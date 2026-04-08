@@ -1,5 +1,5 @@
 ---
-description: Clean up wiki patterns, regenerate finding history, refresh project profile and glossary
+description: Clean up, deduplicate, and reorganize the wiki REVIEW.md using AI. Also regenerates REVIEW-HISTORY.md from PR comment history.
 argument-hint: [--dry-run] [--history-only] [--refresh-profile]
 ---
 
@@ -76,9 +76,6 @@ Fetch all review comments from recent closed/merged PRs and extract finding hist
 RECENT_PRS=$(gh api "repos/$CURRENT_REPO/pulls?state=closed&per_page=30&sort=updated&direction=desc" --jq '.[] | select(.merged_at != null) | .number' 2>/dev/null)
 
 for PR_NUM in $RECENT_PRS; do
-  # Get PR metadata
-  PR_INFO=$(gh api "repos/$CURRENT_REPO/pulls/$PR_NUM" --jq '{title: .title, author: .user.login, merged: .merged_at, files: .changed_files}' 2>/dev/null)
-
   # Get review comments (inline code comments)
   gh api "repos/$CURRENT_REPO/pulls/$PR_NUM/comments" --jq '.[] | {pr: '$PR_NUM', path: .path, body: (.body | split("\n")[0][:200])}' 2>/dev/null
 

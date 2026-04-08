@@ -141,7 +141,7 @@ Run with `model: opus`. After completion:
 WIKI_DIR="/tmp/review-wiki-<number>"
 cp /tmp/PROJECT-PROFILE.md "$WIKI_DIR/PROJECT-PROFILE.md"
 cp /tmp/GLOSSARY.md "$WIKI_DIR/GLOSSARY.md"
-cd "$WIKI_DIR" && git add PROJECT-PROFILE.md GLOSSARY.md && git commit -m "review: initial project profile + glossary" && git push
+cd "$WIKI_DIR" && git add PROJECT-PROFILE.md GLOSSARY.md && { git diff --quiet --cached || git commit -m "review: initial project profile + glossary"; } && git push
 ```
 
 This adds ~30 seconds on the very first run only. Subsequent runs skip this step entirely.
@@ -329,7 +329,7 @@ Parse responses referencing finding numbers (e.g. "#3 — fixed", "#5 — this i
    - DISPUTED — developer provided reasoning. Include their response and your assessment (agree/disagree)
    - ACCEPTED (pre-existing) — developer confirmed it's pre-existing, consider moving to backlog recommendation
 
-7. Run agents on ONLY new changes for NEW findings. **In the Parallel Review step (Step 7), pass `/tmp/inter-diff-<number>.diff` to agents instead of `/tmp/pr<number>.diff`.** The agents must review the inter-diff, not the full PR diff. If inter-diff is unavailable (cross-repo fallback), pass the full diff but instruct agents: "This is a re-review. Only flag findings in files that changed since <REVIEWED_AT_SHA>: <list of changed files>."
+7. **Launch agents on new changes only.** In the next step (Parallel Review), pass `/tmp/inter-diff-<number>.diff` to agents instead of `/tmp/pr<number>.diff`.** The agents must review the inter-diff, not the full PR diff. If inter-diff is unavailable (cross-repo fallback), pass the full diff but instruct agents: "This is a re-review. Only flag findings in files that changed since <REVIEWED_AT_SHA>: <list of changed files>."
 
 Include `Reviewed at: <headRefOid>` in the posted review footer.
 
@@ -558,6 +558,8 @@ gh api repos/<owner>/<repo>/issues/comments/$REVIEW_COMMENT_ID --method PATCH -f
 gh pr review <number> $REPO_FLAG --approve -b "Approved — 0 blockers."
 # or --request-changes if blockers found
 ```
+
+**Own-PR guard:** Check if the PR author matches the current GitHub user (`gh api user --jq '.login'`). If reviewing your own PR, skip the review verdict (`gh pr review`) entirely — GitHub does not allow requesting changes on your own PR, and self-approval is meaningless. Only post the issue comment.
 
 Otherwise: post in TWO steps — an issue comment (for re-review detection in Step 2) AND a review verdict (for branch protection):
 
@@ -791,14 +793,25 @@ cp /tmp/REVIEW.md "$WIKI_DIR/REVIEW.md"
 cp /tmp/ACCEPTED-PATTERNS.md "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
 cd "$WIKI_DIR" && git add REVIEW.md ACCEPTED-PATTERNS.md && { git diff --quiet --cached || git commit -m "review: self-review patterns $(date +%Y-%m-%d)"; } && git push
 ```
-4. Increment the review counter (self-reviews count toward the "every 5 reviews" cleanup trigger):
+4. Increment the review counter AND check auto-trigger threshold (same logic as Step 13):
 ```bash
 META_FILE="$HOME/.claude/review-learn-meta.json"
 if [ -f "$META_FILE" ]; then
   LAST_CLEANUP=$(cat "$META_FILE" | grep -o '"last_cleanup" *: *"[^"]*"' | grep -o '[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}')
   REVIEWS_SINCE=$(cat "$META_FILE" | grep -o '"reviews_since" *: *[0-9]*' | grep -o '[0-9]*$')
-  echo '{"last_cleanup": "'$LAST_CLEANUP'", "reviews_since": '$((REVIEWS_SINCE + 1))'}' > "$META_FILE"
+  CLEANUP_EPOCH=$(date -j -f "%Y-%m-%d" "$LAST_CLEANUP" +%s 2>/dev/null || date -d "$LAST_CLEANUP" +%s 2>/dev/null || echo 0)
+  DAYS_SINCE=$(( ($(date +%s) - $CLEANUP_EPOCH) / 86400 ))
+else
+  REVIEWS_SINCE=0
+  DAYS_SINCE=99
+  LAST_CLEANUP=$(date +%Y-%m-%d)
 fi
+# Check threshold — trigger /review-learn if due
+if [ "$((REVIEWS_SINCE + 1))" -ge 5 ] || [ "$DAYS_SINCE" -ge 2 ]; then
+  # Auto-trigger full cleanup (same as Step 13)
+  echo "Auto-triggering /review-learn (reviews: $((REVIEWS_SINCE + 1)), days: $DAYS_SINCE)"
+fi
+echo '{"last_cleanup": "'$LAST_CLEANUP'", "reviews_since": '$((REVIEWS_SINCE + 1))'}' > "$META_FILE"
 ```
 
 Only skip wiki push if zero findings (clean self-review with nothing to learn).
