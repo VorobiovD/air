@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "air",
+  "description": "AI Review — automated code review with verification, pattern learning, and team knowledge",
+  "owner": {
+    "name": "Dmytro Vorobiov",
+    "email": "dima.v@lifemd.com"
+  },
+  "plugins": [
+    {
+      "name": "air",
+      "description": "Automated code review with verification, pattern learning, and team knowledge. 5 specialized agents + Codex, wiki-based self-learning, re-review tracking, self-review with auto-fix.",
+      "source": "./plugins/air",
+      "category": "development",
+      "homepage": "https://github.com/VorobiovD/air"
+    }
+  ]
+}

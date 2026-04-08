@@ -1,0 +1,9 @@
+{
+  "name": "air",
+  "description": "Automated code review with verification, pattern learning, and team knowledge. 5 specialized agents + Codex, wiki-based self-learning, re-review tracking, self-review with auto-fix.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Dmytro Vorobiov",
+    "email": "dima.v@lifemd.com"
+  }
+}
