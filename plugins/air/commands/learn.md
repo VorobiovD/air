@@ -53,17 +53,30 @@ Read the entire file and analyze every pattern entry for:
 
 - **Semantic duplicates** — patterns that describe the same issue in different words. Merge into one, keeping the best wording. Examples:
   - "raw third-party response proxied to callers" + "unfiltered external API forwarded in error details" → one pattern
-  - "user_id int/string breaking change" + "user_id schema breaks integer callers" → one pattern
-- **Stale patterns** — patterns that were fixed project-wide and no longer relevant. Check recent PRs if needed. Mark as potentially stale but don't remove without confirming.
-- **Misplaced patterns** — author patterns that should be service patterns (or vice versa). Move to the correct section.
-- **Vague patterns** — entries too generic to be actionable. Make them specific or remove.
+  - For author patterns, merge duplicates within the same author only. Combine occurrence counts and PR refs. Use the higher clean counter.
+- **Stale patterns (Common Findings and Service-Specific only)** — patterns that were fixed project-wide and no longer relevant. Check recent PRs if needed. Mark as potentially stale but don't remove without confirming.
+- **Author patterns: NEVER remove or mark as stale.** Author patterns are behavioral tendencies managed by the review pipeline's clean-PR tracking (review.md Step 13). A single fix proves awareness, not behavior change. The lifecycle handles transitions automatically:
+  - Active patterns have `(<Nx>: <PR refs> | last <N> PRs: <M> clean)` metadata
+  - After 5 clean PRs → marked `(declining)`
+  - After 10 clean PRs → moved to `### <author> (archived)` subsection
+  - Archived patterns stay permanently — never delete them
+  - The ONLY valid operations on author patterns during learn are: merging semantic duplicates (within the same author), fixing formatting to match lifecycle format, and migrating legacy entries
+- **Legacy author pattern format** — if any author patterns use the old format (specific incidents like "PR #3470 compared $mif instead of $mif_id" without lifecycle metadata), migrate to the new format:
+  ```
+  - **<Pattern name>** (<Nx>: <PR refs> | last 0 PRs: 0 clean): <Generalized behavioral tendency>
+  ```
+  Generalize the incident into a behavioral tendency. Count PR refs for occurrence count. Set clean counter to 0 (unknown history).
+- **Misplaced patterns** — author patterns that should be service patterns (or vice versa). When moving an author pattern to Common Findings, strip lifecycle metadata (counts, PR refs, clean counter).
+- **Vague patterns** — entries too generic to be actionable. Make them specific or remove. For author patterns, rewrite to be a specific behavioral tendency rather than removing.
 - **Patterns in wrong section** — if learned from one author but applies to everyone, move to Common Findings.
+- **Accepted patterns / false positive calibration in REVIEW.md** — if REVIEW.md has a section named "Accepted Patterns", "False Positive Calibration", or similar, migrate ALL entries to `/tmp/ACCEPTED-PATTERNS.md` (create if it doesn't exist). Format: `- **<pattern>**: <description> (migrated from REVIEW.md)`. Then DELETE that entire section from REVIEW.md. ACCEPTED-PATTERNS.md is the sole store for suppression patterns.
 
 ## Step 3: Reorganize REVIEW.md
 
 - Alphabetize authors within Author Patterns
+- **Author Patterns structure:** Each author has a `### <author-login>` subsection. Archived authors have a separate `### <author-login> (archived)` subsection at the bottom of Author Patterns. Ensure every author pattern entry uses the lifecycle format: `- **<Pattern name>** (<Nx>: <PR refs> | last <N> PRs: <M> clean): <Description>`. Fix any entries that don't match.
 - Group related patterns within each section (security together, config together, etc.)
-- Ensure no section exceeds ~15 patterns — promote the most general ones to Common Findings
+- Ensure Common Findings and Service-Specific sections don't exceed ~15 patterns — promote the most general ones to Common Findings. **Do NOT cap Author Patterns** — each author's patterns are their own namespace and must be preserved through the lifecycle.
 - If a compliance reference section exists (e.g., HIPAA Quick Reference for healthcare projects), keep it unchanged (it's a reference, not learned patterns)
 
 Generate the cleaned-up REVIEW.md content.
@@ -74,7 +87,7 @@ Generate the cleaned-up REVIEW.md content.
 
 **Otherwise (default, lightweight refresh):**
 
-Only run if `/tmp/PROJECT-PROFILE.md` exists (first-run already happened). If it doesn't exist, skip — the first-run discovery in `/air:review` Step 3.5 handles initial creation.
+Only run if `/tmp/PROJECT-PROFILE.md` exists (first-run already happened). If it doesn't exist, run the full Opus deep scan (same as `/air:review` Step 3.5 first-run discovery) to create it now — learn already has the wiki clone ready, so there's no reason to defer. Print "No PROJECT-PROFILE.md found — running first-run discovery." After generation, write both files to `/tmp/PROJECT-PROFILE.md` and `/tmp/GLOSSARY.md` and push to wiki in Step 6.
 
 File-based detection only (~2s, no Opus agent):
 ```bash
@@ -92,27 +105,51 @@ Update the `## Languages` and `## Services` sections in `/tmp/PROJECT-PROFILE.md
 
 ## Step 4: Generate REVIEW-HISTORY.md (KAIROS)
 
-Fetch all review comments from recent closed/merged PRs and extract finding history:
+Fetch all review comments from recent closed/merged PRs and extract finding history.
 
+**IMPORTANT — two-phase approach to avoid API timeouts:** A naive loop of 30 PRs × 2 API calls each = 60+ sequential calls, which easily exceeds 2-minute shell timeouts. Use this two-phase strategy:
+
+**Phase 1: Identify PRs with reviews (1 API call per PR, fast).**
 ```bash
-# Fetch last 30 closed/merged PRs with review comments
+# Fetch last 30 closed/merged PRs
 # GitLab: use projects/$PROJECT_ID/merge_requests?state=merged&per_page=30&order_by=updated_at&sort=desc, use .iid not .number
 RECENT_PRS=$(gh api "repos/$CURRENT_REPO/pulls?state=closed&per_page=30&sort=updated&direction=desc" --jq '.[] | select(.merged_at != null) | .number' 2>/dev/null)
 
+# Quick scan: only fetch issue comment count per PR to identify which have reviews
+# This is much faster than fetching full comment bodies for all 30 PRs
+REVIEWED_PRS=""
 for PR_NUM in $RECENT_PRS; do
+  HAS_REVIEW=$(gh api "repos/$CURRENT_REPO/issues/$PR_NUM/comments" --jq '[.[] | select(.body | startswith("## Code Review"))] | length' 2>/dev/null)
+  if [ "$HAS_REVIEW" -gt 0 ]; then
+    REVIEWED_PRS="$REVIEWED_PRS $PR_NUM"
+  fi
+done
+```
+
+**Phase 2: Fetch full data only for PRs with reviews.**
+```bash
+for PR_NUM in $REVIEWED_PRS; do
   # Get review comments (inline code comments)
   # GitLab: projects/$PROJECT_ID/merge_requests/$PR_NUM/discussions
   gh api "repos/$CURRENT_REPO/pulls/$PR_NUM/comments" --jq '.[] | {pr: '$PR_NUM', path: .path, body: (.body | split("\n")[0][:200])}' 2>/dev/null
 
   # Get issue comments that start with "## Code Review" (our posted reviews)
   # GitLab: projects/$PROJECT_ID/merge_requests/$PR_NUM/notes (filter same way)
-  gh api "repos/$CURRENT_REPO/issues/$PR_NUM/comments" --jq '.[] | select(.body | startswith("## Code Review")) | {pr: '$PR_NUM', body: .body}' 2>/dev/null
+  gh api "repos/$CURRENT_REPO/issues/$PR_NUM/comments" 2>/dev/null | python3 -c "
+import json, sys
+comments = json.loads(sys.stdin.buffer.read())
+for c in comments:
+    if c['body'].startswith('## Code Review'):
+        print(json.dumps({'pr': $PR_NUM, 'body': c['body']}))
+"
 done
 ```
 
+Phase 1 still makes 30 calls but each is fast (jq filter, no body parsing). Phase 2 only runs on PRs with reviews (typically 3-10 of 30). Total: ~35-40 calls instead of 60.
+
 **Sensitive data safety:** Do NOT fetch `diff_hunk` from review comments — it may contain secrets, credentials, PII, or other sensitive data. Only fetch `path` and `body` (first 200 chars).
 
-**Rate limiting:** If any API call returns 403/429, pause for 5 seconds and retry once. Cap total API calls at 100.
+**Rate limiting:** If any API call returns 403/429, pause for 5 seconds and retry once. Cap total API calls at 100. If Phase 1 alone approaches the cap, reduce `per_page` to 15.
 
 From the raw data, generate `REVIEW-HISTORY.md` with these sections:
 
@@ -140,11 +177,13 @@ PRs analyzed: <count>
 
 ## Author Trends
 
-| Author | Total findings | Blockers | Most common pattern |
-|---|---|---|---|
-| alice | 12 | 2 | Missing input validation |
-| bob | 9 | 1 | Broad exception handling |
-| ... | ... | ... | ... |
+| Author | Total findings | Blockers | Most common pattern | Clean PRs (consecutive) | PRs reviewed |
+|---|---|---|---|---|---|
+| alice | 12 | 2 | Missing input validation | 2 | 15 |
+| bob | 9 | 1 | Broad exception handling | 0 | 12 |
+| ... | ... | ... | ... | ... | ... |
+
+"Clean PRs" = consecutive merged PRs by this author where no findings matched their REVIEW.md author patterns. "PRs reviewed" = total merged PRs by this author in the analyzed set. These columns help validate the clean-PR counters in REVIEW.md — if they drift, learn can reconcile.
 
 ## Timeline
 
@@ -222,10 +261,12 @@ Print a summary:
 REVIEW.md cleanup:
 - Merged N duplicate patterns
 - Moved N patterns between sections
+- Author patterns: N active, N declining, N archived (across N authors)
+- Migrated N legacy author patterns to lifecycle format
 PROJECT-PROFILE.md: <refreshed / skipped (no profile yet)>
 SEVERITY-CALIBRATION.md: <recalculated from N data points / skipped (insufficient data)>
 GLOSSARY.md: <N new terms added / no new terms>
-- Flagged N potentially stale patterns
+- Flagged N potentially stale patterns (Common Findings / Service-Specific only)
 
 REVIEW-HISTORY.md generated:
 - Analyzed N PRs (N with review comments)

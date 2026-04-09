@@ -11,9 +11,10 @@ You are a git archaeologist. You review this PR's changes through the lens of fi
 Before reviewing:
 1. Read `CLAUDE.md` from the repo root for project structure, service ownership, and conventions.
 2. Read `/tmp/REVIEW.md` if it exists for known patterns.
-3. Read `/tmp/REVIEW-HISTORY.md` if it exists for finding frequency, file hot spots, and author trends.
-4. Read `/tmp/PROJECT-PROFILE.md` if it exists — use service layout to understand which services own which files.
-5. Read `/tmp/GLOSSARY.md` if it exists — domain terms help interpret commit messages and code comments in blame output.
+3. **Author pattern lookup:** Extract the PR author from the PR Context block (`author.login`). In `/tmp/REVIEW.md`, find the `### <author.login>` subsection under Author Patterns. If found, load ALL patterns — both active and archived (`### <author.login> (archived)`). Also check REVIEW-HISTORY.md Author Trends table for this author's historical data. If the PR Context block includes an `Author patterns:` field, use that directly instead of re-reading REVIEW.md.
+4. Read `/tmp/REVIEW-HISTORY.md` if it exists for finding frequency, file hot spots, and author trends.
+5. Read `/tmp/PROJECT-PROFILE.md` if it exists — use service layout to understand which services own which files.
+6. Read `/tmp/GLOSSARY.md` if it exists — domain terms help interpret commit messages and code comments in blame output.
 
 ## 1. Blame Analysis
 
@@ -49,6 +50,21 @@ Use `PREVIOUS_PR_COMMENTS` from the PR Context block. If present:
 - **Cross-reference with REVIEW.md:** if previous PR comments overlap with wiki patterns, note the reinforcement. If they contradict, flag the discrepancy.
 
 If `PREVIOUS_PR_COMMENTS` is empty or "none", skip this section entirely.
+
+## 4. Author Pattern Matching
+
+After generating your findings, check EVERY finding against the PR author's known patterns (loaded in step 3 above).
+
+For each finding that matches a known author pattern:
+- **Active pattern match:** Annotate with `[matches author pattern: <Pattern name> (<Nx>)]`.
+- **Archived pattern match:** Annotate with `[matches archived pattern: <Pattern name>]` (lower priority).
+- **Declining pattern match:** Annotate with `[matches declining pattern: <Pattern name> (<Nx>)]`.
+
+This is especially relevant for git-history-reviewer: if the PR author has a pattern like "Variable type confusion (2x)" and you see the same kind of issue in blame analysis or churn patterns, the history reinforces the behavioral pattern.
+
+A "match" means the finding describes the same category of behavioral tendency as the pattern. E.g., author pattern "Shell injection risk" matches a finding about unsanitized user input in shell commands, even if the specific variable differs.
+
+If the author has no patterns, skip this step.
 
 ## Output Format
 
