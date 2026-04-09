@@ -36,7 +36,7 @@ plugins/air/
 
 **Verification** (`agents/review-verifier.md`): Post-review quality gate. Reads actual source at flagged lines, classifies findings as CONFIRMED/DOWNGRADED/IMPROVEMENT/PRE-EXISTING/ACCEPTED PATTERN/FALSE POSITIVE using git blame decision tree.
 
-**Wiki storage**: Patterns learned from reviews are stored on the repo's GitHub Wiki (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md). Auto-cleanup every 5 reviews tracked in `~/.claude/air:learn-meta.json`.
+**Wiki storage**: Patterns learned from reviews are stored on the repo's GitHub Wiki (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md). Auto-cleanup every 5 reviews tracked in `~/.claude/review-learn-meta.json`.
 
 ## Development Workflow
 
@@ -63,4 +63,4 @@ plugins/air/
 - Conflict markers in PR diff = automatic blocker finding
 - Security auditor uses a 28-item checklist; PROJECT-PROFILE.md controls which items apply per repo
 - Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.0.0)
-- Install via `/install VorobiovD/air`
+- Install via `/plugin marketplace add VorobiovD/air` then `/plugin install air@air`

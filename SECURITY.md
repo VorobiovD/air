@@ -13,7 +13,7 @@ air is a Claude Code plugin that orchestrates code reviews. It executes shell co
 
 If you discover a security issue, please report it privately:
 
-1. **Email:** dima.v@lifemd.com
+1. **GitHub:** Use [private vulnerability reporting](https://github.com/VorobiovD/air/security/advisories/new) (preferred)
 2. **Subject:** `[air security] <brief description>`
 3. **Include:** steps to reproduce, affected version, potential impact
 

@@ -19,10 +19,11 @@ One command. One consolidated PR comment. Gets smarter over time.
 ## Install
 
 ```
-/install VorobiovD/air
+/plugin marketplace add VorobiovD/air
+/plugin install air@air
 ```
 
-That's it. Two commands become available: `/air:review-pr` and `/air:learn`. Updates are automatic.
+Two commands become available: `/air:review-pr` and `/air:learn`. Updates are automatic.
 
 ## Prerequisites
 
@@ -200,7 +201,7 @@ Patterns are stored on the repo's GitHub Wiki:
 - **No PRs needed** to update patterns — anyone can push directly
 - **No merge conflicts** on pattern files
 - **Every team member's reviews contribute** automatically
-- **Repo-specific** — ai-relay patterns stay in ai-relay wiki
+- **Repo-specific** — each repo's patterns stay in that repo's wiki
 
 Two files:
 - **REVIEW.md** — curated patterns: author tendencies, service-specific gotchas, common findings, accepted patterns, HIPAA reference. Updated incrementally after each review.
@@ -208,7 +209,7 @@ Two files:
 
 ### Auto-trigger Cleanup
 
-A local counter (`~/.claude/air:learn-meta.json`) tracks reviews since last cleanup. Every 5 reviews or 2 days — whichever comes first — whoever runs `/air:review-pr` automatically triggers:
+A local counter (`~/.claude/review-learn-meta.json`) tracks reviews since last cleanup. Every 5 reviews or 2 days — whichever comes first — whoever runs `/air:review-pr` automatically triggers:
 - Full REVIEW.md deduplication and reorganization
 - REVIEW-HISTORY.md regeneration from PR comment history
 - Counter resets — distributed across the team
