@@ -35,7 +35,14 @@ Review the provided code diff. Check for:
    - DB queries: check for missing indexes on columns used in WHERE clauses
    - Components doing work that a caller/orchestrator already did (redundant fetches, duplicate validation)
 
-4. **Code Comment Compliance:**
+4. **Test Coverage** (check PROJECT-PROFILE.md "Test Infrastructure" section for test locations and conventions):
+   - If the PR adds new functionality (new endpoints, new functions, new classes): check if corresponding tests were added
+   - If the PR modifies existing behavior: check if existing tests were updated to match the new behavior
+   - If the project has tests but this PR has none: flag as medium ("New functionality without tests")
+   - If the project has NO test infrastructure at all (documented in PROJECT-PROFILE.md): skip this section entirely — don't flag missing tests for projects that don't use them
+   - Don't flag missing tests for: config changes, documentation, CI/CD files, dependency updates, or pure refactors that don't change behavior
+
+5. **Code Comment Compliance:**
    - Grep for TODO, FIXME, HACK, XXX in changed files (full file, not just the diff)
    - Check if the PR's changes address or invalidate any existing TODOs/FIXMEs (e.g., TODO says "add retry logic" and the PR adds retry → flag the TODO for removal)
    - Check for comment rot — comments that no longer match the code they describe (function signature changed but docstring wasn't updated, comment says "returns error" but function now returns nil)

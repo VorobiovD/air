@@ -106,7 +106,7 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 
 All agents run on Opus for consistent quality. Each receives the same rich context block (PR metadata, CI status, blame summaries, file churn, previous PR comments, project memory, session context).
 
-**code-reviewer** — Bugs, logic errors, error handling, design issues. Checks for orphan imports on deleted files, reference updates on renames. Reads TODO/FIXME/HACK markers and flags comment rot (outdated comments that no longer match the code).
+**code-reviewer** — Bugs, logic errors, error handling, design issues, and test coverage gaps. Checks for orphan imports on deleted files, reference updates on renames, missing tests for new functionality. Reads TODO/FIXME/HACK markers and flags comment rot (outdated comments that no longer match the code).
 
 **simplify** — Duplication, dead code, unused imports, unnecessary complexity. Read-only — reports findings but never edits files.
 
