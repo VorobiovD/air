@@ -1,6 +1,20 @@
 # air — Automated Code Review with Verification, Pattern Learning, and Team Knowledge
 
-A Claude Code plugin that runs automated code reviews on any PR. Five specialized agents + Codex review in parallel, a dedicated verification agent filters false positives, findings are posted as a consolidated GitHub comment, and the system learns patterns across reviews via wiki-backed storage. Each team member's institutional knowledge enriches the review through Claude Code's memory system.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](plugins/air/.claude-plugin/plugin.json)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://claude.ai/code)
+
+## Why
+
+Code reviews are slow, inconsistent, and lose institutional knowledge when people leave. air fixes this:
+
+- **5 specialized agents** review in parallel — security, code quality, simplification, git history, and an optional Codex second opinion
+- **A verification agent** filters false positives before posting — findings must score 60+ confidence
+- **Wiki-backed learning** captures patterns from every review — author tendencies, service gotchas, accepted patterns
+- **Re-review tracking** knows what was fixed and what wasn't — no starting over
+- **Your memory enriches reviews** — Claude Code memory feeds institutional knowledge into every agent
+
+One command. One consolidated PR comment. Gets smarter over time.
 
 ## Install
 
@@ -120,53 +134,63 @@ After all 5 reviewers complete, the **review-verifier** checks every finding aga
 
 ### Review Output
 
-Posted as a single PR comment:
+Posted as a single PR comment. Here's a real example from [PR #1](https://github.com/VorobiovD/air/pull/1#issuecomment-4210596856) on this repo:
 
-```
-## Code Review
+<details>
+<summary>Example: review of the --full flag PR (click to expand)</summary>
 
-<one-line summary>
+> ## Code Review
+>
+> Adds `--full` flag for entire-codebase review. The implementation is clean but missing discoverability updates (argument-hint, README) and has a few ambiguities in how it integrates with the self-review flow.
+>
+> ### Security Audit: 7/7 PASS
+>
+> | Check | Result |
+> |---|---|
+> | Command injection | PASS |
+> | Template injection | PASS |
+> | Secrets management | PASS |
+> | Infrastructure secrets | PASS |
+> | Temp file hygiene | PASS |
+> | Tool/permission minimality | PASS (N/A) |
+> | Hardcoded paths | PASS |
+>
+> ### Medium
+>
+> **1. `--full` missing from argument-hint frontmatter**
+>
+> `plugins/air/commands/review-pr.md#L3` — The `argument-hint` in YAML frontmatter lists every flag except `--full`. Users won't see it in CLI suggestions or tab-completion.
+>
+> **2. `--full` not documented in README.md**
+>
+> `README.md#L23-L33` — The Usage section lists every flag except `--full`.
+>
+> ### Low
+>
+> **3. Ambiguous skip target for `--full` routing**
+>
+> `plugins/air/commands/review-pr.md#L21-L26` — Line 21 says "skip to the Self-Review Flow section below" but line 26 says "proceed to Self Step 2." These are contradictory.
+>
+> **4. `--full --fix` combination is unguarded**
+>
+> `plugins/air/commands/review-pr.md#L17` — `--fix` is documented as "(only with `--self`)" but nothing prevents `--full --fix` from reaching Self Step 6.
+>
+> **5. "Never posts to GitHub" wording is misleading**
+>
+> `plugins/air/commands/review-pr.md#L17` — The self-review flow pushes to the wiki. Rewording suggested.
+>
+> ### Strengths
+>
+> - The `git hash-object -t tree /dev/null` approach is the idiomatic git method for full-codebase diffs
+> - Clean integration with the existing self-review flow without duplicating infrastructure
+>
+> ---
+>
+> 5 findings for this PR (2 medium, 3 low). No blockers.
+>
+> Reviewed at: 1d528e1b
 
-### Security Audit: X/Y PASS
-
-| Check | Result |
-|---|---|
-| PHI in responses | PASS |
-| Injection vulnerabilities | FAIL — evidence |
-
-### Blockers
-
-**1. Shell injection via unescaped user input**
-file.go#L42-L45 — explanation with clickable GitHub link
-
-### Medium
-
-**2. Missing error propagation in retry loop**
-file.py#L88 — explanation
-
-### Low
-
-**3. Unused import after merge resolution**
-file.go#L3 — explanation
-
-### Pre-existing Issues
-
-> Not introduced by this PR. May warrant separate tickets.
-
-**4. PHI field exposed in debug endpoint**
-handler.py#L156 — explanation
-
-### Strengths
-
-- Error handling in the new retry logic covers all three failure modes
-- Tests cover both happy path and the nil-subscription edge case
-
----
-
-5 findings for this PR. Blockers should be fixed before merge.
-
-Reviewed at: abc123def
-```
+</details>
 
 ## Pattern Learning
 
