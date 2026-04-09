@@ -144,6 +144,9 @@ Deep-scan this repository and generate two wiki documents. Go beyond listing fil
    - Read CLAUDE.md AND README.md from the repo root
    - Document: languages, frameworks, service layout, deploy mechanism
 
+   ## Languages
+   Table: Language | Usage | Files (e.g., Go | API services | `cmd/`, `pkg/`)
+
    ## Architecture
    Trace the codebase structure by following actual code, not just listing files:
    - Find entry points (API routes, CLI commands, main functions, Lambda handlers, event listeners)
@@ -153,7 +156,13 @@ Deep-scan this repository and generate two wiki documents. Go beyond listing fil
    - Document how components connect — which modules import which, data flow direction
    - Note cross-cutting concerns (auth middleware, logging, error handling patterns, config loading)
 
-   ## Test Infrastructure
+   ## Services / Components
+   Table: Component | File/directory | Role
+
+   ## CI/CD Setup
+   Check for .github/workflows/, Makefile, Dockerfile, buildspec.yml, etc. Document what exists.
+
+   ## Test Locations
    - Find test directories and test files (look for `*_test.go`, `test_*.py`, `*.test.ts`, `*.spec.ts`, `__tests__/`, `tests/`, `spec/`)
    - Identify the test framework (Jest, pytest, Go testing, PHPUnit, RSpec, etc.)
    - Document test patterns used (unit, integration, e2e, fixtures, mocks, factories)
@@ -459,7 +468,7 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 - Bugs, logic errors, error handling, design issues
 - Author and service patterns from REVIEW.md (use `author.login` from context to look up)
 - If PROJECT-PROFILE.md available: read "Review Focus Rules" section and apply file-pattern-specific checks
-- Test coverage: if PR adds new functionality, check if tests were added. Use PROJECT-PROFILE.md "Test Infrastructure" section for test locations and conventions. Skip if project has no tests.
+- Test coverage: if PR adds new functionality, check if tests were added. Use PROJECT-PROFILE.md "Test Locations" section for test locations and conventions. Skip if project has no tests.
 - Deleted files (from file statuses): check orphan imports in remaining files
 - Renamed files (from file statuses): check all references updated to new name
 - DB: check missing indexes

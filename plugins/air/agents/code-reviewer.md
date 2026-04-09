@@ -1,6 +1,6 @@
 ---
 name: code-reviewer
-description: Review code changes for quality, design, and project conventions. For security checks, use security-auditor.
+description: Review code changes for quality, design, test coverage, and project conventions. For security checks, use security-auditor.
 tools: Read, Grep, Glob, Bash
 # Bash is ONLY for: git log, git blame. Do not run other shell commands.
 model: opus
@@ -35,7 +35,7 @@ Review the provided code diff. Check for:
    - DB queries: check for missing indexes on columns used in WHERE clauses
    - Components doing work that a caller/orchestrator already did (redundant fetches, duplicate validation)
 
-4. **Test Coverage** (check PROJECT-PROFILE.md "Test Infrastructure" section for test locations and conventions):
+4. **Test Coverage** (check PROJECT-PROFILE.md "Test Locations" section for test locations and conventions):
    - If the PR adds new functionality (new endpoints, new functions, new classes): check if corresponding tests were added
    - If the PR modifies existing behavior: check if existing tests were updated to match the new behavior
    - If the project has tests but this PR has none: flag as medium ("New functionality without tests")
