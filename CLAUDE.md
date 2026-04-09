@@ -44,6 +44,7 @@ plugins/air/
 - Reload in Claude Code with `/reload` or reconnect
 - Test with `/air:review-pr <pr-number>` on a repo with PRs
 - `--dry-run` flag prints to console without posting to GitHub
+- After receiving a review, fix findings and run `/air:review-pr --respond` to auto-classify, self-check, and reply
 
 ## Key Design Decisions
 
@@ -53,6 +54,7 @@ plugins/air/
 - **Cross-repo reviews** skip local git data (blame, churn, wiki patterns) gracefully
 - **Self-review mode** (`--self`) outputs a fix plan grouped by file; `--self --fix` auto-applies
 - **Re-review mode** generates inter-diff from `REVIEWED_AT_SHA`, tracks FIXED/NOT FIXED per finding
+- **Respond mode** (`--respond`) automates the developer side — classifies findings, verifies fixes match suggestions, self-checks for regressions, posts parseable response
 
 ## Conventions
 
