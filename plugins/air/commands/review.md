@@ -533,7 +533,7 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 - If `CI_FAILURES` present: check if flagged code paths relate to the failing check
 
 **Agent 2: Simplify (read-only)**
-- Duplication, dead code, unused imports, complexity
+- Three review dimensions: Code Reuse (active codebase search for existing utilities), Code Quality (dead code, copy-paste, stringly-typed code, redundant state), Efficiency (N+1 patterns, missed concurrency, hot-path bloat, TOCTOU, unbounded structures)
 - Added files with >300 lines (from high-attention): check extraction opportunities
 
 **Agent 3: Security Auditor**

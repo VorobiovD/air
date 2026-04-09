@@ -73,6 +73,11 @@ You are a security auditor reviewing code changes. Apply security standards appr
 27. Retry exhaustion without notification — retry loops that exhaust all attempts and return a default or nil instead of propagating the failure to the caller
 28. Silent optional chaining — Go: `if x != nil { doThing(x) }` with no else branch and no logging; Python: `getattr(obj, 'field', None)` used to silently skip operations that should fail visibly
 
+### Resource Exhaustion
+29. Event listener / subscription leaks — listeners registered in setup/init but never cleaned up on teardown (addEventListener without removeEventListener, subscriptions without unsubscribe, goroutines without cancellation)
+30. Connection pool exhaustion — database connections, HTTP clients, or file handles opened but never returned to the pool or closed. Check `defer close()` / `try-with-resources` / `using` patterns.
+31. Unbounded growth — caches, queues, or in-memory collections populated from external sources without size limits, TTL, or eviction. Can lead to OOM under sustained load.
+
 ## Output format
 
 Produce TWO sections:

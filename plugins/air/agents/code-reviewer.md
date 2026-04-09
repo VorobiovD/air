@@ -35,6 +35,8 @@ Review the provided code diff. Check for:
    - If a file was DELETED, verify no orphan imports/references remain
    - DB queries: check for missing indexes on columns used in WHERE clauses
    - Components doing work that a caller/orchestrator already did (redundant fetches, duplicate validation)
+   - Parameter sprawl — adding new parameters to a function instead of generalizing, restructuring, or using an options/config object. Watch for functions gaining 5+ parameters across PRs.
+   - Leaky abstractions — exposing internal implementation details that should be encapsulated, or breaking existing abstraction boundaries (e.g., caller reaching into a module's private state, returning internal error types to external consumers)
 
 4. **Test Coverage** (check PROJECT-PROFILE.md "Test Locations" section for test locations and conventions):
    - If the PR adds new functionality (new endpoints, new functions, new classes): check if corresponding tests were added
