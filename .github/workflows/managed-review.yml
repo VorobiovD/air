@@ -1,0 +1,122 @@
+# Reusable workflow for automated air reviews via Managed Agents.
+#
+# Teams add this to their repo:
+#
+#   # .github/workflows/air-review.yml
+#   name: air review
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened]
+#   jobs:
+#     review:
+#       uses: VorobiovD/air/.github/workflows/managed-review.yml@main
+#       secrets:
+#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#
+# That's it. Three lines of config.
+
+name: air managed review
+
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      GH_TOKEN_OVERRIDE:
+        required: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Review PR with air
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN_OVERRIDE || github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Load agent config from the air repo
+          CONFIG_URL="https://raw.githubusercontent.com/VorobiovD/air/main/managed/config.json"
+          CONFIG=$(curl -fsSL "$CONFIG_URL" 2>/dev/null || echo "")
+
+          if [ -z "$CONFIG" ]; then
+            echo "Error: could not fetch air managed agent config"
+            exit 1
+          fi
+
+          AGENT_ID=$(echo "$CONFIG" | jq -r '.orchestrator.id')
+          ENV_ID=$(echo "$CONFIG" | jq -r '.environment_id')
+          VAULT_ID=$(echo "$CONFIG" | jq -r '.vault_id // empty')
+
+          # Build session request
+          SESSION_BODY=$(jq -n \
+            --arg agent "$AGENT_ID" \
+            --arg env "$ENV_ID" \
+            --arg title "Review PR #$PR_NUMBER on $REPO" \
+            '{agent: $agent, environment_id: $env, title: $title}')
+
+          if [ -n "$VAULT_ID" ]; then
+            SESSION_BODY=$(echo "$SESSION_BODY" | jq --arg v "$VAULT_ID" '.vault_ids = [$v]')
+          fi
+
+          # Create session
+          echo "Creating review session for PR #$PR_NUMBER..."
+          SESSION=$(curl -fsSL https://api.anthropic.com/v1/sessions \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "anthropic-beta: managed-agents-2026-04-01" \
+            -H "content-type: application/json" \
+            -d "$SESSION_BODY")
+
+          SESSION_ID=$(echo "$SESSION" | jq -r '.id')
+          echo "Session: $SESSION_ID"
+
+          # Send review task
+          TASK="Review PR #$PR_NUMBER on $REPO.
+          REPO=$REPO
+          PR_NUMBER=$PR_NUMBER
+          PLATFORM=github
+          MODE=auto
+
+          Execute the full review pipeline. Post the review as a PR comment. Push learned patterns to the wiki."
+
+          EVENT_BODY=$(jq -n --arg text "$TASK" \
+            '{events: [{type: "user.message", content: [{type: "text", text: $text}]}]}')
+
+          curl -fsSL "https://api.anthropic.com/v1/sessions/$SESSION_ID/events" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "anthropic-beta: managed-agents-2026-04-01" \
+            -H "content-type: application/json" \
+            -d "$EVENT_BODY"
+
+          echo "Review started. Polling for completion..."
+
+          # Poll until done (max 25 min)
+          for i in $(seq 1 150); do
+            sleep 10
+
+            STATUS=$(curl -fsSL "https://api.anthropic.com/v1/sessions/$SESSION_ID" \
+              -H "x-api-key: $ANTHROPIC_API_KEY" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "anthropic-beta: managed-agents-2026-04-01" \
+              | jq -r '.status')
+
+            echo "  [$((i * 10))s] Status: $STATUS"
+
+            if [ "$STATUS" = "idle" ]; then
+              echo "Review complete."
+              exit 0
+            elif [ "$STATUS" = "terminated" ]; then
+              echo "Session terminated unexpectedly."
+              exit 1
+            fi
+          done
+
+          echo "Review timed out after 25 minutes."
+          exit 1
