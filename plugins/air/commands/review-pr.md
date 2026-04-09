@@ -14,8 +14,16 @@ Extract from `$ARGUMENTS`:
 - **--fresh**: full review from scratch, post a NEW comment regardless of existing reviews.
 - **--rewrite**: full review from scratch, EDIT the existing review comment in place.
 - **--re-review**: delta review — track FIXED/NOT FIXED on previous findings + review new changes.
+- **--full**: review the ENTIRE codebase (all committed files). Generates a diff from empty tree to HEAD. For first-time audits of new repos, small projects, or full codebase security reviews. Output to console only (never posts to GitHub).
 - **--no-codex**: skip the Codex review pass. By default Codex runs if available.
 - **--dry-run**: print to console, don't post.
+
+If `--full` is present, skip to the **Self-Review Flow** section below but use this diff instead of `git diff HEAD`:
+```bash
+CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+git diff $(git hash-object -t tree /dev/null) HEAD > /tmp/self-review.diff
+```
+This creates a diff of every file in the repo against an empty tree — the entire codebase as one diff. Print "Full codebase review — all committed files." and proceed to Self Step 2.
 
 If `--self` is present, first set `CURRENT_REPO` (needed for wiki operations in Self Step 2 and 7):
 ```bash
