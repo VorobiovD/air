@@ -538,6 +538,8 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 
 **WAIT for ALL 5 (4 agents + Codex) to complete before proceeding to Step 8.** Do not start verification until Codex results are collected.
 
+**CRITICAL: DO NOT edit any files between Step 7 and Step 12.** The review must reflect what the agents actually found. The orchestrator's job is to report findings, not fix them. Even if a fix is obvious, post the finding — the PR author (or `--respond` flow) handles fixes. Editing code and then posting a "0 findings" review defeats the purpose of the review cycle.
+
 ## Step 8: Verification (Round 2)
 
 **Only run AFTER all 5 reviewers (4 agents + Codex) from Step 7 have completed.** Collect ALL findings into one list, then launch **review-verifier**.
@@ -660,15 +662,16 @@ REVIEW_COMMENT_ID=$(gh api repos/<owner>/<repo>/issues/<number>/comments --jq '[
 gh api repos/<owner>/<repo>/issues/comments/$REVIEW_COMMENT_ID --method PATCH -f body="$(cat /tmp/review-comment.md)"
 ```
 3. If still empty (no existing comment found): fall back to posting a new comment instead.
-4. Also submit the review verdict (same as the default path below) so the GitHub approval state matches the rewritten review:
+4. Also submit the review verdict — but check the own-PR guard below first.
+
+**Own-PR guard (check BEFORE any verdict):** Determine if the PR author matches the current user:
 ```bash
-gh pr review <number> $REPO_FLAG --approve -b "Approved — 0 blockers."
-# or --request-changes if blockers found
+# GitHub: gh api user --jq '.login'
+# GitLab: glab api user 2>/dev/null | jq -r '.username'
 ```
+Compare against `author.login` from Step 4 metadata. If they match: **skip ALL review verdicts** (`gh pr review --approve`, `gh pr review --request-changes`, `glab mr approve`). GitHub does not allow self-approval or self-requesting-changes, and attempting it will error. Only post the issue comment. This applies to ALL posting paths below (rewrite, fresh, re-review).
 
-**Own-PR guard:** Check if the PR author matches the current GitHub user (`gh api user --jq '.login'`). If reviewing your own PR, skip the review verdict (`gh pr review`) entirely — GitHub does not allow requesting changes on your own PR, and self-approval is meaningless. Only post the issue comment.
-
-Otherwise: post in TWO steps — an issue comment (for re-review detection in Step 2) AND a review verdict (for branch protection):
+Post in TWO steps — an issue comment (for re-review detection in Step 2) AND a review verdict (for branch protection, only if NOT own PR):
 
 ```bash
 # 1. Post the review body as an issue comment (discoverable by Step 2's gh api .../issues/.../comments query)
