@@ -17,10 +17,23 @@ Note: `/review-pr` auto-triggers this command every 5 reviews or every 2 days (w
 ```bash
 CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
 WIKI_URL="https://github.com/$CURRENT_REPO.wiki.git"
-cd /tmp && rm -rf review-wiki-learn && git clone --depth 1 "$WIKI_URL" review-wiki-learn 2>/dev/null && cp review-wiki-learn/REVIEW.md /tmp/REVIEW.md 2>/dev/null && cp review-wiki-learn/REVIEW-HISTORY.md /tmp/REVIEW-HISTORY.md 2>/dev/null && cp review-wiki-learn/PROJECT-PROFILE.md /tmp/PROJECT-PROFILE.md 2>/dev/null && cp review-wiki-learn/ACCEPTED-PATTERNS.md /tmp/ACCEPTED-PATTERNS.md 2>/dev/null && cp review-wiki-learn/SEVERITY-CALIBRATION.md /tmp/SEVERITY-CALIBRATION.md 2>/dev/null && cp review-wiki-learn/GLOSSARY.md /tmp/GLOSSARY.md 2>/dev/null
+cd /tmp && rm -rf review-wiki-learn && git clone --depth 1 "$WIKI_URL" review-wiki-learn 2>/dev/null
 ```
 
-If the clone fails, check if the wiki exists and has a REVIEW.md page.
+If the clone succeeded (the directory `/tmp/review-wiki-learn/.git` exists), copy whichever pattern files exist. Each copy is independent — on a first run the wiki may have no pattern files yet:
+```bash
+WIKI_DIR="/tmp/review-wiki-learn"
+if [ -d "$WIKI_DIR/.git" ]; then
+  cp "$WIKI_DIR/REVIEW.md" /tmp/REVIEW.md 2>/dev/null
+  cp "$WIKI_DIR/REVIEW-HISTORY.md" /tmp/REVIEW-HISTORY.md 2>/dev/null
+  cp "$WIKI_DIR/PROJECT-PROFILE.md" /tmp/PROJECT-PROFILE.md 2>/dev/null
+  cp "$WIKI_DIR/ACCEPTED-PATTERNS.md" /tmp/ACCEPTED-PATTERNS.md 2>/dev/null
+  cp "$WIKI_DIR/SEVERITY-CALIBRATION.md" /tmp/SEVERITY-CALIBRATION.md 2>/dev/null
+  cp "$WIKI_DIR/GLOSSARY.md" /tmp/GLOSSARY.md 2>/dev/null
+fi
+```
+
+If the clone failed (no `.git` directory): print "Wiki not found — create at https://github.com/$CURRENT_REPO/wiki" and STOP.
 
 If `--history-only` was passed, skip to Step 4 (only regenerate history, don't touch REVIEW.md).
 
@@ -171,7 +184,7 @@ If fewer than 10 total data points across all agents, skip this step entirely �
 
 **Only run if `/tmp/GLOSSARY.md` exists** (first-run already created it).
 
-Scan `/tmp/REVIEW.md` and `/tmp/ACCEPTED-PATTERNS.md` for domain-specific terms not yet in the glossary:
+Scan `/tmp/REVIEW.md`, `/tmp/ACCEPTED-PATTERNS.md`, `CLAUDE.md`, and `README.md` from the repo root for domain-specific terms not yet in the glossary:
 - Proper nouns (service names, tool names)
 - Abbreviated terms (MIF, PHI, OTP)
 - Business domain terms (downsell, guardrail, variant)

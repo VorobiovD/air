@@ -28,6 +28,8 @@ That's it. Two commands become available: `/air:review-pr` and `/air:learn`. Upd
 /air:review-pr --re-review                # Delta review: FIXED/NOT FIXED tracking + new findings
 /air:review-pr --fresh                    # Full review from scratch, new comment
 /air:review-pr --rewrite                  # Full review, edit existing comment in place
+/air:review-pr --respond                  # Reply to review: classify findings + self-check + push
+/air:review-pr --full                     # Review entire codebase (first-time audit)
 /air:review-pr --dry-run                  # Print to console, don't post to GitHub
 /air:review-pr --no-codex                 # Skip Codex review pass
 /air:review-pr https://github.com/org/repo/pull/45   # Cross-repo review
@@ -49,6 +51,23 @@ After posting a review, developers can respond to findings by number:
 - `#8 — pre-existing, not from this PR` → classified separately, not dropped
 
 Re-review generates an inter-diff (only changes since last review) so agents focus on what's new.
+
+### Respond Mode
+
+After fixing review findings (manually or with Claude Code), auto-generate the response:
+
+```bash
+/air:review-pr --respond
+```
+
+This reads the existing review, then for each finding:
+- **Auto-classifies** as fixed/unfixed by checking if the flagged code changed
+- **Verifies fixes** are correct — compares what was done vs what was suggested
+- **Asks you** about unfixed findings (dispute/acknowledge/won't-fix) for non-obvious cases
+- **Runs the full review pipeline** on your fix diff to catch regressions
+- **Detects additional changes** beyond the fixes (refactors, new features) and lists them
+
+Posts a structured response the reviewer's re-review can parse directly, then pushes the branch.
 
 ## How It Works
 
