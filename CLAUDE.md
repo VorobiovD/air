@@ -19,8 +19,9 @@ plugins/air/
 │   ├── git-history-reviewer.md
 │   └── review-verifier.md
 ├── commands/            # CLI command orchestration
-│   ├── review.md     # Main pipeline — the core of the plugin
-│   └── learn.md         # Wiki maintenance
+│   ├── review.md              # Main pipeline — the core of the plugin
+│   ├── learn.md               # Wiki maintenance
+│   └── platform-gitlab.md     # GitLab CLI/API/field mappings (reference, not a command)
 └── .claude-plugin/
     └── plugin.json      # Plugin metadata (name, version, author)
 
@@ -30,13 +31,13 @@ plugins/air/
 
 ## Architecture
 
-**Review pipeline** (`commands/review.md`): Parses args, fetches PR data via `gh` CLI, runs 5 agents + optional Codex in parallel, passes results through a verification agent that filters false positives (confidence < 60 = dropped), then posts a consolidated GitHub comment.
+**Review pipeline** (`commands/review.md`): Parses args, detects platform (GitHub/GitLab) from git remote, fetches PR/MR data via `gh` or `glab` CLI, runs 5 agents + optional Codex in parallel, passes results through a verification agent that filters false positives (confidence < 60 = dropped), then posts a consolidated comment. GitLab-specific command mappings are in `commands/platform-gitlab.md`.
 
 **Agents** (`agents/*.md`): Stateless markdown prompt files. Each is a specialized reviewer personality that receives the same rich context block (PR diff, blame data, wiki patterns, project memory). All run on Opus.
 
 **Verification** (`agents/review-verifier.md`): Post-review quality gate. Reads actual source at flagged lines, classifies findings as CONFIRMED/DOWNGRADED/IMPROVEMENT/PRE-EXISTING/ACCEPTED PATTERN/FALSE POSITIVE using git blame decision tree.
 
-**Wiki storage**: Patterns learned from reviews are stored on the repo's GitHub Wiki (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md). Auto-cleanup every 5 reviews tracked in `~/.claude/review-learn-meta.json`.
+**Wiki storage**: Patterns learned from reviews are stored on the repo's wiki (GitHub or GitLab) (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md). Auto-cleanup every 5 reviews tracked in `~/.claude/review-learn-meta.json`.
 
 ## Development Workflow
 

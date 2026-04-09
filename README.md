@@ -28,10 +28,10 @@ Two commands become available: `/air:review` and `/air:learn`. Updates are autom
 ## Prerequisites
 
 - **Claude Code** — installed and running
-- **GitHub CLI** (`gh`) — authenticated via `gh auth login`
-- **Repo access** — must be able to run `gh pr view` on the target repo
+- **GitHub CLI** (`gh`) or **GitLab CLI** (`glab`) — authenticated. Platform is auto-detected from the git remote URL. GitLab also requires `jq` installed.
+- **Repo access** — must be able to view PRs/MRs on the target repo
 - **Codex plugin** (optional) — if installed, runs as an additional reviewer. Skips gracefully if not available
-- **GitHub Wiki** — auto-created on first run if missing. Used to store learned review patterns
+- **Wiki** — auto-created on first run if missing. Used to store learned review patterns. Works with both GitHub and GitLab wikis.
 
 ## Usage
 
@@ -45,7 +45,7 @@ Two commands become available: `/air:review` and `/air:learn`. Updates are autom
 /air:review --rewrite                  # Full review, edit existing comment in place
 /air:review --respond                  # Reply to review: classify findings + self-check + push
 /air:review --full                     # Review entire codebase (first-time audit)
-/air:review --dry-run                  # Print to console, don't post to GitHub
+/air:review --dry-run                  # Print to console, don't post online
 /air:review --no-codex                 # Skip Codex review pass
 /air:review https://github.com/org/repo/pull/45   # Cross-repo review
 ```
@@ -98,7 +98,7 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 8. **Verify** — dedicated verification agent filters false positives with git blame decision tree
 9. **Attribution** — console-only table showing which agent found what (never posted)
 10. **Consolidate** — deduplicate, assign severity, generate Strengths section
-11. **Format** — clickable GitHub links with full SHA, sequential numbering across all sections
+11. **Format** — clickable links with full SHA, sequential numbering across all sections
 12. **Post** — new comment, or PATCH existing (--rewrite), or console-only (--dry-run)
 13. **Learn** — wiki push with graduated resistance + auto-trigger full cleanup every 5 reviews
 
@@ -197,7 +197,7 @@ Posted as a single PR comment. Here's a real example from [PR #1](https://github
 
 ### Wiki-Backed Storage
 
-Patterns are stored on the repo's GitHub Wiki:
+Patterns are stored on the repo's wiki (GitHub or GitLab):
 - **No PRs needed** to update patterns — anyone can push directly
 - **No merge conflicts** on pattern files
 - **Every team member's reviews contribute** automatically

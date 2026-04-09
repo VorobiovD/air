@@ -12,11 +12,19 @@ Note: `/air:review` auto-triggers this command every 5 reviews or every 2 days (
 - `--history-only` — only regenerate REVIEW-HISTORY.md, don't touch REVIEW.md
 - `--refresh-profile` — re-run the full Opus deep scan for PROJECT-PROFILE.md + GLOSSARY.md (same as first-run discovery). Use when the project has changed significantly (new language, new service, major restructure). Overwrites existing profile and glossary with fresh scan results.
 
+## Platform Detection
+
+Same as `/air:review` — detect platform from git remote URL (or `AIR_PLATFORM` env var override). See review.md "Platform Detection" section for full logic. Sets `PLATFORM`, `PLATFORM_DOMAIN`, and `CLI`.
+
+All `gh` commands below are written for GitHub. On GitLab, translate using platform-gitlab.md — same as review.md.
+
 ## Step 1: Fetch from wiki
 
 ```bash
+# GitHub: gh repo view --json nameWithOwner --jq '.nameWithOwner'
+# GitLab: glab api "projects/$(echo $REMOTE_PATH | sed 's|/|%2F|g')" 2>/dev/null | jq -r '.path_with_namespace'
 CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
-WIKI_URL="https://github.com/$CURRENT_REPO.wiki.git"
+WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 cd /tmp && rm -rf review-wiki-learn && git clone --depth 1 "$WIKI_URL" review-wiki-learn 2>/dev/null
 ```
 
@@ -33,7 +41,9 @@ if [ -d "$WIKI_DIR/.git" ]; then
 fi
 ```
 
-If the clone failed (no `.git` directory): print "Wiki not found — create at https://github.com/$CURRENT_REPO/wiki" and STOP.
+If the clone failed (no `.git` directory): print "Wiki not found — create at https://$PLATFORM_DOMAIN/$CURRENT_REPO/-/wikis (GitLab) or https://$PLATFORM_DOMAIN/$CURRENT_REPO/wiki (GitHub)" and STOP.
+
+**GitLab note:** After `CURRENT_REPO` is set, resolve the project ID for API calls: `PROJECT_ID=$(glab api "projects/$(echo $CURRENT_REPO | sed 's|/|%2F|g')" 2>/dev/null | jq -r '.id')`
 
 If `--history-only` was passed, skip to Step 4 (only regenerate history, don't touch REVIEW.md).
 
@@ -86,13 +96,16 @@ Fetch all review comments from recent closed/merged PRs and extract finding hist
 
 ```bash
 # Fetch last 30 closed/merged PRs with review comments
+# GitLab: use projects/$PROJECT_ID/merge_requests?state=merged&per_page=30&order_by=updated_at&sort=desc, use .iid not .number
 RECENT_PRS=$(gh api "repos/$CURRENT_REPO/pulls?state=closed&per_page=30&sort=updated&direction=desc" --jq '.[] | select(.merged_at != null) | .number' 2>/dev/null)
 
 for PR_NUM in $RECENT_PRS; do
   # Get review comments (inline code comments)
+  # GitLab: projects/$PROJECT_ID/merge_requests/$PR_NUM/discussions
   gh api "repos/$CURRENT_REPO/pulls/$PR_NUM/comments" --jq '.[] | {pr: '$PR_NUM', path: .path, body: (.body | split("\n")[0][:200])}' 2>/dev/null
 
   # Get issue comments that start with "## Code Review" (our posted reviews)
+  # GitLab: projects/$PROJECT_ID/merge_requests/$PR_NUM/notes (filter same way)
   gh api "repos/$CURRENT_REPO/issues/$PR_NUM/comments" --jq '.[] | select(.body | startswith("## Code Review")) | {pr: '$PR_NUM', body: .body}' 2>/dev/null
 done
 ```
