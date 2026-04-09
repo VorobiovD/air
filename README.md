@@ -1,7 +1,7 @@
 # air — Automated Code Review with Verification, Pattern Learning, and Team Knowledge
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.1.0-green.svg)](plugins/air/.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.1.1-green.svg)](plugins/air/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://claude.ai/code)
 [![GitHub](https://img.shields.io/badge/GitHub-supported-black.svg)](https://github.com)
 [![GitLab](https://img.shields.io/badge/GitLab-supported-orange.svg)](https://gitlab.com)
@@ -103,19 +103,19 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 10. **Consolidate** — deduplicate, assign severity, generate Strengths section
 11. **Format** — clickable links with full SHA, sequential numbering across all sections
 12. **Post** — new comment, or PATCH existing (--rewrite), or console-only (--dry-run)
-13. **Learn** — wiki push with graduated resistance + auto-trigger full cleanup every 5 reviews
+13. **Learn** — author pattern lifecycle (create/strengthen/decline/archive), wiki push with graduated resistance, auto-trigger full cleanup every 5 reviews
 
 ### Five Specialized Agents
 
 All agents run on Opus for consistent quality. Each receives the same rich context block (PR metadata, CI status, blame summaries, file churn, previous PR comments, project memory, session context).
 
-**code-reviewer** — Bugs, logic errors, error handling, design issues, and test coverage gaps. Checks for orphan imports on deleted files, reference updates on renames, missing tests for new functionality. Reads TODO/FIXME/HACK markers and flags comment rot (outdated comments that no longer match the code).
+**code-reviewer** — Bugs, logic errors, error handling, design issues, and test coverage gaps. Checks for orphan imports on deleted files, reference updates on renames, missing tests for new functionality. Reads TODO/FIXME/HACK markers and flags comment rot. Matches every finding against the PR author's known behavioral patterns and annotates matches.
 
 **simplify** — Duplication, dead code, unused imports, unnecessary complexity. Read-only — reports findings but never edits files.
 
-**security-auditor** — 28-item checklist covering sensitive data protection (6 items, conditional on project type), injection vulnerabilities (4), authentication/authorization (3), input validation (3), data exposure (3), operational security (4), and silent failures (5). PROJECT-PROFILE.md controls which checks apply per repo. Produces a PASS/FAIL table for every PR.
+**security-auditor** — 28-item checklist covering sensitive data protection (6 items, conditional on project type), injection vulnerabilities (4), authentication/authorization (3), input validation (3), data exposure (3), operational security (4), and silent failures (5). PROJECT-PROFILE.md controls which checks apply per repo. Produces a PASS/FAIL table for every PR. Matches findings against author patterns — an author with "Shell injection risk (3x)" gets extra scrutiny on security checks.
 
-**git-history-reviewer** — Reviews code through the lens of git history. Blame analysis (stale code, absent authors, integration boundaries), file churn patterns (5+ commits in 6 months = design smell), previous PR review comments on the same files. Uses REVIEW-HISTORY.md for finding frequency and file hot spot data.
+**git-history-reviewer** — Reviews code through the lens of git history. Blame analysis (stale code, absent authors, integration boundaries), file churn patterns (5+ commits in 6 months = design smell), previous PR review comments on the same files. Uses REVIEW-HISTORY.md for finding frequency and file hot spot data. Annotates findings that match the PR author's known patterns.
 
 **Codex** (GPT-5.4) — Independent second opinion from a different model family. Catches things Claude agents miss due to shared blind spots. Runs as a background process, results collected before verification.
 
@@ -206,9 +206,25 @@ Patterns are stored on the repo's wiki (GitHub or GitLab):
 - **Every team member's reviews contribute** automatically
 - **Repo-specific** — each repo's patterns stay in that repo's wiki
 
-Two files:
-- **REVIEW.md** — curated patterns: author tendencies, service-specific gotchas, common findings, accepted patterns. Updated incrementally after each review.
-- **REVIEW-HISTORY.md** — analytical data auto-generated from PR comment history. Finding frequency tables, file hot spots, author trends, timeline. Regenerated periodically.
+Six wiki pages (created automatically as needed):
+- **REVIEW.md** — curated patterns: author behavioral profiles, service-specific gotchas, common findings. Updated incrementally after each review.
+- **REVIEW-HISTORY.md** — analytical data auto-generated from PR comment history. Finding frequency tables, file hot spots, author trends with clean-PR tracking, timeline. Regenerated periodically.
+- **PROJECT-PROFILE.md** — project characteristics generated by an Opus deep scan on first run: languages, architecture, services, review focus rules, applicable security checks.
+- **GLOSSARY.md** — project-specific terminology extracted from code and docs. Prevents false findings on intentional naming.
+- **ACCEPTED-PATTERNS.md** — team-approved patterns that suppress matching findings in future reviews. Populated when developers successfully dispute findings.
+- **SEVERITY-CALIBRATION.md** — per-agent confidence thresholds computed from dispute rates. Auto-recalculated when enough data exists.
+
+### Author Pattern Lifecycle
+
+Author patterns in REVIEW.md are behavioral profiles that evolve over time — not task items that get deleted when fixed. Each pattern tracks occurrence count and consecutive clean PRs:
+
+```
+### alice
+- **Shell injection risk** (3x: #45, #52, #67 | last 2 PRs: 2 clean): Misses escapeshellarg() on user input in shell commands
+- **Empty array guard** (1x: #67 | new): Uses implode() on arrays without checking empty first
+```
+
+Lifecycle: **create** (1x, new) → **strengthen** (Nx, counter resets on match) → **decline** (5 clean PRs) → **archive** (10 clean PRs). Patterns are never deleted — archived patterns stay permanently as historical context. Review agents match every finding against the PR author's known patterns and annotate matches, which the orchestrator uses to drive lifecycle transitions.
 
 ### Auto-trigger Cleanup
 
@@ -225,7 +241,7 @@ When developers dispute findings during re-review, the pipeline evaluates their 
 - **Code quality** (MEDIUM resistance) — accepted if the developer explains the design tradeoff
 - **Style/nits** (LOW resistance) — team conventions respected readily
 
-Accepted explanations are added to an `Accepted Patterns` section in the wiki. Future reviews check this section and won't re-flag the same pattern.
+Accepted explanations are stored in ACCEPTED-PATTERNS.md (a dedicated wiki page). Future reviews check this file and suppress matching findings automatically.
 
 ## Better Reviews with Your Context
 
@@ -283,9 +299,10 @@ At 40 reviews/month: ~$66/month. On Team/Pro subscription this is included in th
 ## Standalone Wiki Cleanup
 
 ```bash
-/air:learn              # Full cleanup + history regeneration
-/air:learn --dry-run    # Preview without pushing
-/air:learn --history-only  # Only regenerate REVIEW-HISTORY.md
+/air:learn                  # Full cleanup + history regeneration
+/air:learn --dry-run        # Preview without pushing
+/air:learn --history-only   # Only regenerate REVIEW-HISTORY.md
+/air:learn --refresh-profile  # Re-run full project scan for PROJECT-PROFILE.md + GLOSSARY.md
 ```
 
-Fetches all review comments from recent merged PRs, extracts recurring patterns, deduplicates the wiki, and pushes back. Run manually when patterns feel noisy or after a batch of reviews.
+Fetches all review comments from recent merged PRs, extracts recurring patterns, deduplicates the wiki, migrates legacy author patterns to lifecycle format, reconciles clean-PR counters, and pushes back. Run manually when patterns feel noisy or after a batch of reviews.

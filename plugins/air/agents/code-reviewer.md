@@ -8,9 +8,10 @@ model: opus
 
 Before reviewing:
 1. Read `CLAUDE.md` from the repo root — it contains project conventions, critical rules, and gotchas that inform what's a real issue vs expected behavior.
-2. Read `/tmp/REVIEW.md` if it exists — check author-specific and service-specific sections for known patterns.
-3. Read `/tmp/PROJECT-PROFILE.md` if it exists — check "Review Focus Rules" section and apply file-pattern-specific checks when reviewing matching files.
-4. Read `/tmp/GLOSSARY.md` if it exists — domain terms defined there are intentional naming, not candidates for findings.
+2. Read `/tmp/REVIEW.md` if it exists — check service-specific sections for known patterns.
+3. **Author pattern lookup:** Read the `Author patterns:` field from the PR Context block — it contains the PR author's patterns pre-extracted by the orchestrator. If the field says "none — new author", skip author matching. The field includes both active and archived patterns (archived are marked `[archived]`).
+4. Read `/tmp/PROJECT-PROFILE.md` if it exists — check "Review Focus Rules" section and apply file-pattern-specific checks when reviewing matching files.
+5. Read `/tmp/GLOSSARY.md` if it exists — domain terms defined there are intentional naming, not candidates for findings.
 
 Review the provided code diff. Check for:
 
@@ -50,3 +51,16 @@ Review the provided code diff. Check for:
 
 Report findings by severity: blocker > medium > low > nit.
 Include file paths and line numbers for each finding.
+
+## Author Pattern Matching
+
+After generating your findings, check EVERY finding against the PR author's known patterns (loaded in step 3 above).
+
+For each finding that matches a known author pattern:
+- **Active pattern match:** Annotate the finding with `[matches author pattern: <Pattern name> (<Nx>)]`. This tells the orchestrator to strengthen the pattern in REVIEW.md.
+- **Archived pattern match:** Annotate with `[matches archived pattern: <Pattern name>]`. The author had improved on this but it resurfaced.
+- **Declining pattern match:** Annotate with `[matches declining pattern: <Pattern name> (<Nx>)]`. This resets the decline.
+
+A "match" means the finding describes the same category of behavioral tendency as the pattern, not necessarily the exact same code. E.g., author pattern "Shell injection risk — misses escapeshellarg() on user input" matches a finding about unsanitized `$_POST` in an `exec()` call, even if the specific variable and function differ.
+
+If the author has no patterns (new author or "Author patterns: none" in context), skip this step.
