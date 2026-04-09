@@ -1,8 +1,10 @@
 # air — Automated Code Review with Verification, Pattern Learning, and Team Knowledge
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.1.0-green.svg)](.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://claude.ai/code)
+[![GitHub](https://img.shields.io/badge/GitHub-supported-black.svg)](https://github.com)
+[![GitLab](https://img.shields.io/badge/GitLab-supported-orange.svg)](https://gitlab.com)
 
 ## Why
 
@@ -47,7 +49,8 @@ Two commands become available: `/air:review` and `/air:learn`. Updates are autom
 /air:review --full                     # Review entire codebase (first-time audit)
 /air:review --dry-run                  # Print to console, don't post online
 /air:review --no-codex                 # Skip Codex review pass
-/air:review https://github.com/org/repo/pull/45   # Cross-repo review
+/air:review https://github.com/org/repo/pull/45        # Cross-repo review (GitHub)
+/air:review https://gitlab.com/group/project/-/merge_requests/45  # Cross-repo review (GitLab)
 ```
 
 ### Smart Default (no flags)
@@ -257,6 +260,7 @@ Review PRs from other repos without switching directories:
 
 ```bash
 /air:review https://github.com/org/other-repo/pull/45
+/air:review https://gitlab.com/group/other-project/-/merge_requests/45
 ```
 
 Gracefully skips data that requires a local checkout (blame, churn, file statuses) and falls back to API-only data. Wiki patterns are skipped (repo-specific).
