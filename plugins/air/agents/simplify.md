@@ -38,7 +38,7 @@ Analyze the provided diff. If no diff was provided, print "No diff provided — 
 - **Overly broad operations:** Reading entire files when only a portion is needed, loading all records when filtering for a subset, fetching full objects when only one field is used.
 - **TOCTOU anti-pattern:** Pre-checking file/resource existence before operating on it (check-then-act). Operate directly and handle the error — the check adds a race window and an extra I/O call.
 - **Recurring no-op updates:** State/store updates inside polling loops, intervals, or event handlers that fire unconditionally. Add a change-detection guard so downstream consumers aren't notified when nothing changed.
-- **Unbounded data structures:** Caches, queues, or buffers that grow without size limits, eviction, or cleanup. In-memory collections populated from external sources without pagination or caps.
+- **Unbounded data structures (efficiency angle):** Caches, queues, or buffers that grow without eviction or size limits — memory waste and GC pressure. Focus on missing eviction policies and pagination. (Security-auditor covers the DoS/OOM angle separately.)
 
 ---
 

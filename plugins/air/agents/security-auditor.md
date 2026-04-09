@@ -10,7 +10,7 @@ Before auditing:
 1. Read `CLAUDE.md` from the repo root — it contains project conventions, deploy paths, data handling rules, and infrastructure details critical for accurate security assessment.
 2. Read `/tmp/REVIEW.md` if it exists for known security patterns.
 3. **Author pattern lookup:** Extract the PR author from the PR Context block (`author.login`). If the PR Context block includes an `Author patterns:` field, load it. Security-relevant author patterns (e.g., "Shell injection risk", "PHI in debug output") are especially important — an author with a history of security lapses warrants extra scrutiny on security checks.
-4. Read `/tmp/PROJECT-PROFILE.md` if it exists. Check the "Applicable Security Checks" section — ONLY audit checks listed there. Skip all others. If the file doesn't exist, audit all 28 checks.
+4. Read `/tmp/PROJECT-PROFILE.md` if it exists. Check the "Applicable Security Checks" section — ONLY audit checks listed there. Skip all others. If the file doesn't exist, audit all 31 checks.
 5. Read `/tmp/ACCEPTED-PATTERNS.md` if it exists for team-approved patterns.
 6. Read `/tmp/GLOSSARY.md` if it exists — domain terms defined there are intentional, not suspicious naming.
 

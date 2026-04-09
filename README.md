@@ -111,9 +111,9 @@ All agents run on Opus for consistent quality. Each receives the same rich conte
 
 **code-reviewer** — Bugs, logic errors, error handling, design issues, and test coverage gaps. Checks for orphan imports on deleted files, reference updates on renames, missing tests for new functionality. Reads TODO/FIXME/HACK markers and flags comment rot. Matches every finding against the PR author's known behavioral patterns and annotates matches.
 
-**simplify** — Duplication, dead code, unused imports, unnecessary complexity. Read-only — reports findings but never edits files.
+**simplify** — Three review dimensions: Code Reuse (active codebase search for existing utilities), Code Quality (dead code, copy-paste, stringly-typed code, redundant state), and Efficiency (N+1 patterns, missed concurrency, hot-path bloat, TOCTOU, unbounded structures). Read-only — reports findings but never edits files.
 
-**security-auditor** — 28-item checklist covering sensitive data protection (6 items, conditional on project type), injection vulnerabilities (4), authentication/authorization (3), input validation (3), data exposure (3), operational security (4), and silent failures (5). PROJECT-PROFILE.md controls which checks apply per repo. Produces a PASS/FAIL table for every PR. Matches findings against author patterns — an author with "Shell injection risk (3x)" gets extra scrutiny on security checks.
+**security-auditor** — 31-item checklist covering sensitive data protection (6 items, conditional on project type), injection vulnerabilities (4), authentication/authorization (3), input validation (3), data exposure (3), operational security (4), silent failures (5), and resource exhaustion (3). PROJECT-PROFILE.md controls which checks apply per repo. Produces a PASS/FAIL table for every PR. Matches findings against author patterns — an author with "Shell injection risk (3x)" gets extra scrutiny on security checks.
 
 **git-history-reviewer** — Reviews code through the lens of git history. Blame analysis (stale code, absent authors, integration boundaries), file churn patterns (5+ commits in 6 months = design smell), previous PR review comments on the same files. Uses REVIEW-HISTORY.md for finding frequency and file hot spot data. Annotates findings that match the PR author's known patterns.
 
