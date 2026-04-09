@@ -1176,21 +1176,45 @@ Write the formatted response to `/tmp/respond-comment.md`.
 ```
 ## Review Response
 
+<one-line conclusion: e.g. "All 6 findings fixed." or "5 of 7 findings addressed — 2 acknowledged for follow-up." or "4 fixed, 1 disputed (see below), 2 acknowledged.">
+
 Responding to review at <REVIEWED_AT_SHA>.
 
-#1 — fixed (applied suggested fix)
-#2 — fixed: used allowlist validation instead of escaping
-#3 — disputed: endpoint is behind VPN + IAM role, never public-facing
-#4 — acknowledged: valid, tracking in follow-up
-#5 — partially fixed: added null check but edge case on empty array remains
+### Fixed
 
-### Additional changes
+**#1 — <original finding description>**
+
+<status>. <Brief explanation of how it was fixed — what changed and where.>
+
+**#2 — <original finding description>**
+
+<status>. <Explanation.>
+
+### Disputed
+
+**#3 — <original finding description>**
+
+disputed: <Technical reason why this is intentional, with evidence.>
+
+### Acknowledged
+
+**#4 — <original finding description>**
+
+acknowledged: <Note — e.g. "valid, tracking in follow-up" or "will fix in separate PR".>
+
+### Partially Fixed
+
+**#5 — <original finding description>**
+
+partially fixed: <What was done and what remains.>
+
+### Additional Changes
 
 Changes not related to review findings:
 - `config/settings.yaml` — updated timeout from 30s to 60s for new upstream SLA
 - `handler.go` — extracted retry logic into helper function (refactor)
 
-### Self-check notes
+### Self-check Notes
 
 1 non-blocking observation in the fix diff:
 - `handler.go:55` — new retry helper doesn't cap max retries (low)
@@ -1202,11 +1226,17 @@ Responded at: <current HEAD SHA>
 ```
 
 **Format rules:**
-- Each finding response starts with `#N — ` (parseable by Step 6 re-review)
-- Status values: `fixed`, `fixed (applied suggested fix)`, `fixed: <description>`, `partially fixed: <what's missing>`, `disputed: <reason>`, `acknowledged`, `acknowledged: <note>`, `won't-fix: <reason>`
+- Opening line is a **conclusion** summarizing the overall status. Examples:
+  - All findings fixed: "All N findings fixed."
+  - Mixed: "N of M findings fixed — K acknowledged for follow-up."
+  - Blockers cleared: "All N blockers fixed. K low/nit findings acknowledged."
+  - Disputes: "N fixed, K disputed (see below)."
+- Each finding gets its own `**#N — <description>**` header with the original description from the review, followed by the status and explanation on the next line. This mirrors the review format where each finding is a bold-numbered block.
+- Group findings by status under `### Fixed`, `### Disputed`, `### Acknowledged`, `### Partially Fixed` headers. Omit empty sections. Within each section, maintain the original finding numbers.
+- Each finding response line starts with the status keyword (parseable by Step 6 re-review): `fixed`, `fixed (applied suggested fix)`, `fixed: <description>`, `partially fixed: <what's missing>`, `disputed: <reason>`, `acknowledged`, `acknowledged: <note>`, `won't-fix: <reason>`
 - Pre-existing findings from the review are omitted (no response expected)
-- `### Additional changes` section only if non-finding changes were detected in Step 3. Each entry: `<file>` — `<brief description>`. Omit section if empty.
-- `### Self-check notes` section only if non-blocker self-check findings exist. Omit if clean.
+- `### Additional Changes` section only if non-finding changes were detected in Step 3. Each entry: `<file>` — `<brief description>`. Omit section if empty.
+- `### Self-check Notes` section only if non-blocker self-check findings exist. Omit if clean.
 - `Responded at:` footer uses the local HEAD SHA from `git rev-parse HEAD` (not `Reviewed at:` — different marker)
 - No emoji, no AI attribution
 
