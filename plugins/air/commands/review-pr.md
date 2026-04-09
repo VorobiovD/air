@@ -146,9 +146,9 @@ Scan this repository and generate two wiki documents:
 
    ## Review Focus Rules
    Map file patterns to review-specific checks. Examples:
-   - `*.yaml` in `config/variants/` → check price consistency, coupon math, category registration
-   - `*.py` in `agent-core/shared/` → check backwards compatibility, no PHI in shared utilities
-   - `template.yaml` → check IAM policies, environment parameterization
+   - `*.yaml` in `config/` → check value consistency, feature flag correctness
+   - `*.py` in `shared/` or `lib/` → check backwards compatibility, no sensitive data in shared utilities
+   - `template.yaml` or `*.tf` → check IAM/RBAC policies, environment parameterization
    Generate rules based on what you discover. Be specific to this project.
 
    ## Applicable Security Checks
@@ -189,8 +189,8 @@ If no memory files exist or the directory is not found, skip gracefully.
 4. **Session context:**
 
 You (the orchestrator) are running inside the user's Claude Code session. If you have relevant context from THIS conversation about the PR, the files being changed, or the intent behind the changes — include it as `SESSION_CONTEXT` in the PR Context block. Examples:
-- "The user was debugging a VPC timeout in patient-data-api before starting this review"
-- "This PR is part of the agent-core migration discussed earlier in this session"
+- "The user was debugging a DNS timeout in the auth service before starting this review"
+- "This PR is part of the database migration discussed earlier in this session"
 - "The user mentioned this is a hotfix for a production issue"
 
 If you have no relevant session context, omit the field. Do not fabricate context.
@@ -639,17 +639,17 @@ echo '{"last_cleanup": "'$LAST_CLEANUP'", "reviews_since": '$((REVIEWS_SINCE + 1
 ```
 
 1. Read `/tmp/REVIEW.md` (from Step 3)
-2. Add new patterns from this review (semantic dedup - "Maxio response proxied" = "raw third-party API forwarded")
+2. Add new patterns from this review (semantic dedup - "raw third-party response proxied" = "unfiltered external API forwarded")
 3. **Learn from developer feedback (re-review only):** If this is a re-review and developers disputed findings with explanations, evaluate each disputed finding for wiki update:
 
 ### Resistance Levels
 
 Not all "this is how we do it" responses should be accepted. Apply graduated resistance based on the category:
 
-**HIGH resistance (security/HIPAA/PHI):**
+**HIGH resistance (security/compliance/data-protection):**
 - Requires a concrete technical explanation of WHY the pattern is safe, not just "we always do this"
-- If the pattern involves PHI exposure, injection, auth bypass, or data leakage — do NOT accept without a compensating control being described
-- Example: "We always log the full order object for debugging" → REJECT. PHI risk doesn't go away because it's standard practice
+- If the pattern involves sensitive data exposure, injection, auth bypass, or data leakage — do NOT accept without a compensating control being described
+- Example: "We always log the full order object for debugging" → REJECT. Data exposure risk doesn't go away because it's standard practice
 - Example: "The endpoint is behind VPN + IAM role, never public" → ACCEPT with the compensating control noted
 - Print a warning in console when rejecting a security dispute: "Kept finding #N despite dispute — security risk too high to whitelist"
 

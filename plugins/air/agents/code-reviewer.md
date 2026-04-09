@@ -1,6 +1,6 @@
 ---
 name: code-reviewer
-description: Review code changes for quality, design, and AI Relay conventions. For security checks, use security-auditor.
+description: Review code changes for quality, design, and project conventions. For security checks, use security-auditor.
 tools: Read, Grep, Glob, Bash
 # Bash is ONLY for: git log, git blame. Do not run other shell commands.
 model: opus
@@ -14,25 +14,21 @@ Before reviewing:
 
 Review the provided code diff. Check for:
 
-1. **Go (patient-data-api, memento-api):**
-   - Proper error handling (no swallowed errors)
+1. **Language-specific checks** (apply based on what the PR touches — check PROJECT-PROFILE.md for project languages):
+   - Proper error handling (no swallowed errors, no bare excepts, no `_ = err`)
    - No hardcoded secrets or credentials
-   - Structured logging (no fmt.Println in Lambda handlers)
+   - Structured logging (no debug prints in production handlers)
    - Correct HTTP status codes in API responses
+   - Type annotations/hints on public functions where the language supports them
+   - No sensitive data (PII, credentials, tokens) in log statements
+   - Imports from shared modules where applicable (check PROJECT-PROFILE.md for shared module locations)
 
-2. **Python (agent-core, bedrock-agent):**
-   - Type hints on public functions
-   - Proper exception handling at system boundaries
-   - No PHI in log statements — use hash_patient_id() for correlation
-   - Imports from shared/ modules where applicable (don't duplicate)
-
-3. **SAM/CloudFormation templates:**
-   - Correct resource naming pattern: `<service>-<resource>-<environment>`
+2. **Infrastructure-as-code** (Terraform, SAM, CloudFormation, Kubernetes manifests):
    - Environment parameterization (no hardcoded staging/prod values)
-   - IAM policies scoped to specific resources (no `Resource: '*'` unless necessary)
-   - SSM parameters use String type for CF resolve references
+   - IAM/RBAC policies scoped to specific resources (no wildcard permissions unless justified)
+   - Consistent resource naming patterns
 
-4. **Design & Architecture:**
+3. **Design & Architecture:**
    - Redundant responsibilities between components (e.g., two modules checking the same thing)
    - Fallback mechanisms — are they correct, not just present? (e.g., anchoring on SHA vs timestamp, exact match vs prefix)
    - If a file was DELETED, verify no orphan imports/references remain

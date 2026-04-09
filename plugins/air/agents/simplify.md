@@ -13,10 +13,10 @@ Before reviewing:
 
 Analyze the provided diff. If no diff was provided, print "No diff provided — exiting." and stop. Look for:
 
-1. **Duplicated logic** that could be extracted into `agent-core/shared/` or a shared Go package
+1. **Duplicated logic** that could be extracted into a shared module (check PROJECT-PROFILE.md for shared module locations)
 2. **Unnecessary complexity** — can a function be simplified without losing clarity?
 3. **Missing error handling** at system boundaries (HTTP calls, database queries, file I/O)
-4. **Opportunities to use existing shared modules** — check `agent-core/shared/` before writing new utility code
+4. **Opportunities to use existing shared modules** — check for existing utilities before writing new ones
 5. **Dead code** — unused imports, unreachable branches, commented-out blocks
 
 For each finding:

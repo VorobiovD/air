@@ -42,8 +42,8 @@ If `--history-only` was passed, skip to Step 4 (only regenerate history, don't t
 Read the entire file and analyze every pattern entry for:
 
 - **Semantic duplicates** — patterns that describe the same issue in different words. Merge into one, keeping the best wording. Examples:
-  - "Maxio response proxied to callers" + "raw third-party API forwarded in error details" → one pattern
-  - "subscription_id int/string breaking change" + "subscription_id schema breaks integer callers" → one pattern
+  - "raw third-party response proxied to callers" + "unfiltered external API forwarded in error details" → one pattern
+  - "user_id int/string breaking change" + "user_id schema breaks integer callers" → one pattern
 - **Stale patterns** — patterns that were fixed project-wide and no longer relevant. Check recent PRs if needed. Mark as potentially stale but don't remove without confirming.
 - **Misplaced patterns** — author patterns that should be service patterns (or vice versa). Move to the correct section.
 - **Vague patterns** — entries too generic to be actionable. Make them specific or remove.
@@ -52,9 +52,9 @@ Read the entire file and analyze every pattern entry for:
 ## Step 3: Reorganize REVIEW.md
 
 - Alphabetize authors within Author Patterns
-- Group related patterns within each section (PHI together, config together, etc.)
+- Group related patterns within each section (security together, config together, etc.)
 - Ensure no section exceeds ~15 patterns — promote the most general ones to Common Findings
-- Keep the HIPAA Quick Reference section unchanged (it's a reference, not learned patterns)
+- If a compliance reference section exists (e.g., HIPAA Quick Reference for healthcare projects), keep it unchanged (it's a reference, not learned patterns)
 
 Generate the cleaned-up REVIEW.md content.
 
@@ -97,7 +97,7 @@ for PR_NUM in $RECENT_PRS; do
 done
 ```
 
-**PHI safety:** Do NOT fetch `diff_hunk` from review comments — it may contain code with patient data patterns. Only fetch `path` and `body` (first 200 chars).
+**Sensitive data safety:** Do NOT fetch `diff_hunk` from review comments — it may contain secrets, credentials, PII, or other sensitive data. Only fetch `path` and `body` (first 200 chars).
 
 **Rate limiting:** If any API call returns 403/429, pause for 5 seconds and retry once. Cap total API calls at 100.
 
@@ -113,7 +113,7 @@ PRs analyzed: <count>
 
 | Finding pattern | Count | Last seen | PRs |
 |---|---|---|---|
-| PHI in API responses | 5 | PR #98 | #88, #91, #93, #96, #98 |
+| Sensitive data in API responses | 5 | PR #98 | #88, #91, #93, #96, #98 |
 | Debug functions in production | 3 | PR #96 | #88, #91, #96 |
 | ... | ... | ... | ... |
 
@@ -121,24 +121,24 @@ PRs analyzed: <count>
 
 | File/directory | Findings | Recent PRs |
 |---|---|---|
-| agent-core/shared/handler.py | 8 | #93, #96 |
-| gcp/functions/apis/billing-tool/ | 6 | #88, #91, #98 |
+| src/handlers/auth.py | 8 | #93, #96 |
+| services/payment-api/ | 6 | #88, #91, #98 |
 | ... | ... | ... |
 
 ## Author Trends
 
 | Author | Total findings | Blockers | Most common pattern |
 |---|---|---|---|
-| caguilaron | 12 | 2 | Price inconsistency |
-| christinacephus-md | 9 | 1 | Broad exception handling |
+| alice | 12 | 2 | Missing input validation |
+| bob | 9 | 1 | Broad exception handling |
 | ... | ... | ... | ... |
 
 ## Timeline
 
 | PR | Date | Author | Findings | Blockers |
 |---|---|---|---|---|
-| #98 | 2026-04-03 | caguilaron | 4 | 1 |
-| #96 | 2026-04-01 | christinacephus-md | 3 | 0 |
+| #98 | 2026-04-03 | alice | 4 | 1 |
+| #96 | 2026-04-01 | bob | 3 | 0 |
 | ... | ... | ... | ... | ... |
 ```
 
@@ -186,8 +186,8 @@ If fewer than 10 total data points across all agents, skip this step entirely �
 
 Scan `/tmp/REVIEW.md`, `/tmp/ACCEPTED-PATTERNS.md`, `CLAUDE.md`, and `README.md` from the repo root for domain-specific terms not yet in the glossary:
 - Proper nouns (service names, tool names)
-- Abbreviated terms (MIF, PHI, OTP)
-- Business domain terms (downsell, guardrail, variant)
+- Abbreviated terms (JWT, API, OTP)
+- Business domain terms (guardrail, variant, tenant)
 
 Append new terms. Do not remove existing terms. Format:
 ```markdown
@@ -197,9 +197,9 @@ Last updated: <date>
 
 | Term | Definition | Context |
 |---|---|---|
-| downsell | Retention offer at a lower price point | billing-tool |
-| guardrail | Safety constraint on agent input/output | agent-core |
-| MIF | Medical Intake Form | admin-portal |
+| tenant | Isolated customer workspace | multi-tenancy |
+| guardrail | Safety constraint on agent input/output | AI safety |
+| idempotency key | Unique token preventing duplicate operations | payment API |
 ```
 
 ## Step 5: Report
