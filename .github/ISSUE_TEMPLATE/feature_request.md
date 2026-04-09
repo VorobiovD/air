@@ -17,7 +17,7 @@ Any workarounds or different approaches you've thought of.
 
 **Which component?**
 - [ ] Agent (code-reviewer, security-auditor, simplify, git-history-reviewer, review-verifier)
-- [ ] Pipeline (review-pr.md orchestration)
+- [ ] Pipeline (review.md orchestration)
 - [ ] Learn (wiki patterns, cleanup, calibration)
 - [ ] Documentation
 - [ ] Other

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **air** is a Claude Code plugin for automated PR code review. It is **not** a compiled application — there is no build system, no test suite, no dependencies to install. The entire codebase is markdown files and JSON metadata.
 
-Two commands: `/air:review-pr` (13-step review pipeline) and `/air:learn` (wiki cleanup/regeneration).
+Two commands: `/air:review` (13-step review pipeline) and `/air:learn` (wiki cleanup/regeneration).
 
 ## Project Structure
 
@@ -19,7 +19,7 @@ plugins/air/
 │   ├── git-history-reviewer.md
 │   └── review-verifier.md
 ├── commands/            # CLI command orchestration
-│   ├── review-pr.md     # Main pipeline — the core of the plugin
+│   ├── review.md     # Main pipeline — the core of the plugin
 │   └── learn.md         # Wiki maintenance
 └── .claude-plugin/
     └── plugin.json      # Plugin metadata (name, version, author)
@@ -30,7 +30,7 @@ plugins/air/
 
 ## Architecture
 
-**Review pipeline** (`commands/review-pr.md`): Parses args, fetches PR data via `gh` CLI, runs 5 agents + optional Codex in parallel, passes results through a verification agent that filters false positives (confidence < 60 = dropped), then posts a consolidated GitHub comment.
+**Review pipeline** (`commands/review.md`): Parses args, fetches PR data via `gh` CLI, runs 5 agents + optional Codex in parallel, passes results through a verification agent that filters false positives (confidence < 60 = dropped), then posts a consolidated GitHub comment.
 
 **Agents** (`agents/*.md`): Stateless markdown prompt files. Each is a specialized reviewer personality that receives the same rich context block (PR diff, blame data, wiki patterns, project memory). All run on Opus.
 
@@ -42,9 +42,9 @@ plugins/air/
 
 - Edit agent files (`agents/*.md`) or command files (`commands/*.md`) directly
 - Reload in Claude Code with `/reload` or reconnect
-- Test with `/air:review-pr <pr-number>` on a repo with PRs
+- Test with `/air:review <pr-number>` on a repo with PRs
 - `--dry-run` flag prints to console without posting to GitHub
-- After receiving a review, fix findings and run `/air:review-pr --respond` to auto-classify, self-check, and reply
+- After receiving a review, fix findings and run `/air:review --respond` to auto-classify, self-check, and reply
 
 ## Key Design Decisions
 

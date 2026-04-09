@@ -5,7 +5,7 @@ argument-hint: [--dry-run] [--history-only] [--refresh-profile]
 
 Fetch REVIEW.md from the wiki, clean it up using AI, generate REVIEW-HISTORY.md from PR comment history, and push both back.
 
-Note: `/review-pr` auto-triggers this command every 5 reviews or every 2 days (whichever comes first). You can also run it manually for immediate cleanup.
+Note: `/air:review` auto-triggers this command every 5 reviews or every 2 days (whichever comes first). You can also run it manually for immediate cleanup.
 
 **Flags:**
 - `--dry-run` — preview changes without pushing to wiki
@@ -60,11 +60,11 @@ Generate the cleaned-up REVIEW.md content.
 
 ## Step 3.5: Refresh PROJECT-PROFILE.md
 
-**If `--refresh-profile` was passed:** Run the full Opus deep scan (same as `/review-pr` Step 3.5 first-run discovery). This overwrites the existing PROJECT-PROFILE.md and GLOSSARY.md with fresh results. Use when the project has changed significantly — new language, new service, major restructure, or when agents have flagged wiki drift.
+**If `--refresh-profile` was passed:** Run the full Opus deep scan (same as `/air:review` Step 3.5 first-run discovery). This overwrites the existing PROJECT-PROFILE.md and GLOSSARY.md with fresh results. Use when the project has changed significantly — new language, new service, major restructure, or when agents have flagged wiki drift.
 
 **Otherwise (default, lightweight refresh):**
 
-Only run if `/tmp/PROJECT-PROFILE.md` exists (first-run already happened). If it doesn't exist, skip — the first-run discovery in `/review-pr` Step 3.5 handles initial creation.
+Only run if `/tmp/PROJECT-PROFILE.md` exists (first-run already happened). If it doesn't exist, skip — the first-run discovery in `/air:review` Step 3.5 handles initial creation.
 
 File-based detection only (~2s, no Opus agent):
 ```bash

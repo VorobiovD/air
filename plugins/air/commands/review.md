@@ -558,7 +558,7 @@ Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line
 
 Reviewed at: <headRefOid>
 
-> After fixing, run `/air:review-pr --respond` to verify and reply.
+> After fixing, run `/air:review --respond` to verify and reply.
 ```
 
 Rules:
@@ -1099,7 +1099,7 @@ Response posted to PR #<PR_NUMBER>:
 - Self-check: <clean / N non-blocking notes>
 - Branch pushed.
 
-The reviewer can now run /air:review-pr to re-review.
+The reviewer can now run /air:review to re-review.
 ```
 
 **No wiki learning:** The Respond Flow intentionally does NOT push patterns to the wiki or increment the review counter. Self-check findings are included in the response comment for the reviewer to see, but learning happens on the reviewer's re-review (Step 13), not during the developer's response.
