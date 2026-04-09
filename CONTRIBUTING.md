@@ -11,7 +11,7 @@ air is a Claude Code plugin — the entire codebase is markdown files and JSON m
 - Reduced false positives in security checks
 - New checks for the 28-item security checklist
 
-### Pipeline improvements (`plugins/air/commands/review-pr.md`)
+### Pipeline improvements (`plugins/air/commands/review.md`)
 - Bug fixes in shell commands or flow routing
 - New flags or modes
 - Performance improvements (fewer API calls, better parallelism)
@@ -25,7 +25,7 @@ air is a Claude Code plugin — the entire codebase is markdown files and JSON m
 1. Fork the repo
 2. Create a branch: `git checkout -b feat/your-change`
 3. Edit the markdown files directly
-4. Test manually: run `/air:review-pr --dry-run` on a repo with PRs
+4. Test manually: run `/air:review --dry-run` on a repo with PRs
 5. Open a PR with a clear description of what changed and why
 
 ## Guidelines
@@ -41,9 +41,9 @@ air is a Claude Code plugin — the entire codebase is markdown files and JSON m
 There is no automated test suite. Test manually:
 
 ```bash
-/air:review-pr 123 --dry-run     # Review a PR without posting
-/air:review-pr --self             # Self-review local changes
-/air:review-pr --respond          # Test respond flow after a review
+/air:review 123 --dry-run     # Review a PR without posting
+/air:review --self             # Self-review local changes
+/air:review --respond          # Test respond flow after a review
 /air:learn --dry-run              # Preview wiki cleanup
 ```
 

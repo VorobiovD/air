@@ -23,7 +23,7 @@ One command. One consolidated PR comment. Gets smarter over time.
 /plugin install air@air
 ```
 
-Two commands become available: `/air:review-pr` and `/air:learn`. Updates are automatic.
+Two commands become available: `/air:review` and `/air:learn`. Updates are automatic.
 
 ## Prerequisites
 
@@ -36,23 +36,23 @@ Two commands become available: `/air:review-pr` and `/air:learn`. Updates are au
 ## Usage
 
 ```bash
-/air:review-pr 123                        # Full review of PR #123
-/air:review-pr                            # Auto-detect: review current branch's PR, or self-review
-/air:review-pr --self                     # Review local changes before pushing
-/air:review-pr --self --fix               # Self-review + auto-apply fixes
-/air:review-pr --re-review                # Delta review: FIXED/NOT FIXED tracking + new findings
-/air:review-pr --fresh                    # Full review from scratch, new comment
-/air:review-pr --rewrite                  # Full review, edit existing comment in place
-/air:review-pr --respond                  # Reply to review: classify findings + self-check + push
-/air:review-pr --full                     # Review entire codebase (first-time audit)
-/air:review-pr --dry-run                  # Print to console, don't post to GitHub
-/air:review-pr --no-codex                 # Skip Codex review pass
-/air:review-pr https://github.com/org/repo/pull/45   # Cross-repo review
+/air:review 123                        # Full review of PR #123
+/air:review                            # Auto-detect: review current branch's PR, or self-review
+/air:review --self                     # Review local changes before pushing
+/air:review --self --fix               # Self-review + auto-apply fixes
+/air:review --re-review                # Delta review: FIXED/NOT FIXED tracking + new findings
+/air:review --fresh                    # Full review from scratch, new comment
+/air:review --rewrite                  # Full review, edit existing comment in place
+/air:review --respond                  # Reply to review: classify findings + self-check + push
+/air:review --full                     # Review entire codebase (first-time audit)
+/air:review --dry-run                  # Print to console, don't post to GitHub
+/air:review --no-codex                 # Skip Codex review pass
+/air:review https://github.com/org/repo/pull/45   # Cross-repo review
 ```
 
 ### Smart Default (no flags)
 
-When you run `/air:review-pr` with no arguments:
+When you run `/air:review` with no arguments:
 1. Checks if the current branch has an open PR — if yes, reviews it
 2. If an existing review comment is found with new commits since — auto re-reviews
 3. If no PR exists but you have local changes — auto self-reviews
@@ -72,7 +72,7 @@ Re-review generates an inter-diff (only changes since last review) so agents foc
 After fixing review findings (manually or with Claude Code), auto-generate the response:
 
 ```bash
-/air:review-pr --respond
+/air:review --respond
 ```
 
 This reads the existing review, then for each finding:
@@ -160,7 +160,7 @@ Posted as a single PR comment. Here's a real example from [PR #1](https://github
 >
 > **1. `--full` missing from argument-hint frontmatter**
 >
-> `plugins/air/commands/review-pr.md#L3` — The `argument-hint` in YAML frontmatter lists every flag except `--full`. Users won't see it in CLI suggestions or tab-completion.
+> `plugins/air/commands/review.md#L3` — The `argument-hint` in YAML frontmatter lists every flag except `--full`. Users won't see it in CLI suggestions or tab-completion.
 >
 > **2. `--full` not documented in README.md**
 >
@@ -170,15 +170,15 @@ Posted as a single PR comment. Here's a real example from [PR #1](https://github
 >
 > **3. Ambiguous skip target for `--full` routing**
 >
-> `plugins/air/commands/review-pr.md#L21-L26` — Line 21 says "skip to the Self-Review Flow section below" but line 26 says "proceed to Self Step 2." These are contradictory.
+> `plugins/air/commands/review.md#L21-L26` — Line 21 says "skip to the Self-Review Flow section below" but line 26 says "proceed to Self Step 2." These are contradictory.
 >
 > **4. `--full --fix` combination is unguarded**
 >
-> `plugins/air/commands/review-pr.md#L17` — `--fix` is documented as "(only with `--self`)" but nothing prevents `--full --fix` from reaching Self Step 6.
+> `plugins/air/commands/review.md#L17` — `--fix` is documented as "(only with `--self`)" but nothing prevents `--full --fix` from reaching Self Step 6.
 >
 > **5. "Never posts to GitHub" wording is misleading**
 >
-> `plugins/air/commands/review-pr.md#L17` — The self-review flow pushes to the wiki. Rewording suggested.
+> `plugins/air/commands/review.md#L17` — The self-review flow pushes to the wiki. Rewording suggested.
 >
 > ### Strengths
 >
@@ -209,7 +209,7 @@ Two files:
 
 ### Auto-trigger Cleanup
 
-A local counter (`~/.claude/review-learn-meta.json`) tracks reviews since last cleanup. Every 5 reviews or 2 days — whichever comes first — whoever runs `/air:review-pr` automatically triggers:
+A local counter (`~/.claude/review-learn-meta.json`) tracks reviews since last cleanup. Every 5 reviews or 2 days — whichever comes first — whoever runs `/air:review` automatically triggers:
 - Full REVIEW.md deduplication and reorganization
 - REVIEW-HISTORY.md regeneration from PR comment history
 - Counter resets — distributed across the team
@@ -245,8 +245,8 @@ The skill also uses context from your current conversation session — if you we
 Review your own code before pushing:
 
 ```bash
-/air:review-pr --self          # Get a fix plan
-/air:review-pr --self --fix    # Get a fix plan + auto-apply fixes
+/air:review --self          # Get a fix plan
+/air:review --self --fix    # Get a fix plan + auto-apply fixes
 ```
 
 Same quality as PR review (all 5 agents + Codex + verifier). Output is a fix plan with exact current/replacement code for each finding, grouped by file.
@@ -256,7 +256,7 @@ Same quality as PR review (all 5 agents + Codex + verifier). Output is a fix pla
 Review PRs from other repos without switching directories:
 
 ```bash
-/air:review-pr https://github.com/org/other-repo/pull/45
+/air:review https://github.com/org/other-repo/pull/45
 ```
 
 Gracefully skips data that requires a local checkout (blame, churn, file statuses) and falls back to API-only data. Wiki patterns are skipped (repo-specific).
