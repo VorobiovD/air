@@ -1,7 +1,8 @@
 {
-  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "air",
-  "description": "AI Review — automated code review with verification, pattern learning, and team knowledge",
+  "metadata": {
+    "description": "AI Review — automated code review with verification, pattern learning, and team knowledge"
+  },
   "owner": {
     "name": "Dmytro Vorobiov",
     "email": "dima.v@lifemd.com"
