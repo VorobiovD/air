@@ -652,6 +652,13 @@ Rules:
 
 ## Step 12: Post
 
+**Own-PR guard (check FIRST, before any posting path):** Determine if the PR author matches the current user:
+```bash
+# GitHub: gh api user --jq '.login'
+# GitLab: glab api user 2>/dev/null | jq -r '.username'
+```
+Compare against the PR/MR author username from Step 4 metadata (`author.login` on GitHub, `author.username` on GitLab). If they match: set `OWN_PR=true`. When `OWN_PR=true`, **skip ALL review verdicts** (`gh pr review --approve`, `gh pr review --request-changes`, `glab mr approve`) in every posting path below. GitHub does not allow self-approval or self-requesting-changes, and attempting it will error. Only post the issue comment.
+
 If `--dry-run`: print to console. Skip Step 13 entirely (no wiki push on dry runs). Jump to Cleanup.
 
 If `--rewrite`:
@@ -664,16 +671,9 @@ REVIEW_COMMENT_ID=$(gh api repos/<owner>/<repo>/issues/<number>/comments --jq '[
 gh api repos/<owner>/<repo>/issues/comments/$REVIEW_COMMENT_ID --method PATCH -f body="$(cat /tmp/review-comment.md)"
 ```
 3. If still empty (no existing comment found): fall back to posting a new comment instead.
-4. Also submit the review verdict — but check the own-PR guard below first.
+4. If NOT `OWN_PR`: also submit the review verdict (approve or request-changes).
 
-**Own-PR guard (check BEFORE any verdict):** Determine if the PR author matches the current user:
-```bash
-# GitHub: gh api user --jq '.login'
-# GitLab: glab api user 2>/dev/null | jq -r '.username'
-```
-Compare against `author.login` from Step 4 metadata. If they match: **skip ALL review verdicts** (`gh pr review --approve`, `gh pr review --request-changes`, `glab mr approve`). GitHub does not allow self-approval or self-requesting-changes, and attempting it will error. Only post the issue comment. This applies to ALL posting paths below (rewrite, fresh, re-review).
-
-Post in TWO steps — an issue comment (for re-review detection in Step 2) AND a review verdict (for branch protection, only if NOT own PR):
+Post in TWO steps — an issue comment (for re-review detection in Step 2) AND a review verdict (for branch protection, only if NOT `OWN_PR`):
 
 ```bash
 # 1. Post the review body as an issue comment (discoverable by Step 2's gh api .../issues/.../comments query)
