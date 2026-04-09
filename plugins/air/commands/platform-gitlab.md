@@ -8,6 +8,8 @@ This is NOT a command — it is a reference document read by the orchestrator wh
 2. **`glab api` has no `--jq` flag.** Pipe output to `jq` instead: `glab api <endpoint> 2>/dev/null | jq -r '<filter>'`
 3. **`glab mr view` uses `-F json` not `--json`.** Output is full MR object, use `jq` to extract fields.
 4. **`jq` is required** on the system for GitLab support.
+5. **GitLab API note bodies may contain control characters** that break `jq` parsing. When filtering notes (e.g., finding `## Code Review` comments), use `python3 -c` with `json.loads()` as a fallback if `jq` fails with parse errors.
+6. **GitLab wiki starts empty** (no Home.md). The `.git` directory check still works — the clone succeeds even for empty wikis.
 
 ## Quick Reference: CLI Commands
 
