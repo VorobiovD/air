@@ -1,7 +1,7 @@
 {
   "name": "air",
   "metadata": {
-    "description": "AI Review — automated code review with verification, pattern learning, and team knowledge"
+    "description": "AI Review — automated code review for GitHub and GitLab with verification, pattern learning, and team knowledge"
   },
   "owner": {
     "name": "Dmytro Vorobiov",
@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "air",
-      "description": "Automated code review with verification, pattern learning, and team knowledge. 5 specialized agents + Codex, wiki-based self-learning, re-review tracking, self-review with auto-fix.",
+      "description": "Automated code review for GitHub and GitLab. 5 specialized agents + Codex, wiki-based self-learning, re-review tracking, self-review with auto-fix, respond mode.",
       "source": "./plugins/air",
       "category": "development",
       "homepage": "https://github.com/VorobiovD/air"

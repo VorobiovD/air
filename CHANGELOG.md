@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.1.0] - 2026-04-09
+
+### Added
+- GitLab support — auto-detected from git remote URL, including self-hosted instances
+- `glab` CLI integration alongside `gh` with complete command/field/URL mappings
+- Platform reference document (`platform-gitlab.md`) for all GitLab-specific translations
+- `AIR_PLATFORM` environment variable override for non-standard GitLab domains
+- Cross-platform cross-repo reviews (review a GitLab MR from a GitHub repo and vice versa)
+- Test coverage analysis in code-reviewer agent
+- Deeper project discovery — traces architecture, maps entry points, documents test infrastructure
+- `--respond` flag for automated developer responses to review findings
+- Pipeline guards: "DO NOT edit files" between Steps 7-12, mandatory verification in Step 8
+- Own-PR guard moved to start of Step 12 with platform-neutral field names
+- Safe API response parsing (pipe to parser, not shell variables)
+
+### Fixed
+- Wiki clone on first run — separated clone from file copies so empty wikis don't report "not found"
+- `--full` flag: argument-hint, skip target clarification, --fix guard, wording
+- Review command renamed from `/air:review-pr` to `/air:review`
+
 ## [1.0.0] - 2026-04-08
 
 ### Added
