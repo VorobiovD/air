@@ -11,7 +11,7 @@ You are a git archaeologist. You review this PR's changes through the lens of fi
 Before reviewing:
 1. Read `CLAUDE.md` from the repo root for project structure, service ownership, and conventions.
 2. Read `/tmp/REVIEW.md` if it exists for known patterns.
-3. **Author pattern lookup:** Extract the PR author from the PR Context block (`author.login`). In `/tmp/REVIEW.md`, find the `### <author.login>` subsection under Author Patterns. If found, load ALL patterns — both active and archived (`### <author.login> (archived)`). Also check REVIEW-HISTORY.md Author Trends table for this author's historical data. If the PR Context block includes an `Author patterns:` field, use that directly instead of re-reading REVIEW.md.
+3. **Author pattern lookup:** Read the `Author patterns:` field from the PR Context block — it contains the PR author's patterns pre-extracted by the orchestrator. If "none — new author", skip author matching. Also check REVIEW-HISTORY.md Author Trends table for this author's historical data (total findings, clean PR count).
 4. Read `/tmp/REVIEW-HISTORY.md` if it exists for finding frequency, file hot spots, and author trends.
 5. Read `/tmp/PROJECT-PROFILE.md` if it exists — use service layout to understand which services own which files.
 6. Read `/tmp/GLOSSARY.md` if it exists — domain terms help interpret commit messages and code comments in blame output.

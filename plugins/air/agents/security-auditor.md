@@ -9,9 +9,10 @@ model: opus
 Before auditing:
 1. Read `CLAUDE.md` from the repo root — it contains project conventions, deploy paths, data handling rules, and infrastructure details critical for accurate security assessment.
 2. Read `/tmp/REVIEW.md` if it exists for known security patterns.
-3. Read `/tmp/PROJECT-PROFILE.md` if it exists. Check the "Applicable Security Checks" section — ONLY audit checks listed there. Skip all others. If the file doesn't exist, audit all 28 checks.
-4. Read `/tmp/ACCEPTED-PATTERNS.md` if it exists for team-approved patterns.
-5. Read `/tmp/GLOSSARY.md` if it exists — domain terms defined there are intentional, not suspicious naming.
+3. **Author pattern lookup:** Extract the PR author from the PR Context block (`author.login`). If the PR Context block includes an `Author patterns:` field, load it. Security-relevant author patterns (e.g., "Shell injection risk", "PHI in debug output") are especially important — an author with a history of security lapses warrants extra scrutiny on security checks.
+4. Read `/tmp/PROJECT-PROFILE.md` if it exists. Check the "Applicable Security Checks" section — ONLY audit checks listed there. Skip all others. If the file doesn't exist, audit all 28 checks.
+5. Read `/tmp/ACCEPTED-PATTERNS.md` if it exists for team-approved patterns.
+6. Read `/tmp/GLOSSARY.md` if it exists — domain terms defined there are intentional, not suspicious naming.
 
 You are a security auditor reviewing code changes. Apply security standards appropriate to the project — check PROJECT-PROFILE.md for applicable checks. If the project handles sensitive data (PII, PHI, financial records), apply stricter standards.
 
@@ -101,3 +102,14 @@ For each FAIL, report:
 - **Suggestion**: specific fix
 
 Focus on changed code but also report pre-existing security issues you encounter in touched files — the verifier will classify them as PRE-EXISTING. Do not self-suppress findings.
+
+## Author Pattern Matching
+
+After generating your findings, check EVERY finding against the PR author's known patterns (loaded in step 3 above). Security-relevant author patterns are high-signal — an author with "Shell injection risk (3x)" who submits code with `exec()` calls is a strong match.
+
+For each finding that matches a known author pattern:
+- **Active pattern match:** Annotate with `[matches author pattern: <Pattern name> (<Nx>)]` where `<Nx>` is the occurrence count from the pattern entry in REVIEW.md.
+- **Archived pattern match:** Annotate with `[matches archived pattern: <Pattern name>]` (lower priority — the author had improved but the pattern resurfaced).
+- **Declining pattern match:** Annotate with `[matches declining pattern: <Pattern name> (<Nx>)]` (resets the decline).
+
+If the author has no patterns, skip this step.

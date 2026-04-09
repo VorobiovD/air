@@ -85,11 +85,11 @@ Generate the cleaned-up REVIEW.md content.
 
 **If `--refresh-profile` was passed:** Run the full Opus deep scan (same as `/air:review` Step 3.5 first-run discovery). This overwrites the existing PROJECT-PROFILE.md and GLOSSARY.md with fresh results. Use when the project has changed significantly — new language, new service, major restructure, or when agents have flagged wiki drift.
 
-**Otherwise (default, lightweight refresh):**
+**Otherwise (default):**
 
-Only run if `/tmp/PROJECT-PROFILE.md` exists (first-run already happened). If it doesn't exist, run the full Opus deep scan (same as `/air:review` Step 3.5 first-run discovery) to create it now — learn already has the wiki clone ready, so there's no reason to defer. Print "No PROJECT-PROFILE.md found — running first-run discovery." After generation, write both files to `/tmp/PROJECT-PROFILE.md` and `/tmp/GLOSSARY.md` and push to wiki in Step 6.
+**If `/tmp/PROJECT-PROFILE.md` does NOT exist** (first run on this project): Run the full Opus deep scan (same as `/air:review` Step 3.5 first-run discovery) to create it now. Print "No PROJECT-PROFILE.md found — running first-run discovery." After generation, write both files to `/tmp/PROJECT-PROFILE.md` and `/tmp/GLOSSARY.md` and push to wiki in Step 6. Skip the lightweight refresh below — the deep scan just generated a fresh profile.
 
-File-based detection only (~2s, no Opus agent):
+**If `/tmp/PROJECT-PROFILE.md` exists** (lightweight refresh): File-based detection only (~2s, no Opus agent):
 ```bash
 # Detect new/removed manifest files
 ls go.mod package.json requirements.txt composer.json Makefile Dockerfile *.tf template.yaml 2>/dev/null
@@ -109,43 +109,50 @@ Fetch all review comments from recent closed/merged PRs and extract finding hist
 
 **IMPORTANT — two-phase approach to avoid API timeouts:** A naive loop of 30 PRs × 2 API calls each = 60+ sequential calls, which easily exceeds 2-minute shell timeouts. Use this two-phase strategy:
 
-**Phase 1: Identify PRs with reviews (1 API call per PR, fast).**
+**Phase 1: Identify PRs with reviews and cache their issue comments.**
 ```bash
 # Fetch last 30 closed/merged PRs
 # GitLab: use projects/$PROJECT_ID/merge_requests?state=merged&per_page=30&order_by=updated_at&sort=desc, use .iid not .number
 RECENT_PRS=$(gh api "repos/$CURRENT_REPO/pulls?state=closed&per_page=30&sort=updated&direction=desc" --jq '.[] | select(.merged_at != null) | .number' 2>/dev/null)
 
-# Quick scan: only fetch issue comment count per PR to identify which have reviews
-# This is much faster than fetching full comment bodies for all 30 PRs
+# Fetch issue comments for each PR, cache to temp file, check for air reviews
+# Note: gh api fetches full comment bodies — the jq filter runs client-side on the full response
 REVIEWED_PRS=""
+mkdir -p /tmp/kairos-cache
 for PR_NUM in $RECENT_PRS; do
-  HAS_REVIEW=$(gh api "repos/$CURRENT_REPO/issues/$PR_NUM/comments" --jq '[.[] | select(.body | startswith("## Code Review"))] | length' 2>/dev/null)
+  gh api "repos/$CURRENT_REPO/issues/$PR_NUM/comments" > "/tmp/kairos-cache/$PR_NUM.json" 2>/dev/null
+  HAS_REVIEW=$(cat "/tmp/kairos-cache/$PR_NUM.json" | python3 -c "
+import json, sys
+comments = json.loads(sys.stdin.buffer.read())
+print(sum(1 for c in comments if c['body'].startswith('## Code Review')))
+" 2>/dev/null)
   if [ "$HAS_REVIEW" -gt 0 ]; then
     REVIEWED_PRS="$REVIEWED_PRS $PR_NUM"
   fi
 done
 ```
 
-**Phase 2: Fetch full data only for PRs with reviews.**
+**Phase 2: Fetch inline comments + extract air reviews from cached data.**
 ```bash
 for PR_NUM in $REVIEWED_PRS; do
-  # Get review comments (inline code comments)
+  # Get review comments (inline code comments) — this is the only new API call per reviewed PR
   # GitLab: projects/$PROJECT_ID/merge_requests/$PR_NUM/discussions
   gh api "repos/$CURRENT_REPO/pulls/$PR_NUM/comments" --jq '.[] | {pr: '$PR_NUM', path: .path, body: (.body | split("\n")[0][:200])}' 2>/dev/null
 
-  # Get issue comments that start with "## Code Review" (our posted reviews)
-  # GitLab: projects/$PROJECT_ID/merge_requests/$PR_NUM/notes (filter same way)
-  gh api "repos/$CURRENT_REPO/issues/$PR_NUM/comments" 2>/dev/null | python3 -c "
+  # Extract air reviews from cached Phase 1 data (no API call)
+  cat "/tmp/kairos-cache/$PR_NUM.json" | python3 -c "
 import json, sys
+pr_num = int(sys.argv[1])
 comments = json.loads(sys.stdin.buffer.read())
 for c in comments:
     if c['body'].startswith('## Code Review'):
-        print(json.dumps({'pr': $PR_NUM, 'body': c['body']}))
-"
+        print(json.dumps({'pr': pr_num, 'body': c['body']}))
+" "$PR_NUM"
 done
+rm -rf /tmp/kairos-cache
 ```
 
-Phase 1 still makes 30 calls but each is fast (jq filter, no body parsing). Phase 2 only runs on PRs with reviews (typically 3-10 of 30). Total: ~35-40 calls instead of 60.
+Phase 1 makes 30 API calls (one per PR) and caches the responses. Phase 2 reuses the cached issue comments (0 extra calls) and only fetches inline review comments for reviewed PRs (typically 3-10 calls). Total: ~33-40 calls instead of 60.
 
 **Sensitive data safety:** Do NOT fetch `diff_hunk` from review comments — it may contain secrets, credentials, PII, or other sensitive data. Only fetch `path` and `body` (first 200 chars).
 
@@ -183,7 +190,13 @@ PRs analyzed: <count>
 | bob | 9 | 1 | Broad exception handling | 0 | 12 |
 | ... | ... | ... | ... | ... | ... |
 
-"Clean PRs" = consecutive merged PRs by this author where no findings matched their REVIEW.md author patterns. "PRs reviewed" = total merged PRs by this author in the analyzed set. These columns help validate the clean-PR counters in REVIEW.md — if they drift, learn can reconcile.
+"Clean PRs" = consecutive merged PRs by this author where no findings matched their REVIEW.md author patterns. "PRs reviewed" = total merged PRs by this author in the analyzed set.
+
+**Reconciliation:** After generating REVIEW-HISTORY.md, cross-check its Author Trends against REVIEW.md author pattern counters. For each author with patterns in REVIEW.md:
+1. Compare the `Clean PRs (consecutive)` value from REVIEW-HISTORY.md against `last <N> PRs: <M> clean` in REVIEW.md.
+2. If REVIEW-HISTORY.md shows MORE clean PRs than REVIEW.md records (counters were missed during incremental learns), update REVIEW.md's counters to match REVIEW-HISTORY.md. Apply lifecycle transitions if thresholds are now met (5 → declining, 10 → archive).
+3. If REVIEW-HISTORY.md shows FEWER clean PRs (a pattern was triggered but REVIEW.md wasn't updated), reset the counter in REVIEW.md to the REVIEW-HISTORY.md value.
+4. Print any reconciliation adjustments in the Step 5 report.
 
 ## Timeline
 

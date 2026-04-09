@@ -537,6 +537,7 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 - Added files with >300 lines (from high-attention): check extraction opportunities
 
 **Agent 3: Security Auditor**
+- **Author pattern matching:** Same as Agent 1 — annotate security findings that match the author's known patterns. Security-relevant patterns (injection, data exposure, auth) are high-signal. See `security-auditor.md` for matching rules.
 - If PROJECT-PROFILE.md available: read "Applicable Security Checks" section and ONLY audit listed checks. Skip the rest.
 - PASS/FAIL table + findings for each FAIL. Tailored to changed files
 - Silent failure detection (items 24-28): empty catch, ignored errors, fallback masking, retry exhaustion
@@ -930,7 +931,7 @@ If `--fix` was NOT passed:
 
 **Self-review learns the same as regular review.** The full pipeline ran — patterns are just as valuable regardless of whether they came from a PR or a self-check.
 
-1. Add new patterns from this review to REVIEW.md (same as Step 13 sub-steps 2 and 2.5 — author pattern lifecycle with clean-PR tracking, semantic dedup, all severity levels). For self-review, the "author" is the current git user (`git config user.name` or the GitHub login).
+1. Add new patterns from this review to REVIEW.md (same as Step 13 sub-steps 2 and 2.5 — author pattern lifecycle with clean-PR tracking, semantic dedup, all severity levels). For self-review, resolve the author using the same method as the own-PR guard: `gh api user --jq '.login'` (GitHub) or `glab api user 2>/dev/null | jq -r '.username'` (GitLab). This ensures the heading matches `### <author.login>` used in regular PR reviews.
 2. Record any `WIKI DRIFT:` notes in `## Pending Drift` section
 3. Push to wiki:
 ```bash

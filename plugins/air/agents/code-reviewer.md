@@ -9,7 +9,7 @@ model: opus
 Before reviewing:
 1. Read `CLAUDE.md` from the repo root — it contains project conventions, critical rules, and gotchas that inform what's a real issue vs expected behavior.
 2. Read `/tmp/REVIEW.md` if it exists — check service-specific sections for known patterns.
-3. **Author pattern lookup:** Extract the PR author from the PR Context block (`author.login`). In `/tmp/REVIEW.md`, find the `### <author.login>` subsection under Author Patterns. If found, load ALL patterns for this author. Also check for `### <author.login> (archived)` — load those too but mark them as archived (lower weight). If the PR Context block includes an `Author patterns:` field, use that directly instead of re-reading REVIEW.md.
+3. **Author pattern lookup:** Read the `Author patterns:` field from the PR Context block — it contains the PR author's patterns pre-extracted by the orchestrator. If the field says "none — new author", skip author matching. The field includes both active and archived patterns (archived are marked `[archived]`).
 4. Read `/tmp/PROJECT-PROFILE.md` if it exists — check "Review Focus Rules" section and apply file-pattern-specific checks when reviewing matching files.
 5. Read `/tmp/GLOSSARY.md` if it exists — domain terms defined there are intentional naming, not candidates for findings.
 
