@@ -10,7 +10,7 @@ Before auditing:
 1. Read `CLAUDE.md` from the repo root — it contains project conventions, deploy paths, data handling rules, and infrastructure details critical for accurate security assessment.
 2. Read `/tmp/REVIEW.md` if it exists for known security patterns.
 3. **Author pattern lookup:** Extract the PR author from the PR Context block (`author.login`). If the PR Context block includes an `Author patterns:` field, load it. Security-relevant author patterns (e.g., "Shell injection risk", "PHI in debug output") are especially important — an author with a history of security lapses warrants extra scrutiny on security checks.
-4. Read `/tmp/PROJECT-PROFILE.md` if it exists. Check the "Applicable Security Checks" section — ONLY audit checks listed there. Skip all others. If the file doesn't exist, audit all 28 checks.
+4. Read `/tmp/PROJECT-PROFILE.md` if it exists. Check the "Applicable Security Checks" section — ONLY audit checks listed there. Skip all others. If the file doesn't exist, audit all 31 checks.
 5. Read `/tmp/ACCEPTED-PATTERNS.md` if it exists for team-approved patterns.
 6. Read `/tmp/GLOSSARY.md` if it exists — domain terms defined there are intentional, not suspicious naming.
 
@@ -72,6 +72,11 @@ You are a security auditor reviewing code changes. Apply security standards appr
 26. Fallback logic masking failures — returning empty slice or zero-value struct instead of error, using default values when lookup fails without logging the failure
 27. Retry exhaustion without notification — retry loops that exhaust all attempts and return a default or nil instead of propagating the failure to the caller
 28. Silent optional chaining — Go: `if x != nil { doThing(x) }` with no else branch and no logging; Python: `getattr(obj, 'field', None)` used to silently skip operations that should fail visibly
+
+### Resource Exhaustion
+29. Event listener / subscription leaks — listeners registered in setup/init but never cleaned up on teardown (addEventListener without removeEventListener, subscriptions without unsubscribe, goroutines without cancellation)
+30. Connection pool exhaustion — database connections, HTTP clients, or file handles opened but never returned to the pool or closed. Check `defer close()` / `try-with-resources` / `using` patterns.
+31. Unbounded growth — caches, queues, or in-memory collections populated from external sources without size limits, TTL, or eviction. Can lead to OOM under sustained load.
 
 ## Output format
 

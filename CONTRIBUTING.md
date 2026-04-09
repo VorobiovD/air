@@ -9,7 +9,7 @@ air is a Claude Code plugin — the entire codebase is markdown files and JSON m
 ### Agent improvements (`plugins/air/agents/*.md`)
 - Better detection rules for specific languages or frameworks
 - Reduced false positives in security checks
-- New checks for the 28-item security checklist
+- New checks for the 31-item security checklist
 
 ### Pipeline improvements (`plugins/air/commands/review.md`)
 - Bug fixes in shell commands or flow routing

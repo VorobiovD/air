@@ -34,5 +34,5 @@
 - Cross-repo review support
 - Auto-trigger wiki cleanup every 5 reviews or 2 days
 - First-run project discovery (PROJECT-PROFILE.md + GLOSSARY.md generation)
-- Security audit with 28-item checklist, tailored per project
+- Security audit with 31-item checklist, tailored per project
 - Verification agent filtering false positives with confidence scoring

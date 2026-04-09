@@ -222,7 +222,7 @@ Deep-scan this repository and generate two wiki documents. Go beyond listing fil
    Generate rules specific to THIS project's actual structure, not generic examples.
 
    ## Applicable Security Checks
-   From the 28-item security checklist, list which checks apply to this project:
+   From the 31-item security checklist, list which checks apply to this project:
    - Skip checks for languages/frameworks not present
    - Skip SQL injection if no database code, skip XSS/CSRF if no web frontend
    - Skip sensitive data/compliance checks (1-6) if no regulated or personal data (check CLAUDE.md for context)
@@ -533,7 +533,8 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 - If `CI_FAILURES` present: check if flagged code paths relate to the failing check
 
 **Agent 2: Simplify (read-only)**
-- Duplication, dead code, unused imports, complexity
+- Three review dimensions: Code Reuse, Code Quality, Efficiency (see simplify.md for full checklist)
+- Active codebase search using Grep/Glob for existing utilities before flagging duplication
 - Added files with >300 lines (from high-attention): check extraction opportunities
 
 **Agent 3: Security Auditor**
@@ -541,6 +542,7 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 - If PROJECT-PROFILE.md available: read "Applicable Security Checks" section and ONLY audit listed checks. Skip the rest.
 - PASS/FAIL table + findings for each FAIL. Tailored to changed files
 - Silent failure detection (items 24-28): empty catch, ignored errors, fallback masking, retry exhaustion
+- Resource exhaustion detection (items 29-31): event listener leaks, connection pool exhaustion, unbounded growth
 - If `SECURITY_SCAN_FAILED`: "A CI security scan failed on this PR. Determine whether the PR introduced the failure or if it's pre-existing. Check the failing scanner's typical targets."
 - If high-churn files in context: "High-churn files have more surface area for security regressions — check carefully."
 
