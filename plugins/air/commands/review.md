@@ -88,11 +88,19 @@ git diff --cached --stat 2>/dev/null
 
 5. If no PR and no local changes (both diffs empty): print "Nothing to review. Create a PR or make some changes first." and STOP.
 
-**Cross-repo detection:**
+**Cross-repo and cross-platform detection:**
 ```bash
 CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
 ```
-If PR was given as a URL, extract `owner/repo` and compare with `$CURRENT_REPO`. Set `CROSS_REPO=true` ONLY if they differ. Bare numbers = always same-repo.
+If a PR/MR was given as a URL:
+1. **Detect the target platform from the URL** (not from local remote):
+   - URL contains `github.com` → target is GitHub, use `gh`
+   - URL contains `gitlab.com` or `gitlab.` → target is GitLab, use `glab`
+   - Override `PLATFORM`, `PLATFORM_DOMAIN`, and `CLI` to match the target URL's platform
+2. Extract `owner/repo` (GitHub) or `group/project` (GitLab — parse before `/-/merge_requests/`)
+3. Compare with `$CURRENT_REPO`. Set `CROSS_REPO=true` if they differ.
+
+Bare numbers = always same-repo, same platform as local remote.
 
 If `CROSS_REPO=true`, set `REPO_FLAG="--repo <owner/name>"` and include on ALL `gh` commands. Cross-repo affects:
 - Step 3: skip wiki (patterns are repo-specific)
