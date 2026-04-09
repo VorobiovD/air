@@ -113,6 +113,8 @@ If `CROSS_REPO=true`, set `REPO_FLAG="--repo <owner/name>"` and include on ALL `
 
 If no `--fresh`, `--rewrite`, or `--re-review` flag was passed, check for existing reviews:
 
+**Parsing note:** API responses containing comment bodies have markdown with newlines and special characters. When extracting fields that include `.body`, pipe the raw API output directly to a parser (`python3 -c "json.loads(sys.stdin.buffer.read())"`) rather than storing in a shell variable, which corrupts control characters. Extracting scalar fields like `.id` via `--jq` is safe.
+
 1. Look for an existing `## Code Review` comment on this PR:
 ```bash
 gh api repos/<owner>/<repo>/issues/<number>/comments --jq '[.[] | select(.body | startswith("## Code Review"))] | last'
@@ -951,15 +953,28 @@ PR_NUMBER=$(gh pr view --json number --jq '.number' 2>/dev/null)
 ```
 If no PR exists: "No open PR found on this branch. Push and create a PR first." and STOP.
 
-2. Fetch the review comment (same query as Step 2):
+2. Fetch the review comment (same query as Step 2).
+
+**IMPORTANT:** API responses containing comment bodies have markdown with newlines and special characters. Do NOT store the full response in a shell variable — it corrupts control characters. Pipe directly to a parser:
 ```bash
-REVIEW_DATA=$(gh api repos/<owner>/<repo>/issues/$PR_NUMBER/comments --jq '[.[] | select(.body | startswith("## Code Review"))] | last')
+gh api repos/<owner>/<repo>/issues/$PR_NUMBER/comments 2>/dev/null | python3 -c "
+import json, sys
+comments = json.loads(sys.stdin.buffer.read())
+reviews = [c for c in comments if c['body'].startswith('## Code Review')]
+if reviews:
+    r = reviews[-1]
+    print(f'ID={r[\"id\"]}')
+    print(f'CREATED={r[\"created_at\"]}')
+    lines = r['body'].split('\n')
+    sha = next((l.split('Reviewed at: ')[1].strip() for l in lines if 'Reviewed at:' in l), 'NOT_FOUND')
+    print(f'SHA={sha}')
+"
 ```
 Extract:
-- `REVIEW_COMMENT_ID` = `.id`
-- `REVIEW_COMMENT_BODY` = `.body`
-- `REVIEW_COMMENT_CREATED` = `.created_at`
-- `REVIEWED_AT_SHA` = extracted from body footer (`Reviewed at: <SHA>`)
+- `REVIEW_COMMENT_ID` from ID= line
+- `REVIEW_COMMENT_CREATED` from CREATED= line
+- `REVIEWED_AT_SHA` from SHA= line
+- `REVIEW_COMMENT_BODY` — read from the API response inside the parser, not as a shell variable
 
 If no review comment found: "No review found on PR #$PR_NUMBER. Nothing to respond to." and STOP.
 
