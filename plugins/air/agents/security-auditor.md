@@ -81,8 +81,8 @@ Produce TWO sections:
 ```
 | Check | Result |
 |---|---|
-| PHI in logs/responses | PASS or FAIL — evidence |
-| PHI in persisted data | PASS or FAIL — evidence |
+| Sensitive data in logs/responses | PASS or FAIL — evidence |
+| Sensitive data in persisted storage | PASS or FAIL — evidence |
 | SQL injection | PASS or FAIL — evidence |
 | ... (only include checks relevant to this PR) |
 ```

@@ -170,7 +170,7 @@ Data points: <total findings analyzed>
 
 | Agent | Category | Threshold | Reason | Data points |
 |---|---|---|---|---|
-| security-auditor | PHI-exposure | 75 | dispute rate 45% | 20 |
+| security-auditor | data-exposure | 75 | dispute rate 45% | 20 |
 | code-reviewer | error-handling | 50 | dispute rate 5% | 20 |
 
 ## Default

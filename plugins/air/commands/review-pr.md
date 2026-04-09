@@ -155,7 +155,7 @@ Scan this repository and generate two wiki documents:
    From the 28-item security checklist, list which checks apply to this project:
    - Skip Go checks if no Go code, skip Python checks if no Python
    - Skip SQL injection if no database code, skip XSS/CSRF if no web frontend
-   - Skip HIPAA checks if no healthcare/patient data (check CLAUDE.md for context)
+   - Skip sensitive data/compliance checks (1-6) if no regulated or personal data (check CLAUDE.md for context)
    Format: `Checks: 1, 2, 3, ...` and `Skipped: 4 (reason), 7 (reason), ...`
 
 2. GLOSSARY.md — Project-specific terminology:
@@ -742,7 +742,7 @@ Same quality as PR review. Construct a PR Context block (same structure as Step 
 - Dead code or unused imports
 
 **Agent 3: Security Auditor** - check:
-- Did you accidentally log PHI?
+- Did you accidentally log sensitive data (PII, credentials, tokens)?
 - Any new SQL without parameterization?
 - Any new endpoints missing auth?
 - Secrets or credentials in the diff?

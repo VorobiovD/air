@@ -204,7 +204,7 @@ Patterns are stored on the repo's GitHub Wiki:
 - **Repo-specific** — each repo's patterns stay in that repo's wiki
 
 Two files:
-- **REVIEW.md** — curated patterns: author tendencies, service-specific gotchas, common findings, accepted patterns, HIPAA reference. Updated incrementally after each review.
+- **REVIEW.md** — curated patterns: author tendencies, service-specific gotchas, common findings, accepted patterns. Updated incrementally after each review.
 - **REVIEW-HISTORY.md** — analytical data auto-generated from PR comment history. Finding frequency tables, file hot spots, author trends, timeline. Regenerated periodically.
 
 ### Auto-trigger Cleanup
@@ -218,7 +218,7 @@ A local counter (`~/.claude/review-learn-meta.json`) tracks reviews since last c
 
 When developers dispute findings during re-review, the pipeline evaluates their explanation with graduated resistance:
 
-- **Security/HIPAA** (HIGH resistance) — requires a concrete compensating control described, not just "we always do this"
+- **Security/compliance** (HIGH resistance) — requires a concrete compensating control described, not just "we always do this"
 - **Code quality** (MEDIUM resistance) — accepted if the developer explains the design tradeoff
 - **Style/nits** (LOW resistance) — team conventions respected readily
 

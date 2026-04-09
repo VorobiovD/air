@@ -35,7 +35,7 @@ Review the provided code diff. Check for:
    - DB queries: check for missing indexes on columns used in WHERE clauses
    - Components doing work that a caller/orchestrator already did (redundant fetches, duplicate validation)
 
-5. **Code Comment Compliance:**
+4. **Code Comment Compliance:**
    - Grep for TODO, FIXME, HACK, XXX in changed files (full file, not just the diff)
    - Check if the PR's changes address or invalidate any existing TODOs/FIXMEs (e.g., TODO says "add retry logic" and the PR adds retry → flag the TODO for removal)
    - Check for comment rot — comments that no longer match the code they describe (function signature changed but docstring wasn't updated, comment says "returns error" but function now returns nil)
