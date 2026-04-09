@@ -124,13 +124,8 @@ def create_orchestrator(client: Anthropic, sub_agents: dict) -> dict:
         model="claude-opus-4-6",
         system=system,
         tools=[{"type": "agent_toolset_20260401"}],
-        mcp_servers=[{
-            "type": "url",
-            "name": "github",
-            "url": "https://mcp.github.com/mcp",
-        }],
     )
-    print(f"  Orchestrator: {agent.id} (v{agent.version}) [standalone + GitHub MCP]")
+    print(f"  Orchestrator: {agent.id} (v{agent.version}) [standalone]")
     return {"id": agent.id, "version": agent.version, "mode": "standalone"}
 
 

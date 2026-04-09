@@ -80,6 +80,7 @@ jobs:
           TASK="Review PR #$PR_NUMBER on $REPO.
           REPO=$REPO
           PR_NUMBER=$PR_NUMBER
+          GH_TOKEN=$GH_TOKEN
           PLATFORM=github
           MODE=auto
 

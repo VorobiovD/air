@@ -32,6 +32,7 @@ def main():
     parser.add_argument("pr_number", type=int, help="PR number to review")
     parser.add_argument("--mode", choices=["auto", "fresh", "re-review"], default="auto")
     parser.add_argument("--platform", choices=["github", "gitlab"], default="github")
+    parser.add_argument("--gh-token", help="GitHub PAT (or set GH_TOKEN env var)")
     parser.add_argument("--stream", action="store_true", default=True, help="Stream events (default)")
     parser.add_argument("--poll", action="store_true", help="Poll instead of streaming")
     args = parser.parse_args()
@@ -52,14 +53,25 @@ def main():
     session = client.beta.sessions.create(**session_kwargs)
     print(f"Session: {session.id}")
 
+    # Resolve GitHub token
+    import os
+    gh_token = args.gh_token or os.environ.get("GH_TOKEN", "")
+    if not gh_token:
+        print("Warning: No GH_TOKEN provided. The agent won't be able to access private repos or post comments.", file=sys.stderr)
+        print("Pass --gh-token or set GH_TOKEN env var.", file=sys.stderr)
+
     # Build the review task message
     task = (
         f"Review PR #{args.pr_number} on {args.repo}.\n"
         f"REPO={args.repo}\n"
         f"PR_NUMBER={args.pr_number}\n"
         f"PLATFORM={args.platform}\n"
-        f"MODE={args.mode}\n\n"
-        f"Execute the full review pipeline. Post the review as a PR comment. "
+        f"MODE={args.mode}\n"
+    )
+    if gh_token:
+        task += f"GH_TOKEN={gh_token}\n"
+    task += (
+        f"\nExecute the full review pipeline. Post the review as a PR comment. "
         f"Push learned patterns to the wiki."
     )
 
