@@ -36,7 +36,7 @@ plugins/air/
 
 **Verification** (`agents/review-verifier.md`): Post-review quality gate. Reads actual source at flagged lines, classifies findings as CONFIRMED/DOWNGRADED/IMPROVEMENT/PRE-EXISTING/ACCEPTED PATTERN/FALSE POSITIVE using git blame decision tree.
 
-**Wiki storage**: Patterns learned from reviews are stored on the repo's GitHub Wiki (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md). Auto-cleanup every 5 reviews tracked in `~/.claude/air:learn-meta.json`.
+**Wiki storage**: Patterns learned from reviews are stored on the repo's GitHub Wiki (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md). Auto-cleanup every 5 reviews tracked in `~/.claude/review-learn-meta.json`.
 
 ## Development Workflow
 

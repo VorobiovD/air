@@ -18,6 +18,7 @@ A clear description of the bug.
 What you expected to happen.
 
 **Environment**
+- air plugin version: 
 - Claude Code version: 
 - OS: 
 - `gh --version`: 

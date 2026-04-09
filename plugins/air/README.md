@@ -1,7 +1,7 @@
 # air — Automated Code Review with Verification, Pattern Learning, and Team Knowledge
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](plugins/air/.claude-plugin/plugin.json)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
+[![Version](https://img.shields.io/badge/version-1.0.0-green.svg)](.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://claude.ai/code)
 
 ## Why
@@ -200,7 +200,7 @@ Patterns are stored on the repo's GitHub Wiki:
 - **No PRs needed** to update patterns — anyone can push directly
 - **No merge conflicts** on pattern files
 - **Every team member's reviews contribute** automatically
-- **Repo-specific** — ai-relay patterns stay in ai-relay wiki
+- **Repo-specific** — each repo's patterns stay in that repo's wiki
 
 Two files:
 - **REVIEW.md** — curated patterns: author tendencies, service-specific gotchas, common findings, accepted patterns, HIPAA reference. Updated incrementally after each review.
@@ -208,7 +208,7 @@ Two files:
 
 ### Auto-trigger Cleanup
 
-A local counter (`~/.claude/air:learn-meta.json`) tracks reviews since last cleanup. Every 5 reviews or 2 days — whichever comes first — whoever runs `/air:review-pr` automatically triggers:
+A local counter (`~/.claude/review-learn-meta.json`) tracks reviews since last cleanup. Every 5 reviews or 2 days — whichever comes first — whoever runs `/air:review-pr` automatically triggers:
 - Full REVIEW.md deduplication and reorganization
 - REVIEW-HISTORY.md regeneration from PR comment history
 - Counter resets — distributed across the team
