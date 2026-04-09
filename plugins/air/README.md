@@ -19,10 +19,11 @@ One command. One consolidated PR comment. Gets smarter over time.
 ## Install
 
 ```
-/install VorobiovD/air
+/plugin marketplace add VorobiovD/air
+/plugin install air
 ```
 
-That's it. Two commands become available: `/air:review-pr` and `/air:learn`. Updates are automatic.
+Two commands become available: `/air:review-pr` and `/air:learn`. Updates are automatic.
 
 ## Prerequisites
 
