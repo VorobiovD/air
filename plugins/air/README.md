@@ -28,6 +28,7 @@ That's it. Two commands become available: `/air:review-pr` and `/air:learn`. Upd
 /air:review-pr --re-review                # Delta review: FIXED/NOT FIXED tracking + new findings
 /air:review-pr --fresh                    # Full review from scratch, new comment
 /air:review-pr --rewrite                  # Full review, edit existing comment in place
+/air:review-pr --full                     # Review entire codebase (first-time audit)
 /air:review-pr --dry-run                  # Print to console, don't post to GitHub
 /air:review-pr --no-codex                 # Skip Codex review pass
 /air:review-pr https://github.com/org/repo/pull/45   # Cross-repo review

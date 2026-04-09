@@ -19,8 +19,8 @@ plugins/air/
 │   ├── git-history-reviewer.md
 │   └── review-verifier.md
 ├── commands/            # CLI command orchestration
-│   ├── review-pr.md     # Main pipeline (824 lines) — the core of the plugin
-│   └── learn.md         # Wiki maintenance (244 lines)
+│   ├── review-pr.md     # Main pipeline — the core of the plugin
+│   └── learn.md         # Wiki maintenance
 └── .claude-plugin/
     └── plugin.json      # Plugin metadata (name, version, author)
 

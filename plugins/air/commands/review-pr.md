@@ -1,6 +1,6 @@
 ---
 description: Automated code review with verification, pattern learning, and team knowledge — review PRs, self-check before pushing, or track fixes across iterations
-argument-hint: [<pr-number-or-url>] [--self] [--fix] [--fresh] [--rewrite] [--re-review] [--no-codex] [--dry-run]
+argument-hint: [<pr-number-or-url>] [--self] [--fix] [--fresh] [--rewrite] [--re-review] [--full] [--no-codex] [--dry-run]
 ---
 
 Review code using specialized agents. If a PR number is given, review that PR. If no arguments, auto-detect: review the current branch's PR if one exists, or self-review local changes if not.
@@ -14,16 +14,16 @@ Extract from `$ARGUMENTS`:
 - **--fresh**: full review from scratch, post a NEW comment regardless of existing reviews.
 - **--rewrite**: full review from scratch, EDIT the existing review comment in place.
 - **--re-review**: delta review — track FIXED/NOT FIXED on previous findings + review new changes.
-- **--full**: review the ENTIRE codebase (all committed files). Generates a diff from empty tree to HEAD. For first-time audits of new repos, small projects, or full codebase security reviews. Output to console only (never posts to GitHub).
+- **--full**: review the ENTIRE codebase (all committed files). Generates a diff from empty tree to HEAD. For first-time audits of new repos, small projects, or full codebase security reviews. Review output to console only (never posts a PR comment). Wiki learning still runs normally.
 - **--no-codex**: skip the Codex review pass. By default Codex runs if available.
 - **--dry-run**: print to console, don't post.
 
-If `--full` is present, skip to the **Self-Review Flow** section below but use this diff instead of `git diff HEAD`:
+If `--full` is present, **ignore `--fix` if also passed** (full-codebase review is read-only). Then generate the diff and skip directly to **Self Step 2** (do NOT execute Self Step 1 — it would overwrite this diff):
 ```bash
 CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
 git diff $(git hash-object -t tree /dev/null) HEAD > /tmp/self-review.diff
 ```
-This creates a diff of every file in the repo against an empty tree — the entire codebase as one diff. Print "Full codebase review — all committed files." and proceed to Self Step 2.
+This creates a diff of every file in the repo against an empty tree — the entire codebase as one diff. Print "Full codebase review — all committed files." and proceed directly to Self Step 2.
 
 If `--self` is present, first set `CURRENT_REPO` (needed for wiki operations in Self Step 2 and 7):
 ```bash
@@ -99,10 +99,24 @@ Read these for review context:
 
 If `CROSS_REPO=false`:
 ```bash
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null); WIKI_URL="https://github.com/$CURRENT_REPO.wiki.git"; cd /tmp && rm -rf review-wiki-<number> && git clone --depth 1 "$WIKI_URL" review-wiki-<number> 2>/dev/null && cp review-wiki-<number>/REVIEW.md /tmp/REVIEW.md && cp review-wiki-<number>/REVIEW-HISTORY.md /tmp/REVIEW-HISTORY.md 2>/dev/null && cp review-wiki-<number>/PROJECT-PROFILE.md /tmp/PROJECT-PROFILE.md 2>/dev/null && cp review-wiki-<number>/ACCEPTED-PATTERNS.md /tmp/ACCEPTED-PATTERNS.md 2>/dev/null && cp review-wiki-<number>/SEVERITY-CALIBRATION.md /tmp/SEVERITY-CALIBRATION.md 2>/dev/null && cp review-wiki-<number>/GLOSSARY.md /tmp/GLOSSARY.md 2>/dev/null || { [ -n "$REPO_ROOT" ] && cp "$REPO_ROOT/REVIEW.md" /tmp/REVIEW.md 2>/dev/null; } || true
+WIKI_URL="https://github.com/$CURRENT_REPO.wiki.git"
+cd /tmp && rm -rf review-wiki-<number> && git clone --depth 1 "$WIKI_URL" review-wiki-<number> 2>/dev/null
 ```
 
-If wiki not found: print "Wiki not found for $CURRENT_REPO - create at https://github.com/$CURRENT_REPO/wiki to enable pattern learning."
+If the clone succeeded (the directory `/tmp/review-wiki-<number>/.git` exists), copy whichever pattern files exist. **Do NOT chain these copies with `&&` after the clone** — on a first run the wiki exists but has no pattern files yet, and a failed `cp` would incorrectly signal "wiki not found":
+```bash
+WIKI_DIR="/tmp/review-wiki-<number>"
+if [ -d "$WIKI_DIR/.git" ]; then
+  cp "$WIKI_DIR/REVIEW.md" /tmp/REVIEW.md 2>/dev/null
+  cp "$WIKI_DIR/REVIEW-HISTORY.md" /tmp/REVIEW-HISTORY.md 2>/dev/null
+  cp "$WIKI_DIR/PROJECT-PROFILE.md" /tmp/PROJECT-PROFILE.md 2>/dev/null
+  cp "$WIKI_DIR/ACCEPTED-PATTERNS.md" /tmp/ACCEPTED-PATTERNS.md 2>/dev/null
+  cp "$WIKI_DIR/SEVERITY-CALIBRATION.md" /tmp/SEVERITY-CALIBRATION.md 2>/dev/null
+  cp "$WIKI_DIR/GLOSSARY.md" /tmp/GLOSSARY.md 2>/dev/null
+fi
+```
+
+If the clone failed (no `.git` directory): print "Wiki not found for $CURRENT_REPO - create at https://github.com/$CURRENT_REPO/wiki to enable pattern learning."
 
 If `CROSS_REPO=true`: skip wiki. Print "Cross-repo review - wiki patterns skipped."
 
@@ -117,7 +131,7 @@ Launch a dedicated agent to deep-scan the repo and generate PROJECT-PROFILE.md +
 Scan this repository and generate two wiki documents:
 
 1. PROJECT-PROFILE.md — Project characteristics for review agents:
-   - Read CLAUDE.md from the repo root
+   - Read CLAUDE.md AND README.md from the repo root (both contain project context — CLAUDE.md has conventions/architecture, README.md has features/usage/setup)
    - Scan directory structure (ls depth 2)
    - Check for: go.mod, package.json, requirements.txt, composer.json, Makefile, Dockerfile, *.tf, template.yaml, samconfig.toml, buildspec.yml, .github/workflows/
    - Document: languages, frameworks, test locations, CI/CD setup, deploy mechanism, service layout
@@ -137,7 +151,7 @@ Scan this repository and generate two wiki documents:
    Format: `Checks: 1, 2, 3, ...` and `Skipped: 4 (reason), 7 (reason), ...`
 
 2. GLOSSARY.md — Project-specific terminology:
-   - Extract domain terms from CLAUDE.md
+   - Extract domain terms from CLAUDE.md and README.md
    - Scan top 5 most-commented source files for domain-specific words
    - Format as a table: Term | Definition | Context
 ```
