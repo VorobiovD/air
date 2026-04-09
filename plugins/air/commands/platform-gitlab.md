@@ -19,7 +19,7 @@ This is NOT a command — it is a reference document read by the orchestrator wh
 | Get MR head SHA | `gh pr view <N> --json headRefOid` | `glab mr view <N> -F json 2>/dev/null \| jq -r '.diff_refs.head_sha'` |
 | Get MR diff | `gh pr diff <N>` | `glab mr diff <N>` |
 | Checkout MR | `gh pr checkout <N>` | `glab mr checkout <N>` |
-| Post comment | `gh pr comment <N> --body-file <f>` | `glab mr note <N> --body "$(cat <f>)"` |
+| Post comment | `gh pr comment <N> --body-file <f>` | `glab mr note <N> -m "$(cat <f>)"` |
 | Approve MR | `gh pr review <N> --approve -b "msg"` | `glab mr approve <N>` |
 | Request changes | `gh pr review <N> --request-changes -b "msg"` | No equivalent — see Behavioral Differences #1 |
 | Get current user | `gh api user --jq '.login'` | `glab api user 2>/dev/null \| jq -r '.username'` |
