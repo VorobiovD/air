@@ -5,6 +5,33 @@ argument-hint: [<pr-number-or-url>] [--self] [--fix] [--fresh] [--rewrite] [--re
 
 Review code using specialized agents. If a PR number is given, review that PR. If no arguments, auto-detect: review the current branch's PR if one exists, or self-review local changes if not.
 
+## Platform Detection
+
+Detect the hosting platform before anything else:
+
+```bash
+REMOTE_URL=$(git remote get-url origin 2>/dev/null)
+```
+
+Classify:
+- Contains `github.com` → `PLATFORM=github`
+- Contains `gitlab.com` or `gitlab.` (self-hosted) → `PLATFORM=gitlab`
+- Otherwise → `PLATFORM=github` (default)
+
+Set the CLI tool and domain:
+- github: `CLI=gh`, `PLATFORM_DOMAIN=github.com`
+- gitlab: `CLI=glab`, `PLATFORM_DOMAIN=<extracted from remote URL>`
+
+If `PLATFORM=gitlab`:
+1. Verify `glab` is installed: `glab --version 2>/dev/null`. If not: "glab CLI is required for GitLab repos. Install from https://gitlab.com/gitlab-org/cli and run `glab auth login`." and STOP.
+2. Read the GitLab Platform Reference at `plugins/air/commands/platform-gitlab.md` for all command mappings, field name translations, and behavioral differences. Apply those mappings to every `gh` command throughout this file.
+3. Resolve the GitLab project ID once (used for all API calls):
+```bash
+PROJECT_ID=$(glab api "projects/$(echo $CURRENT_REPO | sed 's|/|%2F|g')" --jq '.id')
+```
+
+All `gh` commands below are written for GitHub. On GitLab, translate using platform-gitlab.md. Key translations: `gh pr` → `glab mr`, `number` → `iid`, `nameWithOwner` → `path_with_namespace`, `headRefOid` → `sha`, API paths use `projects/$PROJECT_ID/merge_requests/` instead of `repos/<owner>/<repo>/pulls/`.
+
 ## Step 1: Parse Arguments
 
 Extract from `$ARGUMENTS`:
@@ -106,7 +133,7 @@ Read these for review context:
 
 If `CROSS_REPO=false`:
 ```bash
-WIKI_URL="https://github.com/$CURRENT_REPO.wiki.git"
+WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 cd /tmp && rm -rf review-wiki-<number> && git clone --depth 1 "$WIKI_URL" review-wiki-<number> 2>/dev/null
 ```
 
@@ -124,7 +151,7 @@ fi
 ```
 
 
-If the clone failed (no `.git` directory): print "Wiki not found for $CURRENT_REPO - create at https://github.com/$CURRENT_REPO/wiki to enable pattern learning."
+If the clone failed (no `.git` directory): print "Wiki not found for $CURRENT_REPO - create at https://$PLATFORM_DOMAIN/$CURRENT_REPO/-/wikis (GitLab) or https://$PLATFORM_DOMAIN/$CURRENT_REPO/wiki (GitHub) to enable pattern learning."
 
 If `CROSS_REPO=true`: skip wiki. Print "Cross-repo review - wiki patterns skipped."
 
@@ -241,12 +268,15 @@ gh api repos/<owner>/<repo>/pulls/<number>/commits --jq '.[] | "\(.sha[:8]) \(.c
 
 Save diff to `/tmp/pr<number>.diff`. Include `$REPO_FLAG` on all `gh` commands if cross-repo.
 
+**GitLab note:** `statusCheckRollup` and `reviewDecision` are not available via `glab mr view`. Fetch CI status and approval state separately — see platform-gitlab.md Behavioral Differences #2 and #3.
+
 Extract from the batched response and retain for later steps:
-- `headRefOid` — HEAD SHA for review footer (was a separate API call)
-- `files` — per-file path + additions + deletions (used in Step 5 for complexity alerts)
-- `statusCheckRollup` — CI check results (used in Step 5 for CI status)
-- `reviewDecision` — APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED
-- `isDraft`, `state` — used in Step 5 pre-flight
+- `headRefOid` — HEAD SHA for review footer (`sha` on GitLab)
+- `files` — per-file path + additions + deletions (`changes[].new_path` on GitLab)
+- `statusCheckRollup` — CI check results (GitLab: separate pipeline endpoint)
+- `reviewDecision` — APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED (GitLab: separate approval endpoint)
+- `isDraft`, `state` — used in Step 5 pre-flight (`draft` on GitLab; state values differ: `OPEN` → `opened`)
+- `commits` — commit count (for commit-ratio flag)
 - `commits` — commit count (for commit-ratio flag)
 - `author.login` — PR author name (passed to agents for pattern lookup)
 
@@ -528,9 +558,10 @@ Write ONE unified review. Incorporate security table. Deduplicate. Use severity:
 
 Write the formatted review to `/tmp/review-comment.md` — this file is consumed by Step 12 for posting.
 
-**Link format for findings:** In posted PR comments (not console or self-review), every file reference must use a clickable GitHub link:
+**Link format for findings:** In posted PR/MR comments (not console or self-review), every file reference must use a clickable link:
 ```
-[`<file>#L<start>-L<end>`](https://github.com/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>)
+GitHub: [`<file>#L<start>-L<end>`](https://github.com/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>)
+GitLab: [`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/-/blob/<headRefOid>/<file>#L<start>-L<end>)
 ```
 Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line: `#L<line>`. In `--self` mode or console output, use plain `file:line` (links are meaningless locally).
 
@@ -634,11 +665,13 @@ gh pr comment <number> $REPO_FLAG --body-file /tmp/review-comment.md
 If **0 blockers** — approve:
 ```bash
 gh pr review <number> $REPO_FLAG --approve -b "Approved — 0 blockers."
+# GitLab: glab mr approve <number>
 ```
 
 If **1+ blockers** — request changes:
 ```bash
 gh pr review <number> $REPO_FLAG --request-changes -b "Changes requested — blockers found. See review comment above."
+# GitLab: no --request-changes equivalent. Skip this step — the review comment itself signals changes needed. Do NOT approve.
 ```
 
 The issue comment contains the full review body (searchable by Step 2 for re-review detection). The review verdict is a short summary that sets the GitHub approval state for branch protection rules.
@@ -711,7 +744,7 @@ When a disputed finding is **rejected** (explanation insufficient):
 WIKI_DIR="/tmp/review-wiki-<number>"
 if [ ! -d "$WIKI_DIR/.git" ]; then
   # Fallback: clone fresh if Step 3 clone was cleaned up or failed
-  WIKI_URL="https://github.com/$CURRENT_REPO.wiki.git"
+  WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
   cd /tmp && git clone --depth 1 "$WIKI_URL" review-wiki-<number> 2>/dev/null
 fi
 cp /tmp/REVIEW.md "$WIKI_DIR/REVIEW.md"
@@ -846,7 +879,7 @@ If `--fix` was NOT passed:
 3. Push to wiki:
 ```bash
 WIKI_DIR="/tmp/review-wiki-self"
-WIKI_URL="https://github.com/$CURRENT_REPO.wiki.git"
+WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 if [ ! -d "$WIKI_DIR/.git" ]; then
   cd /tmp && git clone --depth 1 "$WIKI_URL" review-wiki-self 2>/dev/null
 fi
@@ -1011,7 +1044,7 @@ This step serves TWO purposes: verify "fixed" claims are correct AND catch new b
 
 **5a. Load context** (same as Self Step 2 / regular Step 3):
 ```bash
-WIKI_URL="https://github.com/$CURRENT_REPO.wiki.git"
+WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 cd /tmp && rm -rf review-wiki-respond && git clone --depth 1 "$WIKI_URL" review-wiki-respond 2>/dev/null
 WIKI_DIR="/tmp/review-wiki-respond"
 if [ -d "$WIKI_DIR/.git" ]; then

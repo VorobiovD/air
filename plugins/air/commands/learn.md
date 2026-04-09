@@ -12,11 +12,22 @@ Note: `/air:review` auto-triggers this command every 5 reviews or every 2 days (
 - `--history-only` — only regenerate REVIEW-HISTORY.md, don't touch REVIEW.md
 - `--refresh-profile` — re-run the full Opus deep scan for PROJECT-PROFILE.md + GLOSSARY.md (same as first-run discovery). Use when the project has changed significantly (new language, new service, major restructure). Overwrites existing profile and glossary with fresh scan results.
 
+## Platform Detection
+
+Same as `/air:review` — detect platform from git remote URL:
+```bash
+REMOTE_URL=$(git remote get-url origin 2>/dev/null)
+```
+- Contains `github.com` → `PLATFORM=github`, `PLATFORM_DOMAIN=github.com`, `CLI=gh`
+- Contains `gitlab.com` or `gitlab.` → `PLATFORM=gitlab`, `PLATFORM_DOMAIN=<from URL>`, `CLI=glab`
+- If `PLATFORM=gitlab`: read `plugins/air/commands/platform-gitlab.md` for command mappings.
+
 ## Step 1: Fetch from wiki
 
 ```bash
-CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
-WIKI_URL="https://github.com/$CURRENT_REPO.wiki.git"
+CURRENT_REPO=$($CLI repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
+# GitLab: use --json path_with_namespace --jq '.path_with_namespace'
+WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 cd /tmp && rm -rf review-wiki-learn && git clone --depth 1 "$WIKI_URL" review-wiki-learn 2>/dev/null
 ```
 
@@ -86,13 +97,16 @@ Fetch all review comments from recent closed/merged PRs and extract finding hist
 
 ```bash
 # Fetch last 30 closed/merged PRs with review comments
+# GitLab: use projects/$PROJECT_ID/merge_requests?state=merged&per_page=30&order_by=updated_at&sort=desc, use .iid not .number
 RECENT_PRS=$(gh api "repos/$CURRENT_REPO/pulls?state=closed&per_page=30&sort=updated&direction=desc" --jq '.[] | select(.merged_at != null) | .number' 2>/dev/null)
 
 for PR_NUM in $RECENT_PRS; do
   # Get review comments (inline code comments)
+  # GitLab: projects/$PROJECT_ID/merge_requests/$PR_NUM/discussions
   gh api "repos/$CURRENT_REPO/pulls/$PR_NUM/comments" --jq '.[] | {pr: '$PR_NUM', path: .path, body: (.body | split("\n")[0][:200])}' 2>/dev/null
 
   # Get issue comments that start with "## Code Review" (our posted reviews)
+  # GitLab: projects/$PROJECT_ID/merge_requests/$PR_NUM/notes (filter same way)
   gh api "repos/$CURRENT_REPO/issues/$PR_NUM/comments" --jq '.[] | select(.body | startswith("## Code Review")) | {pr: '$PR_NUM', body: .body}' 2>/dev/null
 done
 ```
