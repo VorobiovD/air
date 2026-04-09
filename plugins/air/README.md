@@ -20,7 +20,7 @@ One command. One consolidated PR comment. Gets smarter over time.
 
 ```
 /plugin marketplace add VorobiovD/air
-/plugin install air
+/plugin install air@air
 ```
 
 Two commands become available: `/air:review-pr` and `/air:learn`. Updates are automatic.
