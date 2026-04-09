@@ -63,5 +63,5 @@ plugins/air/
 - Findings must score 60+ confidence from verifier to appear in output
 - Conflict markers in PR diff = automatic blocker finding
 - Security auditor uses a 31-item checklist; PROJECT-PROFILE.md controls which items apply per repo
-- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.1.1)
+- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.2.0)
 - Install via `/plugin marketplace add VorobiovD/air` then `/plugin install air@air`
