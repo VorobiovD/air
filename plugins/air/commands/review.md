@@ -71,14 +71,16 @@ Then skip to the **Respond Flow** section below.
 
 If no PR number was provided (and no `--self`, `--full`, or `--respond`), auto-detect what to review:
 
+**IMPORTANT — sequential execution required:** Steps 1-3 below MUST run sequentially, NOT in parallel. `gh pr view` returns exit code 1 when no PR exists (expected, not an error). If run in parallel with the diff commands, the non-zero exit cancels sibling calls. Run the PR check FIRST, evaluate the result, THEN run diff commands only if needed.
+
 1. Check if the current branch has an open PR:
 ```bash
 gh pr view --json number --jq '.number' 2>/dev/null
 ```
 
-2. If a PR exists: use that PR number and proceed with the PR review flow.
+2. If a PR exists (exit code 0): use that PR number and proceed with the PR review flow.
 
-3. If NO open PR exists, check for local changes (unstaged AND staged):
+3. If NO open PR exists (exit code 1), check for local changes (unstaged AND staged). These two CAN run in parallel since both are local git commands that won't fail:
 ```bash
 git diff HEAD --stat 2>/dev/null
 git diff --cached --stat 2>/dev/null
