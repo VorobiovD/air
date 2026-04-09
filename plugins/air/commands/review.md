@@ -542,6 +542,8 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 
 ## Step 8: Verification (Round 2)
 
+**CRITICAL: ALWAYS run the verification agent, even if findings seem obvious or the diff is small. Do NOT skip verification based on perceived simplicity. A 1-line finding can still be a false positive.**
+
 **Only run AFTER all 5 reviewers (4 agents + Codex) from Step 7 have completed.** Collect ALL findings into one list, then launch **review-verifier**.
 
 Pass to the verifier: "Read `/tmp/SEVERITY-CALIBRATION.md` if it exists and use its per-agent+category thresholds instead of the default 60. Read `/tmp/ACCEPTED-PATTERNS.md` if it exists as the primary accepted-pattern whitelist."
