@@ -52,7 +52,7 @@ When using `--json` flags or parsing API responses:
 | `nameWithOwner` | `path_with_namespace` | Can be nested: `group/subgroup/project` |
 | `number` | `iid` | MR internal ID within project |
 | `isDraft` | `draft` | Same boolean semantics |
-| `headRefOid` | `sha` | MR head commit SHA |
+| `headRefOid` | `sha` or `diff_refs.head_sha` | Both return the MR head commit SHA. `sha` is top-level and simpler; `diff_refs.head_sha` is nested but always present. Use `sha` by default. |
 | `baseRefName` | `target_branch` | |
 | `headRefName` | `source_branch` | |
 | `changedFiles` | `changes_count` | |

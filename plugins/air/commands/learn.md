@@ -22,7 +22,7 @@ All `gh` commands below are written for GitHub. On GitLab, translate using platf
 
 ```bash
 # GitHub: gh repo view --json nameWithOwner --jq '.nameWithOwner'
-# GitLab: glab repo view --json path_with_namespace --jq '.path_with_namespace'
+# GitLab: glab api "projects/$(echo $REMOTE_PATH | sed 's|/|%2F|g')" 2>/dev/null | jq -r '.path_with_namespace'
 CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
 WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 cd /tmp && rm -rf review-wiki-learn && git clone --depth 1 "$WIKI_URL" review-wiki-learn 2>/dev/null
@@ -43,7 +43,7 @@ fi
 
 If the clone failed (no `.git` directory): print "Wiki not found — create at https://$PLATFORM_DOMAIN/$CURRENT_REPO/-/wikis (GitLab) or https://$PLATFORM_DOMAIN/$CURRENT_REPO/wiki (GitHub)" and STOP.
 
-**GitLab note:** After `CURRENT_REPO` is set, resolve the project ID for API calls: `PROJECT_ID=$(glab api "projects/$(echo $CURRENT_REPO | sed 's|/|%2F|g')" --jq '.id')`
+**GitLab note:** After `CURRENT_REPO` is set, resolve the project ID for API calls: `PROJECT_ID=$(glab api "projects/$(echo $CURRENT_REPO | sed 's|/|%2F|g')" 2>/dev/null | jq -r '.id')`
 
 If `--history-only` was passed, skip to Step 4 (only regenerate history, don't touch REVIEW.md).
 

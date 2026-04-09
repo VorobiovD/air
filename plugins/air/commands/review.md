@@ -373,6 +373,8 @@ Extract and retain:
 
 All data comes from Step 4 — no additional API calls.
 
+**GitLab normalization:** Before running pre-flight checks, normalize GitLab field names to match the GitHub names used below: `state: "opened"` → `"OPEN"`, `state: "closed"` → `"CLOSED"`, `state: "merged"` → `"MERGED"`, `draft` → `isDraft`. This ensures the checks work identically on both platforms.
+
 1. **State:** If `state` is `CLOSED` or `MERGED`, print and STOP.
 2. **Draft:** If `isDraft` is true, print "Draft PR — proceeding with review" but continue.
 3. **Code changes:** If `changedFiles` is 0, STOP.
@@ -576,6 +578,8 @@ GitLab: [`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/-/bl
 ```
 Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line: `#L<line>`. In `--self` mode or console output, use plain `file:line` (links are meaningless locally).
 
+**IMPORTANT:** The template below uses `/blob/` (GitHub format). On GitLab, replace `/blob/` with `/-/blob/` in every finding link. The instruction above shows both formats — apply the one matching `PLATFORM`.
+
 ```
 ## Code Review
 
@@ -634,7 +638,7 @@ Reviewed at: <headRefOid>
 
 Rules:
 - `##`/`###` headers, **sequential numbering across ALL sections** (blockers through pre-existing). Every finding — including Low and Nits — gets a bold number and its own line: `**N. description**` followed by the link and explanation. Do NOT use bullet lists for Low/Nit findings.
-- Every finding uses clickable GitHub links with full SHA (not plain `file:line`)
+- Every finding uses clickable links with full SHA (not plain `file:line`)
 - No emoji, no AI attribution
 - Nits section only if < 10 total findings
 - Pre-existing section only if verifier classified any findings as PRE-EXISTING
