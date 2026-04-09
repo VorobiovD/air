@@ -136,31 +136,59 @@ Launch a dedicated agent to deep-scan the repo and generate PROJECT-PROFILE.md +
 
 **Agent prompt** (inline, not a separate agent file — runs at most once per project):
 ```
-Scan this repository and generate two wiki documents:
+Deep-scan this repository and generate two wiki documents. Go beyond listing files — trace how the codebase works.
 
 1. PROJECT-PROFILE.md — Project characteristics for review agents:
-   - Read CLAUDE.md AND README.md from the repo root (both contain project context — CLAUDE.md has conventions/architecture, README.md has features/usage/setup)
-   - Scan directory structure (ls depth 2)
-   - Check for: go.mod, package.json, requirements.txt, composer.json, Makefile, Dockerfile, *.tf, template.yaml, samconfig.toml, buildspec.yml, .github/workflows/
-   - Document: languages, frameworks, test locations, CI/CD setup, deploy mechanism, service layout
+
+   ## Overview
+   - Read CLAUDE.md AND README.md from the repo root
+   - Document: languages, frameworks, service layout, deploy mechanism
+
+   ## Languages
+   Table: Language | Usage | Files (e.g., Go | API services | `cmd/`, `pkg/`)
+
+   ## Architecture
+   Trace the codebase structure by following actual code, not just listing files:
+   - Find entry points (API routes, CLI commands, main functions, Lambda handlers, event listeners)
+   - Follow call chains from entry points to understand component responsibilities
+   - Map abstraction layers (routing → handlers → services → data access)
+   - Identify integration boundaries (external APIs, databases, message queues, caches)
+   - Document how components connect — which modules import which, data flow direction
+   - Note cross-cutting concerns (auth middleware, logging, error handling patterns, config loading)
+
+   ## Services / Components
+   Table: Component | File/directory | Role
+
+   ## CI/CD Setup
+   Check for .github/workflows/, Makefile, Dockerfile, buildspec.yml, etc. Document what exists.
+
+   ## Test Locations
+   - Find test directories and test files (look for `*_test.go`, `test_*.py`, `*.test.ts`, `*.spec.ts`, `__tests__/`, `tests/`, `spec/`)
+   - Identify the test framework (Jest, pytest, Go testing, PHPUnit, RSpec, etc.)
+   - Document test patterns used (unit, integration, e2e, fixtures, mocks, factories)
+   - Note the test-to-source mapping convention (co-located vs separate test directory)
+   - If no tests exist, document that explicitly — review agents need to know
 
    ## Review Focus Rules
-   Map file patterns to review-specific checks. Examples:
-   - `*.yaml` in `config/` → check value consistency, feature flag correctness
-   - `*.py` in `shared/` or `lib/` → check backwards compatibility, no sensitive data in shared utilities
-   - `template.yaml` or `*.tf` → check IAM/RBAC policies, environment parameterization
-   Generate rules based on what you discover. Be specific to this project.
+   Map file patterns to review-specific checks based on what you discovered in the architecture trace:
+   - For each entry point pattern: what to check (auth, validation, error handling)
+   - For shared/lib modules: check backwards compatibility, no sensitive data
+   - For infrastructure files (*.tf, template.yaml, Dockerfile): check IAM/RBAC, parameterization
+   - For config files: check value consistency, no secrets
+   - For test files: check coverage of adjacent source changes
+   Generate rules specific to THIS project's actual structure, not generic examples.
 
    ## Applicable Security Checks
    From the 28-item security checklist, list which checks apply to this project:
-   - Skip Go checks if no Go code, skip Python checks if no Python
+   - Skip checks for languages/frameworks not present
    - Skip SQL injection if no database code, skip XSS/CSRF if no web frontend
    - Skip sensitive data/compliance checks (1-6) if no regulated or personal data (check CLAUDE.md for context)
    Format: `Checks: 1, 2, 3, ...` and `Skipped: 4 (reason), 7 (reason), ...`
 
 2. GLOSSARY.md — Project-specific terminology:
-   - Extract domain terms from CLAUDE.md and README.md
-   - Scan top 5 most-commented source files for domain-specific words
+   - Extract domain terms from CLAUDE.md, README.md, and actual source code
+   - Read the top 5 most-changed source files (use `git log --oneline --all -- <file> | wc -l` to rank)
+   - Extract proper nouns (service names, tool names), abbreviated terms, and business domain terms from those files
    - Format as a table: Term | Definition | Context
 ```
 
@@ -440,6 +468,7 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 - Bugs, logic errors, error handling, design issues
 - Author and service patterns from REVIEW.md (use `author.login` from context to look up)
 - If PROJECT-PROFILE.md available: read "Review Focus Rules" section and apply file-pattern-specific checks
+- Test coverage: if PR adds new functionality, check if tests were added. Use PROJECT-PROFILE.md "Test Locations" section for test locations and conventions. Skip if project has no tests.
 - Deleted files (from file statuses): check orphan imports in remaining files
 - Renamed files (from file statuses): check all references updated to new name
 - DB: check missing indexes
