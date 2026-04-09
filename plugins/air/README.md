@@ -110,7 +110,7 @@ All agents run on Opus for consistent quality. Each receives the same rich conte
 
 **simplify** — Duplication, dead code, unused imports, unnecessary complexity. Read-only — reports findings but never edits files.
 
-**security-auditor** — 28-item checklist covering PHI/HIPAA (6 items), injection vulnerabilities (4), authentication/authorization (3), input validation (3), data exposure (3), operational security (4), and silent failures (5). Produces a PASS/FAIL table for every PR.
+**security-auditor** — 28-item checklist covering sensitive data protection (6 items, conditional on project type), injection vulnerabilities (4), authentication/authorization (3), input validation (3), data exposure (3), operational security (4), and silent failures (5). PROJECT-PROFILE.md controls which checks apply per repo. Produces a PASS/FAIL table for every PR.
 
 **git-history-reviewer** — Reviews code through the lens of git history. Blame analysis (stale code, absent authors, integration boundaries), file churn patterns (5+ commits in 6 months = design smell), previous PR review comments on the same files. Uses REVIEW-HISTORY.md for finding frequency and file hot spot data.
 
@@ -204,7 +204,7 @@ Patterns are stored on the repo's GitHub Wiki:
 - **Repo-specific** — each repo's patterns stay in that repo's wiki
 
 Two files:
-- **REVIEW.md** — curated patterns: author tendencies, service-specific gotchas, common findings, accepted patterns, HIPAA reference. Updated incrementally after each review.
+- **REVIEW.md** — curated patterns: author tendencies, service-specific gotchas, common findings, accepted patterns. Updated incrementally after each review.
 - **REVIEW-HISTORY.md** — analytical data auto-generated from PR comment history. Finding frequency tables, file hot spots, author trends, timeline. Regenerated periodically.
 
 ### Auto-trigger Cleanup
@@ -218,7 +218,7 @@ A local counter (`~/.claude/review-learn-meta.json`) tracks reviews since last c
 
 When developers dispute findings during re-review, the pipeline evaluates their explanation with graduated resistance:
 
-- **Security/HIPAA** (HIGH resistance) — requires a concrete compensating control described, not just "we always do this"
+- **Security/compliance** (HIGH resistance) — requires a concrete compensating control described, not just "we always do this"
 - **Code quality** (MEDIUM resistance) — accepted if the developer explains the design tradeoff
 - **Style/nits** (LOW resistance) — team conventions respected readily
 
@@ -229,9 +229,9 @@ Accepted explanations are added to an `Accepted Patterns` section in the wiki. F
 The pipeline reads your Claude Code memory files (`project` and `reference` types) and injects relevant institutional knowledge into every agent. This means reviews get better the more you use Claude Code.
 
 To make this work well, save project-relevant context to your Claude Code memory:
-- "Remember that agent-core is migrating from Bedrock to AgentCore runtime"
-- "Remember that billing-tool variants must have matching prices across all files"
-- "Remember that the staging API is at kkrus95s3k..."
+- "Remember that the auth service is migrating from JWT to OAuth2"
+- "Remember that pricing configs must have matching values across all variant files"
+- "Remember that the staging API is at api-staging.example.com"
 
 Different team members bring different knowledge:
 - A security engineer's memories inform the security-auditor about known compliance patterns
