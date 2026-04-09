@@ -1,7 +1,7 @@
 {
   "name": "air",
   "description": "Automated code review for GitHub and GitLab. 5 specialized agents + Codex, wiki-based self-learning, re-review tracking, self-review with auto-fix, respond mode.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": {
     "name": "Dmytro Vorobiov",
     "email": "vorobef@gmail.com"
