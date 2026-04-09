@@ -70,35 +70,43 @@ def main():
 
 
 def run_stream(client: Anthropic, session_id: str, task: str):
-    """Stream events from the session in real-time."""
-    print("Streaming review...\n")
+    """Send the task, then stream events in real-time."""
+    print("Sending review task...")
 
-    with client.beta.sessions.events.stream(
+    # Send the user message first
+    client.beta.sessions.events.send(
         session_id,
         events=[{
             "type": "user.message",
             "content": [{"type": "text", "text": task}],
         }],
-    ) as stream:
+    )
+
+    print("Streaming review...\n")
+
+    # Then subscribe to the event stream
+    with client.beta.sessions.events.stream(session_id) as stream:
         for event in stream:
-            if event.type == "agent.message":
+            etype = event.type if hasattr(event, "type") else str(type(event))
+
+            if etype == "agent.message":
                 for block in event.content:
                     if hasattr(block, "text"):
                         print(block.text, end="", flush=True)
-            elif event.type == "agent.tool_use":
-                tool_name = event.tool.name if hasattr(event, "tool") else "unknown"
+            elif etype == "agent.tool_use":
+                tool_name = getattr(getattr(event, "tool", None), "name", "unknown")
                 print(f"\n  [tool] {tool_name}", flush=True)
-            elif event.type == "agent.thinking":
+            elif etype == "agent.thinking":
                 pass  # silent
-            elif event.type == "session.idle":
+            elif etype == "session.idle":
                 print("\n\nReview complete.")
                 break
-            elif event.type == "session.error":
+            elif etype == "session.error":
                 print(f"\n\nSession error: {event}", file=sys.stderr)
                 sys.exit(1)
-            elif event.type == "session.thread_created":
+            elif etype == "session.thread_created":
                 print(f"\n  [sub-agent spawned]", flush=True)
-            elif event.type == "session.thread_idle":
+            elif etype == "session.thread_idle":
                 print(f"\n  [sub-agent finished]", flush=True)
 
 
@@ -107,7 +115,7 @@ def run_poll(client: Anthropic, session_id: str, task: str):
     import time
 
     # Send the review task
-    client.beta.sessions.events.create(
+    client.beta.sessions.events.send(
         session_id,
         events=[{
             "type": "user.message",

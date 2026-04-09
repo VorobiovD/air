@@ -1,0 +1,31 @@
+{
+  "environment_id": "env_01571KZtN93QxxDnmcY65rKT",
+  "vault_id": null,
+  "orchestrator": {
+    "id": "agent_011CZu1oZC2zB3WcQ6iSc5Ky",
+    "version": 1,
+    "mode": "standalone"
+  },
+  "sub_agents": {
+    "code-reviewer": {
+      "id": "agent_011CZu1iMRxuJXspxU5akZ7m",
+      "version": 1
+    },
+    "simplify": {
+      "id": "agent_011CZu1iNopLA5zpdbp3GCJx",
+      "version": 1
+    },
+    "security-auditor": {
+      "id": "agent_011CZu1iPp6HeGHHM8DypoBh",
+      "version": 1
+    },
+    "git-history-reviewer": {
+      "id": "agent_011CZu1iQynkPFVg6adfFn79",
+      "version": 1
+    },
+    "review-verifier": {
+      "id": "agent_011CZu1iSJAVyjcuqzoPAU1t",
+      "version": 1
+    }
+  }
+}

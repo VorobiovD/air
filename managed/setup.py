@@ -94,23 +94,44 @@ def create_sub_agent(client: Anthropic, name: str, prompt_file: Path) -> dict:
 
 
 def create_orchestrator(client: Anthropic, sub_agents: dict) -> dict:
-    """Create the orchestrator agent with callable sub-agents."""
+    """Create the orchestrator agent. Tries callable_agents for multi-agent,
+    falls back to standalone (sequential reviews in single session)."""
     system = (PROMPTS_DIR / "orchestrator.md").read_text()
 
+    # Try multi-agent first (callable_agents, research preview)
     callable = [
         {"type": "agent", "id": info["id"], "version": info["version"]}
         for info in sub_agents.values()
     ]
 
+    try:
+        agent = client.beta.agents.create(
+            name="air-reviewer",
+            model="claude-opus-4-6",
+            system=system,
+            tools=[{"type": "agent_toolset_20260401"}],
+            callable_agents=callable,
+        )
+        print(f"  Orchestrator: {agent.id} (v{agent.version}) [multi-agent]")
+        return {"id": agent.id, "version": agent.version, "mode": "multi-agent"}
+    except TypeError:
+        pass
+
+    # Fallback: standalone orchestrator (runs all reviews sequentially)
+    print("  callable_agents not available — using standalone mode")
     agent = client.beta.agents.create(
         name="air-reviewer",
         model="claude-opus-4-6",
         system=system,
         tools=[{"type": "agent_toolset_20260401"}],
-        callable_agents=callable,
+        mcp_servers=[{
+            "type": "url",
+            "name": "github",
+            "url": "https://mcp.github.com/mcp",
+        }],
     )
-    print(f"  Orchestrator: {agent.id} (v{agent.version})")
-    return {"id": agent.id, "version": agent.version}
+    print(f"  Orchestrator: {agent.id} (v{agent.version}) [standalone + GitHub MCP]")
+    return {"id": agent.id, "version": agent.version, "mode": "standalone"}
 
 
 def main():
