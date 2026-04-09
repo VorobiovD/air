@@ -2,26 +2,33 @@
 
 This is NOT a command — it is a reference document read by the orchestrator when `PLATFORM=gitlab`. Every `gh` command in review.md and learn.md has a GitLab equivalent documented here.
 
+## Critical: glab CLI Differences from gh
+
+1. **`glab repo view` has no `--json` flag.** Use `glab api projects/<path>` instead.
+2. **`glab api` has no `--jq` flag.** Pipe output to `jq` instead: `glab api <endpoint> 2>/dev/null | jq -r '<filter>'`
+3. **`glab mr view` uses `-F json` not `--json`.** Output is full MR object, use `jq` to extract fields.
+4. **`jq` is required** on the system for GitLab support.
+
 ## Quick Reference: CLI Commands
 
 | Action | GitHub | GitLab |
 |---|---|---|
-| Get repo path | `gh repo view --json nameWithOwner --jq '.nameWithOwner'` | `glab repo view --json path_with_namespace --jq '.path_with_namespace'` |
-| Detect MR on branch | `gh pr view --json number --jq '.number'` | `glab mr view --json iid --jq '.iid'` |
-| View MR metadata | `gh pr view <N> --json number,title,author,...` | `glab mr view <N> --json iid,title,author,...` (see Field Mappings below for field names) |
-| Get MR head SHA | `gh pr view <N> --json headRefOid --jq '.headRefOid'` | `glab mr view <N> --json sha --jq '.sha'` |
+| Get repo path | `gh repo view --json nameWithOwner --jq '.nameWithOwner'` | `glab api "projects/$(echo $REMOTE_PATH \| sed 's\|/\|%2F\|g')" 2>/dev/null \| jq -r '.path_with_namespace'` |
+| Detect MR on branch | `gh pr view --json number --jq '.number'` | `glab mr view -F json 2>/dev/null \| jq -r '.iid'` |
+| View MR metadata | `gh pr view <N> --json <fields>` | `glab mr view <N> -F json 2>/dev/null \| jq '{iid, title, state, draft, ...}'` |
+| Get MR head SHA | `gh pr view <N> --json headRefOid` | `glab mr view <N> -F json 2>/dev/null \| jq -r '.diff_refs.head_sha'` |
 | Get MR diff | `gh pr diff <N>` | `glab mr diff <N>` |
 | Checkout MR | `gh pr checkout <N>` | `glab mr checkout <N>` |
 | Post comment | `gh pr comment <N> --body-file <f>` | `glab mr note <N> --body "$(cat <f>)"` |
 | Approve MR | `gh pr review <N> --approve -b "msg"` | `glab mr approve <N>` |
 | Request changes | `gh pr review <N> --request-changes -b "msg"` | No equivalent — see Behavioral Differences #1 |
-| Get current user | `gh api user --jq '.login'` | `glab api user --jq '.username'` |
+| Get current user | `gh api user --jq '.login'` | `glab api user 2>/dev/null \| jq -r '.username'` |
 
 ## API Path Mappings
 
 GitLab API paths use a project ID or URL-encoded path instead of `owner/repo`. Obtain the project ID first:
 ```bash
-PROJECT_ID=$(glab api "projects/$(echo $CURRENT_REPO | sed 's|/|%2F|g')" --jq '.id')
+PROJECT_ID=$(glab api "projects/$(echo $CURRENT_REPO | sed 's|/|%2F|g')" 2>/dev/null | jq -r '.id')
 ```
 
 | GitHub API | GitLab API | Notes |
@@ -55,7 +62,7 @@ When using `--json` flags or parsing API responses:
 | `files[].additions` | `changes[].diff` | Must be parsed from diff if needed |
 | `statusCheckRollup` | (none) | See Behavioral Differences #2 |
 | `reviewDecision` | (none) | See Behavioral Differences #3 |
-| `commits.totalCount` | (count from commits endpoint) | `glab api .../commits --jq 'length'` |
+| `commits.totalCount` | (count from commits endpoint) | `glab api .../commits 2>/dev/null \| jq 'length'` |
 | `state: "OPEN"` | `state: "opened"` | Different string values |
 | `state: "MERGED"` | `state: "merged"` | Same |
 | `state: "CLOSED"` | `state: "closed"` | Same |
@@ -87,7 +94,7 @@ GitHub provides `statusCheckRollup` in the batched PR metadata call. GitLab does
 
 Fetch separately:
 ```bash
-glab api "projects/$PROJECT_ID/merge_requests/<iid>/pipelines" --jq '.[0] | {status, web_url}'
+glab api "projects/$PROJECT_ID/merge_requests/<iid>/pipelines" 2>/dev/null | jq '.[0] | {status, web_url}'
 ```
 
 Map status values:
@@ -98,7 +105,7 @@ Map status values:
 
 For individual job failures:
 ```bash
-glab api "projects/$PROJECT_ID/pipelines/<pipeline_id>/jobs" --jq '.[] | select(.status == "failed") | .name'
+glab api "projects/$PROJECT_ID/pipelines/<pipeline_id>/jobs" 2>/dev/null | jq '.[] | select(.status == "failed") | .name'
 ```
 
 ### 3. Review Decision / Approval State
@@ -107,19 +114,19 @@ GitHub provides `reviewDecision` (APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED
 
 Fetch separately:
 ```bash
-glab api "projects/$PROJECT_ID/merge_requests/<iid>/approval_state" --jq '.rules[].approved'
+glab api "projects/$PROJECT_ID/merge_requests/<iid>/approval_state" 2>/dev/null | jq '.rules[].approved'
 ```
 
 Or check approvals list:
 ```bash
-glab api "projects/$PROJECT_ID/merge_requests/<iid>/approvals" --jq '{approved: .approved, approvals_left: .approvals_left}'
+glab api "projects/$PROJECT_ID/merge_requests/<iid>/approvals" 2>/dev/null | jq '{approved: .approved, approvals_left: .approvals_left}'
 ```
 
 ### 4. Own-MR Guard
 
 GitHub disallows self-approval (API error). GitLab may allow self-approval depending on project settings. Check:
 ```bash
-glab api "projects/$PROJECT_ID/merge_requests/<iid>/approvals" --jq '.approved_by[].user.username'
+glab api "projects/$PROJECT_ID/merge_requests/<iid>/approvals" 2>/dev/null | jq '.approved_by[].user.username'
 ```
 Compare against current user. If project allows self-approval, the guard is unnecessary. If project prohibits it, skip the approve step (same as GitHub behavior).
 
@@ -142,7 +149,7 @@ GitLab allows `group/subgroup/project` paths. When using the API with a path ins
 ```bash
 # group/subgroup/project → group%2Fsubgroup%2Fproject
 ENCODED_PATH=$(echo "$CURRENT_REPO" | sed 's|/|%2F|g')
-glab api "projects/$ENCODED_PATH" --jq '.id'
+glab api "projects/$ENCODED_PATH" 2>/dev/null | jq -r '.id'
 ```
 
 Alternatively, resolve the numeric project ID once and use it for all subsequent API calls.
@@ -167,9 +174,9 @@ Before first use on GitLab, verify:
 ```bash
 glab --version              # Must be installed
 glab auth status            # Must be authenticated
+jq --version                # Required — glab api has no --jq flag
 glab mr view --help         # Verify mr subcommand exists
 glab api --help             # Verify api subcommand exists
-glab repo view --help       # Verify repo subcommand exists
 ```
 
 For self-hosted GitLab, ensure `glab` is configured for the correct instance:

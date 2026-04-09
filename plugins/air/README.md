@@ -28,7 +28,7 @@ Two commands become available: `/air:review` and `/air:learn`. Updates are autom
 ## Prerequisites
 
 - **Claude Code** — installed and running
-- **GitHub CLI** (`gh`) or **GitLab CLI** (`glab`) — authenticated. Platform is auto-detected from the git remote URL.
+- **GitHub CLI** (`gh`) or **GitLab CLI** (`glab`) — authenticated. Platform is auto-detected from the git remote URL. GitLab also requires `jq` installed.
 - **Repo access** — must be able to view PRs/MRs on the target repo
 - **Codex plugin** (optional) — if installed, runs as an additional reviewer. Skips gracefully if not available
 - **Wiki** — auto-created on first run if missing. Used to store learned review patterns. Works with both GitHub and GitLab wikis.

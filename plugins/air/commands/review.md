@@ -33,7 +33,7 @@ All `gh` commands below are written for GitHub. On GitLab, translate using platf
 
 **GitLab project ID:** After `CURRENT_REPO` is set (in Step 1), resolve the numeric project ID for API calls:
 ```bash
-PROJECT_ID=$(glab api "projects/$(echo $CURRENT_REPO | sed 's|/|%2F|g')" --jq '.id')
+PROJECT_ID=$(glab api "projects/$(echo $CURRENT_REPO | sed 's|/|%2F|g')" 2>/dev/null | jq -r '.id')
 ```
 
 ## Step 1: Parse Arguments
