@@ -25,7 +25,7 @@ One command. One consolidated PR comment. Gets smarter over time.
 /plugin install air@air
 ```
 
-Two commands become available: `/air:review` and `/air:learn`. Updates are automatic.
+Two commands become available: `/air:review` and `/air:learn`. To enable auto-updates, run `/plugin marketplace update air` or enable in `/plugin` → Marketplaces → air → "Enable auto-update".
 
 ## Prerequisites
 
