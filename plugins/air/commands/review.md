@@ -16,27 +16,31 @@ REMOTE_URL=$(git remote get-url origin 2>/dev/null)
 Classify:
 - Contains `github.com` → `PLATFORM=github`
 - Contains `gitlab.com` or `gitlab.` (self-hosted) → `PLATFORM=gitlab`
+- If `glab` CLI is available and `gh` is not → `PLATFORM=gitlab`
 - Otherwise → `PLATFORM=github` (default)
+
+**Override:** If auto-detection fails for self-hosted GitLab with a non-standard domain (e.g., `code.company.com`), the user can set `PLATFORM=gitlab` by running `export AIR_PLATFORM=gitlab` before invoking the command. Check this env var first: if `AIR_PLATFORM` is set, use it and skip auto-detection.
 
 Set the CLI tool and domain:
 - github: `CLI=gh`, `PLATFORM_DOMAIN=github.com`
-- gitlab: `CLI=glab`, `PLATFORM_DOMAIN=<extracted from remote URL>`
+- gitlab: `CLI=glab`, `PLATFORM_DOMAIN=<extracted from remote URL hostname>`
 
 If `PLATFORM=gitlab`:
 1. Verify `glab` is installed: `glab --version 2>/dev/null`. If not: "glab CLI is required for GitLab repos. Install from https://gitlab.com/gitlab-org/cli and run `glab auth login`." and STOP.
 2. Read the GitLab Platform Reference at `plugins/air/commands/platform-gitlab.md` for all command mappings, field name translations, and behavioral differences. Apply those mappings to every `gh` command throughout this file.
-3. Resolve the GitLab project ID once (used for all API calls):
+
+All `gh` commands below are written for GitHub. On GitLab, translate using platform-gitlab.md. Key translations: `gh pr` → `glab mr`, `number` → `iid`, `nameWithOwner` → `path_with_namespace`, `headRefOid` → `sha`, API paths use `projects/$PROJECT_ID/merge_requests/` instead of `repos/<owner>/<repo>/pulls/`.
+
+**GitLab project ID:** After `CURRENT_REPO` is set (in Step 1), resolve the numeric project ID for API calls:
 ```bash
 PROJECT_ID=$(glab api "projects/$(echo $CURRENT_REPO | sed 's|/|%2F|g')" --jq '.id')
 ```
 
-All `gh` commands below are written for GitHub. On GitLab, translate using platform-gitlab.md. Key translations: `gh pr` → `glab mr`, `number` → `iid`, `nameWithOwner` → `path_with_namespace`, `headRefOid` → `sha`, API paths use `projects/$PROJECT_ID/merge_requests/` instead of `repos/<owner>/<repo>/pulls/`.
-
 ## Step 1: Parse Arguments
 
 Extract from `$ARGUMENTS`:
-- **PR identifier**: a number (e.g. `96`) or a full GitHub URL. If a URL, extract the PR number AND repo.
-- **--self**: self-review mode — review your local changes (staged + unstaged), no PR needed. Output a fix plan to console. Never posts to GitHub.
+- **PR/MR identifier**: a number (e.g. `96`) or a full URL (GitHub PR or GitLab MR). If a URL, extract the PR/MR number AND repo.
+- **--self**: self-review mode — review your local changes (staged + unstaged), no PR needed. Output a fix plan to console. Never posts online.
 - **--fix**: (only with `--self`) auto-apply fixes after self-review instead of just planning them.
 - **--fresh**: full review from scratch, post a NEW comment regardless of existing reviews.
 - **--rewrite**: full review from scratch, EDIT the existing review comment in place.
@@ -276,7 +280,6 @@ Extract from the batched response and retain for later steps:
 - `statusCheckRollup` — CI check results (GitLab: separate pipeline endpoint)
 - `reviewDecision` — APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED (GitLab: separate approval endpoint)
 - `isDraft`, `state` — used in Step 5 pre-flight (`draft` on GitLab; state values differ: `OPEN` → `opened`)
-- `commits` — commit count (for commit-ratio flag)
 - `commits` — commit count (for commit-ratio flag)
 - `author.login` — PR author name (passed to agents for pattern lookup)
 
@@ -560,7 +563,7 @@ Write the formatted review to `/tmp/review-comment.md` — this file is consumed
 
 **Link format for findings:** In posted PR/MR comments (not console or self-review), every file reference must use a clickable link:
 ```
-GitHub: [`<file>#L<start>-L<end>`](https://github.com/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>)
+GitHub: [`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>)
 GitLab: [`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/-/blob/<headRefOid>/<file>#L<start>-L<end>)
 ```
 Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line: `#L<line>`. In `--self` mode or console output, use plain `file:line` (links are meaningless locally).
@@ -580,25 +583,25 @@ Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line
 
 **1. <description>**
 
-[`<file>#L<start>-L<end>`](https://github.com/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>) — <explanation>
+[`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>) — <explanation>
 
 ### Medium
 
 **2. <description>**
 
-[`<file>#L<start>-L<end>`](https://github.com/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>) — <explanation>
+[`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>) — <explanation>
 
 ### Low
 
 **3. <description>**
 
-[`<file>#L<line>`](https://github.com/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<line>) — <explanation>
+[`<file>#L<line>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<line>) — <explanation>
 
 ### Nits
 
 **4. <description>**
 
-[`<file>#L<line>`](https://github.com/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<line>) — <explanation>
+[`<file>#L<line>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<line>) — <explanation>
 
 ### Pre-existing Issues
 
@@ -606,7 +609,7 @@ Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line
 
 **5. <description>**
 
-[`<file>#L<line>`](https://github.com/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<line>) — <explanation>
+[`<file>#L<line>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<line>) — <explanation>
 
 ### Strengths
 

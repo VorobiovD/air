@@ -14,19 +14,16 @@ Note: `/air:review` auto-triggers this command every 5 reviews or every 2 days (
 
 ## Platform Detection
 
-Same as `/air:review` — detect platform from git remote URL:
-```bash
-REMOTE_URL=$(git remote get-url origin 2>/dev/null)
-```
-- Contains `github.com` → `PLATFORM=github`, `PLATFORM_DOMAIN=github.com`, `CLI=gh`
-- Contains `gitlab.com` or `gitlab.` → `PLATFORM=gitlab`, `PLATFORM_DOMAIN=<from URL>`, `CLI=glab`
-- If `PLATFORM=gitlab`: read `plugins/air/commands/platform-gitlab.md` for command mappings.
+Same as `/air:review` — detect platform from git remote URL (or `AIR_PLATFORM` env var override). See review.md "Platform Detection" section for full logic. Sets `PLATFORM`, `PLATFORM_DOMAIN`, and `CLI`.
+
+All `gh` commands below are written for GitHub. On GitLab, translate using platform-gitlab.md — same as review.md.
 
 ## Step 1: Fetch from wiki
 
 ```bash
-CURRENT_REPO=$($CLI repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
-# GitLab: use --json path_with_namespace --jq '.path_with_namespace'
+# GitHub: gh repo view --json nameWithOwner --jq '.nameWithOwner'
+# GitLab: glab repo view --json path_with_namespace --jq '.path_with_namespace'
+CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
 WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 cd /tmp && rm -rf review-wiki-learn && git clone --depth 1 "$WIKI_URL" review-wiki-learn 2>/dev/null
 ```
@@ -44,7 +41,9 @@ if [ -d "$WIKI_DIR/.git" ]; then
 fi
 ```
 
-If the clone failed (no `.git` directory): print "Wiki not found — create at https://github.com/$CURRENT_REPO/wiki" and STOP.
+If the clone failed (no `.git` directory): print "Wiki not found — create at https://$PLATFORM_DOMAIN/$CURRENT_REPO/-/wikis (GitLab) or https://$PLATFORM_DOMAIN/$CURRENT_REPO/wiki (GitHub)" and STOP.
+
+**GitLab note:** After `CURRENT_REPO` is set, resolve the project ID for API calls: `PROJECT_ID=$(glab api "projects/$(echo $CURRENT_REPO | sed 's|/|%2F|g')" --jq '.id')`
 
 If `--history-only` was passed, skip to Step 4 (only regenerate history, don't touch REVIEW.md).
 

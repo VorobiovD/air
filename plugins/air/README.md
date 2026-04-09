@@ -197,7 +197,7 @@ Posted as a single PR comment. Here's a real example from [PR #1](https://github
 
 ### Wiki-Backed Storage
 
-Patterns are stored on the repo's GitHub Wiki:
+Patterns are stored on the repo's wiki (GitHub or GitLab):
 - **No PRs needed** to update patterns — anyone can push directly
 - **No merge conflicts** on pattern files
 - **Every team member's reviews contribute** automatically

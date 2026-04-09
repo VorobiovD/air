@@ -157,7 +157,7 @@ Note the `/-/` segment. For nested groups: `https://gitlab.com/group/subgroup/pr
 Extract the MR number and project path:
 ```bash
 # From: https://gitlab.example.com/group/subgroup/project/-/merge_requests/123
-MR_NUMBER=$(echo "$URL" | grep -oP '/-/merge_requests/\K[0-9]+')
+MR_NUMBER=$(echo "$URL" | sed -n 's|.*/-/merge_requests/\([0-9]*\).*|\1|p')
 MR_REPO=$(echo "$URL" | sed 's|https://[^/]*/||; s|/-/merge_requests/.*||')
 ```
 

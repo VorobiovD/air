@@ -19,8 +19,9 @@ plugins/air/
 │   ├── git-history-reviewer.md
 │   └── review-verifier.md
 ├── commands/            # CLI command orchestration
-│   ├── review.md     # Main pipeline — the core of the plugin
-│   └── learn.md         # Wiki maintenance
+│   ├── review.md              # Main pipeline — the core of the plugin
+│   ├── learn.md               # Wiki maintenance
+│   └── platform-gitlab.md     # GitLab CLI/API/field mappings (reference, not a command)
 └── .claude-plugin/
     └── plugin.json      # Plugin metadata (name, version, author)
 
