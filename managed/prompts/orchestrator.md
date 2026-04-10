@@ -220,7 +220,7 @@ Reviewed at: <HEAD_SHA>
 - Security table has exactly 2 columns: `Check | Result` (no `#` column)
 - Sequential numbering across ALL sections (blockers through pre-existing)
 - Every finding: `**N. <description>**` on its own line, then link + explanation on the next line
-- Do NOT include code blocks or fix suggestions in findings — just describe the issue
+- Include code blocks when showing problematic code or suggesting fixes — they improve clarity
 - Clickable links with full SHA: `[file#Lstart-Lend](https://github.com/$REPO/blob/$HEAD_SHA/file#Lstart-Lend)`
 - No emoji, no AI attribution
 - Nits section only if < 10 total findings

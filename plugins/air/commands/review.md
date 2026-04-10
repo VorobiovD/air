@@ -662,6 +662,7 @@ Reviewed at: <headRefOid>
 Rules:
 - `##`/`###` headers, **sequential numbering across ALL sections** (blockers through pre-existing). Every finding — including Low and Nits — gets a bold number and its own line: `**N. description**` followed by the link and explanation. Do NOT use bullet lists for Low/Nit findings.
 - Every finding uses clickable links with full SHA (not plain `file:line`)
+- Include code blocks when showing problematic code or suggesting fixes — they improve clarity
 - No emoji, no AI attribution
 - Nits section only if < 10 total findings
 - Pre-existing section only if verifier classified any findings as PRE-EXISTING
