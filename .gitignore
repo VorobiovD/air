@@ -5,3 +5,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Managed agent
+managed/config.json
+*.pem

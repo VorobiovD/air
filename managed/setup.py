@@ -13,6 +13,7 @@ the GitHub Action workflow.
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -93,40 +94,60 @@ def create_sub_agent(client: Anthropic, name: str, prompt_file: Path) -> dict:
     return {"id": agent.id, "version": agent.version}
 
 
-def create_orchestrator(client: Anthropic, sub_agents: dict) -> dict:
-    """Create the orchestrator agent. Tries callable_agents for multi-agent,
-    falls back to standalone (sequential reviews in single session)."""
-    system = (PROMPTS_DIR / "orchestrator.md").read_text()
+def create_orchestrator(sub_agents: dict) -> dict:
+    """Create the orchestrator agent with callable_agents via raw API.
+    The SDK doesn't support callable_agents yet, so we use requests directly."""
+    import requests as req
 
-    # Try multi-agent first (callable_agents, research preview)
-    callable = [
+    system = (PROMPTS_DIR / "orchestrator.md").read_text()
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+
+    callable_agents = [
         {"type": "agent", "id": info["id"], "version": info["version"]}
         for info in sub_agents.values()
     ]
 
-    try:
-        agent = client.beta.agents.create(
-            name="air-reviewer",
-            model="claude-opus-4-6",
-            system=system,
-            tools=[{"type": "agent_toolset_20260401"}],
-            callable_agents=callable,
-        )
-        print(f"  Orchestrator: {agent.id} (v{agent.version}) [multi-agent]")
-        return {"id": agent.id, "version": agent.version, "mode": "multi-agent"}
-    except TypeError:
-        pass
+    body = {
+        "name": "air-reviewer",
+        "model": "claude-opus-4-6",
+        "system": system,
+        "tools": [{"type": "agent_toolset_20260401"}],
+        "callable_agents": callable_agents,
+    }
 
-    # Fallback: standalone orchestrator (runs all reviews sequentially)
-    print("  callable_agents not available — using standalone mode")
-    agent = client.beta.agents.create(
-        name="air-reviewer",
-        model="claude-opus-4-6",
-        system=system,
-        tools=[{"type": "agent_toolset_20260401"}],
+    resp = req.post(
+        "https://api.anthropic.com/v1/agents",
+        headers={
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "managed-agents-2026-04-01",
+            "content-type": "application/json",
+        },
+        json=body,
     )
-    print(f"  Orchestrator: {agent.id} (v{agent.version}) [standalone]")
-    return {"id": agent.id, "version": agent.version, "mode": "standalone"}
+    data = resp.json()
+
+    if "error" in data:
+        print(f"  callable_agents failed: {data['error']['message']}")
+        print("  Falling back to standalone mode...")
+        del body["callable_agents"]
+        resp = req.post(
+            "https://api.anthropic.com/v1/agents",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "anthropic-beta": "managed-agents-2026-04-01",
+                "content-type": "application/json",
+            },
+            json=body,
+        )
+        data = resp.json()
+        mode = "standalone"
+    else:
+        mode = "multi-agent"
+
+    print(f"  Orchestrator: {data['id']} (v{data['version']}) [{mode}]")
+    return {"id": data["id"], "version": data["version"], "mode": mode}
 
 
 def main():
@@ -165,7 +186,7 @@ def main():
 
     # 4. Orchestrator
     print("[4/4] Orchestrator")
-    orchestrator = create_orchestrator(client, sub_agents)
+    orchestrator = create_orchestrator(sub_agents)
 
     # Save config
     config = {
