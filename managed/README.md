@@ -2,59 +2,21 @@
 
 Automated code review on every PR — zero human trigger needed.
 
-Uses Anthropic's Managed Agents API to run the air review pipeline in a cloud sandbox. Triggered by GitHub Actions on PR open/update. Posts reviews as `air-reviewer[bot]` via a GitHub App.
+## Setup (per org, one-time)
 
-## Status
+1. Create a GitHub bot account (e.g., `air-reviewer-bot`)
+2. Add it as collaborator (Write) to your repos
+3. Generate a fine-grained PAT on the bot account:
+   - Contents: Read & Write (for wiki push)
+   - Issues: Write (for PR comments)
+   - Pull requests: Write (for review verdicts)
+4. Add two org secrets:
+   - `ANTHROPIC_API_KEY` — your Anthropic API key with Managed Agents access
+   - `AIR_BOT_TOKEN` — the bot's PAT
 
-- Single-session sequential reviews: **working**
-- Multi-agent parallel reviews (callable_agents): **pending** — agents are registered, waiting for multi-agent research preview access
-- GitHub App authentication: **working** — posts as `air-reviewer[bot]` with 1-hour ephemeral tokens
+## Enable on a repo
 
-## Prerequisites
-
-- Anthropic API key with Managed Agents beta access
-- Python 3.10+ with dependencies: `pip install -r requirements.txt`
-- GitHub App with `contents: read`, `issues: write`, `pull_requests: write` permissions
-
-## Setup (one-time)
-
-```bash
-pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...
-
-# Create all resources (agents, environment, sub-agents, orchestrator)
-python setup.py
-```
-
-This creates `config.json` with all resource IDs. **Do not commit this file** — it contains your agent IDs and GitHub App credentials. A `config.example.json` is provided as reference.
-
-Add your GitHub App details to `config.json`:
-```json
-{
-  "github_app": {
-    "app_id": "YOUR_APP_ID",
-    "installation_id": "YOUR_INSTALLATION_ID",
-    "private_key_path": "~/path/to/your-app.private-key.pem"
-  }
-}
-```
-
-## Manual trigger
-
-```bash
-# Review a specific PR (generates App token automatically)
-python review.py myorg/myrepo 123 --app-auth
-
-# With explicit token
-python review.py myorg/myrepo 123 --gh-token ghp_...
-
-# Poll instead of stream
-python review.py myorg/myrepo 123 --app-auth --poll
-```
-
-## Team setup (automated via GitHub Actions)
-
-Add this to any repo:
+Add this file:
 
 ```yaml
 # .github/workflows/air-review.yml
@@ -68,52 +30,63 @@ jobs:
     uses: VorobiovD/air/.github/workflows/managed-review.yml@main
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
 ```
 
-## Architecture
+First PR auto-bootstraps the agents. Subsequent PRs reuse them.
+
+## How it works
 
 ```
-GitHub PR opened → GitHub Action → Anthropic Managed Agent session
-                                          │
-                                   Orchestrator agent
-                                   (air-reviewer, Opus)
-                                          │
-                          ┌───────────────┤ (sequential now,
-                          │               │  parallel when
-                          │               │  multi-agent enabled)
-                          ▼               ▼
-                   4 review passes    verification pass
-                   (code, simplify,   (review-verifier)
-                    security, history)
-                          │
-                          ▼
-                   Post PR comment
-                   (as air-reviewer[bot])
-                          │
-                          ▼
-                   Push wiki patterns
+PR opened
+  │
+  ▼
+GitHub Action triggers
+  │
+  ├── Checks if agents exist (by name via API)
+  ├── If not → creates environment + 5 sub-agents + orchestrator
+  ├── If yes → updates prompts to latest from air repo
+  │
+  ▼
+Creates Managed Agent session
+  │
+  ├── Repo mounted via github_repository resource
+  │   (token in API request, NOT in conversation)
+  ├── PR branch pre-checked-out at /workspace/repo
+  ├── gh CLI authenticated as bot account
+  │
+  ▼
+Orchestrator runs review pipeline
+  │
+  ├── Fetches PR data, loads wiki context
+  ├── Delegates to 4 reviewer sub-agents
+  │   (parallel when multi-agent enabled, sequential for now)
+  ├── Runs verification agent
+  ├── Posts review as bot account
+  └── Pushes learned patterns to wiki
 ```
 
-When multi-agent research preview is enabled, the orchestrator will spawn 4 parallel threads (one per reviewer) via `callable_agents` — no code changes needed, just a runtime feature flip.
+## Manual trigger
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+export AIR_BOT_TOKEN=ghp_...
+
+pip install -r requirements.txt
+python review.py myorg/myrepo 123        # stream mode
+python review.py myorg/myrepo 123 --poll  # poll mode
+```
+
+## Agent updates
+
+When agent prompts change in the air repo, the workflow auto-updates deployed agents on the next PR (compares and patches via API). No manual step needed.
 
 ## Security
 
-- **GitHub App tokens**: 1-hour expiry, scoped to installed repos only
-- **Token in session**: the `GH_TOKEN` appears in the Anthropic session message (stored in their systems). Mitigated by short expiry — even if leaked, the token is invalid within 1 hour.
-- **Private key**: stored locally, never committed to git (`.gitignore`d)
-- **Production recommendation**: replace PAT with GitHub App for bot identity and ephemeral tokens
+- **Bot token**: passed via `github_repository` resource in the session API request — never appears in the agent's conversation
+- **Permissions**: minimal (contents read+write, issues write, pull_requests write)
+- **Agent access**: each org's agents are isolated under their own Anthropic API key
 
 ## Cost
 
-~$1.69 per review (same as CLI plugin). At 40 reviews/month: ~$67/month.
-Session hours: ~$0.016 per review (~0.2 hr at $0.08/hr).
-
-## Updating agents
-
-When agent prompts change (new checklist items, patterns), re-run setup:
-
-```bash
-python setup.py
-```
-
-This creates new agent versions. Existing sessions are unaffected.
+~$1.69 per review. At 40 reviews/month: ~$67/month.

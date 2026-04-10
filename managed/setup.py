@@ -1,28 +1,42 @@
 #!/usr/bin/env python3
 """
-One-time setup: creates the air-reviewer agent, environment, vault,
-and sub-agents via the Anthropic Managed Agents API.
+Bootstrap: creates air review agents + environment via the Anthropic API.
+
+The GitHub Action auto-runs this on first PR. Can also run manually.
+Agents are looked up by name — if they exist, they're updated with
+the latest prompts. If not, they're created.
 
 Usage:
     export ANTHROPIC_API_KEY=sk-ant-...
-    python setup.py [--github-token ghp_...]
-
-Outputs a config.json with all resource IDs for use by review.py and
-the GitHub Action workflow.
+    python setup.py
 """
 
-import argparse
 import json
 import os
 import sys
 from pathlib import Path
 
-from anthropic import Anthropic
+import requests
 
-BETA_HEADER = "managed-agents-2026-04-01"
+API_BASE = "https://api.anthropic.com/v1"
 AGENTS_DIR = Path(__file__).parent.parent / "plugins" / "air" / "agents"
 PROMPTS_DIR = Path(__file__).parent / "prompts"
-CONFIG_PATH = Path(__file__).parent / "config.json"
+
+HEADERS = {
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": "managed-agents-2026-04-01",
+    "content-type": "application/json",
+}
+
+SUB_AGENTS = ["code-reviewer", "simplify", "security-auditor", "git-history-reviewer", "review-verifier"]
+
+
+def get_headers():
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        print("Error: ANTHROPIC_API_KEY not set.", file=sys.stderr)
+        sys.exit(1)
+    return {**HEADERS, "x-api-key": key}
 
 
 def read_prompt(path: Path) -> str:
@@ -33,54 +47,16 @@ def read_prompt(path: Path) -> str:
             end = text.index("---", 3)
             return text[end + 3:].strip()
         except ValueError:
-            print(f"  Warning: {path.name} has unclosed frontmatter, using full content")
+            print(f"  Warning: {path.name} has unclosed frontmatter")
             return text.strip()
     return text.strip()
 
 
-def create_environment(client: Anthropic) -> str:
-    """Create the sandbox environment with gh CLI pre-installed."""
-    env = client.beta.environments.create(
-        name="air-review-env",
-        config={
-            "type": "cloud",
-            "packages": {"apt": ["gh"]},
-            "networking": {"type": "unrestricted"},
-        },
-    )
-    print(f"  Environment: {env.id}")
-    return env.id
-
-
-def create_vault(client: Anthropic, github_token: str | None) -> str | None:
-    """Create a vault and store the GitHub PAT."""
-    if not github_token:
-        print("  Vault: skipped (no --github-token)")
-        return None
-
-    vault = client.beta.vaults.create(
-        display_name="air-reviewer",
-        metadata={"purpose": "code-review"},
-    )
-
-    client.beta.vaults.credentials.create(
-        vault.id,
-        display_name="GitHub PAT",
-        auth={
-            "type": "static_bearer",
-            "mcp_server_url": "https://mcp.github.com/mcp",
-            "token": github_token,
-        },
-    )
-    print(f"  Vault: {vault.id} (GitHub PAT stored)")
-    return vault.id
-
-
 def parse_agent_tools(path: Path) -> list[str]:
-    """Extract tool names from agent frontmatter (e.g., 'tools: Read, Grep, Glob, Bash')."""
+    """Extract tool names from agent frontmatter."""
     text = path.read_text()
     if not text.startswith("---"):
-        return ["bash", "read", "grep", "glob"]  # default
+        return ["bash", "read", "grep", "glob"]
     try:
         end = text.index("---", 3)
         frontmatter = text[3:end]
@@ -89,136 +65,129 @@ def parse_agent_tools(path: Path) -> list[str]:
 
     for line in frontmatter.split("\n"):
         if line.strip().startswith("tools:"):
-            tools_str = line.split(":", 1)[1].strip()
-            return [t.strip().lower() for t in tools_str.split(",")]
+            return [t.strip().lower() for t in line.split(":", 1)[1].strip().split(",")]
     return ["bash", "read", "grep", "glob"]
 
 
-def create_sub_agent(client: Anthropic, name: str, prompt_file: Path) -> dict:
-    """Create a sub-agent from an agent markdown file, respecting its declared tools."""
-    system = read_prompt(prompt_file)
-    declared_tools = parse_agent_tools(prompt_file)
-
-    tool_configs = [{"name": t, "enabled": True} for t in declared_tools]
-
-    agent = client.beta.agents.create(
-        name=f"air-{name}",
-        model="claude-opus-4-6",
-        system=system,
-        tools=[{
-            "type": "agent_toolset_20260401",
-            "default_config": {"enabled": False},
-            "configs": tool_configs,
-        }],
-    )
-    print(f"  Agent {name}: {agent.id} (v{agent.version}) tools={declared_tools}")
-    return {"id": agent.id, "version": agent.version}
+def find_agent(name: str) -> dict | None:
+    """Find an existing agent by name (oldest first)."""
+    resp = requests.get(f"{API_BASE}/agents", headers=get_headers())
+    if not resp.ok:
+        return None
+    for agent in resp.json().get("data", []):
+        if agent["name"] == name and not agent.get("archived_at"):
+            return agent
+    return None
 
 
-def create_orchestrator(sub_agents: dict) -> dict:
-    """Create the orchestrator agent with callable_agents via raw API.
-    The SDK doesn't support callable_agents yet, so we use requests directly."""
-    import requests as req
+def create_or_update_agent(name: str, system: str, tools: list, callable_agents: list | None = None) -> dict:
+    """Find agent by name → update if exists, create if not."""
+    existing = find_agent(name)
 
-    system = (PROMPTS_DIR / "orchestrator.md").read_text()
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-
-    callable_agents = [
-        {"type": "agent", "id": info["id"], "version": info["version"]}
-        for info in sub_agents.values()
-    ]
-
-    body = {
-        "name": "air-reviewer",
-        "model": "claude-opus-4-6",
-        "system": system,
-        "tools": [{"type": "agent_toolset_20260401"}],
-        "callable_agents": callable_agents,
-    }
-
-    resp = req.post(
-        "https://api.anthropic.com/v1/agents",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "anthropic-beta": "managed-agents-2026-04-01",
-            "content-type": "application/json",
-        },
-        json=body,
-    )
-    data = resp.json()
-
-    if "error" in data:
-        print(f"  callable_agents failed: {data['error']['message']}")
-        print("  Falling back to standalone mode...")
-        del body["callable_agents"]
-        resp = req.post(
-            "https://api.anthropic.com/v1/agents",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "anthropic-beta": "managed-agents-2026-04-01",
-                "content-type": "application/json",
-            },
+    if existing:
+        # Update with latest prompt
+        body = {"system": system, "tools": tools}
+        if callable_agents:
+            body["callable_agents"] = callable_agents
+        resp = requests.post(
+            f"{API_BASE}/agents/{existing['id']}",
+            headers=get_headers(),
             json=body,
         )
-        data = resp.json()
-        mode = "standalone"
+        if resp.ok:
+            data = resp.json()
+            print(f"  {name}: updated → v{data['version']}")
+            return data
+        else:
+            print(f"  {name}: update failed ({resp.status_code}), using existing v{existing['version']}")
+            return existing
     else:
-        mode = "multi-agent"
+        # Create new
+        body = {"name": name, "model": "claude-opus-4-6", "system": system, "tools": tools}
+        if callable_agents:
+            body["callable_agents"] = callable_agents
+        resp = requests.post(f"{API_BASE}/agents", headers=get_headers(), json=body)
+        if not resp.ok:
+            print(f"  {name}: creation failed — {resp.json().get('error', {}).get('message', resp.text[:200])}", file=sys.stderr)
+            sys.exit(1)
+        data = resp.json()
+        print(f"  {name}: created → {data['id']} (v{data['version']})")
+        return data
 
-    print(f"  Orchestrator: {data['id']} (v{data['version']}) [{mode}]")
-    return {"id": data["id"], "version": data["version"], "mode": mode}
+
+def find_or_create_environment() -> str:
+    """Find existing environment or create one."""
+    resp = requests.get(f"{API_BASE}/environments", headers=get_headers())
+    if resp.ok:
+        for env in resp.json().get("data", []):
+            if env["name"] == "air-review-env" and not env.get("archived_at"):
+                print(f"  Environment: {env['id']} (existing)")
+                return env["id"]
+
+    resp = requests.post(
+        f"{API_BASE}/environments",
+        headers=get_headers(),
+        json={
+            "name": "air-review-env",
+            "config": {
+                "type": "cloud",
+                "packages": {"apt": ["gh"]},
+                "networking": {"type": "unrestricted"},
+            },
+        },
+    )
+    if not resp.ok:
+        print(f"  Environment creation failed: {resp.text[:200]}", file=sys.stderr)
+        sys.exit(1)
+    data = resp.json()
+    print(f"  Environment: {data['id']} (created)")
+    return data["id"]
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Set up air Managed Agent resources")
-    parser.add_argument("--github-token", help="GitHub PAT for vault (optional, can set GH_TOKEN at session level)")
-    args = parser.parse_args()
-
-    client = Anthropic()
-
-    print("Creating air Managed Agent resources...\n")
+    print("air Managed Agent bootstrap\n")
 
     # 1. Environment
-    print("[1/4] Environment")
-    env_id = create_environment(client)
+    print("[1] Environment")
+    env_id = find_or_create_environment()
 
-    # 2. Vault
-    print("[2/4] Vault")
-    vault_id = create_vault(client, args.github_token)
-
-    # 3. Sub-agents (4 reviewers + 1 verifier)
-    print("[3/4] Sub-agents")
-    agent_files = {
-        "code-reviewer": AGENTS_DIR / "code-reviewer.md",
-        "simplify": AGENTS_DIR / "simplify.md",
-        "security-auditor": AGENTS_DIR / "security-auditor.md",
-        "git-history-reviewer": AGENTS_DIR / "git-history-reviewer.md",
-        "review-verifier": AGENTS_DIR / "review-verifier.md",
-    }
-
-    sub_agents = {}
-    for name, path in agent_files.items():
-        if not path.exists():
-            print(f"  WARNING: {path} not found, skipping")
+    # 2. Sub-agents
+    print("[2] Sub-agents")
+    sub_agent_refs = []
+    for name in SUB_AGENTS:
+        prompt_file = AGENTS_DIR / f"{name}.md"
+        if not prompt_file.exists():
+            print(f"  {name}: SKIPPED — {prompt_file} not found")
             continue
-        sub_agents[name] = create_sub_agent(client, name, path)
 
-    # 4. Orchestrator
-    print("[4/4] Orchestrator")
-    orchestrator = create_orchestrator(sub_agents)
+        system = read_prompt(prompt_file)
+        tools = parse_agent_tools(prompt_file)
+        tool_configs = [{"name": t, "enabled": True} for t in tools]
 
-    # Save config
-    config = {
-        "environment_id": env_id,
-        "vault_id": vault_id,
-        "orchestrator": orchestrator,
-        "sub_agents": sub_agents,
-    }
-    CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
-    print(f"\nConfig saved to {CONFIG_PATH}")
-    print("Use these IDs in review.py and the GitHub Action workflow.")
+        agent = create_or_update_agent(
+            name=f"air-{name}",
+            system=system,
+            tools=[{
+                "type": "agent_toolset_20260401",
+                "default_config": {"enabled": False},
+                "configs": tool_configs,
+            }],
+        )
+        sub_agent_refs.append({"type": "agent", "id": agent["id"], "version": agent["version"]})
+
+    # 3. Orchestrator
+    print("[3] Orchestrator")
+    orchestrator_prompt = (PROMPTS_DIR / "orchestrator.md").read_text()
+
+    orchestrator = create_or_update_agent(
+        name="air-reviewer",
+        system=orchestrator_prompt,
+        tools=[{"type": "agent_toolset_20260401"}],
+        callable_agents=sub_agent_refs,
+    )
+
+    print(f"\nDone. Environment: {env_id}, Orchestrator: {orchestrator['id']} (v{orchestrator['version']})")
+    print(f"Sub-agents: {len(sub_agent_refs)} registered")
 
 
 if __name__ == "__main__":

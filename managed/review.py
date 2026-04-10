@@ -1,71 +1,87 @@
 #!/usr/bin/env python3
 """
-Trigger an air review via Managed Agent with multi-agent orchestration.
+Trigger an air review via Managed Agent.
 
-The orchestrator agent spawns 4 reviewer sub-agents in parallel threads,
-collects findings, runs verification, and posts the review — all within
-one session, mirroring the CLI plugin architecture.
+The repo is mounted via github_repository resource (token never in message).
+Agents are bootstrapped automatically on first run.
 
 Usage:
     export ANTHROPIC_API_KEY=sk-ant-...
-    python review.py myorg/myrepo 123 --app-auth
+    export AIR_BOT_TOKEN=ghp_...
+    python review.py myorg/myrepo 123
 """
 
 import argparse
 import json
 import os
+import signal
 import sys
 import time
 from pathlib import Path
 
-from anthropic import Anthropic
+import requests as req
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
+API_BASE = "https://api.anthropic.com/v1"
+HEADERS = {
+    "anthropic-version": "2023-06-01",
+    "anthropic-beta": "managed-agents-2026-04-01",
+    "content-type": "application/json",
+}
 
 
-def generate_app_token(config: dict) -> str:
-    """Generate a short-lived GitHub App installation token (1 hour expiry)."""
-    try:
-        import jwt
-        import requests as req
-    except ImportError:
-        print("Error: PyJWT, cryptography, requests required. pip install PyJWT cryptography requests", file=sys.stderr)
+def get_headers():
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        print("Error: ANTHROPIC_API_KEY not set.", file=sys.stderr)
+        sys.exit(1)
+    return {**HEADERS, "x-api-key": key}
+
+
+def find_agent(name: str) -> dict | None:
+    """Find an existing agent by name (first match = oldest)."""
+    resp = req.get(f"{API_BASE}/agents", headers=get_headers())
+    if not resp.ok:
+        return None
+    for agent in resp.json().get("data", []):
+        if agent["name"] == name and not agent.get("archived_at"):
+            return agent
+    return None
+
+
+def find_environment() -> str | None:
+    """Find existing environment by name."""
+    resp = req.get(f"{API_BASE}/environments", headers=get_headers())
+    if not resp.ok:
+        return None
+    for env in resp.json().get("data", []):
+        if env["name"] == "air-review-env" and not env.get("archived_at"):
+            return env["id"]
+    return None
+
+
+def bootstrap():
+    """Run setup.py if agents don't exist."""
+    import subprocess
+    print("  Agents not found — bootstrapping...")
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).parent / "setup.py")],
+        env=os.environ,
+    )
+    if result.returncode != 0:
+        print("Error: bootstrap failed.", file=sys.stderr)
         sys.exit(1)
 
-    app = config.get("github_app", {})
-    app_id = app.get("app_id") or os.environ.get("APP_ID", "")
-    install_id = app.get("installation_id") or os.environ.get("INSTALLATION_ID", "")
-    key_path = app.get("private_key_path") or os.environ.get("APP_PRIVATE_KEY_PATH", "")
 
-    if not all([app_id, install_id, key_path]):
-        print("Error: GitHub App auth requires app_id, installation_id, private_key_path.", file=sys.stderr)
-        sys.exit(1)
-
-    pem = Path(key_path).expanduser().read_text()
-    now = int(time.time())
-    jwt_token = jwt.encode({"iat": now - 60, "exp": now + 600, "iss": str(app_id)}, pem, algorithm="RS256")
-
-    resp = req.post(
-        f"https://api.github.com/app/installations/{install_id}/access_tokens",
-        headers={"Authorization": f"Bearer {jwt_token}", "Accept": "application/vnd.github+json"},
+def get_pr_branch(repo: str, pr_number: int, token: str) -> str:
+    """Get the PR's head branch name."""
+    resp = req.get(
+        f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
     )
     if not resp.ok:
-        print(f"Error: GitHub API returned {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+        print(f"Error fetching PR: {resp.status_code}", file=sys.stderr)
         sys.exit(1)
-    data = resp.json()
-    if "token" not in data:
-        print(f"Error: unexpected response: {data}", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"  Token ready (expires {data['expires_at']}, posts as air-reviewer[bot])")
-    return data["token"]
-
-
-def load_config() -> dict:
-    if not CONFIG_PATH.exists():
-        print("Error: config.json not found. Run setup.py first.", file=sys.stderr)
-        sys.exit(1)
-    return json.loads(CONFIG_PATH.read_text())
+    return resp.json()["head"]["ref"]
 
 
 def main():
@@ -73,50 +89,64 @@ def main():
     parser.add_argument("repo", help="owner/repo (e.g., myorg/myrepo)")
     parser.add_argument("pr_number", type=int, help="PR number to review")
     parser.add_argument("--mode", choices=["auto", "fresh", "re-review"], default="auto")
-    parser.add_argument("--gh-token", help="GitHub token (or set GH_TOKEN env var, or use --app-auth)")
-    parser.add_argument("--app-auth", action="store_true", help="Generate token from GitHub App")
     parser.add_argument("--poll", action="store_true", help="Poll instead of streaming (default: stream)")
     args = parser.parse_args()
 
-    config = load_config()
-    client = Anthropic()
-
-    # Step 1: Resolve GitHub token
-    gh_token = args.gh_token or os.environ.get("GH_TOKEN", "")
-    if not gh_token and args.app_auth:
-        print("[1] Generating GitHub App token...")
-        gh_token = generate_app_token(config)
-    if not gh_token:
-        print("Error: No GitHub token. Use --app-auth, --gh-token, or set GH_TOKEN.", file=sys.stderr)
+    # Resolve bot token
+    bot_token = os.environ.get("AIR_BOT_TOKEN", "")
+    if not bot_token:
+        print("Error: AIR_BOT_TOKEN not set.", file=sys.stderr)
         sys.exit(1)
 
-    # Step 2: Create session
-    print(f"[2] Creating session for PR #{args.pr_number} on {args.repo}...")
-    session_kwargs = {
-        "agent": config["orchestrator"]["id"],
-        "environment_id": config["environment_id"],
-        "title": f"Review PR #{args.pr_number} on {args.repo}",
-    }
-    if config.get("vault_id"):
-        session_kwargs["vault_ids"] = [config["vault_id"]]
+    # Find or bootstrap agents
+    print(f"[1] Preparing agents...")
+    orchestrator = find_agent("air-reviewer")
+    env_id = find_environment()
 
-    session = client.beta.sessions.create(**session_kwargs)
+    if not orchestrator or not env_id:
+        bootstrap()
+        orchestrator = find_agent("air-reviewer")
+        env_id = find_environment()
+
+    if not orchestrator or not env_id:
+        print("Error: agents not found after bootstrap.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"  Orchestrator: {orchestrator['id']} (v{orchestrator['version']})")
+
+    # Get PR branch name
+    pr_branch = get_pr_branch(args.repo, args.pr_number, bot_token)
+
+    # Create session with repo mounted
+    print(f"[2] Creating session for PR #{args.pr_number} on {args.repo}...")
+
+    from anthropic import Anthropic
+    client = Anthropic()
+
+    session = client.beta.sessions.create(
+        agent=orchestrator["id"],
+        environment_id=env_id,
+        title=f"Review PR #{args.pr_number} on {args.repo}",
+        resources=[{
+            "type": "github_repository",
+            "url": f"https://github.com/{args.repo}",
+            "authorization_token": bot_token,
+            "checkout": {"type": "branch", "name": pr_branch},
+            "mount_path": "/workspace/repo",
+        }],
+    )
     print(f"  Session: {session.id}")
 
-    # Step 3: Send the review task
+    # Send review task (no token in message!)
     task = (
         f"Review PR #{args.pr_number} on {args.repo}.\n"
         f"REPO={args.repo}\n"
         f"PR_NUMBER={args.pr_number}\n"
-        f"GH_TOKEN={gh_token}\n"
+        f"PLATFORM=github\n"
         f"MODE={args.mode}\n\n"
-        f"Execute the full review pipeline:\n"
-        f"1. Setup auth and clone the repo\n"
-        f"2. Fetch PR data and load wiki context\n"
-        f"3. Delegate to ALL 4 reviewer sub-agents in PARALLEL\n"
-        f"4. Collect findings, run verification via the verifier sub-agent\n"
-        f"5. Post the consolidated review as a PR comment\n"
-        f"6. Push learned patterns to the wiki\n"
+        f"The repo is pre-cloned at /workspace/repo with branch '{pr_branch}' checked out.\n"
+        f"Git auth is configured — gh CLI and git push work.\n"
+        f"Execute the full review pipeline."
     )
 
     print("[3] Sending review task...")
@@ -125,23 +155,17 @@ def main():
         events=[{"type": "user.message", "content": [{"type": "text", "text": task}]}],
     )
 
-    # Step 4: Monitor
+    # Monitor
     if args.poll:
         poll_session(client, session.id)
     else:
         stream_session(client, session.id)
 
 
-def stream_session(client: Anthropic, session_id: str):
+def stream_session(client, session_id: str):
     """Stream events in real-time with 30-minute timeout."""
-    import signal
-
-    def timeout_handler(signum, frame):
-        print("\n\nStream timed out after 30 minutes.", file=sys.stderr)
-        sys.exit(1)
-
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(1800)  # 30 minutes
+    signal.signal(signal.SIGALRM, lambda *_: (print("\nTimed out (30 min)."), sys.exit(1)))
+    signal.alarm(1800)
 
     print("[4] Streaming...\n")
     threads_active = 0
@@ -157,9 +181,6 @@ def stream_session(client: Anthropic, session_id: str):
             elif t == "agent.tool_use":
                 name = getattr(event, "name", "?")
                 print(f"\n  [tool] {name}", flush=True)
-            elif t == "agent.mcp_tool_use":
-                name = getattr(event, "name", "?")
-                print(f"\n  [mcp] {name}", flush=True)
             elif t == "session.thread_created":
                 threads_active += 1
                 print(f"\n  [sub-agent spawned] ({threads_active} active)", flush=True)
@@ -170,48 +191,34 @@ def stream_session(client: Anthropic, session_id: str):
                 print("\n\nReview complete.")
                 break
             elif t == "session.error":
-                print(f"\n\nSession error: {event}", file=sys.stderr)
+                print(f"\n\nSession error.", file=sys.stderr)
                 sys.exit(1)
 
 
-def poll_session(client: Anthropic, session_id: str):
-    """Poll for completion with initial delay."""
+def poll_session(client, session_id: str):
+    """Poll for completion."""
     print("[4] Polling (review takes ~5-15 min)...")
-
-    # Wait 30s before first poll to let session start
-    time.sleep(30)
+    time.sleep(30)  # initial delay
 
     for i in range(150):  # ~25 min max
         s = client.beta.sessions.retrieve(session_id)
-        status = s.status
 
-        if status == "idle":
-            # Check if work was actually done (not just initial idle)
+        if s.status == "idle":
             events = client.beta.sessions.events.list(session_id, limit=5, order="desc")
-            has_work = any(e.type in ("agent.message", "agent.tool_use", "agent.mcp_tool_use") for e in events.data)
+            has_work = any(e.type in ("agent.message", "agent.tool_use") for e in events.data)
             if has_work:
                 print("\nReview complete.")
-                # Print final messages
-                all_events = client.beta.sessions.events.list(session_id, limit=100, order="desc")
-                for event in reversed(all_events.data):
-                    if event.type == "agent.message":
-                        for block in event.content:
-                            if hasattr(block, "text") and block.text.strip():
-                                print(block.text)
-                break
-            else:
-                # Session idle but no work yet — wait more
-                time.sleep(5)
-                continue
-        elif status == "terminated":
-            print(f"\nSession terminated.", file=sys.stderr)
+                return
+            time.sleep(5)
+            continue
+        elif s.status == "terminated":
+            print("\nSession terminated.", file=sys.stderr)
             sys.exit(1)
-        else:
-            elapsed = (i + 1) * 10 + 30
-            print(f"  [{elapsed}s] {status}...", flush=True)
-            time.sleep(10)
+
+        print(f"  [{(i+1)*10 + 30}s] {s.status}...", flush=True)
+        time.sleep(10)
     else:
-        print("\nTimed out after 25 min.", file=sys.stderr)
+        print("\nTimed out (25 min).", file=sys.stderr)
         sys.exit(1)
 
 
