@@ -49,9 +49,12 @@ def generate_app_token(config: dict) -> str:
         f"https://api.github.com/app/installations/{install_id}/access_tokens",
         headers={"Authorization": f"Bearer {jwt_token}", "Accept": "application/vnd.github+json"},
     )
+    if not resp.ok:
+        print(f"Error: GitHub API returned {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+        sys.exit(1)
     data = resp.json()
     if "token" not in data:
-        print(f"Error: {data}", file=sys.stderr)
+        print(f"Error: unexpected response: {data}", file=sys.stderr)
         sys.exit(1)
 
     print(f"  Token ready (expires {data['expires_at']}, posts as air-reviewer[bot])")
@@ -130,7 +133,16 @@ def main():
 
 
 def stream_session(client: Anthropic, session_id: str):
-    """Stream events in real-time."""
+    """Stream events in real-time with 30-minute timeout."""
+    import signal
+
+    def timeout_handler(signum, frame):
+        print("\n\nStream timed out after 30 minutes.", file=sys.stderr)
+        sys.exit(1)
+
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(1800)  # 30 minutes
+
     print("[4] Streaming...\n")
     threads_active = 0
 

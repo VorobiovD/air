@@ -74,17 +74,24 @@ jobs:
             -d "$SESSION_BODY")
 
           SESSION_ID=$(echo "$SESSION" | jq -r '.id')
+          if [ "$SESSION_ID" = "null" ] || [ -z "$SESSION_ID" ]; then
+            echo "Error: session creation failed"
+            echo "$SESSION"
+            exit 1
+          fi
           echo "Session: $SESSION_ID"
 
-          # Send review task
-          TASK="Review PR #$PR_NUMBER on $REPO.
-          REPO=$REPO
-          PR_NUMBER=$PR_NUMBER
-          GH_TOKEN=$GH_TOKEN
-          PLATFORM=github
-          MODE=auto
+          # Send review task (heredoc avoids YAML indentation in the message)
+          read -r -d '' TASK <<ENDTASK || true
+Review PR #$PR_NUMBER on $REPO.
+REPO=$REPO
+PR_NUMBER=$PR_NUMBER
+GH_TOKEN=$GH_TOKEN
+PLATFORM=github
+MODE=auto
 
-          Execute the full review pipeline. Post the review as a PR comment. Push learned patterns to the wiki."
+Execute the full review pipeline. Post the review as a PR comment. Push learned patterns to the wiki.
+ENDTASK
 
           EVENT_BODY=$(jq -n --arg text "$TASK" \
             '{events: [{type: "user.message", content: [{type: "text", text: $text}]}]}')

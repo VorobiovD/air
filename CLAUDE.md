@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-**air** is a Claude Code plugin for automated PR code review. It is **not** a compiled application — there is no build system, no test suite, no dependencies to install. The entire codebase is markdown files and JSON metadata.
+**air** is a Claude Code plugin for automated PR code review, with an optional Managed Agent mode for CI automation.
 
-Two commands: `/air:review` (13-step review pipeline) and `/air:learn` (wiki cleanup/regeneration).
+The CLI plugin (`plugins/air/`) is markdown files and JSON metadata — no build system or dependencies. The Managed Agent (`managed/`) adds Python scripts for Anthropic's cloud API + a GitHub Actions workflow.
+
+Two CLI commands: `/air:review` (13-step review pipeline) and `/air:learn` (wiki cleanup/regeneration). For CI: `managed/review.py` or the reusable GitHub Action.
 
 ## Project Structure
 
@@ -27,6 +29,17 @@ plugins/air/
 
 .claude-plugin/
 └── marketplace.json     # Marketplace distribution definition
+
+managed/                          # Managed Agent (CI automation)
+├── setup.py                      # Creates agents + environment via API
+├── review.py                     # Triggers review sessions
+├── prompts/orchestrator.md       # System prompt for cloud orchestrator
+├── config.example.json           # Reference config (real config is .gitignored)
+├── requirements.txt              # Python dependencies
+└── README.md
+
+.github/workflows/
+└── managed-review.yml            # Reusable GitHub Action for teams
 ```
 
 ## Architecture

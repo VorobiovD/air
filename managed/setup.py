@@ -29,8 +29,12 @@ def read_prompt(path: Path) -> str:
     """Read a markdown prompt file, stripping YAML frontmatter."""
     text = path.read_text()
     if text.startswith("---"):
-        end = text.index("---", 3)
-        return text[end + 3:].strip()
+        try:
+            end = text.index("---", 3)
+            return text[end + 3:].strip()
+        except ValueError:
+            print(f"  Warning: {path.name} has unclosed frontmatter, using full content")
+            return text.strip()
     return text.strip()
 
 
@@ -72,9 +76,31 @@ def create_vault(client: Anthropic, github_token: str | None) -> str | None:
     return vault.id
 
 
+def parse_agent_tools(path: Path) -> list[str]:
+    """Extract tool names from agent frontmatter (e.g., 'tools: Read, Grep, Glob, Bash')."""
+    text = path.read_text()
+    if not text.startswith("---"):
+        return ["bash", "read", "grep", "glob"]  # default
+    try:
+        end = text.index("---", 3)
+        frontmatter = text[3:end]
+    except ValueError:
+        return ["bash", "read", "grep", "glob"]
+
+    for line in frontmatter.split("\n"):
+        if line.strip().startswith("tools:"):
+            tools_str = line.split(":", 1)[1].strip()
+            return [t.strip().lower() for t in tools_str.split(",")]
+    return ["bash", "read", "grep", "glob"]
+
+
 def create_sub_agent(client: Anthropic, name: str, prompt_file: Path) -> dict:
-    """Create a sub-agent from an agent markdown file."""
+    """Create a sub-agent from an agent markdown file, respecting its declared tools."""
     system = read_prompt(prompt_file)
+    declared_tools = parse_agent_tools(prompt_file)
+
+    tool_configs = [{"name": t, "enabled": True} for t in declared_tools]
+
     agent = client.beta.agents.create(
         name=f"air-{name}",
         model="claude-opus-4-6",
@@ -82,15 +108,10 @@ def create_sub_agent(client: Anthropic, name: str, prompt_file: Path) -> dict:
         tools=[{
             "type": "agent_toolset_20260401",
             "default_config": {"enabled": False},
-            "configs": [
-                {"name": "bash", "enabled": True},
-                {"name": "read", "enabled": True},
-                {"name": "grep", "enabled": True},
-                {"name": "glob", "enabled": True},
-            ],
+            "configs": tool_configs,
         }],
     )
-    print(f"  Agent {name}: {agent.id} (v{agent.version})")
+    print(f"  Agent {name}: {agent.id} (v{agent.version}) tools={declared_tools}")
     return {"id": agent.id, "version": agent.version}
 
 
