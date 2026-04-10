@@ -1,10 +1,15 @@
 {
   "environment_id": "env_01571KZtN93QxxDnmcY65rKT",
-  "vault_id": null,
+  "vault_id": "vlt_011CZu4xGqNqxv9ugpXAKZFH",
   "orchestrator": {
-    "id": "agent_011CZu1oZC2zB3WcQ6iSc5Ky",
+    "id": "agent_011CZuxRuMGwVRSPJQzVGtRr",
     "version": 1,
-    "mode": "standalone"
+    "mode": "multi-agent"
+  },
+  "github_app": {
+    "app_id": "3335304",
+    "installation_id": "122867133",
+    "private_key_path": "~/Downloads/air-reviewer.2026-04-10.private-key.pem"
   },
   "sub_agents": {
     "code-reviewer": {

@@ -145,37 +145,28 @@ If re-reviewing:
 
 ## Step 7: Parallel Review
 
-**Send ALL 4 review tasks to sub-agents simultaneously.**
+**CRITICAL: You MUST delegate to your callable sub-agents. Do NOT perform the reviews yourself.** You are an orchestrator — your job is to prepare context and dispatch, not to review code directly. Send a message to each of the 4 reviewer agents. They run in parallel threads and return findings to you.
 
-Build a PR Context block with all metadata, blame summaries, churn data, and wiki page availability. Include the author's patterns from REVIEW.md if they exist.
+Build a PR Context block with all metadata, blame summaries, churn data, and wiki page availability. Include the author's patterns from REVIEW.md if they exist. Include the full diff.
 
-**Dispatch to each callable agent with the PR Context block + diff:**
+**Send messages to ALL 4 callable agents:**
 
-1. **air-code-reviewer** — bugs, logic errors, error handling, design, test coverage, author pattern matching
-2. **air-simplify** — code reuse (active search), quality (dead code, copy-paste, stringly-typed), efficiency (N+1, concurrency, hot-path, TOCTOU)
-3. **air-security-auditor** — 31-item checklist (scoped by PROJECT-PROFILE.md), PASS/FAIL table, author pattern matching
-4. **air-git-history-reviewer** — blame analysis, churn patterns, previous PR comments, author pattern matching
+1. **air-code-reviewer** — "Review this PR for bugs, logic errors, error handling, design issues, test coverage. Check author patterns. Here is the context and diff: [PR Context + diff]"
+2. **air-simplify** — "Review this PR for code reuse, quality, and efficiency issues. Here is the context and diff: [PR Context + diff]"
+3. **air-security-auditor** — "Audit this PR against the 31-item security checklist. Produce a PASS/FAIL table. Here is the context and diff: [PR Context + diff]"
+4. **air-git-history-reviewer** — "Review this PR through the lens of git history, blame, churn, and author patterns. Here is the context and diff: [PR Context + diff]"
 
-Each agent receives:
-- The full PR Context block (metadata, blame, churn, wiki flags, author patterns)
-- The diff content (full PR diff or inter-diff for re-review)
-- Instructions to read wiki files from /tmp/ for learned patterns
+Each agent has access to the shared filesystem — wiki files in /tmp/ are accessible to all.
 
-**All agents share the same filesystem** — wiki files in /tmp/ are accessible to all.
-
-Every finding MUST include file:line. Severity: blocker/medium/low/nit.
+**Wait for ALL 4 agents to return their findings before proceeding to Step 8.**
 
 ## Step 8: Verification
 
 After ALL 4 sub-agents complete, collect all findings into one list.
 
-**Dispatch to air-review-verifier:**
-- Pass all findings
-- Instruct it to read actual source at flagged lines
-- If `/tmp/SEVERITY-CALIBRATION.md` exists, use per-agent thresholds
-- If `/tmp/ACCEPTED-PATTERNS.md` exists, check for pattern matches
+**Delegate to air-review-verifier** — send it all findings with the diff and instructions to read actual source at flagged lines.
 
-Post-processing:
+Post-processing on the verifier's results:
 - CONFIRMED → keep at stated severity
 - DOWNGRADED → keep at lower severity
 - IMPROVEMENT → keep as low
@@ -224,13 +215,19 @@ Format:
 Reviewed at: <HEAD_SHA>
 ```
 
-Rules:
-- Sequential numbering across all sections
-- Clickable links with full SHA
+**STRICT format rules — follow EXACTLY:**
+- One-line summary only (1 sentence, not a paragraph)
+- Security table has exactly 2 columns: `Check | Result` (no `#` column)
+- Sequential numbering across ALL sections (blockers through pre-existing)
+- Every finding: `**N. <description>**` on its own line, then link + explanation on the next line
+- Do NOT include code blocks or fix suggestions in findings — just describe the issue
+- Clickable links with full SHA: `[file#Lstart-Lend](https://github.com/$REPO/blob/$HEAD_SHA/file#Lstart-Lend)`
 - No emoji, no AI attribution
-- Nits only if < 10 total findings
-- Strengths omitted if 3+ blockers
-- Footer count excludes pre-existing
+- Nits section only if < 10 total findings
+- Pre-existing section only if verifier classified any as PRE-EXISTING
+- Strengths section: 1-3 specific observations. Omit if 3+ blockers.
+- Footer MUST include: `<N> findings for this PR.` then `Reviewed at: <HEAD_SHA>` then `> After fixing, run /air:review --respond to verify and reply.`
+- Empty severity sections are omitted entirely
 
 ## Step 10: Post
 
