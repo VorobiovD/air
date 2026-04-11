@@ -1,0 +1,54 @@
+# Reusable workflow for automated air reviews via Managed Agents.
+#
+# Teams add this to their repo:
+#
+#   name: air review
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, reopened]
+#   jobs:
+#     review:
+#       uses: VorobiovD/air/.github/workflows/managed-review.yml@main
+#       secrets:
+#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#         AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
+
+name: air managed review
+
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      AIR_BOT_TOKEN:
+        required: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install anthropic requests
+
+      - name: Checkout air repo (for setup.py + agent prompts)
+        uses: actions/checkout@v4
+        with:
+          repository: VorobiovD/air
+          path: air
+
+      - name: Run review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          cd air
+          python managed/review.py "$REPO" "$PR_NUMBER" --poll
