@@ -30,12 +30,13 @@ def api_error_message(resp: requests.Response) -> str:
 
 
 def list_agents() -> dict[str, dict]:
-    """Fetch all agents once, return as {name: agent} dict (oldest first per name)."""
+    """Fetch all agents once, return as {name: agent} dict.
+    API returns newest first. We iterate oldest→newest so dict overwrites
+    keep the newest non-archived agent per name (matches prior behavior)."""
     resp = requests.get(f"{API_BASE}/agents", headers=get_headers())
     if not resp.ok:
         return {}
     result = {}
-    # API returns newest first — we want oldest per name, so iterate in reverse
     for agent in reversed(resp.json().get("data", [])):
         if not agent.get("archived_at"):
             result[agent["name"]] = agent

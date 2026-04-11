@@ -6,10 +6,8 @@ Automated code review on every PR — zero human trigger needed.
 
 1. Create a GitHub bot account (e.g., `air-reviewer-bot`)
 2. Add it as collaborator (Write) to your repos
-3. Generate a fine-grained PAT on the bot account:
-   - Contents: Read & Write (for wiki push)
-   - Issues: Write (for PR comments)
-   - Pull requests: Write (for review verdicts)
+3. Generate a classic PAT on the bot account with `repo` scope
+   (fine-grained PATs don't support wiki push)
 4. Add two org secrets:
    - `ANTHROPIC_API_KEY` — your Anthropic API key with Managed Agents access
    - `AIR_BOT_TOKEN` — the bot's PAT
