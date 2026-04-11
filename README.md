@@ -296,6 +296,70 @@ At 40 reviews/month: ~$66/month. On Team/Pro subscription this is included in th
 
 **Timing:** 9-15 minutes per review. All agents run in parallel — the bottleneck is the slowest agent, not the sum.
 
+## Automated Reviews (CI/CD)
+
+Review every PR automatically — no human trigger needed. Uses Anthropic Managed Agents.
+
+### Setup (one-time per org, ~10 min)
+
+**1. Create a bot account**
+
+Sign up a new GitHub account (e.g., `air-reviewer-bot`). This is the identity that posts reviews.
+
+**2. Add the bot to your repos**
+
+Invite the bot as a collaborator (Write role) on repos you want reviewed. Or add as an org member.
+
+**3. Generate a token**
+
+On the bot account: Settings → Developer settings → Personal access tokens → **Tokens (classic)** → Generate new token.
+- Scopes: check `repo`
+- Expiration: 90 days or longer
+
+**4. Add secrets**
+
+In your GitHub org: Settings → Secrets and variables → Actions → New organization secret:
+- `ANTHROPIC_API_KEY` — your Anthropic API key (with Managed Agents access)
+- `AIR_BOT_TOKEN` — the bot's classic PAT from step 3
+
+**5. Enable on a repo**
+
+Add this file to any repo:
+
+```yaml
+# .github/workflows/air-review.yml
+name: air review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    uses: VorobiovD/air/.github/workflows/managed-review.yml@main
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
+```
+
+The first PR auto-creates the review agents. Every subsequent PR is reviewed automatically. Agent prompts update automatically when the air repo is updated.
+
+### What happens on each PR
+
+1. GitHub Action triggers → checks out air repo → syncs agent prompts
+2. Creates a Managed Agent session with the repo pre-cloned
+3. Orchestrator runs the full review pipeline (same 5 agents as CLI)
+4. Posts review as the bot account
+5. Pushes learned patterns to the repo's wiki
+
+### Remote wiki maintenance
+
+```bash
+# From your machine (requires ANTHROPIC_API_KEY + AIR_BOT_TOKEN env vars)
+python managed/learn.py myorg/myrepo                  # Full cleanup
+python managed/learn.py myorg/myrepo --history-only   # Only regenerate history
+python managed/learn.py myorg/myrepo --refresh-profile # Re-scan project profile
+```
+
 ## Standalone Wiki Cleanup
 
 ```bash
