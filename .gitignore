@@ -9,3 +9,6 @@ Thumbs.db
 # Managed agent
 managed/config.json
 *.pem
+*.pyc
+air-expansion-plan.md
+architecture-review.md
