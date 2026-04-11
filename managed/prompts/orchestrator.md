@@ -63,8 +63,8 @@ cd /workspace/repo
 # 1. Read CLAUDE.md
 cat CLAUDE.md 2>/dev/null
 
-# 2. Clone wiki
-WIKI_URL="https://github.com/$REPO.wiki.git"
+# 2. Clone wiki (use GH_TOKEN for auth — wiki requires write access)
+WIKI_URL="https://x-access-token:$GH_TOKEN@github.com/$REPO.wiki.git"
 git clone --depth 1 "$WIKI_URL" /workspace/wiki 2>/dev/null
 if [ -d "/workspace/wiki/.git" ]; then
   cp /workspace/wiki/REVIEW.md /tmp/REVIEW.md 2>/dev/null
@@ -247,13 +247,16 @@ gh pr comment $PR_NUMBER --body-file /tmp/review-comment.md
    `- **<Pattern name>** (<Nx>: <PR refs> | last <N> PRs: <M> clean): <Description>`
 3. Track clean PRs for non-triggered author patterns
 4. Add verified false positives to `/tmp/ACCEPTED-PATTERNS.md`
-5. Push to wiki:
+5. Push to wiki. The wiki clone may not have auth — set it explicitly before pushing:
 ```bash
 cp /tmp/REVIEW.md /workspace/wiki/REVIEW.md
 cp /tmp/ACCEPTED-PATTERNS.md /workspace/wiki/ACCEPTED-PATTERNS.md 2>/dev/null
-cd /workspace/wiki && git add -A && { git diff --quiet --cached || git -c commit.gpgsign=false commit -m "review: learned from PR #$PR_NUMBER"; } && git push
+cd /workspace/wiki
+# Wire auth into wiki remote (the github_repository resource only covers /workspace/repo)
+git remote set-url origin "https://x-access-token:$GH_TOKEN@github.com/$REPO.wiki.git"
+git add -A && { git diff --quiet --cached || git -c user.name="air-machine" -c user.email="air@bot" -c commit.gpgsign=false commit -m "review: learned from PR #$PR_NUMBER"; } && git push
 ```
-If wiki push fails, skip gracefully.
+If wiki push fails, skip gracefully — the review comment was already posted.
 
 ## Step 12: Cleanup
 
