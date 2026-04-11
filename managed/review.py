@@ -137,15 +137,17 @@ def main():
     )
     print(f"  Session: {session.id}")
 
-    # Send review task (no token in message!)
+    # Send review task
+    # GH_TOKEN included for gh CLI (git clone/push handled by resource auth)
     task = (
         f"Review PR #{args.pr_number} on {args.repo}.\n"
         f"REPO={args.repo}\n"
         f"PR_NUMBER={args.pr_number}\n"
+        f"GH_TOKEN={bot_token}\n"
         f"PLATFORM=github\n"
         f"MODE={args.mode}\n\n"
         f"The repo is pre-cloned at /workspace/repo with branch '{pr_branch}' checked out.\n"
-        f"Git auth is configured — gh CLI and git push work.\n"
+        f"Git push is configured. Set GH_TOKEN above as env var for gh CLI.\n"
         f"Execute the full review pipeline."
     )
 

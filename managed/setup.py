@@ -85,8 +85,8 @@ def create_or_update_agent(name: str, system: str, tools: list, callable_agents:
     existing = find_agent(name)
 
     if existing:
-        # Update with latest prompt
-        body = {"system": system, "tools": tools}
+        # Update with latest prompt (version required for optimistic concurrency)
+        body = {"system": system, "tools": tools, "version": existing["version"]}
         if callable_agents:
             body["callable_agents"] = callable_agents
         resp = requests.post(
@@ -99,7 +99,8 @@ def create_or_update_agent(name: str, system: str, tools: list, callable_agents:
             print(f"  {name}: updated → v{data['version']}")
             return data
         else:
-            print(f"  {name}: update failed ({resp.status_code}), using existing v{existing['version']}")
+            err = resp.json().get("error", {}).get("message", resp.text[:200])
+            print(f"  {name}: update failed ({resp.status_code}: {err}), using existing v{existing['version']}")
             return existing
     else:
         # Create new
