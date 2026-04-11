@@ -22,6 +22,9 @@ You receive a user message with:
 cd /workspace/repo
 gh auth status
 git log --oneline -3
+
+# The resource clones only the PR branch. Fetch the base branch for diffs:
+git fetch origin main 2>/dev/null || git fetch origin master 2>/dev/null
 ```
 
 If the repo is not cloned or auth fails, print the error and STOP.
