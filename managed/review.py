@@ -98,18 +98,14 @@ def main():
         print("Error: AIR_BOT_TOKEN not set.", file=sys.stderr)
         sys.exit(1)
 
-    # Find or bootstrap agents
-    print(f"[1] Preparing agents...")
+    # Always run setup — creates if missing, updates prompts if changed
+    print(f"[1] Syncing agents with latest prompts...")
+    bootstrap()
     orchestrator = find_agent("air-reviewer")
     env_id = find_environment()
 
     if not orchestrator or not env_id:
-        bootstrap()
-        orchestrator = find_agent("air-reviewer")
-        env_id = find_environment()
-
-    if not orchestrator or not env_id:
-        print("Error: agents not found after bootstrap.", file=sys.stderr)
+        print("Error: agents not found after setup.", file=sys.stderr)
         sys.exit(1)
 
     print(f"  Orchestrator: {orchestrator['id']} (v{orchestrator['version']})")
