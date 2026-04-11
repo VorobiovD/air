@@ -31,10 +31,11 @@ plugins/air/
 └── marketplace.json     # Marketplace distribution definition
 
 managed/                          # Managed Agent (CI automation)
-├── setup.py                      # Creates agents + environment via API
+├── api.py                        # Shared API helpers
+├── setup.py                      # Creates/updates agents + environment via API
 ├── review.py                     # Triggers review sessions
+├── test-session.py               # Quick 9-test verification script
 ├── prompts/orchestrator.md       # System prompt for cloud orchestrator
-├── config.example.json           # Reference config (real config is .gitignored)
 ├── requirements.txt              # Python dependencies
 └── README.md
 

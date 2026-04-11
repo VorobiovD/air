@@ -2,8 +2,9 @@
 """
 Trigger an air review via Managed Agent.
 
-The repo is mounted via github_repository resource (token never in message).
-Agents are bootstrapped automatically on first run.
+The repo is mounted via github_repository resource for clone/push auth.
+GH_TOKEN is passed in the session message for gh CLI API calls (PR comments,
+review verdicts). This is a bot PAT with minimal permissions.
 
 Usage:
     export ANTHROPIC_API_KEY=sk-ant-...
@@ -12,64 +13,16 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 import requests as req
 
-API_BASE = "https://api.anthropic.com/v1"
-HEADERS = {
-    "anthropic-version": "2023-06-01",
-    "anthropic-beta": "managed-agents-2026-04-01",
-    "content-type": "application/json",
-}
-
-
-def get_headers():
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not key:
-        print("Error: ANTHROPIC_API_KEY not set.", file=sys.stderr)
-        sys.exit(1)
-    return {**HEADERS, "x-api-key": key}
-
-
-def find_agent(name: str) -> dict | None:
-    """Find an existing agent by name (first match = oldest)."""
-    resp = req.get(f"{API_BASE}/agents", headers=get_headers())
-    if not resp.ok:
-        return None
-    for agent in resp.json().get("data", []):
-        if agent["name"] == name and not agent.get("archived_at"):
-            return agent
-    return None
-
-
-def find_environment() -> str | None:
-    """Find existing environment by name."""
-    resp = req.get(f"{API_BASE}/environments", headers=get_headers())
-    if not resp.ok:
-        return None
-    for env in resp.json().get("data", []):
-        if env["name"] == "air-review-env" and not env.get("archived_at"):
-            return env["id"]
-    return None
-
-
-def bootstrap():
-    """Run setup.py if agents don't exist."""
-    import subprocess
-    print("  Agents not found — bootstrapping...")
-    result = subprocess.run(
-        [sys.executable, str(Path(__file__).parent / "setup.py")],
-        env=os.environ,
-    )
-    if result.returncode != 0:
-        print("Error: bootstrap failed.", file=sys.stderr)
-        sys.exit(1)
+from api import list_agents, find_environment
 
 
 def get_pr_branch(repo: str, pr_number: int, token: str) -> str:
@@ -79,9 +32,21 @@ def get_pr_branch(repo: str, pr_number: int, token: str) -> str:
         headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
     )
     if not resp.ok:
-        print(f"Error fetching PR: {resp.status_code}", file=sys.stderr)
+        print(f"Error fetching PR: {resp.status_code} {resp.text[:200]}", file=sys.stderr)
         sys.exit(1)
     return resp.json()["head"]["ref"]
+
+
+def sync_agents():
+    """Run setup.py to create/update agents with latest prompts."""
+    print("[1] Syncing agents with latest prompts...")
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).parent / "setup.py")],
+        env=os.environ,
+    )
+    if result.returncode != 0:
+        print("Error: agent sync failed.", file=sys.stderr)
+        sys.exit(1)
 
 
 def main():
@@ -92,28 +57,29 @@ def main():
     parser.add_argument("--poll", action="store_true", help="Poll instead of streaming (default: stream)")
     args = parser.parse_args()
 
-    # Resolve bot token
     bot_token = os.environ.get("AIR_BOT_TOKEN", "")
     if not bot_token:
         print("Error: AIR_BOT_TOKEN not set.", file=sys.stderr)
         sys.exit(1)
 
-    # Always run setup — creates if missing, updates prompts if changed
-    print(f"[1] Syncing agents with latest prompts...")
-    bootstrap()
-    orchestrator = find_agent("air-reviewer")
+    # Step 1: Sync agents (creates if missing, updates prompts if changed)
+    sync_agents()
+
+    # Find orchestrator and environment
+    agents = list_agents()
+    orchestrator = agents.get("air-reviewer")
     env_id = find_environment()
 
     if not orchestrator or not env_id:
-        print("Error: agents not found after setup.", file=sys.stderr)
+        print("Error: agents not found after sync.", file=sys.stderr)
         sys.exit(1)
 
     print(f"  Orchestrator: {orchestrator['id']} (v{orchestrator['version']})")
 
-    # Get PR branch name
+    # Step 2: Get PR branch
     pr_branch = get_pr_branch(args.repo, args.pr_number, bot_token)
 
-    # Create session with repo mounted
+    # Step 3: Create session with repo mounted
     print(f"[2] Creating session for PR #{args.pr_number} on {args.repo}...")
 
     from anthropic import Anthropic
@@ -133,8 +99,9 @@ def main():
     )
     print(f"  Session: {session.id}")
 
-    # Send review task
-    # GH_TOKEN included for gh CLI (git clone/push handled by resource auth)
+    # Step 4: Send review task
+    # GH_TOKEN in message for gh CLI (comments, PR data, review verdicts).
+    # Clone/push auth handled by github_repository resource.
     task = (
         f"Review PR #{args.pr_number} on {args.repo}.\n"
         f"REPO={args.repo}\n"
@@ -143,7 +110,7 @@ def main():
         f"PLATFORM=github\n"
         f"MODE={args.mode}\n\n"
         f"The repo is pre-cloned at /workspace/repo with branch '{pr_branch}' checked out.\n"
-        f"Git push is configured. Set GH_TOKEN above as env var for gh CLI.\n"
+        f"Set GH_TOKEN as env var for gh CLI. Git push auth is pre-configured.\n"
         f"Execute the full review pipeline."
     )
 
@@ -153,7 +120,6 @@ def main():
         events=[{"type": "user.message", "content": [{"type": "text", "text": task}]}],
     )
 
-    # Monitor
     if args.poll:
         poll_session(client, session.id)
     else:
@@ -189,16 +155,15 @@ def stream_session(client, session_id: str):
                 print("\n\nReview complete.")
                 break
             elif t == "session.error":
-                print(f"\n\nSession error.", file=sys.stderr)
-                sys.exit(1)
+                print(f"\n  [session error — continuing]", flush=True)
 
 
 def poll_session(client, session_id: str):
     """Poll for completion."""
     print("[4] Polling (review takes ~5-15 min)...")
-    time.sleep(30)  # initial delay
+    time.sleep(30)
 
-    for i in range(150):  # ~25 min max
+    for i in range(150):
         s = client.beta.sessions.retrieve(session_id)
 
         if s.status == "idle":

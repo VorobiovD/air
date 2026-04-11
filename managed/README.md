@@ -83,8 +83,9 @@ When agent prompts change in the air repo, the workflow auto-updates deployed ag
 
 ## Security
 
-- **Bot token**: passed via `github_repository` resource in the session API request — never appears in the agent's conversation
-- **Permissions**: minimal (contents read+write, issues write, pull_requests write)
+- **Repo clone/push**: authenticated via `github_repository` resource (token in API request, not conversation)
+- **gh CLI (comments, verdicts)**: `GH_TOKEN` passed in session message. This is visible in Anthropic's session logs. Mitigated by: bot account with minimal permissions, classic PAT with `repo` scope only, rotatable.
+- **Permissions**: `repo` scope on bot account (needed for wiki push — fine-grained PATs don't support wiki)
 - **Agent access**: each org's agents are isolated under their own Anthropic API key
 
 ## Cost
