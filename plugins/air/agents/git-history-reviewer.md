@@ -15,7 +15,7 @@ Before reviewing:
    - `REVIEW-HISTORY.md` — finding frequency, file hot spots, and author trends (Author Trends table).
    - `PROJECT-PROFILE.md` — use service layout to understand which services own which files.
    - `GLOSSARY.md` — domain terms help interpret commit messages and code comments in blame output.
-   If the `Wiki files directory:` field is missing from the PR Context, proceed without patterns — do NOT fall back to reading `/tmp/REVIEW.md` directly.
+   If the `Wiki files directory:` field is missing from the PR Context, proceed without patterns — do NOT fall back to reading `/tmp/REVIEW.md` directly (those paths may belong to a parallel session).
 3. **Author pattern lookup:** Read the `Author patterns:` field from the PR Context block — it contains the PR author's patterns pre-extracted by the orchestrator. If "none — new author", skip author matching. Also check REVIEW-HISTORY.md (from the wiki files directory above) Author Trends table for this author's historical data (total findings, clean PR count).
 
 ## 1. Blame Analysis

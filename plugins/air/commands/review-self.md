@@ -6,9 +6,13 @@ When `--self` is passed, this is a completely different flow. No PR needed. Revi
 
 Before any `/tmp` write, mint a per-invocation session dir so parallel `/air:review --self` runs (or a review + self-review in two Claude Code sessions) don't corrupt each other's wiki files and diffs. Claude Code's Bash tool starts a fresh shell per call, so `export` doesn't persist — capture the literal path from the command below and substitute it into every `$AIR_TMP` reference downstream.
 
+If the orchestrator already minted `$AIR_TMP` (e.g. `/air:review --self` routed through review.md Step 0), reuse it — don't double-mint. Otherwise mint a fresh dir:
+
 ```bash
-find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
-AIR_TMP=$(mktemp -d "/tmp/air-self-XXXXXX")
+if [ -z "$AIR_TMP" ]; then
+  find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
+  AIR_TMP=$(mktemp -d "/tmp/air-self-XXXXXX")
+fi
 echo "$AIR_TMP"
 ```
 
@@ -35,7 +39,14 @@ Also generate blame summaries and churn data for the changed files (same as Step
 
 ### Self Step 3: Full Review (4 agents + Codex)
 
-Same quality as PR review. Construct a PR Context block (same structure as Step 7 in `commands/review.md`) with the self-review diff summary, blame summaries, churn data, and wiki page availability flags. Pass this context block to all agents. Launch ALL reviewers in parallel:
+Same quality as PR review. Construct a PR Context block (same structure as Step 7 in `commands/review.md`) with the self-review diff summary, blame summaries, churn data, and — critically — the two-field wiki contract:
+
+```
+- Wiki files directory: <literal $AIR_TMP path — e.g. /tmp/air-self-AbCdEf>
+- Wiki files available in that directory: <list which of REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md, GLOSSARY.md actually exist>
+```
+
+The 5 agents require the literal `Wiki files directory:` field to locate wiki patterns — without it they proceed without patterns. Pass this context block to all agents. Launch ALL reviewers in parallel:
 
 **Agent 1: Code Reviewer** - focused on YOUR changes:
 - Bugs you might have introduced
@@ -126,7 +137,7 @@ If `--fix` was NOT passed:
 WIKI_DIR="$AIR_TMP/review-wiki-self"
 WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 if [ ! -d "$WIKI_DIR/.git" ]; then
-  cd /tmp && git clone --depth 1 "$WIKI_URL" review-wiki-self 2>/dev/null
+  cd "$AIR_TMP" && git clone --depth 1 "$WIKI_URL" review-wiki-self 2>/dev/null
 fi
 cp "$AIR_TMP/REVIEW.md" "$WIKI_DIR/REVIEW.md"
 cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null

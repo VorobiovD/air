@@ -24,6 +24,9 @@ Before any `/tmp` write, mint a per-invocation session dir so a `/air:learn` run
 
 ```bash
 find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
+# Sweep KAIROS cache entries older than 30 days — the cache is persistent across runs
+# (reused for KAIROS history regeneration) but needs bounded growth.
+find "$HOME/.cache/air/kairos" -type f -name '*.json' -mtime +30 -delete 2>/dev/null
 AIR_TMP=$(mktemp -d "/tmp/air-learn-XXXXXX")
 echo "$AIR_TMP"
 ```
@@ -128,7 +131,8 @@ RECENT_PRS=$(gh api "repos/$CURRENT_REPO/pulls?state=closed&per_page=30&sort=upd
 # Fetch issue comments for each PR, cache to temp file, check for air reviews
 # Note: gh api fetches full comment bodies — the jq filter runs client-side on the full response
 REVIEWED_PRS=""
-KAIROS_CACHE="$HOME/.cache/air/kairos"
+# Namespace cache by repo so PR #5 in repo A doesn't collide with PR #5 in repo B
+KAIROS_CACHE="$HOME/.cache/air/kairos/$(echo $CURRENT_REPO | tr / _)"
 mkdir -p "$KAIROS_CACHE"
 for PR_NUM in $RECENT_PRS; do
   gh api "repos/$CURRENT_REPO/issues/$PR_NUM/comments" > "$KAIROS_CACHE/$PR_NUM.json" 2>/dev/null
@@ -160,7 +164,8 @@ for c in comments:
         print(json.dumps({'pr': pr_num, 'body': c['body']}))
 " "$PR_NUM"
 done
-# KAIROS cache persists in $HOME/.cache/air/kairos (reused across runs). Not cleaned up here.
+# KAIROS cache persists under $HOME/.cache/air/kairos/<repo>/ (reused across runs).
+# Cleanup is the Step 0 find-mtime+30 sweep; no per-run cleanup.
 ```
 
 Phase 1 makes 30 API calls (one per PR) and caches the responses. Phase 2 reuses the cached issue comments (0 extra calls) and only fetches inline review comments for reviewed PRs (typically 3-10 calls). Total: ~33-40 calls instead of 60.
@@ -308,7 +313,7 @@ Otherwise, push to the wiki:
 ```bash
 WIKI_DIR="$AIR_TMP/review-wiki-learn"
 if [ ! -d "$WIKI_DIR/.git" ]; then
-  cd /tmp && git clone --depth 1 "$WIKI_URL" review-wiki-learn 2>/dev/null
+  cd "$AIR_TMP" && git clone --depth 1 "$WIKI_URL" review-wiki-learn 2>/dev/null
 fi
 cp "$AIR_TMP/REVIEW.md" "$WIKI_DIR/REVIEW.md"
 cp "$AIR_TMP/REVIEW-HISTORY.md" "$WIKI_DIR/REVIEW-HISTORY.md" 2>/dev/null
@@ -317,7 +322,6 @@ cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
 cp "$AIR_TMP/SEVERITY-CALIBRATION.md" "$WIKI_DIR/SEVERITY-CALIBRATION.md" 2>/dev/null
 cp "$AIR_TMP/GLOSSARY.md" "$WIKI_DIR/GLOSSARY.md" 2>/dev/null
 cd "$WIKI_DIR" && git add REVIEW.md REVIEW-HISTORY.md PROJECT-PROFILE.md ACCEPTED-PATTERNS.md SEVERITY-CALIBRATION.md GLOSSARY.md && { git diff --quiet --cached || git commit -m "review-learn: cleanup + calibration $(date +%Y-%m-%d)"; } && git push
-# Session dir cleanup happens at the end of Step 6 via rm -rf "$AIR_TMP"
 ```
 
 ## Step 7: Update meta

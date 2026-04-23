@@ -1,7 +1,7 @@
 # air — Architecture, Decisions, and Roadmap
 
 **Last updated:** 2026-04-23
-**Version:** 1.5.0
+**Version:** 1.5.1
 
 ---
 
@@ -35,7 +35,7 @@ VorobiovD/air/
 │   │   ├── learn.md                  Wiki maintenance + KAIROS history
 │   │   └── platform-gitlab.md       GitLab CLI/API mappings
 │   └── .claude-plugin/
-│       └── plugin.json             Version 1.5.0
+│       └── plugin.json             Version 1.5.1
 │
 ├── managed/                        ← MANAGED AGENT (Anthropic cloud)
 │   ├── api.py                        Shared helpers: get_headers, list_agents, find_environment

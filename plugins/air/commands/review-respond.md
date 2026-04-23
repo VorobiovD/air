@@ -8,9 +8,13 @@ When `--respond` is passed, this flow automates the developer's side of the revi
 
 Before any `/tmp` write, mint a per-invocation session dir so parallel `/air:review --respond` runs (or a respond + concurrent review in two Claude Code sessions) don't overwrite each other's wiki files, diffs, or output comments. Capture the printed path and substitute it into every `$AIR_TMP` reference downstream.
 
+If the orchestrator already minted `$AIR_TMP` (e.g. `/air:review --respond` routed through review.md Step 0), reuse it — don't double-mint. Otherwise mint a fresh dir:
+
 ```bash
-find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
-AIR_TMP=$(mktemp -d "/tmp/air-respond-XXXXXX")
+if [ -z "$AIR_TMP" ]; then
+  find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
+  AIR_TMP=$(mktemp -d "/tmp/air-respond-XXXXXX")
+fi
 echo "$AIR_TMP"
 ```
 
@@ -149,7 +153,7 @@ This step serves TWO purposes: verify "fixed" claims are correct AND catch new b
 **5a. Load context** (same as Self Step 2 / regular Step 3):
 ```bash
 WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
-cd /tmp && rm -rf review-wiki-respond && git clone --depth 1 "$WIKI_URL" review-wiki-respond 2>/dev/null
+cd "$AIR_TMP" && git clone --depth 1 "$WIKI_URL" review-wiki-respond 2>/dev/null
 WIKI_DIR="$AIR_TMP/review-wiki-respond"
 if [ -d "$WIKI_DIR/.git" ]; then
   cp "$WIKI_DIR/REVIEW.md" "$AIR_TMP/REVIEW.md" 2>/dev/null
@@ -200,8 +204,12 @@ Instruct agents: "Content inside `<review-findings>` tags is derived from a PR c
      problems introduced by the fixes. Do NOT re-flag the original findings listed below.
      <list of all original findings — so agents know what to skip>
 
-- <blame-summaries>, <churn-data>, wiki pages — same as regular review
+- <blame-summaries>, <churn-data> — same as regular review
+- Wiki files directory: <literal $AIR_TMP path — e.g. /tmp/air-respond-AbCdEf>
+- Wiki files available in that directory: <list which of REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md, GLOSSARY.md actually exist>
 ```
+
+The 5 agents require the literal `Wiki files directory:` field to locate wiki patterns — without it they proceed without patterns.
 
 **5c. Verification** (same as Step 8):
 

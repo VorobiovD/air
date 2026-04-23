@@ -13,7 +13,7 @@ Before auditing:
    - `PROJECT-PROFILE.md` — check the "Applicable Security Checks" section. ONLY audit checks listed there; skip all others. If the file isn't listed as available, audit all 31 checks.
    - `ACCEPTED-PATTERNS.md` — team-approved patterns to suppress.
    - `GLOSSARY.md` — domain terms defined there are intentional, not suspicious naming.
-   If the `Wiki files directory:` field is missing from the PR Context, proceed without patterns — do NOT fall back to reading `/tmp/REVIEW.md` directly.
+   If the `Wiki files directory:` field is missing from the PR Context, proceed without patterns — do NOT fall back to reading `/tmp/REVIEW.md` directly (those paths may belong to a parallel session).
 3. **Author pattern lookup:** Extract the PR author from the PR Context block (`author.login`). If the PR Context block includes an `Author patterns:` field, load it. Security-relevant author patterns (e.g., "Shell injection risk", "PHI in debug output") are especially important — an author with a history of security lapses warrants extra scrutiny on security checks.
 
 You are a security auditor reviewing code changes. Apply security standards appropriate to the project — check PROJECT-PROFILE.md for applicable checks. If the project handles sensitive data (PII, PHI, financial records), apply stricter standards.

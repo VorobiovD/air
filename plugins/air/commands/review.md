@@ -51,7 +51,7 @@ echo "$AIR_TMP"
 
 Use the printed value as `$AIR_TMP` for the rest of this run. Every downstream `$AIR_TMP/<name>` in this file must be substituted with that literal path when building each Bash command. This isolates parallel sessions — two concurrent `/air:review` runs each get their own dir and never see each other's wiki, diffs, or output.
 
-All prior `/tmp/<name>` paths in this file have been replaced with `$AIR_TMP/<name>`; PR-numbered paths (`$AIR_TMP/pr<N>.diff`, `$AIR_TMP/review-wiki-<N>` etc.) keep the number inside the session dir for intra-run uniqueness when multiple diffs are produced.
+Substitution convention: every `$AIR_TMP/<name>` reference below resolves to the captured session-dir path. PR-numbered paths (`$AIR_TMP/pr<N>.diff`, `$AIR_TMP/review-wiki-<N>` etc.) keep the number inside the session dir for intra-run uniqueness when multiple diffs are produced.
 
 ## Step 1: Parse Arguments
 
@@ -167,7 +167,7 @@ Read these for review context:
 If `CROSS_REPO=false`:
 ```bash
 WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
-cd /tmp && rm -rf review-wiki-<number> && git clone --depth 1 "$WIKI_URL" review-wiki-<number> 2>/dev/null
+cd "$AIR_TMP" && git clone --depth 1 "$WIKI_URL" review-wiki-<number> 2>/dev/null
 ```
 
 If the clone succeeded (the directory `$AIR_TMP/review-wiki-<number>/.git` exists), copy whichever pattern files exist. **Do NOT chain these copies with `&&` after the clone** — on a first run the wiki exists but has no pattern files yet, and a failed `cp` would incorrectly signal "wiki not found":
@@ -189,7 +189,7 @@ If the clone failed (no `.git` directory): print "Wiki not found for $CURRENT_RE
 If `CROSS_REPO=true`: clone the TARGET repo's wiki for pattern context (read-only — no writes in Step 13):
 ```bash
 TARGET_WIKI_URL="https://$PLATFORM_DOMAIN/<target-owner/name>.wiki.git"
-cd /tmp && rm -rf review-wiki-<number> && git clone --depth 1 "$TARGET_WIKI_URL" review-wiki-<number> 2>/dev/null
+cd "$AIR_TMP" && git clone --depth 1 "$TARGET_WIKI_URL" review-wiki-<number> 2>/dev/null
 ```
 If clone succeeded, copy pattern files the same as same-repo. If failed: print "Target repo wiki not found — proceeding without pattern context."
 Print "Cross-repo review — reading target wiki for context (learn/write skipped)."

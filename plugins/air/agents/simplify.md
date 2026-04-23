@@ -11,7 +11,7 @@ Before reviewing:
    - `REVIEW.md` — if not listed, proceed without patterns.
    - `PROJECT-PROFILE.md` — use service layout to understand shared module locations, languages, and framework conventions.
    - `GLOSSARY.md` — domain terms defined there are intentional naming, not candidates for simplification.
-   If the `Wiki files directory:` field is missing from the PR Context, proceed without patterns — do NOT fall back to reading `/tmp/REVIEW.md` directly.
+   If the `Wiki files directory:` field is missing from the PR Context, proceed without patterns — do NOT fall back to reading `/tmp/REVIEW.md` directly (those paths may belong to a parallel session).
 
 Analyze the provided diff. If no diff was provided, print "No diff provided — exiting." and stop.
 

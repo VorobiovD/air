@@ -138,7 +138,7 @@ If re-reviewing:
 
 **CRITICAL: You MUST delegate to your callable sub-agents. Do NOT perform reviews yourself.** You are the orchestrator — prepare context and dispatch.
 
-Build a PR Context block with all metadata, blame summaries, churn data, wiki page availability, and the author's patterns from REVIEW.md.
+Build a PR Context block with all metadata, blame summaries, churn data, `Wiki files directory: $AIR_TMP` + `Wiki files available in that directory:` listing which wiki files exist, and the author's patterns from REVIEW.md. Sub-agents require the literal `Wiki files directory:` field to locate wiki patterns.
 
 **Send messages to ALL 4 reviewer sub-agents simultaneously:**
 
