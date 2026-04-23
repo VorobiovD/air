@@ -26,8 +26,14 @@ plugins/air/
 │   ├── review-respond.md      # Respond flow (--respond mode)
 │   ├── learn.md               # Wiki maintenance
 │   └── platform-gitlab.md     # GitLab CLI/API/field mappings (reference, not a command)
+├── hooks/               # Pre-commit drift-check hook (v1.6.0+)
+│   ├── hooks.json             # PreToolUse hook registration
+│   ├── pre-commit-drift.py    # Wrapper: narrows to `git commit`, routes custom/built-in
+│   └── builtin-checks.sh      # Zero-config auto-detection (version mirror + badge)
 └── .claude-plugin/
     └── plugin.json      # Plugin metadata (name, version, author)
+
+.air-checks.sh           # Opt-in per-repo drift checks (consumed by the hook above)
 
 .claude-plugin/
 └── marketplace.json     # Marketplace distribution definition
@@ -55,6 +61,8 @@ managed/                          # Managed Agent (CI automation)
 
 **Wiki storage**: Patterns learned from reviews are stored on the repo's wiki (GitHub or GitLab) (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md). Auto-cleanup every 5 reviews tracked in `~/.claude/review-learn-meta.json`.
 
+**Pre-commit drift check** (`hooks/`): A `PreToolUse` hook on `Bash` fires before every Claude-driven `git commit`, runs either a repo-specific `.air-checks.sh` (if executable at repo root) or the plugin's built-in auto-detection (manifest version vs shields badge + `currently X.Y.Z` + `**Version:** X.Y.Z` across `CLAUDE.md`/`README.md`/`docs/**/*.md`). Non-zero exit blocks the commit. `/air:review` Step 3.5 and `/air:learn` Step 4.65 generate/augment `.air-checks.sh` from `PROJECT-PROFILE.md`. `git commit --no-verify` bypasses. See `plugins/air/README.md` for the three-level progression.
+
 ## Development Workflow
 
 - Edit agent files (`agents/*.md`) or command files (`commands/*.md`) directly
@@ -72,6 +80,7 @@ managed/                          # Managed Agent (CI automation)
 - **Self-review mode** (`--self`) outputs a fix plan grouped by file; `--self --fix` auto-applies
 - **Re-review mode** generates inter-diff from `REVIEWED_AT_SHA`, tracks FIXED/NOT FIXED per finding
 - **Respond mode** (`--respond`) automates the developer side — classifies findings, verifies fixes match suggestions, self-checks for regressions, posts parseable response
+- **Pre-commit drift check** (v1.6.0) — plugin-wide `PreToolUse` hook blocks Claude-driven commits on detectable doc/version drift. Zero-config built-ins cover version mirror; opt-in `.air-checks.sh` adds repo-specific greps. Supply-chain note: the custom script executes with user privileges, so treat `.air-checks.sh` edits in incoming PRs as security-sensitive.
 
 ## Conventions
 
@@ -79,5 +88,5 @@ managed/                          # Managed Agent (CI automation)
 - Findings must score 60+ confidence from verifier to appear in output
 - Conflict markers in PR diff = automatic blocker finding
 - Security auditor uses a 31-item checklist; PROJECT-PROFILE.md controls which items apply per repo
-- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.5.1)
+- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.6.0)
 - Install via `/plugin marketplace add VorobiovD/air` then `/plugin install air@air`

@@ -1,0 +1,17 @@
+{
+  "description": "Pre-commit drift check. Runs the repo's .air-checks.sh (if present) before every git commit. Opt-in per repo.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/pre-commit-drift.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

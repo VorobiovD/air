@@ -1,7 +1,7 @@
 # air — Automated Code Review with Verification, Pattern Learning, and Team Knowledge
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.5.1-green.svg)](plugins/air/.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.6.0-green.svg)](plugins/air/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://claude.ai/code)
 [![GitHub](https://img.shields.io/badge/GitHub-supported-black.svg)](https://github.com)
 [![GitLab](https://img.shields.io/badge/GitLab-supported-orange.svg)](https://gitlab.com)
@@ -105,6 +105,8 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 11. **Format** — clickable links with full SHA, sequential numbering across all sections
 12. **Post** — new comment, or PATCH existing (--rewrite), or console-only (--dry-run)
 13. **Learn** — author pattern lifecycle (create/strengthen/decline/archive), wiki push with graduated resistance, auto-trigger full cleanup every 5 reviews
+
+**Pre-commit drift check (v1.6.0+):** A `PreToolUse` hook fires before every Claude-driven `git commit` and runs either a repo's opt-in `.air-checks.sh` or the plugin's built-in auto-detection (manifest-version mirror greps). Step 3.5 and `/air:learn` bootstrap the tailored script from `PROJECT-PROFILE.md`. See [`plugins/air/README.md`](plugins/air/README.md#pre-commit-drift-check-v160) for the three-level progression.
 
 ### Five Specialized Agents
 

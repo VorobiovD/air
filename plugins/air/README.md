@@ -1,7 +1,7 @@
 # air — Automated Code Review with Verification, Pattern Learning, and Team Knowledge
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
-[![Version](https://img.shields.io/badge/version-1.1.0-green.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.6.0-green.svg)](.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://claude.ai/code)
 [![GitHub](https://img.shields.io/badge/GitHub-supported-black.svg)](https://github.com)
 [![GitLab](https://img.shields.io/badge/GitLab-supported-orange.svg)](https://gitlab.com)
@@ -282,6 +282,54 @@ Per review, with v1.5.0 model tiering (Opus 4.7 at $15/$75 per 1M, Sonnet 4.6 at
 At 40 reviews/month: ~$90/month. Model tiering (v1.5.0) removes ~$1/review relative to all-Opus at current 4.7 pricing.
 
 **Timing:** 9-15 minutes per review. All agents run in parallel — the bottleneck is the slowest agent, not the sum.
+
+## Pre-commit Drift Check (v1.6.0+)
+
+The plugin registers a `PreToolUse` hook on `Bash` that fires on every `git commit` (when Claude runs it via the Bash tool). The hook runs drift checks before letting the commit through; a non-zero exit blocks the commit with the output shown to Claude.
+
+This shifts detection of the wiki's `Stale documentation references` and `Flow routing gaps` patterns from **post-hoc reviewer finding** to **pre-commit gate** — no more "grep for the old version before committing" prose advice that nobody follows.
+
+### Three progressively stronger levels
+
+1. **Zero config** — out of the box, the hook runs built-in auto-detection: manifest-file version vs shields.io version badge in README, `currently X.Y.Z` lines in `CLAUDE.md` / `README.md` / `docs/*.md`, and `**Version:** X.Y.Z` markdown headers. Supports `plugin.json`, `package.json`, `pyproject.toml`, `Cargo.toml`, `composer.json` manifests. Catches the most common drift class (version bumps not mirrored in docs) without any setup.
+
+2. **Tailored (auto-generated)** — a `.air-checks.sh` gets generated automatically at two points if one doesn't exist:
+   - First `/air:review` run on your repo — the deep-scan agent that produces `PROJECT-PROFILE.md` + `GLOSSARY.md` also emits `.air-checks.sh` tailored to your project's layout (which manifest, which mirror docs, which sentinel strings).
+   - Any `/air:learn` run — bootstraps from the already-loaded `PROJECT-PROFILE.md` if the file is still missing (e.g., you installed the plugin after the wiki profile already existed, so Step 3.5 never fired on your repo).
+
+   Generated files are written non-executable — review, `chmod +x`, commit to enable.
+
+3. **Custom** — write (or edit) your own `.air-checks.sh` at the repo root. When the hook sees a custom script, it runs *only* that (you take full control). Your script can still delegate to built-ins via `$AIR_PLUGIN_ROOT/hooks/builtin-checks.sh`:
+
+   ```bash
+   #!/bin/bash
+   set -u
+   status=0
+   fail() { printf '  [FAIL] %s\n' "$1" >&2; status=1; }
+
+   # Run built-ins first (version mirror, shields badge, etc.)
+   "$AIR_PLUGIN_ROOT/hooks/builtin-checks.sh" || status=1
+
+   # Your project-specific checks below
+   grep -q "MyCanonicalString" my-contract.md \
+     || fail "my-contract.md missing required canonical string"
+
+   exit $status
+   ```
+
+### Evolution over time
+
+Each `/air:learn` run (periodic, every 5 reviews or 2 days):
+- If `.air-checks.sh` doesn't exist yet → generates one from the wiki's `PROJECT-PROFILE.md` (see point 2 above).
+- If it exists → inspects recurring Author Patterns in your wiki `REVIEW.md` and, if it sees codifiable drift (e.g., "Stale documentation references" flagged 3+ times with specific mirror-file shape), appends **commented-out** suggestions at the bottom for you to review-and-uncomment. Suggestions are capped at 3 per run and de-duplicated against existing content.
+
+### Controls
+
+- **Bypass:** `git commit --no-verify` skips the check entirely.
+- **Disable:** create an empty executable `.air-checks.sh` with just `exit 0` — the hook runs that and returns clean.
+- **Not executable:** if `.air-checks.sh` exists but isn't `chmod +x`, the hook prints a nudge and falls back to built-ins so you still get protection while you finish reviewing the auto-generated script.
+
+See `.air-checks.sh` in the air repo itself for a real-world extension example (version consistency from built-ins + air-specific convention-enforcement greps).
 
 ## Standalone Wiki Cleanup
 
