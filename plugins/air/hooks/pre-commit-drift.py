@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PreToolUse hook: runs the repo's `.air-checks.sh` before `git commit`.
+PreToolUse hook: runs drift checks before `git commit`.
 
 Contract:
 - Stdin: JSON with {session_id, tool_name, tool_input: {command}}
@@ -9,12 +9,17 @@ Contract:
 
 Behavior:
 - Fires only when tool_name == "Bash" AND command starts with `git commit`
-  (not `git commit-tree`, `git commit-graph`, etc. — only the commit verb)
-- Does nothing unless `.air-checks.sh` exists at the repo root (opt-in)
-- Runs the script from the repo root; if it exits non-zero, the commit
-  is blocked and the script's output is shown
-
-Skip with --no-verify on the git commit call if needed.
+  (not `git commit-tree`/`git commit-graph`)
+- `--no-verify` on the commit bypasses the check entirely
+- Lookup order for what to run:
+    1. If `.air-checks.sh` at repo root is executable → run only that
+    2. Else if `.air-checks.sh` exists but NOT executable → print nudge,
+       run built-ins (give the user zero-config protection even while their
+       custom script is half-installed)
+    3. Else → run built-ins
+- Built-ins live at `$AIR_PLUGIN_ROOT/hooks/builtin-checks.sh`. The hook
+  exports `AIR_PLUGIN_ROOT` so user scripts can delegate to built-ins via:
+      "$AIR_PLUGIN_ROOT/hooks/builtin-checks.sh" || status=1
 """
 
 import json
@@ -25,6 +30,29 @@ import sys
 
 
 GIT_COMMIT_RE = re.compile(r"(?:^|[\s;&|])git\s+commit(?:\s|$|-m|--)")
+
+# AIR_PLUGIN_ROOT is the plugins/air/ directory (parent of hooks/ which
+# contains this script).
+AIR_PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BUILTIN_CHECKS = os.path.join(AIR_PLUGIN_ROOT, "hooks", "builtin-checks.sh")
+
+
+def run_script(path, cwd):
+    """Run a shell script; return (rc, stdout, stderr). Timeout at 25s."""
+    env = os.environ.copy()
+    env["AIR_PLUGIN_ROOT"] = AIR_PLUGIN_ROOT
+    try:
+        result = subprocess.run(
+            ["/bin/bash", path],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=25,
+        )
+    except subprocess.TimeoutExpired:
+        return 1, "", f"air drift-check: {path} timed out after 25s"
+    return result.returncode, result.stdout, result.stderr
 
 
 def main():
@@ -40,7 +68,6 @@ def main():
     if not GIT_COMMIT_RE.search(cmd):
         sys.exit(0)
 
-    # If the user is intentionally bypassing hooks, honor that.
     if "--no-verify" in cmd:
         sys.exit(0)
 
@@ -52,36 +79,45 @@ def main():
     except (subprocess.CalledProcessError, FileNotFoundError):
         sys.exit(0)
 
-    script = os.path.join(repo_root, ".air-checks.sh")
-    if not os.path.isfile(script):
-        sys.exit(0)
+    custom = os.path.join(repo_root, ".air-checks.sh")
+    custom_exists = os.path.isfile(custom)
+    custom_executable = custom_exists and os.access(custom, os.X_OK)
 
-    if not os.access(script, os.X_OK):
-        print(
-            f"air drift-check: {script} exists but is not executable. "
-            f"Run `chmod +x {script}` or delete it.",
-            file=sys.stderr,
+    preamble = []  # non-blocking messages to surface alongside any failure
+    if custom_exists and not custom_executable:
+        preamble.append(
+            f"air drift-check: {custom} is present but not executable. "
+            f"`chmod +x .air-checks.sh` to enable it. "
+            f"Running built-in auto-detection in the meantime."
         )
-        sys.exit(2)
 
-    result = subprocess.run(
-        [script],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        timeout=25,
-    )
+    if custom_executable:
+        rc, out, err = run_script(custom, cwd=repo_root)
+        source = ".air-checks.sh"
+    else:
+        if not os.path.isfile(BUILTIN_CHECKS):
+            # Plugin files missing — silently allow (don't break commits if
+            # the plugin is half-installed).
+            sys.exit(0)
+        rc, out, err = run_script(BUILTIN_CHECKS, cwd=repo_root)
+        source = "built-in auto-detection"
 
-    if result.returncode == 0:
+    if rc == 0:
+        # All clear. Surface the preamble if any (non-blocking info).
+        if preamble:
+            for msg in preamble:
+                print(msg, file=sys.stderr)
         sys.exit(0)
 
-    # Blocked. Surface the script's output so Claude sees what failed.
-    print("air drift-check blocked the commit:", file=sys.stderr)
+    # Drift detected. Block with combined output.
+    for msg in preamble:
+        print(msg, file=sys.stderr)
+    print(f"air drift-check blocked the commit ({source}):", file=sys.stderr)
     print("", file=sys.stderr)
-    if result.stdout:
-        print(result.stdout.rstrip(), file=sys.stderr)
-    if result.stderr:
-        print(result.stderr.rstrip(), file=sys.stderr)
+    if out:
+        print(out.rstrip(), file=sys.stderr)
+    if err:
+        print(err.rstrip(), file=sys.stderr)
     print("", file=sys.stderr)
     print(
         "Fix the issues above, or pass --no-verify to bypass this check intentionally.",

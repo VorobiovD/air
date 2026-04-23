@@ -261,6 +261,48 @@ For any agent+category not listed above: use threshold 60.
 
 If fewer than 10 total data points across all agents, skip this step entirely — insufficient data for calibration.
 
+## Step 4.65: Augment .air-checks.sh with pattern-derived suggestions
+
+**Only run if `$REPO_ROOT/.air-checks.sh` exists** (Step 3.5 owns bootstrap; augmentation never creates the file). Skip if `CROSS_REPO=true`.
+
+Inspect recurring Author Patterns in the cleaned REVIEW.md — specifically entries with `(Nx: ...)` where `N >= 3`. For each pattern with a concrete drift shape that can be codified as a shell grep (most commonly "Stale documentation references" with a specific mirror-file or version-string shape), propose a commented-out check to append at the bottom of `.air-checks.sh`.
+
+**Rules:**
+
+- Read the existing `.air-checks.sh`. Parse its content to identify:
+  - Checks already active (uncommented `grep` / `fail` lines)
+  - Suggestions already appended in prior runs (commented lines starting with `# Suggested by /air:learn`)
+- De-duplicate: if a suggestion's grep pattern is already present (active OR commented), do NOT re-append.
+- For each new qualifying pattern, append a block like:
+  ```
+  # Suggested by /air:learn (<date>): based on <N> recurring findings in "<Pattern name>".
+  # Uncomment to enable:
+  # <grep command> \
+  #   || fail "<specific failure message>"
+  ```
+- Cap at **3 new suggestions per run** — avoid flooding. If more qualify, pick the N highest-count patterns.
+- Only derive suggestions from Author Patterns whose description mentions specific file paths, version strings, sentinel phrases, or mirror-file concepts. Skip vague patterns ("code quality", "error handling") — they don't map cleanly to greps.
+
+**Output:**
+- Append to `$REPO_ROOT/.air-checks.sh` (not the wiki).
+- Preserve the file's existing mode (don't chmod).
+- Print: `"Appended N drift-check suggestions to .air-checks.sh (commented). Review + uncomment to enable."`
+
+**Example** — if REVIEW.md has:
+```
+- **Stale documentation references** (5x: #1, #11, #12, #20, #21 | 0 clean): ... specifics include "plugin.json version not mirrored in plugins/air/README.md badge" ...
+```
+then append:
+```
+# Suggested by /air:learn (2026-04-23): based on 5 recurring findings in "Stale documentation references".
+# Uncomment to enable:
+# VERSION=$(python3 -c "import json; print(json.load(open('plugins/air/.claude-plugin/plugin.json'))['version'])" 2>/dev/null)
+# grep -q "version-${VERSION//./\\.}-" plugins/air/README.md \
+#   || fail "plugins/air/README.md badge does not match plugin.json version $VERSION"
+```
+
+The user reads the suggestion on their next pull/pre-commit, decides whether to uncomment, and commits.
+
 ## Step 4.7: Refresh GLOSSARY.md
 
 **Only run if `$AIR_TMP/GLOSSARY.md` exists** (first-run already created it).

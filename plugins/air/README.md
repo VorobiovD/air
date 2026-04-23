@@ -283,37 +283,47 @@ At 40 reviews/month: ~$90/month. Model tiering (v1.5.0) removes ~$1/review relat
 
 **Timing:** 9-15 minutes per review. All agents run in parallel — the bottleneck is the slowest agent, not the sum.
 
-## Pre-commit Drift Check (opt-in, v1.6.0+)
+## Pre-commit Drift Check (v1.6.0+)
 
-The plugin registers a `PreToolUse` hook on `Bash` that fires on every `git commit` (when Claude runs it via the Bash tool). If your repo contains an executable `.air-checks.sh` at its root, the hook runs it before the commit — a non-zero exit blocks the commit with the script's output shown to Claude.
+The plugin registers a `PreToolUse` hook on `Bash` that fires on every `git commit` (when Claude runs it via the Bash tool). The hook runs drift checks before letting the commit through; a non-zero exit blocks the commit with the output shown to Claude.
 
-This addresses a recurring problem the review pipeline catches *post-hoc* (wiki `Stale documentation references` + `Flow routing gaps` patterns) — by the time a human reviews, the drift is already pushed. The hook shifts detection to *pre-commit*, running the exact greps the wiki advises.
+This shifts detection of the wiki's `Stale documentation references` and `Flow routing gaps` patterns from **post-hoc reviewer finding** to **pre-commit gate** — no more "grep for the old version before committing" prose advice that nobody follows.
 
-**Opt in for your repo:** create `.air-checks.sh` at the repo root with whatever checks you care about, and `chmod +x` it. Minimal example:
+### Three progressively stronger levels
 
-```bash
-#!/bin/bash
-# .air-checks.sh — runs before every Claude-driven git commit
+1. **Zero config** — out of the box, the hook runs built-in auto-detection: manifest-file version vs shields.io version badge in README, `currently X.Y.Z` lines in `CLAUDE.md` / `README.md` / `docs/*.md`, and `**Version:** X.Y.Z` markdown headers. Supports `plugin.json`, `package.json`, `pyproject.toml`, `Cargo.toml`, `composer.json` manifests. Catches the most common drift class (version bumps not mirrored in docs) without any setup.
 
-set -u
-status=0
-fail() { printf '  [FAIL] %s\n' "$1" >&2; status=1; }
+2. **Tailored (auto-generated)** — the first time `/air:review` runs on your repo, the deep-scan agent that generates `PROJECT-PROFILE.md` + `GLOSSARY.md` also emits a `.air-checks.sh` tailored to your project's layout (which manifest, which mirror docs, which sentinel strings matter). File is written non-executable — you review it, `chmod +x`, commit to enable.
 
-# Version in package.json must appear in README badge
-VERSION=$(python3 -c "import json; print(json.load(open('package.json'))['version'])" 2>/dev/null)
-if [ -n "$VERSION" ]; then
-  grep -q "version-${VERSION//./\\.}" README.md \
-    || fail "README.md badge does not match package.json version $VERSION"
-fi
+3. **Custom** — write (or edit) your own `.air-checks.sh` at the repo root. When the hook sees a custom script, it runs *only* that (you take full control). Your script can still delegate to built-ins via `$AIR_PLUGIN_ROOT/hooks/builtin-checks.sh`:
 
-exit $status
-```
+   ```bash
+   #!/bin/bash
+   set -u
+   status=0
+   fail() { printf '  [FAIL] %s\n' "$1" >&2; status=1; }
 
-**Bypass:** `git commit --no-verify` skips the check. The hook honors this automatically.
+   # Run built-ins first (version mirror, shields badge, etc.)
+   "$AIR_PLUGIN_ROOT/hooks/builtin-checks.sh" || status=1
 
-**Zero config:** without `.air-checks.sh` the hook is a no-op — no noise for repos that haven't opted in.
+   # Your project-specific checks below
+   grep -q "MyCanonicalString" my-contract.md \
+     || fail "my-contract.md missing required canonical string"
 
-See `.air-checks.sh` in the air repo itself for a real-world example (version consistency + convention-enforcement greps).
+   exit $status
+   ```
+
+### Evolution over time
+
+On each `/air:learn` run (periodic, every 5 reviews or 2 days), the plugin inspects recurring Author Patterns in your wiki REVIEW.md and, if it sees codifiable drift (e.g., "Stale documentation references" flagged 3+ times with specific mirror-file shape), appends **commented-out** suggestions at the bottom of `.air-checks.sh` for you to review-and-uncomment. Suggestions are capped at 3 per run and de-duplicated against existing content.
+
+### Controls
+
+- **Bypass:** `git commit --no-verify` skips the check entirely.
+- **Disable:** create an empty executable `.air-checks.sh` with just `exit 0` — the hook runs that and returns clean.
+- **Not executable:** if `.air-checks.sh` exists but isn't `chmod +x`, the hook prints a nudge and falls back to built-ins so you still get protection while you finish reviewing the auto-generated script.
+
+See `.air-checks.sh` in the air repo itself for a real-world extension example (version consistency from built-ins + air-specific convention-enforcement greps).
 
 ## Standalone Wiki Cleanup
 
