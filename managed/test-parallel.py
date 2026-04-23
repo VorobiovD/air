@@ -12,39 +12,21 @@ Each sub-agent sleeps SLEEP_SECONDS seconds then returns.
 
 Usage:
     export ANTHROPIC_API_KEY=sk-ant-...
-    python test-parallel.py [sleep_seconds]   # default 10
-
-Cleanup: the test agents persist in your account. Delete manually or via:
-    python test-parallel.py --cleanup
+    python test-parallel.py [sleep_seconds]          # default 10, auto-cleans up
+    python test-parallel.py [sleep_seconds] --keep   # retain test agents
+    python test-parallel.py --cleanup                # remove test agents
 """
 
-import os
 import sys
 import time
 
 import requests as req
 
+from api import API_BASE, get_headers, list_agents, find_environment
 from setup import MODEL_ALIASES
-
-API_BASE = "https://api.anthropic.com/v1"
-HEADERS = {
-    "anthropic-version": "2023-06-01",
-    "anthropic-beta": "managed-agents-2026-04-01",
-    "content-type": "application/json",
-}
 
 SUB_AGENT_NAMES = [f"air-test-parallel-sub{i}" for i in range(1, 5)]
 ORCHESTRATOR_NAME = "air-test-parallel-orchestrator"
-
-
-def get_headers():
-    return {**HEADERS, "x-api-key": os.environ["ANTHROPIC_API_KEY"]}
-
-
-def list_agents() -> dict:
-    resp = req.get(f"{API_BASE}/agents", headers=get_headers())
-    resp.raise_for_status()
-    return {a["name"]: a for a in resp.json().get("data", []) if not a.get("archived_at")}
 
 
 def delete_agent(agent_id: str) -> None:
@@ -66,7 +48,7 @@ def create_or_reuse_sub_agent(name: str, sleep_seconds: int, existing: dict) -> 
         return existing[name]
     body = {
         "name": name,
-        "model": MODEL_ALIASES["haiku"],  # cheapest; this agent does almost nothing
+        "model": MODEL_ALIASES["haiku"],
         "system": (
             f"You are test sub-agent {name}. When called, record the current time as START, "
             f"then run exactly one bash command: `sleep {sleep_seconds}`. After it completes, "
@@ -104,8 +86,10 @@ def create_or_reuse_orchestrator(sub_refs: list[dict], existing: dict) -> dict:
         if resp.ok:
             print(f"  reusing {ORCHESTRATOR_NAME} → {agent['id']} (synced)")
             return resp.json()
-        # fall through to recreate
+        # Update failed — delete the old agent and drop it from the local dict
+        # so the create-new branch below doesn't see a stale entry.
         delete_agent(agent["id"])
+        existing.pop(ORCHESTRATOR_NAME, None)
 
     body = {
         "name": ORCHESTRATOR_NAME,
@@ -140,12 +124,7 @@ def run(sleep_seconds: int):
     orch = create_or_reuse_orchestrator(sub_refs, existing)
 
     print("\n[3] Finding environment")
-    resp = req.get(f"{API_BASE}/environments", headers=get_headers())
-    env_id = None
-    for e in resp.json().get("data", []):
-        if e["name"] == "air-review-env" and not e.get("archived_at"):
-            env_id = e["id"]
-            break
+    env_id = find_environment()
     if not env_id:
         print("  Error: no environment found. Run `python setup.py` first.", file=sys.stderr)
         sys.exit(1)
@@ -221,8 +200,15 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--cleanup":
         cleanup()
         return
-    sleep_seconds = int(sys.argv[1]) if len(sys.argv) > 1 else 10
-    run(sleep_seconds)
+    keep = "--keep" in sys.argv[1:]
+    positional = [a for a in sys.argv[1:] if not a.startswith("--")]
+    sleep_seconds = int(positional[0]) if positional else 10
+    try:
+        run(sleep_seconds)
+    finally:
+        if not keep:
+            print("\n[cleanup] removing test agents (pass --keep to retain)")
+            cleanup()
 
 
 if __name__ == "__main__":
