@@ -37,17 +37,25 @@ from anthropic import Anthropic, AsyncAnthropic
 from api import list_agents, find_environment
 
 
-# Tracks live session IDs so atexit/signal handlers can send interrupts to
+# Tracks live session IDs so cleanup handlers can send interrupts to
 # anything still running when the driver dies unexpectedly (CI job killed,
 # Ctrl-C, uncaught exception). Without this, an orphan session keeps running
 # on Anthropic's side until its own idle timeout — burning tokens and
 # blocking DELETE /sessions/{id} for ~5 minutes.
+#
+# Lifecycle rule (enforced by run_session): only remove from this set when
+# the session has clearly reached idle on Anthropic's side. Any exception,
+# error event, timeout, or unknown-idle stop reason leaves the id tracked
+# so the cleanup handlers interrupt it.
 LIVE_SESSIONS: set[str] = set()
 
 
-def _interrupt_live_sessions() -> None:
-    """Best-effort interrupt of any still-running sessions. Sync client
-    because atexit runs after the asyncio loop is gone."""
+def _interrupt_live_sessions_sync() -> None:
+    """Best-effort sync interrupt of any still-tracked sessions.
+
+    Registered via atexit in main(). Uses the sync Anthropic client because
+    atexit runs after the asyncio loop has been torn down.
+    """
     if not LIVE_SESSIONS:
         return
     print(f"  [shutdown] interrupting {len(LIVE_SESSIONS)} live session(s)", file=sys.stderr)
@@ -60,17 +68,45 @@ def _interrupt_live_sessions() -> None:
     LIVE_SESSIONS.clear()
 
 
-atexit.register(_interrupt_live_sessions)
+async def _interrupt_session_async(client, session_id: str) -> None:
+    """Fire-and-forget async interrupt from inside the event loop.
+
+    Used to promptly terminate orphaned specialist sessions mid-review
+    (e.g. after a specialist times out) so they don't burn tokens while
+    Phase 2's verifier runs.
+    """
+    try:
+        await client.beta.sessions.events.send(
+            session_id, events=[{"type": "user.interrupt"}]
+        )
+    except Exception as e:
+        print(f"  [interrupt] {session_id}: {e}", file=sys.stderr)
+    finally:
+        LIVE_SESSIONS.discard(session_id)
 
 
-def _signal_handler(signum, _frame):
-    _interrupt_live_sessions()
-    sys.exit(128 + signum)
+def _install_shutdown_handlers() -> None:
+    """Register shutdown hygiene. Called from main() — not at import time —
+    so test harnesses and other importers don't inherit the SIGTERM handler
+    or atexit registration.
 
+    Design:
+    - SIGTERM (CI job kill): install a handler that raises SystemExit, which
+      lets asyncio cancel pending tasks and run their finally blocks.
+      Without a handler, Python's default terminates the process without
+      running atexit, leaving every session orphaned.
+    - SIGINT (Ctrl-C): do NOT override — Python's default raises
+      KeyboardInterrupt which asyncio already converts to CancelledError,
+      propagating through `async with stream_cm` cleanup paths.
+    - atexit fires after asyncio shuts down and is our last-resort sync
+      cleanup for anything that leaked past async teardown.
+    """
+    atexit.register(_interrupt_live_sessions_sync)
 
-# SIGKILL can't be caught; SIGTERM/SIGINT cover most CI-level kills + Ctrl-C.
-signal.signal(signal.SIGTERM, _signal_handler)
-signal.signal(signal.SIGINT, _signal_handler)
+    def _sigterm_to_systemexit(signum, _frame):
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _sigterm_to_systemexit)
 
 
 SPECIALIST_AGENTS = [
@@ -247,66 +283,63 @@ async def run_session(
     )
     LIVE_SESSIONS.add(session.id)
 
-    try:
-        await client.beta.sessions.events.send(
-            session.id,
-            events=[{"type": "user.message", "content": [{"type": "text", "text": user_text}]}],
-        )
+    await client.beta.sessions.events.send(
+        session.id,
+        events=[{"type": "user.message", "content": [{"type": "text", "text": user_text}]}],
+    )
 
-        # Stop reasons we treat as a clean end-of-turn. Anything else (explicit
-        # error, cancelled, unknown future types) is surfaced to the caller so
-        # gather() can record a degraded specialist note instead of silently
-        # reporting empty findings as a successful review.
-        TERMINAL_SUCCESS = {"end_turn", "stop_sequence", "max_tokens"}
+    # Stop reasons we treat as a clean end-of-turn. Anything else (explicit
+    # error, cancelled, unknown future types) is surfaced to the caller so
+    # gather() can record a degraded specialist note instead of silently
+    # reporting empty findings as a successful review.
+    TERMINAL_SUCCESS = {"end_turn", "stop_sequence", "max_tokens"}
 
-        parts: list[str] = []
-        terminated_reason: str | None = None
-        # AsyncAnthropic's beta.sessions.events.stream is an `async def` that
-        # returns an AsyncStream — must await it before using as a context
-        # manager (it isn't itself the context manager).
-        stream_cm = await client.beta.sessions.events.stream(session.id)
-        async with stream_cm as stream:
-            async for event in stream:
-                t = getattr(event, "type", "")
-                if t == "agent.message":
-                    for block in event.content:
-                        text = getattr(block, "text", None)
-                        if text:
-                            parts.append(text)
-                elif t == "session.status_idle":
-                    stop_reason = getattr(event, "stop_reason", None)
-                    stop_type = getattr(stop_reason, "type", None) if stop_reason else None
-                    if stop_type == "requires_action":
-                        # Transient idle waiting for client-side events; we
-                        # don't send any here, so keep draining the stream.
-                        continue
-                    if stop_type in TERMINAL_SUCCESS:
-                        break
-                    terminated_reason = f"idle with stop_reason={stop_type!r}"
+    parts: list[str] = []
+    terminated_reason: str | None = None
+    # AsyncAnthropic's beta.sessions.events.stream is an `async def` that
+    # returns an AsyncStream — must await it before using as a context
+    # manager (it isn't itself the context manager).
+    stream_cm = await client.beta.sessions.events.stream(session.id)
+    async with stream_cm as stream:
+        async for event in stream:
+            t = getattr(event, "type", "")
+            if t == "agent.message":
+                for block in event.content:
+                    text = getattr(block, "text", None)
+                    if text:
+                        parts.append(text)
+            elif t == "session.status_idle":
+                stop_reason = getattr(event, "stop_reason", None)
+                stop_type = getattr(stop_reason, "type", None) if stop_reason else None
+                if stop_type == "requires_action":
+                    # Transient idle waiting for client-side events; we
+                    # don't send any here, so keep draining the stream.
+                    continue
+                if stop_type in TERMINAL_SUCCESS:
                     break
-                elif t == "session.status_terminated":
-                    terminated_reason = "session terminated"
-                    break
-                elif t == "session.error":
-                    terminated_reason = f"session error: {getattr(event, 'error', '?')}"
-                    break
+                terminated_reason = f"idle with stop_reason={stop_type!r}"
+                break
+            elif t == "session.status_terminated":
+                terminated_reason = "session terminated"
+                break
+            elif t == "session.error":
+                terminated_reason = f"session error: {getattr(event, 'error', '?')}"
+                break
 
-        # Stream broke cleanly (terminal or error event) — session reached
-        # idle on Anthropic's side, safe to drop from LIVE_SESSIONS.
-        # Exception paths (cancellation, timeout) skip this and leave the id
-        # in LIVE_SESSIONS so atexit/signal handlers can interrupt it.
+    # Only drop from LIVE_SESSIONS on clean success. Error events, unknown
+    # idle states, timeouts, cancellations, and any exception during the
+    # stream all leave the id tracked so the cleanup handlers can interrupt
+    # it. Anthropic docs don't guarantee `session.error` implies server-side
+    # termination, and an extra interrupt on an already-idle session is a
+    # cheap no-op.
+    if terminated_reason is None:
         LIVE_SESSIONS.discard(session.id)
 
-        output = "".join(parts).strip()
-        if terminated_reason and not output:
-            raise SpecialistSessionError(label, terminated_reason)
-        print(f"  [done] {label}")
-        return output
-    except BaseException:
-        # On any exception (including CancelledError), leave the session in
-        # LIVE_SESSIONS so the shutdown handler interrupts it. Re-raise so
-        # asyncio.gather(return_exceptions=True) can record the failure.
-        raise
+    output = "".join(parts).strip()
+    if terminated_reason and not output:
+        raise SpecialistSessionError(label, terminated_reason)
+    print(f"  [done] {label}")
+    return output
 
 
 async def run_review(args):
@@ -374,6 +407,18 @@ async def run_review(args):
 
         status = f"{len(SPECIALIST_AGENTS) - len(degraded)}/{len(SPECIALIST_AGENTS)} specialists ok"
         print(f"  All specialists complete in {elapsed:.1f}s ({status})")
+
+        # Interrupt any specialist sessions that timed out, errored, or hit
+        # an unknown-idle state. Doing this between phases (instead of
+        # deferring to atexit) stops them from burning tokens through the
+        # verifier phase, which can itself run up to SESSION_TIMEOUT_SECS.
+        orphans = list(LIVE_SESSIONS)
+        if orphans:
+            print(f"  [cleanup] interrupting {len(orphans)} orphan specialist session(s)")
+            await asyncio.gather(
+                *(_interrupt_session_async(client, sid) for sid in orphans),
+                return_exceptions=True,
+            )
 
         # Phase 2: verifier sequential
         print(f"\n[4] Running verifier on consolidated findings...")
@@ -508,6 +553,7 @@ def main():
         print("Error: ANTHROPIC_API_KEY not set.", file=sys.stderr)
         sys.exit(1)
 
+    _install_shutdown_handlers()
     asyncio.run(run_review(args))
 
 
