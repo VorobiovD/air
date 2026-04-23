@@ -46,6 +46,7 @@ Two commands become available: `/air:review` and `/air:learn`. To enable auto-up
 /air:review --fresh                    # Full review from scratch, new comment
 /air:review --rewrite                  # Full review, edit existing comment in place
 /air:review --respond                  # Reply to review: classify findings + self-check + push
+/air:review --respond --dry-run        # Preview response without posting
 /air:review --full                     # Review entire codebase (first-time audit)
 /air:review --dry-run                  # Print to console, don't post online
 /air:review --no-codex                 # Skip Codex review pass
@@ -82,10 +83,10 @@ This reads the existing review, then for each finding:
 - **Auto-classifies** as fixed/unfixed by checking if the flagged code changed
 - **Verifies fixes** are correct — compares what was done vs what was suggested
 - **Asks you** about unfixed findings (dispute/acknowledge/won't-fix) for non-obvious cases
-- **Runs the full review pipeline** on your fix diff to catch regressions
+- **Scales self-check by diff size** — small fixes (< 50 lines) run code-reviewer + verifier only; larger diffs get the full 4-agent panel
 - **Detects additional changes** beyond the fixes (refactors, new features) and lists them
 
-Posts a structured response the reviewer's re-review can parse directly, then pushes the branch.
+Posts a structured response the reviewer's re-review can parse directly, then pushes the branch. Use `--respond --dry-run` to preview without posting.
 
 ## How It Works
 
@@ -95,10 +96,10 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 2. **Smart default** — detect existing reviews, auto re-review or self-review
 3. **Load context** — CLAUDE.md, wiki patterns (REVIEW.md), finding history (REVIEW-HISTORY.md), project memory, session context
 4. **Fetch** — batched API call (1 call for all metadata), diff, commits, blame summaries, file churn, previous PR comments, CI status, file statuses (A/M/D/R)
-5. **Pre-flight** — CI failures flagged to agents, conflict markers = automatic blocker, file complexity alerts
+5. **Pre-flight** — CI failures flagged to agents, conflict markers = automatic blocker, file complexity alerts, pure-promotion PR detection
 6. **Re-review** — inter-diff generation, developer response parsing, FIXED/NOT FIXED/DISPUTED tracking
 7. **Review** — 5 agents + Codex in parallel, each receives full PR Context block including history data
-8. **Verify** — dedicated verification agent filters false positives with git blame decision tree
+8. **Verify** — dedicated verification agent filters false positives with git blame decision tree. Bootstrap calibration defaults when no severity data exists.
 9. **Attribution** — console-only table showing which agent found what (never posted)
 10. **Consolidate** — deduplicate, assign severity, generate Strengths section
 11. **Format** — clickable links with full SHA, sequential numbering across all sections
@@ -268,7 +269,7 @@ Review your own code before pushing:
 /air:review --self --fix    # Get a fix plan + auto-apply fixes
 ```
 
-Same quality as PR review (all 5 agents + Codex + verifier). Output is a fix plan with exact current/replacement code for each finding, grouped by file.
+Same quality as PR review (all 5 agents + Codex + verifier). Output is a fix plan with exact current/replacement code for each finding, grouped by file. Never posts a PR comment — wiki pattern updates still push.
 
 ## Cross-Repo Reviews
 
@@ -279,7 +280,7 @@ Review PRs from other repos without switching directories:
 /air:review https://gitlab.com/group/other-project/-/merge_requests/45
 ```
 
-Gracefully skips data that requires a local checkout (blame, churn, file statuses) and falls back to API-only data. Wiki patterns are skipped (repo-specific).
+Gracefully skips data that requires a local checkout (blame, churn, file statuses) and falls back to API-only data. Reads the target repo's wiki for pattern context (author patterns, project profile, accepted patterns). Wiki writes are skipped to avoid cross-pollination.
 
 ## Cost
 
