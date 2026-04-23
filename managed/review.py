@@ -59,30 +59,36 @@ def _interrupt_live_sessions_sync() -> None:
     if not LIVE_SESSIONS:
         return
     print(f"  [shutdown] interrupting {len(LIVE_SESSIONS)} live session(s)", file=sys.stderr)
-    client = Anthropic()
+    # Tight per-request timeout + no retries so a slow/unreachable API can't
+    # block atexit for minutes while the CI runner's grace window ticks down
+    # to SIGKILL. The except branch handles failure.
+    client = Anthropic(timeout=10.0, max_retries=0)
     for sid in list(LIVE_SESSIONS):
         try:
             client.beta.sessions.events.send(sid, events=[{"type": "user.interrupt"}])
+            LIVE_SESSIONS.discard(sid)
         except Exception as e:
+            # Leave failed sids in LIVE_SESSIONS — the process is exiting
+            # anyway, so there's no later retry path, but clearing would
+            # lose information for operator follow-up.
             print(f"  [shutdown] interrupt failed for {sid}: {e}", file=sys.stderr)
-    LIVE_SESSIONS.clear()
 
 
-async def _interrupt_session_async(client, session_id: str) -> None:
+async def _interrupt_session_async(client: "AsyncAnthropic", session_id: str) -> None:
     """Fire-and-forget async interrupt from inside the event loop.
 
     Used to promptly terminate orphaned specialist sessions mid-review
     (e.g. after a specialist times out) so they don't burn tokens while
-    Phase 2's verifier runs.
+    Phase 2's verifier runs. Discard is inside the try — a transient API
+    error leaves the id tracked so the atexit fallback gets another shot.
     """
     try:
         await client.beta.sessions.events.send(
             session_id, events=[{"type": "user.interrupt"}]
         )
+        LIVE_SESSIONS.discard(session_id)
     except Exception as e:
         print(f"  [interrupt] {session_id}: {e}", file=sys.stderr)
-    finally:
-        LIVE_SESSIONS.discard(session_id)
 
 
 def _install_shutdown_handlers() -> None:
@@ -107,6 +113,10 @@ def _install_shutdown_handlers() -> None:
         sys.exit(128 + signum)
 
     signal.signal(signal.SIGTERM, _sigterm_to_systemexit)
+    # SIGHUP covers parent-shell death and some container stop sequences.
+    # Guarded for Windows (no SIGHUP on that platform).
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _sigterm_to_systemexit)
 
 
 SPECIALIST_AGENTS = [
@@ -261,27 +271,36 @@ async def run_session(
     (Managed Agents treats a 404 on push-only wikis as an empty mount).
     """
     print(f"  [launch] {label}")
-    session = await client.beta.sessions.create(
-        agent={"type": "agent", "id": agent_id, "version": agent_version},
-        environment_id=env_id,
-        title=f"{label} — {repo}",
-        resources=[
-            {
-                "type": "github_repository",
-                "url": f"https://github.com/{repo}",
-                "authorization_token": bot_token,
-                "checkout": {"type": "branch", "name": pr_branch},
-                "mount_path": "/workspace/repo",
-            },
-            {
-                "type": "github_repository",
-                "url": f"https://github.com/{repo}.wiki",
-                "authorization_token": bot_token,
-                "mount_path": "/workspace/wiki",
-            },
-        ],
-    )
-    LIVE_SESSIONS.add(session.id)
+    # try/finally ensures LIVE_SESSIONS.add is reached as soon as session.id
+    # is known, even if SystemExit (from a SIGTERM) fires between create()
+    # returning and the next statement. Without this guard, a signal at
+    # that narrow race window leaves a session live on Anthropic's side
+    # but untracked locally — the exact leak we're trying to prevent.
+    session = None
+    try:
+        session = await client.beta.sessions.create(
+            agent={"type": "agent", "id": agent_id, "version": agent_version},
+            environment_id=env_id,
+            title=f"{label} — {repo}",
+            resources=[
+                {
+                    "type": "github_repository",
+                    "url": f"https://github.com/{repo}",
+                    "authorization_token": bot_token,
+                    "checkout": {"type": "branch", "name": pr_branch},
+                    "mount_path": "/workspace/repo",
+                },
+                {
+                    "type": "github_repository",
+                    "url": f"https://github.com/{repo}.wiki",
+                    "authorization_token": bot_token,
+                    "mount_path": "/workspace/wiki",
+                },
+            ],
+        )
+    finally:
+        if session is not None:
+            LIVE_SESSIONS.add(session.id)
 
     await client.beta.sessions.events.send(
         session.id,
@@ -312,8 +331,8 @@ async def run_session(
                 stop_reason = getattr(event, "stop_reason", None)
                 stop_type = getattr(stop_reason, "type", None) if stop_reason else None
                 if stop_type == "requires_action":
-                    # Transient idle waiting for client-side events; we
-                    # don't send any here, so keep draining the stream.
+                    # Transient idle waiting for client-side events; we don't
+                    # send any here, so keep draining the stream.
                     continue
                 if stop_type in TERMINAL_SUCCESS:
                     break
@@ -412,6 +431,11 @@ async def run_review(args):
         # an unknown-idle state. Doing this between phases (instead of
         # deferring to atexit) stops them from burning tokens through the
         # verifier phase, which can itself run up to SESSION_TIMEOUT_SECS.
+        #
+        # Invariant: at this point LIVE_SESSIONS only contains specialist
+        # sessions — the verifier isn't created until Phase 2 below. If a
+        # future change adds a pre-Phase-1 session or moves verifier launch
+        # earlier, scope this interrupt by a known specialist-id set instead.
         orphans = list(LIVE_SESSIONS)
         if orphans:
             print(f"  [cleanup] interrupting {len(orphans)} orphan specialist session(s)")
