@@ -29,6 +29,7 @@ import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests as req
@@ -67,10 +68,9 @@ def _interrupt_live_sessions_sync() -> None:
     # Tight per-request timeout + no retries so a slow/unreachable API can't
     # block atexit for minutes while the CI runner's grace window ticks down
     # to SIGKILL. Parallelize via thread pool so total shutdown wall-time
-    # is ~10s regardless of N (serial would be 10s * N, exceeding GitHub
-    # Actions' default 30s SIGTERM→SIGKILL grace for 4+ sessions).
-    from concurrent.futures import ThreadPoolExecutor
-
+    # is ~10s regardless of N (serial would be 10s * N, which on CI runners
+    # with short SIGTERM→SIGKILL grace can eat the whole window for 4+
+    # sessions; exact grace varies by runtime).
     client = Anthropic(timeout=10.0, max_retries=0)
 
     def _interrupt_one(sid: str) -> None:
@@ -100,10 +100,9 @@ async def _interrupt_session_async(client: AsyncAnthropic, session_id: str) -> N
         await client.beta.sessions.events.send(session_id, events=[INTERRUPT_EVENT])
         LIVE_SESSIONS.discard(session_id)
     except APIStatusError as e:
-        status = getattr(e, "status_code", 0)
-        if 400 <= status < 500 and status != 429:
+        if 400 <= e.status_code < 500 and e.status_code != 429:
             LIVE_SESSIONS.discard(session_id)
-        print(f"  [interrupt] {session_id}: {status} {e}", file=sys.stderr)
+        print(f"  [interrupt] {session_id}: {e.status_code} {e}", file=sys.stderr)
     except Exception as e:
         print(f"  [interrupt] {session_id}: {e}", file=sys.stderr)
 
@@ -465,12 +464,17 @@ async def run_review(args):
         # would NOT be caught here — only specialists launched above.
         orphans = list(specialist_ids)
         if orphans:
-            print(f"  [cleanup] interrupting {len(orphans)} orphan specialist session(s)")
+            print(f"  [cleanup] interrupting {len(orphans)} orphan specialist session(s)", file=sys.stderr)
             # No return_exceptions=True — _interrupt_session_async catches
             # internally and never raises.
             await asyncio.gather(
                 *(_interrupt_session_async(client, sid) for sid in orphans),
             )
+            # Keep specialist_ids in sync with the post-cleanup LIVE_SESSIONS
+            # so a future reader of the set doesn't see already-interrupted
+            # stale ids. _interrupt_session_async only discards from the
+            # global set; this line propagates that to the caller-owned one.
+            specialist_ids.intersection_update(LIVE_SESSIONS)
 
         # Phase 2: verifier sequential
         print(f"\n[4] Running verifier on consolidated findings...")
@@ -548,6 +552,10 @@ Raw findings to verify and consolidate:
         # diff re-sent, which would ~5x the tokens across specialists+verifier.
         verifier_user_text = f"{pr_context}\n\n{verifier_task}"
 
+        # No tracking= set for the verifier: the between-phase cleanup above
+        # already fired on specialists, and any orphaned verifier session is
+        # caught by atexit (LIVE_SESSIONS holds it until the process exits).
+        # There's no Phase-3 that needs a scoped cleanup set.
         verifier_out = await asyncio.wait_for(
             run_session(
                 client, agents[VERIFIER_AGENT]["id"], agents[VERIFIER_AGENT]["version"],
