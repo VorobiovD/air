@@ -21,18 +21,118 @@ Usage:
 
 import argparse
 import asyncio
+import atexit
 import html
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests as req
-from anthropic import AsyncAnthropic
+from anthropic import Anthropic, APIStatusError, AsyncAnthropic
 
 from api import list_agents, find_environment
+
+
+# Tracks live session IDs so cleanup handlers can send interrupts to
+# anything still running when the driver dies unexpectedly (CI job killed,
+# Ctrl-C, uncaught exception). Without this, an orphan session keeps running
+# on Anthropic's side until its own idle timeout — burning tokens and
+# blocking DELETE /sessions/{id} for ~5 minutes.
+#
+# Lifecycle rule (enforced by run_session): only remove from this set when
+# the session has clearly reached idle on Anthropic's side. Any exception,
+# error event, timeout, or unknown-idle stop reason leaves the id tracked
+# so the cleanup handlers interrupt it.
+LIVE_SESSIONS: set[str] = set()
+
+# Single source for the interrupt event payload — if Anthropic renames the
+# event type, there's one string to update.
+INTERRUPT_EVENT = {"type": "user.interrupt"}
+
+
+def _interrupt_live_sessions_sync() -> None:
+    """Best-effort sync interrupt of any still-tracked sessions.
+
+    Registered via atexit in main(). Uses the sync Anthropic client because
+    atexit runs after the asyncio loop has been torn down.
+    """
+    if not LIVE_SESSIONS:
+        return
+    sids = list(LIVE_SESSIONS)
+    print(f"  [shutdown] interrupting {len(sids)} live session(s)", file=sys.stderr)
+    # Tight per-request timeout + no retries so a slow/unreachable API can't
+    # block atexit for minutes while the CI runner's grace window ticks down
+    # to SIGKILL. Parallelize via thread pool so total shutdown wall-time
+    # is ~10s regardless of N (serial would be 10s * N, which on CI runners
+    # with short SIGTERM→SIGKILL grace can eat the whole window for 4+
+    # sessions; exact grace varies by runtime).
+    client = Anthropic(timeout=10.0, max_retries=0)
+
+    def _interrupt_one(sid: str) -> None:
+        try:
+            client.beta.sessions.events.send(sid, events=[INTERRUPT_EVENT])
+            LIVE_SESSIONS.discard(sid)
+        except Exception as e:
+            print(f"  [shutdown] interrupt failed for {sid}: {e}", file=sys.stderr)
+
+    with ThreadPoolExecutor(max_workers=min(len(sids), 8)) as pool:
+        list(pool.map(_interrupt_one, sids))
+
+
+async def _interrupt_session_async(client: AsyncAnthropic, session_id: str) -> None:
+    """Fire-and-forget async interrupt from inside the event loop.
+
+    Used to promptly terminate orphaned specialist sessions mid-review
+    (e.g. after a specialist times out) so they don't burn tokens while
+    Phase 2's verifier runs.
+
+    4xx (except 429) means the session is in a state the interrupt doesn't
+    apply to — typically already idled. Discard; there's no retry that
+    would succeed. 5xx / network / timeout / 429 are transient; leave
+    tracked so the atexit fallback gets another shot.
+    """
+    try:
+        await client.beta.sessions.events.send(session_id, events=[INTERRUPT_EVENT])
+        LIVE_SESSIONS.discard(session_id)
+    except APIStatusError as e:
+        if 400 <= e.status_code < 500 and e.status_code != 429:
+            LIVE_SESSIONS.discard(session_id)
+        print(f"  [interrupt] {session_id}: {e.status_code} {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"  [interrupt] {session_id}: {e}", file=sys.stderr)
+
+
+def _install_shutdown_handlers() -> None:
+    """Register shutdown hygiene. Called from main() — not at import time —
+    so test harnesses and other importers don't inherit the SIGTERM handler
+    or atexit registration.
+
+    Design:
+    - SIGTERM (CI job kill): install a handler that raises SystemExit, which
+      lets asyncio cancel pending tasks and run their finally blocks.
+      Without a handler, Python's default terminates the process without
+      running atexit, leaving every session orphaned.
+    - SIGINT (Ctrl-C): do NOT override — Python's default raises
+      KeyboardInterrupt which asyncio already converts to CancelledError,
+      propagating through `async with stream_cm` cleanup paths.
+    - atexit fires after asyncio shuts down and is our last-resort sync
+      cleanup for anything that leaked past async teardown.
+    """
+    atexit.register(_interrupt_live_sessions_sync)
+
+    def _sigterm_to_systemexit(signum, _frame):
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _sigterm_to_systemexit)
+    # SIGHUP covers parent-shell death and some container stop sequences.
+    # Guarded for Windows (no SIGHUP on that platform).
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _sigterm_to_systemexit)
 
 
 SPECIALIST_AGENTS = [
@@ -177,6 +277,7 @@ async def run_session(
     bot_token: str,
     user_text: str,
     label: str,
+    tracking: set[str] | None = None,
 ) -> str:
     """Create a session, send the user prompt, stream events, return collected agent text.
 
@@ -186,27 +287,41 @@ async def run_session(
     message text. The wiki resource mounts empty if the repo has no wiki
     (Managed Agents treats a 404 on push-only wikis as an empty mount).
     """
-    print(f"  [launch] {label}")
-    session = await client.beta.sessions.create(
-        agent={"type": "agent", "id": agent_id, "version": agent_version},
-        environment_id=env_id,
-        title=f"{label} — {repo}",
-        resources=[
-            {
-                "type": "github_repository",
-                "url": f"https://github.com/{repo}",
-                "authorization_token": bot_token,
-                "checkout": {"type": "branch", "name": pr_branch},
-                "mount_path": "/workspace/repo",
-            },
-            {
-                "type": "github_repository",
-                "url": f"https://github.com/{repo}.wiki",
-                "authorization_token": bot_token,
-                "mount_path": "/workspace/wiki",
-            },
-        ],
-    )
+    # try/finally narrows the race window between sessions.create() returning
+    # and LIVE_SESSIONS.add() running: if SystemExit (from SIGTERM) fires
+    # after `await` resumes but before `LIVE_SESSIONS.add`, finally still
+    # runs. It can't eliminate the window (a signal between the `await`
+    # resuming and STORE_FAST `session` leaves session=None in finally),
+    # but it narrows it to a handful of bytecodes.
+    session = None
+    try:
+        session = await client.beta.sessions.create(
+            agent={"type": "agent", "id": agent_id, "version": agent_version},
+            environment_id=env_id,
+            title=f"{label} — {repo}",
+            resources=[
+                {
+                    "type": "github_repository",
+                    "url": f"https://github.com/{repo}",
+                    "authorization_token": bot_token,
+                    "checkout": {"type": "branch", "name": pr_branch},
+                    "mount_path": "/workspace/repo",
+                },
+                {
+                    "type": "github_repository",
+                    "url": f"https://github.com/{repo}.wiki",
+                    "authorization_token": bot_token,
+                    "mount_path": "/workspace/wiki",
+                },
+            ],
+        )
+    finally:
+        if session is not None:
+            LIVE_SESSIONS.add(session.id)
+            if tracking is not None:
+                tracking.add(session.id)
+
+    print(f"  [launch] {label} → {session.id}")
 
     await client.beta.sessions.events.send(
         session.id,
@@ -251,6 +366,17 @@ async def run_session(
                 terminated_reason = f"session error: {getattr(event, 'error', '?')}"
                 break
 
+    # Only drop from LIVE_SESSIONS on clean success. Error events, unknown
+    # idle states, timeouts, cancellations, and any exception during the
+    # stream all leave the id tracked so the cleanup handlers can interrupt
+    # it. Anthropic docs don't guarantee `session.error` implies server-side
+    # termination, and an extra interrupt on an already-idle session is a
+    # cheap no-op.
+    if terminated_reason is None:
+        LIVE_SESSIONS.discard(session.id)
+        if tracking is not None:
+            tracking.discard(session.id)
+
     output = "".join(parts).strip()
     if terminated_reason and not output:
         raise SpecialistSessionError(label, terminated_reason)
@@ -285,12 +411,17 @@ async def run_review(args):
         print(f"\n[3] Launching 4 specialist sessions in parallel...")
         t0 = time.monotonic()
 
+        # Caller-owned tracking so the between-phase cleanup only interrupts
+        # specialist sessions, not whatever else might be in LIVE_SESSIONS.
+        specialist_ids: set[str] = set()
+
         async def run_with_timeout(name, agent, task):
             user_text = f"{pr_context}\n\n{task}\n\n<diff>\n{diff}\n</diff>"
             return await asyncio.wait_for(
                 run_session(
                     client, agent["id"], agent["version"], env_id,
                     args.repo, pr_branch, bot_token, user_text, name,
+                    tracking=specialist_ids,
                 ),
                 timeout=SESSION_TIMEOUT_SECS,
             )
@@ -323,6 +454,27 @@ async def run_review(args):
 
         status = f"{len(SPECIALIST_AGENTS) - len(degraded)}/{len(SPECIALIST_AGENTS)} specialists ok"
         print(f"  All specialists complete in {elapsed:.1f}s ({status})")
+
+        # Interrupt any specialist sessions that timed out, errored, or hit
+        # an unknown-idle state. Doing this between phases (instead of
+        # deferring to atexit) stops them from burning tokens through the
+        # verifier phase, which can itself run up to SESSION_TIMEOUT_SECS.
+        # Scoped to the caller-owned `specialist_ids` set, so an unrelated
+        # session in LIVE_SESSIONS (e.g. from a future pre-Phase-1 step)
+        # would NOT be caught here — only specialists launched above.
+        orphans = list(specialist_ids)
+        if orphans:
+            print(f"  [cleanup] interrupting {len(orphans)} orphan specialist session(s)", file=sys.stderr)
+            # No return_exceptions=True — _interrupt_session_async catches
+            # internally and never raises.
+            await asyncio.gather(
+                *(_interrupt_session_async(client, sid) for sid in orphans),
+            )
+            # Keep specialist_ids in sync with the post-cleanup LIVE_SESSIONS
+            # so a future reader of the set doesn't see already-interrupted
+            # stale ids. _interrupt_session_async only discards from the
+            # global set; this line propagates that to the caller-owned one.
+            specialist_ids.intersection_update(LIVE_SESSIONS)
 
         # Phase 2: verifier sequential
         print(f"\n[4] Running verifier on consolidated findings...")
@@ -400,6 +552,10 @@ Raw findings to verify and consolidate:
         # diff re-sent, which would ~5x the tokens across specialists+verifier.
         verifier_user_text = f"{pr_context}\n\n{verifier_task}"
 
+        # No tracking= set for the verifier: the between-phase cleanup above
+        # already fired on specialists, and any orphaned verifier session is
+        # caught by atexit (LIVE_SESSIONS holds it until the process exits).
+        # There's no Phase-3 that needs a scoped cleanup set.
         verifier_out = await asyncio.wait_for(
             run_session(
                 client, agents[VERIFIER_AGENT]["id"], agents[VERIFIER_AGENT]["version"],
@@ -457,6 +613,7 @@ def main():
         print("Error: ANTHROPIC_API_KEY not set.", file=sys.stderr)
         sys.exit(1)
 
+    _install_shutdown_handlers()
     asyncio.run(run_review(args))
 
 
