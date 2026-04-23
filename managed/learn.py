@@ -20,6 +20,7 @@ from pathlib import Path
 import requests as req
 
 from api import API_BASE, get_headers, list_agents, find_environment, api_error_message
+from setup import DEFAULT_OPUS
 
 
 def sync_learn_agent():
@@ -47,7 +48,7 @@ def sync_learn_agent():
             headers=get_headers(),
             json={
                 "name": "air-learner",
-                "model": "claude-opus-4-7",
+                "model": DEFAULT_OPUS,
                 "system": prompt,
                 "tools": [{"type": "agent_toolset_20260401"}],
             },

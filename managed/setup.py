@@ -24,66 +24,70 @@ PROMPTS_DIR = Path(__file__).parent / "prompts"
 SUB_AGENTS = ["code-reviewer", "simplify", "security-auditor", "git-history-reviewer", "review-verifier"]
 
 
+MODEL_ALIASES = {
+    "opus": "claude-opus-4-7",
+    "sonnet": "claude-sonnet-4-6",
+    "haiku": "claude-haiku-4-5",
+}
+
+DEFAULT_OPUS = MODEL_ALIASES["opus"]
+
+
+def _split_frontmatter(path: Path) -> tuple[dict[str, str], str]:
+    """Return ({key: value} for scalar frontmatter fields, body_text). Empty dict if no frontmatter."""
+    text = path.read_text()
+    if not text.startswith("---"):
+        return {}, text.strip()
+    try:
+        end = text.index("---", 3)
+    except ValueError:
+        print(f"  Warning: {path.name} has unclosed frontmatter")
+        return {}, text.strip()
+    fields: dict[str, str] = {}
+    for line in text[3:end].split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or ":" not in stripped:
+            continue
+        key, value = stripped.split(":", 1)
+        # strip inline YAML comments ("value # comment" -> "value")
+        fields[key.strip()] = value.split("#", 1)[0].strip()
+    return fields, text[end + 3:].strip()
+
+
 def read_prompt(path: Path) -> str:
     """Read a markdown prompt file, stripping YAML frontmatter."""
-    text = path.read_text()
-    if text.startswith("---"):
-        try:
-            end = text.index("---", 3)
-            return text[end + 3:].strip()
-        except ValueError:
-            print(f"  Warning: {path.name} has unclosed frontmatter")
-            return text.strip()
-    return text.strip()
+    _, body = _split_frontmatter(path)
+    return body
 
 
 def parse_agent_tools(path: Path) -> list[str]:
     """Extract tool names from agent frontmatter."""
-    text = path.read_text()
-    if not text.startswith("---"):
+    fields, _ = _split_frontmatter(path)
+    if "tools" not in fields:
         return ["bash", "read", "grep", "glob"]
-    try:
-        end = text.index("---", 3)
-        frontmatter = text[3:end]
-    except ValueError:
-        return ["bash", "read", "grep", "glob"]
-
-    for line in frontmatter.split("\n"):
-        if line.strip().startswith("tools:"):
-            return [t.strip().lower() for t in line.split(":", 1)[1].strip().split(",")]
-    return ["bash", "read", "grep", "glob"]
+    return [t.strip().lower() for t in fields["tools"].split(",")]
 
 
-MODEL_ALIASES = {
-    "opus": "claude-opus-4-7",
-    "sonnet": "claude-sonnet-4-6",
-    "haiku": "claude-haiku-4-5-20251001",
-}
-
-
-def parse_agent_model(path: Path, default: str = "claude-opus-4-7") -> str:
+def parse_agent_model(path: Path, default: str = DEFAULT_OPUS) -> str:
     """Read `model:` from agent frontmatter, resolving aliases to API IDs."""
-    text = path.read_text()
-    if not text.startswith("---"):
+    fields, _ = _split_frontmatter(path)
+    value = fields.get("model", "")
+    if not value:
         return default
-    try:
-        end = text.index("---", 3)
-        frontmatter = text[3:end]
-    except ValueError:
-        return default
-
-    for line in frontmatter.split("\n"):
-        if line.strip().startswith("model:"):
-            value = line.split(":", 1)[1].strip()
-            return MODEL_ALIASES.get(value, value) if value else default
-    return default
+    return MODEL_ALIASES.get(value, value)
 
 
-def create_or_update_agent(name: str, system: str, tools: list, existing: dict | None, callable_agents: list | None = None, model: str = "claude-opus-4-7") -> dict:
-    """Update if exists, create if not. Takes pre-fetched existing agent."""
+def create_or_update_agent(name: str, system: str, tools: list, existing: dict | None, callable_agents: list | None = None, model: str = DEFAULT_OPUS) -> dict:
+    """Update if exists, create if not. Takes pre-fetched existing agent.
+
+    On update, the `model` field is sent so model changes (e.g. from frontmatter
+    tiering) propagate to existing managed deployments. If the API rejects a
+    model change in-place, we retry without `model` and print a warning so the
+    operator knows the agent needs manual re-creation to pick up the new model.
+    """
 
     if existing:
-        body = {"system": system, "tools": tools, "version": existing["version"]}
+        body = {"model": model, "system": system, "tools": tools, "version": existing["version"]}
         if callable_agents:
             body["callable_agents"] = callable_agents
         resp = requests.post(
@@ -91,9 +95,24 @@ def create_or_update_agent(name: str, system: str, tools: list, existing: dict |
             headers=get_headers(),
             json=body,
         )
+        if not resp.ok and existing.get("model") != model:
+            # Retry without model in case the API disallows in-place model changes
+            retry_body = {k: v for k, v in body.items() if k != "model"}
+            retry = requests.post(
+                f"{API_BASE}/agents/{existing['id']}",
+                headers=get_headers(),
+                json=retry_body,
+            )
+            if retry.ok:
+                print(f"  {name}: synced prompt (model pinned to {existing.get('model','?')} — delete + re-run setup.py to retier to {model})")
+                return retry.json()
+            resp = retry
         if resp.ok:
             data = resp.json()
-            print(f"  {name}: synced → v{data['version']}")
+            if existing.get("model") and existing["model"] != model:
+                print(f"  {name}: synced → v{data['version']} (model {existing['model']} → {model})")
+            else:
+                print(f"  {name}: synced → v{data['version']}")
             return data
         else:
             print(f"  {name}: sync failed ({resp.status_code}: {api_error_message(resp)}), using v{existing['version']}")

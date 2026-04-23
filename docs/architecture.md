@@ -1,7 +1,7 @@
 # air — Architecture, Decisions, and Roadmap
 
 **Last updated:** 2026-04-23
-**Version:** 1.3.0 (pending 1.4.0)
+**Version:** 1.5.0
 
 ---
 
@@ -233,13 +233,15 @@ Lifecycle:
 | Agent | Model | Tools | Purpose |
 |---|---|---|---|
 | air-code-reviewer | Opus | read, grep, glob, bash | Code quality review |
-| air-simplify | Opus | read, grep, glob | Reuse, quality, efficiency (no bash) |
+| air-simplify | Sonnet | read, grep, glob | Reuse, quality, efficiency (no bash) |
 | air-security-auditor | Opus | read, grep, glob, bash | 31-item security audit |
-| air-git-history-reviewer | Opus | read, grep, glob, bash | Blame, churn, history |
+| air-git-history-reviewer | Sonnet | read, grep, glob, bash | Blame, churn, history |
 | air-review-verifier | Opus | read, grep, glob, bash | False positive filtering |
 | air-reviewer | Opus | all (agent_toolset) | Review orchestrator (has callable_agents) |
 | air-learner | Opus | all (agent_toolset) | Wiki maintenance |
 | air-test | Sonnet | all (agent_toolset) | Quick 9-test verification |
+
+Model tiering introduced in v1.5.0: judgment-heavy reviewers stay on Opus, mechanical / pattern-matching reviewers (simplify, git-history-reviewer) run on Sonnet for ~5× cheaper input. Models are declared in each agent's frontmatter (`plugins/air/agents/<name>.md`) and resolved to API IDs via `managed/setup.py::MODEL_ALIASES`.
 
 ---
 
@@ -321,12 +323,15 @@ Responded at: <SHA>
 
 ## Cost
 
-| Component | Per review | Monthly (40 reviews) |
-|---|---|---|
-| 4 agents (Opus) | ~$1.38 | ~$55 |
-| Verification (Opus) | ~$0.28 | ~$11 |
-| Managed Agent session | ~$0.02 | ~$0.80 |
-| **Total** | **~$1.68** | **~$67** |
+| Component | Model | Per review | Monthly (40 reviews) |
+|---|---|---|---|
+| code-reviewer, security-auditor | Opus | ~$0.75 each | ~$60 combined |
+| simplify, git-history-reviewer | Sonnet | ~$0.15 each | ~$12 combined |
+| review-verifier | Opus | ~$0.50 | ~$20 |
+| Managed Agent session overhead | — | ~$0.02 | ~$0.80 |
+| **Total** | — | **~$2.30** | **~$90** |
+
+v1.5.0 model tiering (simplify + git-history-reviewer → Sonnet) removes ~$1/review relative to all-Opus at current Opus 4.7 pricing.
 
 ---
 

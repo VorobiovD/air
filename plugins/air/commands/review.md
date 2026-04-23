@@ -486,7 +486,7 @@ Run with `run_in_background: true`. Graceful skip if not configured.
 
 **Each agent receives a PR Context block at the top of its prompt** (inline, not a separate file).
 
-**Prompt-cache discipline:** Build the PR Context block ONCE and pass the **byte-identical** string as the opening of every agent's prompt. Do not tailor the block per agent (no "for the security agent, emphasize X…"). All agent-specific guidance goes AFTER the block. Claude Code's automatic prompt cache keys off shared prefixes, so a stable block shared across the 4 parallel agents lets 3 of the 4 calls read the cached prefix at ~10% input cost instead of re-paying the full context for each agent.
+**Prompt-cache discipline:** Build the PR Context block ONCE and pass the **byte-identical** string as the opening of every agent's prompt. Do not tailor the block per agent (no "for the security agent, emphasize X…"). All agent-specific guidance goes AFTER the block. Claude Code's automatic prompt cache keys off shared prefixes AND model — cache hits are per-model-family, so a stable block lets each model family (Opus pair + Sonnet pair) share its prefix at ~10% input cost on the second and subsequent calls within that family.
 
 ```
 **PR Context:**

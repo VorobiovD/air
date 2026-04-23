@@ -108,7 +108,7 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 
 ### Five Specialized Agents
 
-Each agent receives the same rich context block (PR metadata, CI status, blame summaries, file churn, previous PR comments, project memory, session context). The identical prefix across all 4 parallel agents enables prompt-cache hits on ~80% of the input.
+Each agent receives the same rich context block (PR metadata, CI status, blame summaries, file churn, previous PR comments, project memory, session context). The identical prefix across the 4 parallel agents enables prompt-cache hits within each model family (Opus calls share their own cache, Sonnet calls share theirs).
 
 **Model tiering:** Judgment-heavy reviewers (code-reviewer, security-auditor, review-verifier) run on Opus. Mechanical / pattern-matching reviewers (git-history-reviewer, simplify) run on Sonnet — ~5× cheaper input with minimal quality risk on their task shape. Each agent's model is declared in its own frontmatter (`plugins/air/agents/<name>.md`).
 
@@ -294,11 +294,11 @@ Per review, with v1.5.0 model tiering (Opus 4.7 at $15/$75 per 1M, Sonnet 4.6 at
 | simplify, git-history-reviewer | Sonnet | ~$0.15 each |
 | review-verifier | Opus | ~$0.50 |
 | Codex | external | varies |
-| **Total** | | **~$2.30** |
+| **Total** | — | **~$2.30** |
 
-The structurally identical PR Context block across the 4 parallel agents is designed to hit Claude Code's automatic prompt cache, further reducing input cost on the shared prefix. Actual cost varies with PR size; large PRs scale linearly.
+The structurally identical PR Context block across the 4 parallel agents is designed to hit Claude Code's automatic prompt cache within each model family (Claude's cache is per-model, so cross-tier hits don't apply). Actual cost varies with PR size; large PRs scale linearly.
 
-Prior to v1.5.0 (all-Opus), the same review ran ~$3.00+. Model tiering on the two mechanical reviewers (git-history, simplify) removes ~$1/review without touching judgment-heavy agents.
+At current Opus 4.7 pricing, an all-Opus v1.5.0 review would run ~$3.30. Tiering the two mechanical reviewers (git-history, simplify) to Sonnet saves ~$1/review without touching judgment-heavy agents. (v1.4.0 shipped at Opus 4.6 pricing and was cheaper in absolute terms — the `~$1.66` figure from earlier versions reflected Opus 4.6's `$5/$25` rates, not the current 4.7 rates.)
 
 **Timing:** 9-15 minutes per review. All agents run in parallel — the bottleneck is the slowest agent, not the sum.
 
