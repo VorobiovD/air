@@ -51,4 +51,4 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           cd air
-          python managed/review.py "$REPO" "$PR_NUMBER" --poll
+          python managed/review.py "$REPO" "$PR_NUMBER"

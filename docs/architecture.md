@@ -1,7 +1,7 @@
 # air — Architecture, Decisions, and Roadmap
 
 **Last updated:** 2026-04-23
-**Version:** 1.6.0
+**Version:** 1.7.0
 
 ---
 
@@ -39,18 +39,18 @@ VorobiovD/air/
 │   │   ├── pre-commit-drift.py       Narrows to `git commit`, routes custom/built-in
 │   │   └── builtin-checks.sh         Zero-config manifest-version vs doc-mirror greps
 │   └── .claude-plugin/
-│       └── plugin.json             Version 1.6.0
+│       └── plugin.json             Version 1.7.0
 │
 ├── managed/                        ← MANAGED AGENT (Anthropic cloud)
 │   ├── api.py                        Shared helpers: get_headers, list_agents, find_environment
-│   ├── setup.py                      Creates/updates agents via API (find by name, PATCH with version)
-│   ├── review.py                     Triggers review sessions (streaming or polling)
-│   ├── learn.py                      Triggers wiki maintenance sessions
+│   ├── setup.py                      Creates/updates 5 specialist agents via API (no orchestrator agent)
+│   ├── review.py                     Client-side orchestrator — fans out 4 specialists via asyncio.gather, runs verifier, posts comment
+│   ├── learn.py                      Triggers wiki maintenance sessions (single-agent)
 │   ├── test-session.py               9-test verification (repo, auth, blame, comment, wiki)
 │   ├── test-learn.py                 Wiki clone/push verification
+│   ├── test-parallel.py              Smoke test for parallel sub-agent execution (detects Research Preview access)
 │   ├── prompts/
-│   │   ├── orchestrator.md           Review pipeline for cloud (~200 lines)
-│   │   └── learn-orchestrator.md     Learn pipeline for cloud
+│   │   └── learn-orchestrator.md     Learn pipeline for cloud (review orchestrator.md deleted in v1.7.0 — replaced by review.py)
 │   └── requirements.txt             anthropic>=0.93.0, requests>=2.28.0
 │
 ├── .github/workflows/
@@ -73,9 +73,9 @@ VorobiovD/air/
 |---|---|---|---|
 | Agent prompts (5 files) | Loaded as subagent_type | Read by setup.py → API agents | **YES — single source** |
 | Wiki patterns (6 files) | git clone/push locally | git clone/push from sandbox | **YES — same wiki** |
-| Review output format | Defined in review.md | Defined in orchestrator.md | NO — duplicated |
-| Orchestrator logic | review.md (1276 lines) | orchestrator.md (~200 lines) | NO — duplicated |
-| Learn logic | learn.md | learn-orchestrator.md | NO — duplicated |
+| Review output format | Defined in review.md | Templated in review.py verifier prompt | Equivalent — same markdown shape |
+| Orchestrator logic | review.md (markdown → Claude Code) | review.py (Python → asyncio.gather) | Implementation-specific by design |
+| Learn logic | learn.md | learn-orchestrator.md | NO — duplicated (single-agent flow, not fanned out) |
 | Auth | User's local gh auth | Bot PAT via github_repository resource | Different |
 | Trigger | Manual: /air:review | Automatic: GitHub Action on PR | Different |
 | Modes | --self, --respond (+ --dry-run), --full, --re-review, --fresh, --rewrite, --dry-run | auto, fresh, re-review | CLI has more |
@@ -124,25 +124,28 @@ VorobiovD/air/
 
 ---
 
-## Managed Agent Pipeline
+## Managed Agent Pipeline (v1.7.0 — client-side orchestrator)
 
 ```
 PR opened → GitHub Action → managed/review.py
   │
-  ├── [1] Sync agents (setup.py: find by name → create or PATCH with latest prompts)
-  ├── [2] Create session (github_repository resource mounts repo with auth)
-  ├── [3] Send task (REPO, PR_NUMBER, GH_TOKEN, MODE)
+  ├── [1] Sync 5 specialist agents (setup.py: find by name → create or PATCH with latest prompts)
+  ├── [2] Fetch PR metadata + diff from GitHub API (via AIR_BOT_TOKEN on the runner)
+  ├── [3] Build PR Context block (Python)
   │
-  └── Orchestrator agent runs in Anthropic cloud sandbox:
-      ├── Verify setup (gh auth, repo access)
-      ├── Fetch base branch (git fetch origin main)
-      ├── Fetch PR data (gh CLI + git blame/log)
-      ├── Load wiki context (clone with token auth)
-      ├── Run 4 review passes (sequential now, parallel when callable_agents enabled)
-      ├── Verify findings
-      ├── Post review as bot account
-      └── Push learned patterns to wiki
+  ├── [4] asyncio.gather 4 specialist sessions in parallel:
+  │     ├── air-code-reviewer       (own container, clones repo + wiki, returns findings)
+  │     ├── air-simplify            (own container, same)
+  │     ├── air-security-auditor    (own container, same)
+  │     └── air-git-history-reviewer (own container, same)
+  │
+  ├── [5] Sequential verifier session (air-review-verifier receives all 4 findings sets,
+  │       filters false positives, emits final review comment markdown)
+  │
+  └── [6] Python posts the review comment directly via GitHub API (no 6th session)
 ```
+
+The orchestrator is the **Python driver**, not a server-side agent. Anthropic's `callable_agents` (server-side parallel sub-agents) is gated behind a Managed Agents multiagent Research Preview, so we fan out client-side. Each specialist session spawns its own container for tool execution — same as the CLI plugin's `Agent`-tool fan-out, just one container per specialist instead of one Claude Code process with parallel subagents.
 
 ---
 
@@ -228,7 +231,7 @@ Lifecycle:
 
 **Self-bootstrapping:** First PR on any org auto-creates agents. No manual setup.py needed.
 
-**Find by name:** `GET /v1/agents` → find `air-reviewer` → use it. No config files, no stored IDs. Each org's API key isolates their agents.
+**Find by name:** `GET /v1/agents` → Python driver looks up each of the 5 specialists (`air-code-reviewer`, `air-simplify`, `air-security-auditor`, `air-git-history-reviewer`, `air-review-verifier`) by name. No config files, no stored IDs. Each org's API key isolates their agents.
 
 **Auto-update:** Every run calls setup.py which PATCHes each agent with the latest prompt from the air repo. Uses `version` field for optimistic concurrency. When you merge a prompt change to main, the next PR on any org picks it up automatically.
 
@@ -242,10 +245,11 @@ Lifecycle:
 | air-simplify | Sonnet | read, grep, glob | Reuse, quality, efficiency (no bash) |
 | air-security-auditor | Opus | read, grep, glob, bash | 31-item security audit |
 | air-git-history-reviewer | Sonnet | read, grep, glob, bash | Blame, churn, history |
-| air-review-verifier | Opus | read, grep, glob, bash | False positive filtering |
-| air-reviewer | Opus | all (agent_toolset) | Review orchestrator (has callable_agents) |
+| air-review-verifier | Opus | read, grep, glob, bash | False-positive filtering + emits the final review comment markdown (v1.7.0+) |
 | air-learner | Opus | all (agent_toolset) | Wiki maintenance |
 | air-test | Sonnet | all (agent_toolset) | Quick 9-test verification |
+
+**Note:** `air-reviewer` (server-side orchestrator) was removed in v1.7.0 — `managed/review.py` is now the orchestrator (client-side). Existing deployments can safely archive or leave the old `air-reviewer` agent — it's orphaned but harmless.
 
 Model tiering introduced in v1.5.0: judgment-heavy reviewers stay on Opus, mechanical / pattern-matching reviewers (simplify, git-history-reviewer) run on Sonnet for ~5× cheaper input. Models are declared in each agent's frontmatter (`plugins/air/agents/<name>.md`) and resolved to API IDs via `managed/setup.py::MODEL_ALIASES`.
 
@@ -344,9 +348,10 @@ v1.5.0 model tiering (simplify + git-history-reviewer → Sonnet) removes ~$1/re
 ## Known Limitations
 
 **Managed Agent:**
-- Sequential execution (~12 min per review). Parallel when callable_agents threads are enabled (requested multi-agent access).
-- GH_TOKEN visible in Anthropic session logs (mitigated by bot account minimal permissions).
-- Wiki push can timeout in sandbox (5-min command limit). Fixed with explicit token in wiki remote URL.
+- Parallel execution via client-side orchestration (v1.7.0+). 4 specialists run concurrently in separate sessions; wall-clock ≈ slowest specialist + verifier (~5-8 min).
+- Server-side parallel sub-agents (`callable_agents`) remain unavailable — gated behind Anthropic's Managed Agents multiagent Research Preview. `managed/test-parallel.py` smoke-tests access; as of 2026-04-23 we do not have it.
+- GH_TOKEN visible in Anthropic session logs (mitigated by bot account minimal permissions, rotatable).
+- Wiki push can timeout in sandbox (5-min command limit). Mitigated with explicit token in wiki remote URL; each specialist session clones the wiki independently.
 - No Codex (GPT-5.4) — CLI-only feature, requires OpenAI plugin.
 - GitHub-only — no GitLab support yet.
 - `github_repository` resource only clones the PR branch — base branch must be fetched separately (`git fetch origin main`).
@@ -358,8 +363,8 @@ v1.5.0 model tiering (simplify + git-history-reviewer → Sonnet) removes ~$1/re
 - Auto-trigger for /air:learn sometimes skipped due to prompt length (mitigated with >>> markers and explicit RETURN in Step 13).
 
 **Both:**
-- Orchestrator logic duplicated between CLI (review.md) and managed (orchestrator.md).
-- Agent prompt changes propagate automatically; orchestrator changes require manual sync.
+- Agent prompts are shared via `plugins/air/agents/*.md` — single source of truth.
+- Orchestrator logic is now implementation-specific by design (review.md for CLI, review.py for managed) since one is a Claude Code markdown instruction and the other is Python code. No prose duplication between `orchestrator.md` and `review.md` anymore — the managed orchestrator prompt was deleted in v1.7.0.
 
 ---
 
@@ -379,7 +384,8 @@ Subagents cannot nest in Claude Code — only the main session can use the Agent
 
 | Priority | Item | Effort | Impact | Status |
 |---|---|---|---|---|
-| **Blocked** | Parallel sub-agents (callable_agents) | Zero — flip when enabled | 12 min → ~5 min reviews | Waiting for access |
+| **Done** | Parallel execution for managed reviews | 1 day | 12 min → ~5-8 min | v1.7.0 — client-side asyncio fan-out (Python driver), replaces server-side callable_agents dependency |
+| **Blocked** | Server-side parallel sub-agents (callable_agents) | Would simplify review.py | Marginal — client-side fan-out already parallel | Waiting for Research Preview access; `managed/test-parallel.py` detects readiness |
 | **Done** | Slim review.md (1319 → 879 lines) | 1 day | CLI consistency | v1.4.0 — extracted --self + --respond |
 | **Done** | Respond self-check scaling | 0.5 day | Token savings | v1.4.0 — < 50 lines = fewer agents |
 | **Done** | Cross-repo wiki read | 0.5 day | Pattern context | v1.4.0 — reads target wiki, skip write |
@@ -409,9 +415,8 @@ Subagents cannot nest in Claude Code — only the main session can use the Agent
 | Newest agent per name used | Dict overwrite on reversed API list; duplicates are harmless |
 | GH_TOKEN in session message | github_repository handles clone; gh CLI needs env var; no API support for session env vars |
 | Auto-update on every run | setup.py PATCHes agents with latest prompts; ~2s overhead per run |
-| Orchestrator duplication accepted | CLI has interactive modes (--self, --respond) that don't apply to managed; shared reference is future work |
 | Codex skipped in managed | Requires OpenAI plugin/key in sandbox; optional in CLI too |
-| Sequential execution accepted | callable_agents registered but runtime doesn't spawn threads yet; waiting for multi-agent access |
+| Client-side fan-out for managed reviews (v1.7.0) | callable_agents gated behind Research Preview — Python driver parallelizes via asyncio.gather instead |
 | Code blocks in review findings | Improves clarity — both CLI and managed include them |
 | Author patterns never deleted | Archived after 10 clean PRs but stay permanently as historical context |
 | --self and --respond extracted to separate files | Reduces review.md cognitive load; each mode is self-contained with its own reference to shared steps |

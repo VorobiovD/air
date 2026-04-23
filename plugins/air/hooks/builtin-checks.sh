@@ -67,14 +67,21 @@ fi
 # Escape dots for regex (1.2.3 → 1\.2\.3)
 VERSION_RE="${VERSION//./\\.}"
 
-# --- Check 1: Shields.io version badge in README.md ---
-if [ -f README.md ]; then
-  BAD_BADGE=$(grep -oE "shields\\.io/badge/version-[0-9]+\\.[0-9]+\\.[0-9]+-" README.md 2>/dev/null \
+# --- Check 1: Shields.io version badges in README.md + nested plugin READMEs ---
+# Includes root README.md and any plugins/*/README.md (PR #23 regression: the
+# plugin README's version badge was missed when root moved to the new version).
+BADGE_FILES="README.md"
+for nested in plugins/*/README.md; do
+  [ -f "$nested" ] && BADGE_FILES="$BADGE_FILES $nested"
+done
+for f in $BADGE_FILES; do
+  [ -f "$f" ] || continue
+  BAD_BADGE=$(grep -oE "shields\\.io/badge/version-[0-9]+\\.[0-9]+\\.[0-9]+-" "$f" 2>/dev/null \
     | grep -v "version-${VERSION_RE}-" | head -1)
   if [ -n "$BAD_BADGE" ]; then
-    fail "README.md shields.io version badge is '$BAD_BADGE' but $MANIFEST version is $VERSION"
+    fail "$f shields.io version badge is '$BAD_BADGE' but $MANIFEST version is $VERSION"
   fi
-fi
+done
 
 # Enumerate candidate doc files via find so nested docs/ trees are covered on
 # macOS bash 3.2 (which lacks `shopt -s globstar`).

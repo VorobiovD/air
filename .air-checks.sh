@@ -28,12 +28,14 @@ if [ -n "$STRAY_TMP" ]; then
 fi
 
 # Check B: every PR-Context-building file carries the literal
-# `Wiki files directory:` field.
+# `Wiki files directory:` field. managed/prompts/orchestrator.md was deleted
+# in the move to client-side orchestration (v1.7.0) — managed review now
+# builds the PR Context block in review.py and passes it as a user message
+# instead of having a server-side orchestrator prompt render it.
 for f in \
   plugins/air/commands/review.md \
   plugins/air/commands/review-self.md \
-  plugins/air/commands/review-respond.md \
-  managed/prompts/orchestrator.md; do
+  plugins/air/commands/review-respond.md; do
   grep -q 'Wiki files directory:' "$f" 2>/dev/null \
     || fail "$f missing literal 'Wiki files directory:' field in PR Context template"
 done
