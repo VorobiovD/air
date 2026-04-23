@@ -1,5 +1,7 @@
 ## Respond Flow (--respond mode)
 
+All `gh` commands below are written for GitHub. On GitLab, translate using `commands/platform-gitlab.md` — same as the main review.md.
+
 When `--respond` is passed, this flow automates the developer's side of the review cycle. It reads the existing review, classifies each finding based on local code changes, verifies fixes are correct, runs a self-check on the fix diff, detects additional changes, and posts a structured response that the reviewer's next re-review (Step 6) can parse directly.
 
 ### Respond Step 1: Find the review and PR

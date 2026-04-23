@@ -22,6 +22,8 @@ plugins/air/
 │   └── review-verifier.md
 ├── commands/            # CLI command orchestration
 │   ├── review.md              # Main pipeline — the core of the plugin
+│   ├── review-self.md         # Self-review flow (--self mode)
+│   ├── review-respond.md      # Respond flow (--respond mode)
 │   ├── learn.md               # Wiki maintenance
 │   └── platform-gitlab.md     # GitLab CLI/API/field mappings (reference, not a command)
 └── .claude-plugin/

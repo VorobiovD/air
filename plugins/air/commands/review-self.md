@@ -19,13 +19,13 @@ Print summary: "<N> files changed, +<additions>/-<deletions>"
 
 ### Self Step 2: Load Context
 
-Same as regular Step 3 — clone the wiki and copy ALL wiki pages to /tmp/ (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md, GLOSSARY.md). Also read CLAUDE.md from the repo root and the current repo's `.claude/agents/` for any repo-specific review rules. Run Step 3.5 (first-run project discovery — see `commands/review-reference.md#first-run-discovery`) if PROJECT-PROFILE.md doesn't exist.
+Same as regular Step 3 — clone the wiki and copy ALL wiki pages to /tmp/ (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md, GLOSSARY.md). Also read CLAUDE.md from the repo root and the current repo's `.claude/agents/` for any repo-specific review rules. Run Step 3.5 (first-run project discovery — see `commands/review.md` Step 3.5) if PROJECT-PROFILE.md doesn't exist.
 
 Also generate blame summaries and churn data for the changed files (same as Step 4's "Git history context") so all agents — including git-history-reviewer — have the data they need.
 
 ### Self Step 3: Full Review (4 agents + Codex)
 
-Same quality as PR review. Construct a PR Context block (same structure as Step 7 — see `commands/review-reference.md#pr-context-block`) with the self-review diff summary, blame summaries, churn data, and wiki page availability flags. Pass this context block to all agents. Launch ALL reviewers in parallel:
+Same quality as PR review. Construct a PR Context block (same structure as Step 7 in `commands/review.md`) with the self-review diff summary, blame summaries, churn data, and wiki page availability flags. Pass this context block to all agents. Launch ALL reviewers in parallel:
 
 **Agent 1: Code Reviewer** - focused on YOUR changes:
 - Bugs you might have introduced
@@ -124,24 +124,23 @@ cd "$WIKI_DIR" && git add REVIEW.md ACCEPTED-PATTERNS.md && { git diff --quiet -
 ```
 4. Increment the review counter AND check auto-trigger threshold:
 ```bash
-META_FILE="$HOME/.claude/review-learn-meta.json"
+META_FILE="$HOME/.claude/air:learn-meta.json"
 if [ -f "$META_FILE" ]; then
   LAST_CLEANUP=$(cat "$META_FILE" | grep -o '"last_cleanup" *: *"[^"]*"' | grep -o '[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}')
   REVIEWS_SINCE=$(cat "$META_FILE" | grep -o '"reviews_since" *: *[0-9]*' | grep -o '[0-9]*$')
   CLEANUP_EPOCH=$(date -j -f "%Y-%m-%d" "$LAST_CLEANUP" +%s 2>/dev/null || date -d "$LAST_CLEANUP" +%s 2>/dev/null || echo 0)
   DAYS_SINCE=$(( ($(date +%s) - $CLEANUP_EPOCH) / 86400 ))
 else
-  REVIEWS_SINCE=0
+  REVIEWS_SINCE=99
   DAYS_SINCE=99
-  LAST_CLEANUP=$(date +%Y-%m-%d)
 fi
 echo "Auto-trigger check: reviews_since=$REVIEWS_SINCE, days_since=$DAYS_SINCE (threshold: 5 reviews or 2 days)"
 ```
 
 **>>> AUTO-TRIGGER DECISION (do NOT skip) <<<**
 
-If `REVIEWS_SINCE + 1 >= 5` OR `DAYS_SINCE >= 2`:
-1. Print "Triggering /review-learn (reviews: $((REVIEWS_SINCE + 1)), days: $DAYS_SINCE)"
+If `REVIEWS_SINCE >= 5` OR `DAYS_SINCE >= 2`:
+1. Print "Triggering /air:learn (reviews: $((REVIEWS_SINCE + 1)), days: $DAYS_SINCE)"
 2. Run `/air:learn` (full cleanup + KAIROS history regeneration)
 3. After learn completes, RETURN — do not fall through to the counter increment below
 
