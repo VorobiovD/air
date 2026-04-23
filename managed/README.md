@@ -88,4 +88,4 @@ When agent prompts change in the air repo, the workflow auto-updates deployed ag
 
 ## Cost
 
-~$1.69 per review. At 40 reviews/month: ~$67/month.
+~$2.30 per review (v1.5.0 with model tiering at Opus 4.7 + Sonnet 4.6 pricing). At 40 reviews/month: ~$90/month.

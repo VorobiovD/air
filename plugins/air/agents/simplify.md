@@ -2,7 +2,7 @@
 name: simplify
 description: Review changed code for reuse, quality, and efficiency. Report findings only.
 tools: Read, Grep, Glob
-model: opus
+model: sonnet
 ---
 
 Before reviewing:

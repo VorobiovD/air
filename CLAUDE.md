@@ -49,7 +49,7 @@ managed/                          # Managed Agent (CI automation)
 
 **Review pipeline** (`commands/review.md`): Parses args, detects platform (GitHub/GitLab) from git remote, fetches PR/MR data via `gh` or `glab` CLI, runs 5 agents + optional Codex in parallel, passes results through a verification agent that filters false positives (confidence < 60 = dropped), then posts a consolidated comment. GitLab-specific command mappings are in `commands/platform-gitlab.md`.
 
-**Agents** (`agents/*.md`): Stateless markdown prompt files. Each is a specialized reviewer personality that receives the same rich context block (PR diff, blame data, wiki patterns, project memory). All run on Opus.
+**Agents** (`agents/*.md`): Stateless markdown prompt files. Each is a specialized reviewer personality that receives the same rich context block (PR diff, blame data, wiki patterns, project memory). Tiered models: code-reviewer, security-auditor, and review-verifier run on Opus; simplify and git-history-reviewer run on Sonnet. Each agent declares its model in frontmatter.
 
 **Verification** (`agents/review-verifier.md`): Post-review quality gate. Reads actual source at flagged lines, classifies findings as CONFIRMED/DOWNGRADED/IMPROVEMENT/PRE-EXISTING/ACCEPTED PATTERN/FALSE POSITIVE using git blame decision tree.
 
@@ -79,5 +79,5 @@ managed/                          # Managed Agent (CI automation)
 - Findings must score 60+ confidence from verifier to appear in output
 - Conflict markers in PR diff = automatic blocker finding
 - Security auditor uses a 31-item checklist; PROJECT-PROFILE.md controls which items apply per repo
-- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.4.0)
+- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.5.0)
 - Install via `/plugin marketplace add VorobiovD/air` then `/plugin install air@air`

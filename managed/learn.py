@@ -20,44 +20,25 @@ from pathlib import Path
 import requests as req
 
 from api import API_BASE, get_headers, list_agents, find_environment, api_error_message
+from setup import DEFAULT_OPUS, create_or_update_agent
 
 
 def sync_learn_agent():
-    """Create or update the learn orchestrator agent."""
-    agents = list_agents()
-    existing = agents.get("air-learner")
-    prompt = (Path(__file__).parent / "prompts" / "learn-orchestrator.md").read_text()
+    """Create or update the learn orchestrator agent.
 
-    if existing:
-        resp = req.post(
-            f"{API_BASE}/agents/{existing['id']}",
-            headers=get_headers(),
-            json={"system": prompt, "tools": [{"type": "agent_toolset_20260401"}], "version": existing["version"]},
-        )
-        if resp.ok:
-            data = resp.json()
-            print(f"  air-learner: synced → v{data['version']}")
-            return data
-        else:
-            print(f"  air-learner: sync failed, using v{existing['version']}")
-            return existing
-    else:
-        resp = req.post(
-            f"{API_BASE}/agents",
-            headers=get_headers(),
-            json={
-                "name": "air-learner",
-                "model": "claude-opus-4-6",
-                "system": prompt,
-                "tools": [{"type": "agent_toolset_20260401"}],
-            },
-        )
-        if not resp.ok:
-            print(f"Error creating learn agent: {api_error_message(resp)}", file=sys.stderr)
-            sys.exit(1)
-        data = resp.json()
-        print(f"  air-learner: created → {data['id']} (v{data['version']})")
-        return data
+    Delegates to setup.create_or_update_agent so the model field propagates on
+    update (same retry-without-model fallback as sub-agents) and there's one
+    source of truth for the update body shape.
+    """
+    agents = list_agents()
+    prompt = (Path(__file__).parent / "prompts" / "learn-orchestrator.md").read_text()
+    return create_or_update_agent(
+        name="air-learner",
+        system=prompt,
+        tools=[{"type": "agent_toolset_20260401"}],
+        existing=agents.get("air-learner"),
+        model=DEFAULT_OPUS,
+    )
 
 
 def main():

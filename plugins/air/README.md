@@ -107,7 +107,9 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 
 ### Five Specialized Agents
 
-All agents run on Opus for consistent quality. Each receives the same rich context block (PR metadata, CI status, blame summaries, file churn, previous PR comments, project memory, session context).
+Each agent receives the same rich context block (PR metadata, CI status, blame summaries, file churn, previous PR comments, project memory, session context). The identical prefix across the 4 parallel agents enables prompt-cache hits within each model family.
+
+**Model tiering (v1.5.0+):** Judgment-heavy reviewers (code-reviewer, security-auditor, review-verifier) run on Opus. Mechanical / pattern-matching reviewers (git-history-reviewer, simplify) run on Sonnet — ~5× cheaper input with minimal quality risk on their task shape. Each agent's model is declared in its own frontmatter.
 
 **code-reviewer** — Bugs, logic errors, error handling, design issues, and test coverage gaps. Checks for orphan imports on deleted files, reference updates on renames, missing tests for new functionality. Reads TODO/FIXME/HACK markers and flags comment rot (outdated comments that no longer match the code).
 
@@ -267,16 +269,17 @@ Gracefully skips data that requires a local checkout (blame, churn, file statuse
 
 ## Cost
 
-Per review (API pricing, Opus 4.6 at $5/$25 per 1M tokens):
+Per review, with v1.5.0 model tiering (Opus 4.7 at $15/$75 per 1M, Sonnet 4.6 at $3/$15 per 1M):
 
-| Component | Tokens | Cost |
+| Component | Model | Approx. cost |
 |---|---|---|
-| 4 agents | ~135k | ~$1.38 |
-| Verification agent | ~27k | ~$0.28 |
+| code-reviewer, security-auditor | Opus | ~$0.75 each |
+| simplify, git-history-reviewer | Sonnet | ~$0.15 each |
+| review-verifier | Opus | ~$0.50 |
 | Codex | external | varies |
-| **Total** | **~162k** | **~$1.66** |
+| **Total** | — | **~$2.30** |
 
-At 40 reviews/month: ~$66/month. On Team/Pro subscription this is included in the seat cost.
+At 40 reviews/month: ~$90/month. Model tiering (v1.5.0) removes ~$1/review relative to all-Opus at current 4.7 pricing.
 
 **Timing:** 9-15 minutes per review. All agents run in parallel — the bottleneck is the slowest agent, not the sum.
 
