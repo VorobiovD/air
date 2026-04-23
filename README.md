@@ -1,7 +1,7 @@
 # air — Automated Code Review with Verification, Pattern Learning, and Team Knowledge
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.4.0-green.svg)](plugins/air/.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.5.0-green.svg)](plugins/air/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://claude.ai/code)
 [![GitHub](https://img.shields.io/badge/GitHub-supported-black.svg)](https://github.com)
 [![GitLab](https://img.shields.io/badge/GitLab-supported-orange.svg)](https://gitlab.com)
@@ -108,7 +108,9 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 
 ### Five Specialized Agents
 
-All agents run on Opus for consistent quality. Each receives the same rich context block (PR metadata, CI status, blame summaries, file churn, previous PR comments, project memory, session context).
+Each agent receives the same rich context block (PR metadata, CI status, blame summaries, file churn, previous PR comments, project memory, session context). The identical prefix across all 4 parallel agents enables prompt-cache hits on ~80% of the input.
+
+**Model tiering:** Judgment-heavy reviewers (code-reviewer, security-auditor, review-verifier) run on Opus. Mechanical / pattern-matching reviewers (git-history-reviewer, simplify) run on Sonnet — ~5× cheaper input with minimal quality risk on their task shape. Each agent's model is declared in its own frontmatter (`plugins/air/agents/<name>.md`).
 
 **code-reviewer** — Bugs, logic errors, error handling, design issues, and test coverage gaps. Checks for orphan imports on deleted files, reference updates on renames, missing tests for new functionality. Reads TODO/FIXME/HACK markers and flags comment rot. Matches every finding against the PR author's known behavioral patterns and annotates matches.
 
@@ -284,16 +286,19 @@ Gracefully skips data that requires a local checkout (blame, churn, file statuse
 
 ## Cost
 
-Per review (API pricing, Opus 4.6 at $5/$25 per 1M tokens):
+Per review, with v1.5.0 model tiering (Opus 4.7 at $15/$75 per 1M, Sonnet 4.6 at $3/$15 per 1M):
 
-| Component | Tokens | Cost |
+| Component | Model | Approx. cost |
 |---|---|---|
-| 4 agents | ~135k | ~$1.38 |
-| Verification agent | ~27k | ~$0.28 |
+| code-reviewer, security-auditor | Opus | ~$0.75 each |
+| simplify, git-history-reviewer | Sonnet | ~$0.15 each |
+| review-verifier | Opus | ~$0.50 |
 | Codex | external | varies |
-| **Total** | **~162k** | **~$1.66** |
+| **Total** | | **~$2.30** |
 
-At 40 reviews/month: ~$66/month. On Team/Pro subscription this is included in the seat cost.
+The structurally identical PR Context block across the 4 parallel agents is designed to hit Claude Code's automatic prompt cache, further reducing input cost on the shared prefix. Actual cost varies with PR size; large PRs scale linearly.
+
+Prior to v1.5.0 (all-Opus), the same review ran ~$3.00+. Model tiering on the two mechanical reviewers (git-history, simplify) removes ~$1/review without touching judgment-heavy agents.
 
 **Timing:** 9-15 minutes per review. All agents run in parallel — the bottleneck is the slowest agent, not the sum.
 

@@ -54,7 +54,32 @@ def parse_agent_tools(path: Path) -> list[str]:
     return ["bash", "read", "grep", "glob"]
 
 
-def create_or_update_agent(name: str, system: str, tools: list, existing: dict | None, callable_agents: list | None = None) -> dict:
+MODEL_ALIASES = {
+    "opus": "claude-opus-4-7",
+    "sonnet": "claude-sonnet-4-6",
+    "haiku": "claude-haiku-4-5-20251001",
+}
+
+
+def parse_agent_model(path: Path, default: str = "claude-opus-4-7") -> str:
+    """Read `model:` from agent frontmatter, resolving aliases to API IDs."""
+    text = path.read_text()
+    if not text.startswith("---"):
+        return default
+    try:
+        end = text.index("---", 3)
+        frontmatter = text[3:end]
+    except ValueError:
+        return default
+
+    for line in frontmatter.split("\n"):
+        if line.strip().startswith("model:"):
+            value = line.split(":", 1)[1].strip()
+            return MODEL_ALIASES.get(value, value) if value else default
+    return default
+
+
+def create_or_update_agent(name: str, system: str, tools: list, existing: dict | None, callable_agents: list | None = None, model: str = "claude-opus-4-7") -> dict:
     """Update if exists, create if not. Takes pre-fetched existing agent."""
 
     if existing:
@@ -74,7 +99,7 @@ def create_or_update_agent(name: str, system: str, tools: list, existing: dict |
             print(f"  {name}: sync failed ({resp.status_code}: {api_error_message(resp)}), using v{existing['version']}")
             return existing
     else:
-        body = {"name": name, "model": "claude-opus-4-6", "system": system, "tools": tools}
+        body = {"name": name, "model": model, "system": system, "tools": tools}
         if callable_agents:
             body["callable_agents"] = callable_agents
         resp = requests.post(f"{API_BASE}/agents", headers=get_headers(), json=body)
@@ -82,7 +107,7 @@ def create_or_update_agent(name: str, system: str, tools: list, existing: dict |
             print(f"  {name}: creation failed — {api_error_message(resp)}", file=sys.stderr)
             sys.exit(1)
         data = resp.json()
-        print(f"  {name}: created → {data['id']} (v{data['version']})")
+        print(f"  {name}: created → {data['id']} (v{data['version']}, model={model})")
         return data
 
 
@@ -137,6 +162,7 @@ def main():
 
         system = read_prompt(prompt_file)
         tools = parse_agent_tools(prompt_file)
+        model = parse_agent_model(prompt_file)
         tool_configs = [{"name": t, "enabled": True} for t in tools]
 
         agent = create_or_update_agent(
@@ -148,6 +174,7 @@ def main():
                 "configs": tool_configs,
             }],
             existing=agents_by_name.get(f"air-{name}"),
+            model=model,
         )
         sub_agent_refs.append({"type": "agent", "id": agent["id"], "version": agent["version"]})
 

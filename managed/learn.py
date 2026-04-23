@@ -47,7 +47,7 @@ def sync_learn_agent():
             headers=get_headers(),
             json={
                 "name": "air-learner",
-                "model": "claude-opus-4-6",
+                "model": "claude-opus-4-7",
                 "system": prompt,
                 "tools": [{"type": "agent_toolset_20260401"}],
             },

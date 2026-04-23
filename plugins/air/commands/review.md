@@ -484,7 +484,9 @@ Run with `run_in_background: true`. Graceful skip if not configured.
 
 **Phase B:** Immediately after launching Codex (don't wait for it), launch 4 agents in parallel.
 
-**Each agent receives a PR Context block at the top of its prompt** (inline, not a separate file):
+**Each agent receives a PR Context block at the top of its prompt** (inline, not a separate file).
+
+**Prompt-cache discipline:** Build the PR Context block ONCE and pass the **byte-identical** string as the opening of every agent's prompt. Do not tailor the block per agent (no "for the security agent, emphasize X…"). All agent-specific guidance goes AFTER the block. Claude Code's automatic prompt cache keys off shared prefixes, so a stable block shared across the 4 parallel agents lets 3 of the 4 calls read the cached prefix at ~10% input cost instead of re-paying the full context for each agent.
 
 ```
 **PR Context:**
@@ -530,11 +532,13 @@ WIKI DRIFT: <what you noticed> — suggest running /review-learn --refresh-profi
 Do NOT update the wiki yourself during the review — the PR isn't merged yet and the code may change during the review-fix cycle. The orchestrator will collect drift notes and decide whether to trigger a profile refresh after the PR merges.
 
 **Agent types:** Launch each agent using its registered `subagent_type` so it picks up the `.claude/agents/<name>.md` definition and shows the correct name in the UI:
-- Agent 1 → `subagent_type: "air:code-reviewer"`
-- Agent 2 → `subagent_type: "air:simplify"`
-- Agent 3 → `subagent_type: "air:security-auditor"`
-- Agent 4 → `subagent_type: "air:git-history-reviewer"`
-- Verifier (Step 8) → `subagent_type: "air:review-verifier"`
+- Agent 1 → `subagent_type: "air:code-reviewer"` (Opus — judgment-heavy bug/design review)
+- Agent 2 → `subagent_type: "air:simplify"` (Sonnet — pattern matching against codebase + heuristics)
+- Agent 3 → `subagent_type: "air:security-auditor"` (Opus — judgment-heavy threat modeling)
+- Agent 4 → `subagent_type: "air:git-history-reviewer"` (Sonnet — mostly mechanical blame/churn analysis)
+- Verifier (Step 8) → `subagent_type: "air:review-verifier"` (Opus — final quality gate, must be precise)
+
+**Model tiering rationale:** Each agent's model is declared in its own frontmatter (`plugins/air/agents/<name>.md`). Judgment-heavy reviewers (code-reviewer, security-auditor, review-verifier) run on Opus. Mechanical / pattern-matching reviewers (git-history-reviewer, simplify) run on Sonnet — ~5× cheaper input, minimal quality risk on their task shape. Do not override models when launching agents — the frontmatter is the source of truth.
 
 **Fallback:** If a `subagent_type: "air:<name>"` fails (plugin not installed or agent file not found), fall back to `subagent_type: "general-purpose"` and include the full agent instructions from `plugins/air/agents/<name>.md` in the prompt. The review quality is the same — only the UI label changes.
 
