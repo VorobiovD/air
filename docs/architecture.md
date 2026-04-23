@@ -1,0 +1,410 @@
+# air — Architecture, Decisions, and Roadmap
+
+**Last updated:** 2026-04-23
+**Version:** 1.3.0 (pending 1.4.0)
+
+---
+
+## What It Is
+
+**air** is an automated code review system with two distribution paths:
+
+1. **CLI Plugin** — runs locally in Claude Code, triggered manually with `/air:review`
+2. **Managed Agent** — runs in Anthropic's cloud, triggered automatically by GitHub Actions on every PR
+
+Both paths use the same 5 agent prompts, same wiki patterns, same review format, and learn from each other.
+
+---
+
+## Repository Structure
+
+```
+VorobiovD/air/
+│
+├── plugins/air/                    ← CLI PLUGIN (Claude Code marketplace)
+│   ├── agents/                     ← SHARED agent prompts (single source of truth)
+│   │   ├── code-reviewer.md           Bugs, logic, design, test coverage, author patterns
+│   │   ├── simplify.md                3 sections: Code Reuse, Quality, Efficiency (16 items)
+│   │   ├── security-auditor.md        31-item checklist + resource exhaustion
+│   │   ├── git-history-reviewer.md    Blame, churn, previous PR comments, author patterns
+│   │   └── review-verifier.md         False positive filter, confidence scoring, 6 verdicts
+│   ├── commands/                   ← CLI-only orchestration
+│   │   ├── review.md                 13-step pipeline (~879 lines, core orchestration)
+│   │   ├── review-self.md            Self-review flow (--self mode, extracted)
+│   │   ├── review-respond.md         Respond flow (--respond mode, extracted)
+│   │   ├── learn.md                  Wiki maintenance + KAIROS history
+│   │   └── platform-gitlab.md       GitLab CLI/API mappings
+│   └── .claude-plugin/
+│       └── plugin.json             Version 1.3.0
+│
+├── managed/                        ← MANAGED AGENT (Anthropic cloud)
+│   ├── api.py                        Shared helpers: get_headers, list_agents, find_environment
+│   ├── setup.py                      Creates/updates agents via API (find by name, PATCH with version)
+│   ├── review.py                     Triggers review sessions (streaming or polling)
+│   ├── learn.py                      Triggers wiki maintenance sessions
+│   ├── test-session.py               9-test verification (repo, auth, blame, comment, wiki)
+│   ├── test-learn.py                 Wiki clone/push verification
+│   ├── prompts/
+│   │   ├── orchestrator.md           Review pipeline for cloud (~200 lines)
+│   │   └── learn-orchestrator.md     Learn pipeline for cloud
+│   └── requirements.txt             anthropic>=0.93.0, requests>=2.28.0
+│
+├── .github/workflows/
+│   └── managed-review.yml           Reusable GitHub Action (teams reference this)
+│
+├── .claude-plugin/
+│   └── marketplace.json              Plugin marketplace distribution
+│
+├── CLAUDE.md                         Project conventions (references both plugin and managed)
+├── README.md                         User docs with CLI + CI setup guides
+├── .gitignore                        Excludes: managed/config.json, *.pem, *.pyc
+└── LICENSE
+```
+
+---
+
+## What's Shared vs Separate
+
+| Component | CLI Plugin | Managed Agent | Shared? |
+|---|---|---|---|
+| Agent prompts (5 files) | Loaded as subagent_type | Read by setup.py → API agents | **YES — single source** |
+| Wiki patterns (6 files) | git clone/push locally | git clone/push from sandbox | **YES — same wiki** |
+| Review output format | Defined in review.md | Defined in orchestrator.md | NO — duplicated |
+| Orchestrator logic | review.md (1276 lines) | orchestrator.md (~200 lines) | NO — duplicated |
+| Learn logic | learn.md | learn-orchestrator.md | NO — duplicated |
+| Auth | User's local gh auth | Bot PAT via github_repository resource | Different |
+| Trigger | Manual: /air:review | Automatic: GitHub Action on PR | Different |
+| Modes | --self, --respond (+ --dry-run), --full, --re-review, --fresh, --rewrite, --dry-run | auto, fresh, re-review | CLI has more |
+| Respond self-check | Scales by diff size: < 50 lines = code-reviewer + verifier only | Same (in orchestrator) | YES — same logic |
+| Cross-repo wiki | Reads TARGET repo's wiki (skip write only) | N/A | Changed in v1.4.0 |
+| Codex (GPT-5.4) | Optional 5th reviewer | Not available | CLI only |
+| GitLab | Supported via platform-gitlab.md | Not yet | CLI only |
+
+---
+
+## CLI Plugin Pipeline (13 steps)
+
+```
+/air:review [number] [flags]
+  │
+  ├── Step 1: Parse arguments (PR number, flags, cross-repo detection)
+  ├── Step 2: Smart default (check existing reviews, auto re-review)
+  ├── Step 3: Load context (CLAUDE.md, wiki patterns, project memory, session context)
+  ├── Step 3.5: First-run project discovery (PROJECT-PROFILE.md + GLOSSARY.md)
+  ├── Step 4: Fetch PR data (batched API, diff, commits, blame, churn, previous PR comments)
+  ├── Step 5: Pre-flight checks (state, draft, CI, conflict markers, file complexity, pure-promotion detection)
+  ├── Step 6: Re-review mode (inter-diff, developer responses, FIXED/NOT FIXED tracking)
+  │
+  ├── Step 7: Parallel review ← 5 reviewers launched simultaneously
+  │   ├── Phase A: Codex (background, GPT-5.4)
+  │   └── Phase B: 4 agents via Agent tool
+  │       ├── code-reviewer (+ author pattern matching)
+  │       ├── simplify (reuse, quality, efficiency)
+  │       ├── security-auditor (31-item checklist + author patterns)
+  │       └── git-history-reviewer (blame, churn + author patterns)
+  │
+  ├── Step 8: Verification (review-verifier filters false positives, bootstrap calibration defaults when no SEVERITY-CALIBRATION.md exists)
+  ├── Step 9: Console attribution (severity table, drops/downgrades — never posted)
+  ├── Step 10: Consolidate (deduplicate, strengths, wiki drift collection)
+  ├── Step 11: Format (clickable links, sequential numbering, code blocks)
+  ├── Step 12: Post (new comment or PATCH, own-PR guard, review verdict)
+  └── Step 13: Learn (author pattern lifecycle, graduated resistance, wiki push)
+```
+
+**Additional modes (extracted into separate files):**
+- `--self` / `--self --fix` — (`review-self.md`) review local changes, generate fix plan, optionally auto-apply. Never posts a PR comment; wiki patterns still push.
+- `--respond` — (`review-respond.md`) auto-classify findings, self-check (scaled by diff size: < 50 lines uses code-reviewer + verifier only), post response. Supports `--dry-run`.
+- `--full` — review entire codebase (all files, console only)
+
+---
+
+## Managed Agent Pipeline
+
+```
+PR opened → GitHub Action → managed/review.py
+  │
+  ├── [1] Sync agents (setup.py: find by name → create or PATCH with latest prompts)
+  ├── [2] Create session (github_repository resource mounts repo with auth)
+  ├── [3] Send task (REPO, PR_NUMBER, GH_TOKEN, MODE)
+  │
+  └── Orchestrator agent runs in Anthropic cloud sandbox:
+      ├── Verify setup (gh auth, repo access)
+      ├── Fetch base branch (git fetch origin main)
+      ├── Fetch PR data (gh CLI + git blame/log)
+      ├── Load wiki context (clone with token auth)
+      ├── Run 4 review passes (sequential now, parallel when callable_agents enabled)
+      ├── Verify findings
+      ├── Post review as bot account
+      └── Push learned patterns to wiki
+```
+
+---
+
+## Agent Prompts (Shared, Single Source of Truth)
+
+**code-reviewer.md** — Bugs, logic errors, error handling, design, test coverage. Checks orphan imports on deleted files, reference updates on renames. Author pattern annotations are inline in the output format section (for EVERY finding, check against known patterns). Parameter sprawl and leaky abstractions under Design & Architecture.
+
+**simplify.md** — Three sections:
+- Code Reuse: active codebase search via Grep/Glob, reinvented utilities, missed shared modules
+- Code Quality: dead code, copy-paste with variation, stringly-typed code, unnecessary comments, redundant state
+- Efficiency: N+1 patterns, missed concurrency, hot-path bloat, TOCTOU, overly broad operations, no-op updates, unbounded structures
+
+**security-auditor.md** — 31-item checklist:
+- Sensitive data (6), injection (4), auth (3), input validation (3), data exposure (3), operational security (4), silent failures (5), resource exhaustion (3)
+- PROJECT-PROFILE.md controls which checks apply per repo
+- Author pattern annotations inline in output format (security-relevant patterns are high-signal)
+
+**git-history-reviewer.md** — Blame analysis (stale code, absent authors, integration boundaries), churn patterns (5+ commits/6mo = design smell), previous PR review comments, author pattern matching.
+
+**review-verifier.md** — Post-review quality gate. Reads actual source at flagged lines. 6 verdicts: CONFIRMED, DOWNGRADED, IMPROVEMENT, PRE-EXISTING, ACCEPTED PATTERN, FALSE POSITIVE. Confidence scoring (0-100), default threshold 60. SEVERITY-CALIBRATION.md overrides per-agent thresholds when sufficient data exists.
+
+---
+
+## Author Pattern Lifecycle
+
+Patterns in REVIEW.md are behavioral profiles that evolve over time:
+
+```
+### alice
+- **Shell injection risk** (3x: #45, #52, #67 | last 2 PRs: 2 clean): Misses escapeshellarg() on user input
+- **Empty array guard** (1x: #67 | new): Uses implode() on arrays without checking empty first
+```
+
+Format: `**<Pattern name>** (<Nx>: <PR refs> | last <N> PRs: <M> clean): <Description>`
+
+Lifecycle:
+- **Create** — `(1x: #PR | new)` — generalize from specific incident to behavioral tendency
+- **Strengthen** — increment count, add PR ref, reset clean counter to 0
+- **Decline** — 5 consecutive clean PRs → append `(declining)`
+- **Archive** — 10 consecutive clean PRs → move to `### <author> (archived)`
+- **Never delete** — archived patterns stay permanently as historical context
+
+3 of 4 review agents (code-reviewer, security-auditor, git-history-reviewer) annotate findings with `[matches author pattern: <name> (<Nx>)]`. The orchestrator uses annotations to drive lifecycle transitions in Step 13.
+
+---
+
+## Wiki Storage (6 pages per repo)
+
+| Page | Purpose | Updated by |
+|---|---|---|
+| REVIEW.md | Curated patterns: common findings, author profiles, service gotchas | Every review (Step 13) + learn |
+| REVIEW-HISTORY.md | Auto-generated analytics: finding frequency, file hot spots, author trends | Learn (KAIROS) |
+| PROJECT-PROFILE.md | Project characteristics: languages, architecture, review focus rules, applicable security checks | First-run discovery + learn refresh |
+| GLOSSARY.md | Domain terminology: prevents false findings on intentional naming | First-run + learn |
+| ACCEPTED-PATTERNS.md | Team-approved patterns that suppress matching findings | Developer disputes (graduated resistance) |
+| SEVERITY-CALIBRATION.md | Per-agent confidence thresholds from dispute rates | Learn (when 10+ data points) |
+
+---
+
+## Authentication (Managed Agent)
+
+**Decision: Machine bot account with classic PAT**
+
+- Bot account: `air-machine` (regular GitHub account used as bot)
+- Classic PAT with `repo` scope (fine-grained PATs don't support wiki push or GraphQL comments)
+- Token passed two ways:
+  - `github_repository` resource: mounts repo with auth (clone/push, token in API request, not conversation)
+  - `GH_TOKEN` in session message: for `gh` CLI (comments, review verdicts). Visible in Anthropic session logs — accepted tradeoff with minimal-permission bot account.
+
+**Alternatives evaluated and rejected:**
+
+| Option | Why rejected |
+|---|---|
+| GitHub App | Complex onboarding (private key, JWT, installation tokens) |
+| Fine-grained PAT | Doesn't support wiki push or GraphQL comments |
+| Vault + MCP OAuth | Read-only — can't write comments or push wiki |
+| GITHUB_TOKEN | Free but can't push to wiki repos |
+| Centralized token service | Requires hosting infrastructure |
+
+---
+
+## Agent Management
+
+**Self-bootstrapping:** First PR on any org auto-creates agents. No manual setup.py needed.
+
+**Find by name:** `GET /v1/agents` → find `air-reviewer` → use it. No config files, no stored IDs. Each org's API key isolates their agents.
+
+**Auto-update:** Every run calls setup.py which PATCHes each agent with the latest prompt from the air repo. Uses `version` field for optimistic concurrency. When you merge a prompt change to main, the next PR on any org picks it up automatically.
+
+**Duplicates:** If race condition creates multiples, newest is used (dict overwrite on reversed API list). Harmless — clean up manually if needed.
+
+**Agent inventory per org:**
+
+| Agent | Model | Tools | Purpose |
+|---|---|---|---|
+| air-code-reviewer | Opus | read, grep, glob, bash | Code quality review |
+| air-simplify | Opus | read, grep, glob | Reuse, quality, efficiency (no bash) |
+| air-security-auditor | Opus | read, grep, glob, bash | 31-item security audit |
+| air-git-history-reviewer | Opus | read, grep, glob, bash | Blame, churn, history |
+| air-review-verifier | Opus | read, grep, glob, bash | False positive filtering |
+| air-reviewer | Opus | all (agent_toolset) | Review orchestrator (has callable_agents) |
+| air-learner | Opus | all (agent_toolset) | Wiki maintenance |
+| air-test | Sonnet | all (agent_toolset) | Quick 9-test verification |
+
+---
+
+## Team Onboarding (per org)
+
+| Step | Who | Time | What |
+|---|---|---|---|
+| 1 | Org admin | 2 min | Create bot GitHub account |
+| 2 | Org admin | 1 min | Add bot as collaborator (Write) to repos |
+| 3 | Org admin | 2 min | Generate classic PAT (`repo` scope) on bot account |
+| 4 | Org admin | 2 min | Set `ANTHROPIC_API_KEY` + `AIR_BOT_TOKEN` as org secrets |
+| 5 | Any dev | 1 min | Add workflow YAML to repo |
+
+First PR auto-bootstraps. No setup scripts, no config files, no CLI installation required.
+
+---
+
+## Review Output Format
+
+Both CLI and managed produce identical format:
+
+```
+## Code Review
+
+<one-line summary>
+
+### Security Audit: <pass>/<total> PASS
+
+| Check | Result |
+|---|---|
+
+### Blockers
+**1. <description>**
+[`file#Lstart-Lend`](link) — <explanation>
+```code block if helpful```
+
+### Medium / Low / Nits
+(same format, sequential numbering)
+
+### Pre-existing Issues
+(not introduced by PR, don't block merge)
+
+### Strengths
+- <1-3 specific observations>
+
+---
+<N> findings for this PR. Blockers should be fixed before merge.
+Reviewed at: <SHA>
+> After fixing, run `/air:review --respond` to verify and reply.
+```
+
+---
+
+## Respond Format
+
+```
+## Review Response
+
+<conclusion — e.g., "All 6 findings fixed.">
+
+Responding to review at <SHA>.
+
+### Fixed
+**#1 — <description>**
+fixed: <how it was fixed>
+
+### Disputed / Acknowledged / Partially Fixed
+(grouped by status)
+
+### Additional Changes / Self-check Notes
+(if applicable)
+
+---
+Changes: +N/-N across M files.
+Responded at: <SHA>
+```
+
+---
+
+## Cost
+
+| Component | Per review | Monthly (40 reviews) |
+|---|---|---|
+| 4 agents (Opus) | ~$1.38 | ~$55 |
+| Verification (Opus) | ~$0.28 | ~$11 |
+| Managed Agent session | ~$0.02 | ~$0.80 |
+| **Total** | **~$1.68** | **~$67** |
+
+---
+
+## Known Limitations
+
+**Managed Agent:**
+- Sequential execution (~12 min per review). Parallel when callable_agents threads are enabled (requested multi-agent access).
+- GH_TOKEN visible in Anthropic session logs (mitigated by bot account minimal permissions).
+- Wiki push can timeout in sandbox (5-min command limit). Fixed with explicit token in wiki remote URL.
+- No Codex (GPT-5.4) — CLI-only feature, requires OpenAI plugin.
+- GitHub-only — no GitLab support yet.
+- `github_repository` resource only clones the PR branch — base branch must be fetched separately (`git fetch origin main`).
+
+**CLI Plugin:**
+- review.md reduced to 879 lines (from 1276) — --self and --respond extracted to separate files. Still long; further extraction planned.
+- Subagents CANNOT spawn other subagents (Claude Code hard limit, nesting depth = 1).
+- Plugin auto-update unreliable — marketplace pulls repo but doesn't always re-install to cache.
+- Auto-trigger for /air:learn sometimes skipped due to prompt length (mitigated with >>> markers and explicit RETURN in Step 13).
+
+**Both:**
+- Orchestrator logic duplicated between CLI (review.md) and managed (orchestrator.md).
+- Agent prompt changes propagate automatically; orchestrator changes require manual sync.
+
+---
+
+## CLI Orchestrator Research
+
+Subagents cannot nest in Claude Code — only the main session can use the Agent tool. The current architecture (review.md as orchestrator → Agent tool → sub-agents) is the correct pattern. Inconsistency comes from review.md being too long (1276 lines), not from wrong architecture.
+
+**Fix:** Slim review.md to ~300 lines by extracting verbose sections (format rules, wiki learning protocol, resistance levels, author pattern lifecycle) into reference files. Same architecture, less prompt bloat, more consistent execution.
+
+**Agent Teams** (experimental, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`): alternative with peer-to-peer communication between teammates. Known bug: teammates lack Agent tool (issue #31977). Not production-ready.
+
+**Deferred idea:** CLI triggers Managed Agent (cloud execution from terminal) — would unify execution model but requires internet and can't handle --self mode (local uncommitted changes).
+
+---
+
+## Roadmap
+
+| Priority | Item | Effort | Impact | Status |
+|---|---|---|---|---|
+| **Blocked** | Parallel sub-agents (callable_agents) | Zero — flip when enabled | 12 min → ~5 min reviews | Waiting for access |
+| **Done** | Slim review.md (1319 → 879 lines) | 1 day | CLI consistency | v1.4.0 — extracted --self + --respond |
+| **Done** | Respond self-check scaling | 0.5 day | Token savings | v1.4.0 — < 50 lines = fewer agents |
+| **Done** | Cross-repo wiki read | 0.5 day | Pattern context | v1.4.0 — reads target wiki, skip write |
+| **Done** | Severity calibration bootstrap | 0.5 day | New project UX | v1.4.0 — default thresholds table |
+| **Done** | Pure-promotion PR detection | 0.5 day | Workflow | v1.4.0 — warn and offer skip |
+| **Done** | Auto-trigger visibility | 0.5 day | Reliability | v1.4.0 — markers + explicit RETURN |
+| **Done** | Respond --dry-run | 0.5 day | Preview | v1.4.0 |
+| **High** | Reduce orchestrator duplication | 1 day | Maintenance burden | |
+| **High** | Further slim review.md (879 → ~300) | 1 day | CLI consistency | Extract verbose sections to reference file |
+| **Medium** | GitLab in managed agent | 2-3 days | Platform coverage | |
+| **Medium** | Wiki push reliability | 1 day | Sandbox timeout handling | |
+| **Low** | Codex in managed agent | 1 day | Second model opinion | |
+| **Deferred** | CLI triggers Managed Agent | 1 week | Unified execution model | |
+| **Deferred** | Cowork plugin | 1-2 weeks | Non-CLI users | |
+| **Deferred** | Slack/Confluence integrations | 1 week | Team visibility | |
+| **Deferred** | Agent Teams (experimental) | Research | Alternative parallelism | |
+
+---
+
+## Key Decisions Made
+
+| Decision | Rationale |
+|---|---|
+| Bot account over GitHub App | Simpler onboarding — no private key, no JWT, no installation IDs |
+| Classic PAT over fine-grained | Fine-grained doesn't support wiki push or GraphQL comments |
+| Agents found by name, not stored | Eliminates config files, enables self-bootstrapping |
+| Newest agent per name used | Dict overwrite on reversed API list; duplicates are harmless |
+| GH_TOKEN in session message | github_repository handles clone; gh CLI needs env var; no API support for session env vars |
+| Auto-update on every run | setup.py PATCHes agents with latest prompts; ~2s overhead per run |
+| Orchestrator duplication accepted | CLI has interactive modes (--self, --respond) that don't apply to managed; shared reference is future work |
+| Codex skipped in managed | Requires OpenAI plugin/key in sandbox; optional in CLI too |
+| Sequential execution accepted | callable_agents registered but runtime doesn't spawn threads yet; waiting for multi-agent access |
+| Code blocks in review findings | Improves clarity — both CLI and managed include them |
+| Author patterns never deleted | Archived after 10 clean PRs but stay permanently as historical context |
+| --self and --respond extracted to separate files | Reduces review.md cognitive load; each mode is self-contained with its own reference to shared steps |
+| Respond self-check scales by diff size | < 50 lines = code-reviewer + verifier only; saves ~60% tokens on small fix diffs |
+| Cross-repo reads target wiki | Reading patterns from unfamiliar repo is highest value; writing skipped to avoid pollution |
+| Bootstrap severity calibration | Default thresholds (security=70, simplify=55, others=60) until project accumulates 10+ data points |
+| Author pattern annotations inline in output format | Moved from separate section at end of agent file to where findings are produced — increases compliance from ~60% to expected higher |
