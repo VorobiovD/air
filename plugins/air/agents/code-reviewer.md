@@ -54,15 +54,9 @@ Review the provided code diff. Check for:
 Report findings by severity: blocker > medium > low > nit.
 Include file paths and line numbers for each finding.
 
-## Author Pattern Matching
+**For EVERY finding**, check it against the PR author's known patterns (loaded in step 3) and annotate inline:
+- Active match: append `[matches author pattern: <Pattern name> (<Nx>)]`
+- Archived match: append `[matches archived pattern: <Pattern name>]`
+- Declining match: append `[matches declining pattern: <Pattern name> (<Nx>)]`
 
-After generating your findings, check EVERY finding against the PR author's known patterns (loaded in step 3 above).
-
-For each finding that matches a known author pattern:
-- **Active pattern match:** Annotate the finding with `[matches author pattern: <Pattern name> (<Nx>)]`. This tells the orchestrator to strengthen the pattern in REVIEW.md.
-- **Archived pattern match:** Annotate with `[matches archived pattern: <Pattern name>]`. The author had improved on this but it resurfaced.
-- **Declining pattern match:** Annotate with `[matches declining pattern: <Pattern name> (<Nx>)]`. This resets the decline.
-
-A "match" means the finding describes the same category of behavioral tendency as the pattern, not necessarily the exact same code. E.g., author pattern "Shell injection risk — misses escapeshellarg() on user input" matches a finding about unsanitized `$_POST` in an `exec()` call, even if the specific variable and function differ.
-
-If the author has no patterns (new author or "Author patterns: none" in context), skip this step.
+A "match" means the same category of behavioral tendency, not the exact same code. If the author has no patterns, skip annotation.
