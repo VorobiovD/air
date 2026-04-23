@@ -29,15 +29,39 @@ def api_error_message(resp: requests.Response) -> str:
         return resp.text[:200]
 
 
+def _paginate(path: str) -> list[dict]:
+    """Fetch all pages of a list endpoint. The /agents and /environments
+    endpoints default to 20 items per page and signal more via `next_page`
+    (no `has_more` field). Accounts with >20 total agents silently drop
+    matches without pagination — e.g. review.py misses `air-simplify` on
+    the second page and aborts with a spurious "Missing agents" error.
+    """
+    all_items: list[dict] = []
+    cursor: str | None = None
+    while True:
+        params = {"limit": 100}
+        if cursor:
+            params["page"] = cursor
+        resp = requests.get(f"{API_BASE}{path}", headers=get_headers(), params=params)
+        if not resp.ok:
+            break
+        body = resp.json()
+        all_items.extend(body.get("data", []))
+        cursor = body.get("next_page")
+        if not cursor:
+            break
+    return all_items
+
+
 def list_agents() -> dict[str, dict]:
-    """Fetch all agents once, return as {name: agent} dict.
-    API returns newest first. We iterate oldest→newest so dict overwrites
-    keep the newest non-archived agent per name (matches prior behavior)."""
-    resp = requests.get(f"{API_BASE}/agents", headers=get_headers())
-    if not resp.ok:
-        return {}
+    """Fetch all agents across pages, return as {name: agent} dict.
+
+    API returns newest first per page. We iterate oldest→newest so dict
+    overwrites keep the newest non-archived agent per name.
+    """
+    all_agents = _paginate("/agents")
     result = {}
-    for agent in reversed(resp.json().get("data", [])):
+    for agent in reversed(all_agents):
         if not agent.get("archived_at"):
             result[agent["name"]] = agent
     return result
@@ -45,10 +69,7 @@ def list_agents() -> dict[str, dict]:
 
 def find_environment() -> str | None:
     """Find existing environment by name."""
-    resp = requests.get(f"{API_BASE}/environments", headers=get_headers())
-    if not resp.ok:
-        return None
-    for env in resp.json().get("data", []):
+    for env in _paginate("/environments"):
         if env["name"] == "air-review-env" and not env.get("archived_at"):
             return env["id"]
     return None
