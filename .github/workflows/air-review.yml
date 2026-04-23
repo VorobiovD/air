@@ -1,0 +1,16 @@
+# Dogfood: air reviews its own PRs via the Managed Agent.
+# Uses the reusable workflow in this same repo (pinned to @main so PRs can't
+# modify the review logic that reviews them).
+
+name: air review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    uses: VorobiovD/air/.github/workflows/managed-review.yml@main
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
