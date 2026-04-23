@@ -47,6 +47,8 @@ find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
 # Mint the session dir. `mktemp -d` guarantees a non-empty, non-colliding path.
 AIR_TMP=$(mktemp -d "/tmp/air-XXXXXX")
 # Repo root (used by Step 3.5 when writing `.air-checks.sh` â€” same-repo only).
+# Falls back to empty when invoked from outside a git repo; Step 3.5 skips
+# `.air-checks.sh` generation in that case.
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 echo "$AIR_TMP"
 ```
@@ -281,7 +283,7 @@ Deep-scan this repository and generate three outputs. Go beyond listing files â€
 
 Run with `model: opus`. After completion:
 - Write PROJECT-PROFILE.md and GLOSSARY.md to `$AIR_TMP/` (pushed to wiki below)
-- Write `.air-checks.sh` to the **repo root** (NOT the wiki) with mode `644` so it stays non-executable until the user explicitly enables it. Skip the write if `$REPO_ROOT/.air-checks.sh` already exists (respect user customization).
+- Write `.air-checks.sh` to the **repo root** (NOT the wiki) with mode `644` so it stays non-executable until the user explicitly enables it. Skip the write if `$REPO_ROOT` is empty (not in a git repo) OR if `$REPO_ROOT/.air-checks.sh` already exists (respect user customization).
 - Push wiki files:
 ```bash
 WIKI_DIR="$AIR_TMP/review-wiki-<number>"

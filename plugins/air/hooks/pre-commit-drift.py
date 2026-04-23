@@ -52,22 +52,31 @@ def run_script(path, cwd):
     return result.returncode, result.stdout, result.stderr
 
 
+# Shell operators that separate sub-commands. shlex with `punctuation_chars`
+# returns each operator as its own token even when tight-packed like `a;b`.
 _SUBCOMMAND_SEPARATORS = {";", "&&", "||", "|", "&", "\n"}
+# Common command wrappers that precede the real command. `env VAR=x git commit`
+# and `sudo git commit` should route to the same path as bare `git commit`.
+_WRAPPERS = {"sudo", "nohup", "exec", "time", "env"}
+# Two-token git meta-flags: `git --git-dir /foo commit` consumes the next arg.
+_GIT_TWO_TOKEN_FLAGS = {"--git-dir", "--work-tree", "--namespace", "-C", "-c"}
+
+
+def _tokenize(cmd: str) -> list[str]:
+    """shlex-tokenize, respecting quotes AND producing operator tokens for `;`, `&&`, `||`, `|`, `&` even tight-packed."""
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars="|&;<>")
+        lex.whitespace_split = True
+        return list(lex)
+    except ValueError:
+        return cmd.split()
 
 
 def _split_subcommands(cmd: str) -> list[list[str]]:
-    """Split a Bash command into argv lists per sub-command (split on ;, &&, ||, |, &).
-
-    Returns a list of argv lists. Falls back to whitespace split if shlex
-    can't handle the quoting.
-    """
-    try:
-        tokens = shlex.split(cmd)
-    except ValueError:
-        tokens = cmd.split()
+    """Split a Bash command into argv lists per sub-command."""
     subs: list[list[str]] = []
     current: list[str] = []
-    for t in tokens:
+    for t in _tokenize(cmd):
         if t in _SUBCOMMAND_SEPARATORS:
             if current:
                 subs.append(current)
@@ -80,13 +89,19 @@ def _split_subcommands(cmd: str) -> list[list[str]]:
 
 
 def _argv_is_git_commit(argv: list[str]) -> bool:
-    """True if argv invokes `git commit` (not commit-tree/commit-graph) at its leader."""
+    """True if argv invokes `git commit` (not commit-tree/commit-graph)."""
     if not argv:
         return False
-    # Strip env-var prefix assignments like `GIT_AUTHOR_NAME=x git commit`.
     i = 0
+    # Strip env-var prefix assignments like `GIT_AUTHOR_NAME=x git commit`.
     while i < len(argv) and "=" in argv[i] and not argv[i].startswith("-") and "/" not in argv[i].split("=", 1)[0]:
         i += 1
+    # Strip common wrappers: `sudo git commit`, `env git commit`, `nohup git commit`, etc.
+    while i < len(argv) and argv[i] in _WRAPPERS:
+        i += 1
+        # env-style VAR=val assignments after `env`.
+        while i < len(argv) and "=" in argv[i] and not argv[i].startswith("-"):
+            i += 1
     if i >= len(argv):
         return False
     leader = argv[i]
@@ -96,10 +111,12 @@ def _argv_is_git_commit(argv: list[str]) -> bool:
     j = i + 1
     while j < len(argv):
         tok = argv[j]
-        if tok.startswith("--git-dir") or tok.startswith("--work-tree") or tok.startswith("--namespace"):
+        # Single-token forms: `--git-dir=/foo`, `-c key=val`, generic `-X`.
+        if any(tok.startswith(f + "=") for f in ("--git-dir", "--work-tree", "--namespace")):
             j += 1
             continue
-        if tok in ("-C", "-c"):
+        # Two-token forms: `--git-dir /foo`, `-C /path`, etc.
+        if tok in _GIT_TWO_TOKEN_FLAGS:
             j += 2
             continue
         if tok.startswith("-"):

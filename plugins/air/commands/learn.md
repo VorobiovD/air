@@ -269,7 +269,7 @@ If fewer than 10 total data points across all agents, skip this step entirely �
 
 ## Step 4.65: Generate or augment .air-checks.sh
 
-Skip if `CROSS_REPO=true`. Otherwise branch on existence of `$REPO_ROOT/.air-checks.sh`:
+Skip if `CROSS_REPO=true`. Skip if `$REPO_ROOT` is empty (not invoked from inside a git repo — no sensible place to write the script). Otherwise branch on existence of `$REPO_ROOT/.air-checks.sh`:
 
 ### Branch A — file does NOT exist: generate it
 
