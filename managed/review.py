@@ -21,18 +21,56 @@ Usage:
 
 import argparse
 import asyncio
+import atexit
 import html
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import requests as req
-from anthropic import AsyncAnthropic
+from anthropic import Anthropic, AsyncAnthropic
 
 from api import list_agents, find_environment
+
+
+# Tracks live session IDs so atexit/signal handlers can send interrupts to
+# anything still running when the driver dies unexpectedly (CI job killed,
+# Ctrl-C, uncaught exception). Without this, an orphan session keeps running
+# on Anthropic's side until its own idle timeout — burning tokens and
+# blocking DELETE /sessions/{id} for ~5 minutes.
+LIVE_SESSIONS: set[str] = set()
+
+
+def _interrupt_live_sessions() -> None:
+    """Best-effort interrupt of any still-running sessions. Sync client
+    because atexit runs after the asyncio loop is gone."""
+    if not LIVE_SESSIONS:
+        return
+    print(f"  [shutdown] interrupting {len(LIVE_SESSIONS)} live session(s)", file=sys.stderr)
+    client = Anthropic()
+    for sid in list(LIVE_SESSIONS):
+        try:
+            client.beta.sessions.events.send(sid, events=[{"type": "user.interrupt"}])
+        except Exception as e:
+            print(f"  [shutdown] interrupt failed for {sid}: {e}", file=sys.stderr)
+    LIVE_SESSIONS.clear()
+
+
+atexit.register(_interrupt_live_sessions)
+
+
+def _signal_handler(signum, _frame):
+    _interrupt_live_sessions()
+    sys.exit(128 + signum)
+
+
+# SIGKILL can't be caught; SIGTERM/SIGINT cover most CI-level kills + Ctrl-C.
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 SPECIALIST_AGENTS = [
@@ -207,55 +245,68 @@ async def run_session(
             },
         ],
     )
+    LIVE_SESSIONS.add(session.id)
 
-    await client.beta.sessions.events.send(
-        session.id,
-        events=[{"type": "user.message", "content": [{"type": "text", "text": user_text}]}],
-    )
+    try:
+        await client.beta.sessions.events.send(
+            session.id,
+            events=[{"type": "user.message", "content": [{"type": "text", "text": user_text}]}],
+        )
 
-    # Stop reasons we treat as a clean end-of-turn. Anything else (explicit
-    # error, cancelled, unknown future types) is surfaced to the caller so
-    # gather() can record a degraded specialist note instead of silently
-    # reporting empty findings as a successful review.
-    TERMINAL_SUCCESS = {"end_turn", "stop_sequence", "max_tokens"}
+        # Stop reasons we treat as a clean end-of-turn. Anything else (explicit
+        # error, cancelled, unknown future types) is surfaced to the caller so
+        # gather() can record a degraded specialist note instead of silently
+        # reporting empty findings as a successful review.
+        TERMINAL_SUCCESS = {"end_turn", "stop_sequence", "max_tokens"}
 
-    parts: list[str] = []
-    terminated_reason: str | None = None
-    # AsyncAnthropic's beta.sessions.events.stream is an `async def` that
-    # returns an AsyncStream — must await it before using as a context
-    # manager (it isn't itself the context manager).
-    stream_cm = await client.beta.sessions.events.stream(session.id)
-    async with stream_cm as stream:
-        async for event in stream:
-            t = getattr(event, "type", "")
-            if t == "agent.message":
-                for block in event.content:
-                    text = getattr(block, "text", None)
-                    if text:
-                        parts.append(text)
-            elif t == "session.status_idle":
-                stop_reason = getattr(event, "stop_reason", None)
-                stop_type = getattr(stop_reason, "type", None) if stop_reason else None
-                if stop_type == "requires_action":
-                    # Transient idle waiting for client-side events; we don't
-                    # send any here, so keep draining the stream.
-                    continue
-                if stop_type in TERMINAL_SUCCESS:
+        parts: list[str] = []
+        terminated_reason: str | None = None
+        # AsyncAnthropic's beta.sessions.events.stream is an `async def` that
+        # returns an AsyncStream — must await it before using as a context
+        # manager (it isn't itself the context manager).
+        stream_cm = await client.beta.sessions.events.stream(session.id)
+        async with stream_cm as stream:
+            async for event in stream:
+                t = getattr(event, "type", "")
+                if t == "agent.message":
+                    for block in event.content:
+                        text = getattr(block, "text", None)
+                        if text:
+                            parts.append(text)
+                elif t == "session.status_idle":
+                    stop_reason = getattr(event, "stop_reason", None)
+                    stop_type = getattr(stop_reason, "type", None) if stop_reason else None
+                    if stop_type == "requires_action":
+                        # Transient idle waiting for client-side events; we
+                        # don't send any here, so keep draining the stream.
+                        continue
+                    if stop_type in TERMINAL_SUCCESS:
+                        break
+                    terminated_reason = f"idle with stop_reason={stop_type!r}"
                     break
-                terminated_reason = f"idle with stop_reason={stop_type!r}"
-                break
-            elif t == "session.status_terminated":
-                terminated_reason = "session terminated"
-                break
-            elif t == "session.error":
-                terminated_reason = f"session error: {getattr(event, 'error', '?')}"
-                break
+                elif t == "session.status_terminated":
+                    terminated_reason = "session terminated"
+                    break
+                elif t == "session.error":
+                    terminated_reason = f"session error: {getattr(event, 'error', '?')}"
+                    break
 
-    output = "".join(parts).strip()
-    if terminated_reason and not output:
-        raise SpecialistSessionError(label, terminated_reason)
-    print(f"  [done] {label}")
-    return output
+        # Stream broke cleanly (terminal or error event) — session reached
+        # idle on Anthropic's side, safe to drop from LIVE_SESSIONS.
+        # Exception paths (cancellation, timeout) skip this and leave the id
+        # in LIVE_SESSIONS so atexit/signal handlers can interrupt it.
+        LIVE_SESSIONS.discard(session.id)
+
+        output = "".join(parts).strip()
+        if terminated_reason and not output:
+            raise SpecialistSessionError(label, terminated_reason)
+        print(f"  [done] {label}")
+        return output
+    except BaseException:
+        # On any exception (including CancelledError), leave the session in
+        # LIVE_SESSIONS so the shutdown handler interrupts it. Re-raise so
+        # asyncio.gather(return_exceptions=True) can record the failure.
+        raise
 
 
 async def run_review(args):
