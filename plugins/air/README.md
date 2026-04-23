@@ -1,7 +1,7 @@
 # air — Automated Code Review with Verification, Pattern Learning, and Team Knowledge
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
-[![Version](https://img.shields.io/badge/version-1.1.0-green.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.6.0-green.svg)](.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://claude.ai/code)
 [![GitHub](https://img.shields.io/badge/GitHub-supported-black.svg)](https://github.com)
 [![GitLab](https://img.shields.io/badge/GitLab-supported-orange.svg)](https://gitlab.com)
@@ -282,6 +282,38 @@ Per review, with v1.5.0 model tiering (Opus 4.7 at $15/$75 per 1M, Sonnet 4.6 at
 At 40 reviews/month: ~$90/month. Model tiering (v1.5.0) removes ~$1/review relative to all-Opus at current 4.7 pricing.
 
 **Timing:** 9-15 minutes per review. All agents run in parallel — the bottleneck is the slowest agent, not the sum.
+
+## Pre-commit Drift Check (opt-in, v1.6.0+)
+
+The plugin registers a `PreToolUse` hook on `Bash` that fires on every `git commit` (when Claude runs it via the Bash tool). If your repo contains an executable `.air-checks.sh` at its root, the hook runs it before the commit — a non-zero exit blocks the commit with the script's output shown to Claude.
+
+This addresses a recurring problem the review pipeline catches *post-hoc* (wiki `Stale documentation references` + `Flow routing gaps` patterns) — by the time a human reviews, the drift is already pushed. The hook shifts detection to *pre-commit*, running the exact greps the wiki advises.
+
+**Opt in for your repo:** create `.air-checks.sh` at the repo root with whatever checks you care about, and `chmod +x` it. Minimal example:
+
+```bash
+#!/bin/bash
+# .air-checks.sh — runs before every Claude-driven git commit
+
+set -u
+status=0
+fail() { printf '  [FAIL] %s\n' "$1" >&2; status=1; }
+
+# Version in package.json must appear in README badge
+VERSION=$(python3 -c "import json; print(json.load(open('package.json'))['version'])" 2>/dev/null)
+if [ -n "$VERSION" ]; then
+  grep -q "version-${VERSION//./\\.}" README.md \
+    || fail "README.md badge does not match package.json version $VERSION"
+fi
+
+exit $status
+```
+
+**Bypass:** `git commit --no-verify` skips the check. The hook honors this automatically.
+
+**Zero config:** without `.air-checks.sh` the hook is a no-op — no noise for repos that haven't opted in.
+
+See `.air-checks.sh` in the air repo itself for a real-world example (version consistency + convention-enforcement greps).
 
 ## Standalone Wiki Cleanup
 
