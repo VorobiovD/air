@@ -21,6 +21,8 @@ import time
 
 import requests as req
 
+from setup import MODEL_ALIASES
+
 API_BASE = "https://api.anthropic.com/v1"
 HEADERS = {
     "anthropic-version": "2023-06-01",
@@ -64,7 +66,7 @@ def main():
         print("  Creating test agent...")
         resp = req.post(f"{API_BASE}/agents", headers=get_headers(), json={
             "name": "air-test",
-            "model": "claude-sonnet-4-6",
+            "model": MODEL_ALIASES["sonnet"],
             "system": "You are a test agent. Execute the commands the user gives you. Report results concisely.",
             "tools": [{"type": "agent_toolset_20260401"}],
         })

@@ -10,6 +10,7 @@ Usage:
     python setup.py
 """
 
+import functools
 import os
 import sys
 from pathlib import Path
@@ -33,8 +34,14 @@ MODEL_ALIASES = {
 DEFAULT_OPUS = MODEL_ALIASES["opus"]
 
 
+@functools.lru_cache(maxsize=None)
 def _split_frontmatter(path: Path) -> tuple[dict[str, str], str]:
-    """Return ({key: value} for scalar frontmatter fields, body_text). Empty dict if no frontmatter."""
+    """Return ({key: value} for scalar frontmatter fields, body_text). Empty dict if no frontmatter.
+
+    Cached per-path so the file is read once per run and warnings (e.g. unclosed
+    frontmatter) fire once, not once per consumer (read_prompt / parse_agent_tools /
+    parse_agent_model).
+    """
     text = path.read_text()
     if not text.startswith("---"):
         return {}, text.strip()
@@ -49,7 +56,10 @@ def _split_frontmatter(path: Path) -> tuple[dict[str, str], str]:
         if not stripped or stripped.startswith("#") or ":" not in stripped:
             continue
         key, value = stripped.split(":", 1)
-        # strip inline YAML comments ("value # comment" -> "value")
+        # Strip inline YAML comments. Note: naive — a legitimate `#` inside a
+        # value (e.g. a URL fragment or quoted `#123` reference) will be truncated.
+        # Acceptable for the current scalar fields (name, model, tools); use a
+        # real YAML parser if quoted values with `#` become needed.
         fields[key.strip()] = value.split("#", 1)[0].strip()
     return fields, text[end + 3:].strip()
 
@@ -95,18 +105,6 @@ def create_or_update_agent(name: str, system: str, tools: list, existing: dict |
             headers=get_headers(),
             json=body,
         )
-        if not resp.ok and existing.get("model") != model:
-            # Retry without model in case the API disallows in-place model changes
-            retry_body = {k: v for k, v in body.items() if k != "model"}
-            retry = requests.post(
-                f"{API_BASE}/agents/{existing['id']}",
-                headers=get_headers(),
-                json=retry_body,
-            )
-            if retry.ok:
-                print(f"  {name}: synced prompt (model pinned to {existing.get('model','?')} — delete + re-run setup.py to retier to {model})")
-                return retry.json()
-            resp = retry
         if resp.ok:
             data = resp.json()
             if existing.get("model") and existing["model"] != model:
@@ -114,9 +112,33 @@ def create_or_update_agent(name: str, system: str, tools: list, existing: dict |
             else:
                 print(f"  {name}: synced → v{data['version']}")
             return data
-        else:
-            print(f"  {name}: sync failed ({resp.status_code}: {api_error_message(resp)}), using v{existing['version']}")
+        # Retry without model ONLY if the primary failure mentions model
+        # (API disallows in-place model changes on some endpoints).
+        primary_error = api_error_message(resp)
+        if existing.get("model") != model and "model" in str(primary_error).lower():
+            retry_body = {k: v for k, v in body.items() if k != "model"}
+            retry = requests.post(
+                f"{API_BASE}/agents/{existing['id']}",
+                headers=get_headers(),
+                json=retry_body,
+            )
+            if retry.ok:
+                data = retry.json()
+                print(
+                    f"  {name}: synced prompt → v{data['version']} "
+                    f"(model pinned to {existing.get('model', '?')} — delete the agent via the Anthropic console "
+                    f"or DELETE /agents/{existing['id']}, then re-run setup.py to re-tier to {model})"
+                )
+                return data
+            # Double-failure: report both errors
+            print(
+                f"  {name}: sync failed ({resp.status_code}: {primary_error}); "
+                f"retry-without-model also failed ({retry.status_code}: {api_error_message(retry)}), "
+                f"using v{existing['version']}"
+            )
             return existing
+        print(f"  {name}: sync failed ({resp.status_code}: {primary_error}), using v{existing['version']}")
+        return existing
     else:
         body = {"name": name, "model": model, "system": system, "tools": tools}
         if callable_agents:
