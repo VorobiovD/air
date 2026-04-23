@@ -106,6 +106,8 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 12. **Post** — new comment, or PATCH existing (--rewrite), or console-only (--dry-run)
 13. **Learn** — author pattern lifecycle (create/strengthen/decline/archive), wiki push with graduated resistance, auto-trigger full cleanup every 5 reviews
 
+**Pre-commit drift check (v1.6.0+):** A `PreToolUse` hook fires before every Claude-driven `git commit` and runs either a repo's opt-in `.air-checks.sh` or the plugin's built-in auto-detection (manifest-version mirror greps). Step 3.5 and `/air:learn` bootstrap the tailored script from `PROJECT-PROFILE.md`. See [`plugins/air/README.md`](plugins/air/README.md#pre-commit-drift-check-v160) for the three-level progression.
+
 ### Five Specialized Agents
 
 Each agent receives the same rich context block (PR metadata, CI status, blame summaries, file churn, previous PR comments, project memory, session context). The identical prefix across the 4 parallel agents enables prompt-cache hits within each model family (Opus calls share their own cache, Sonnet calls share theirs).

@@ -34,6 +34,10 @@ VorobiovD/air/
 │   │   ├── review-respond.md         Respond flow (--respond mode, extracted)
 │   │   ├── learn.md                  Wiki maintenance + KAIROS history
 │   │   └── platform-gitlab.md       GitLab CLI/API mappings
+│   ├── hooks/                      ← CLI-only pre-commit drift check (v1.6.0+)
+│   │   ├── hooks.json                PreToolUse registration on Bash
+│   │   ├── pre-commit-drift.py       Narrows to `git commit`, routes custom/built-in
+│   │   └── builtin-checks.sh         Zero-config manifest-version vs doc-mirror greps
 │   └── .claude-plugin/
 │       └── plugin.json             Version 1.6.0
 │
@@ -90,7 +94,7 @@ VorobiovD/air/
   ├── Step 1: Parse arguments (PR number, flags, cross-repo detection)
   ├── Step 2: Smart default (check existing reviews, auto re-review)
   ├── Step 3: Load context (CLAUDE.md, wiki patterns, project memory, session context)
-  ├── Step 3.5: First-run project discovery (PROJECT-PROFILE.md + GLOSSARY.md)
+  ├── Step 3.5: First-run project discovery (PROJECT-PROFILE.md + GLOSSARY.md + `.air-checks.sh` [v1.6.0+])
   ├── Step 4: Fetch PR data (batched API, diff, commits, blame, churn, previous PR comments)
   ├── Step 5: Pre-flight checks (state, draft, CI, conflict markers, file complexity, pure-promotion detection)
   ├── Step 6: Re-review mode (inter-diff, developer responses, FIXED/NOT FIXED tracking)
@@ -115,6 +119,8 @@ VorobiovD/air/
 - `--self` / `--self --fix` — (`review-self.md`) review local changes, generate fix plan, optionally auto-apply. Never posts a PR comment; wiki patterns still push.
 - `--respond` — (`review-respond.md`) auto-classify findings, self-check (scaled by diff size: < 50 lines uses code-reviewer + verifier only), post response. Supports `--dry-run`.
 - `--full` — review entire codebase (all files, console only)
+
+**Pre-commit drift check (v1.6.0+, CLI-only):** The plugin registers a `PreToolUse` hook on `Bash` via `hooks/hooks.json`. The wrapper at `hooks/pre-commit-drift.py` narrows to `git commit` calls (handles `git -C <path> commit`, respects `--no-verify`), locates the repo root, and runs either the repo's executable `.air-checks.sh` (custom rules) or `hooks/builtin-checks.sh` (zero-config auto-detection of manifest-version vs doc mirrors). Non-zero exit blocks the commit with output shown to Claude. Step 3.5 and `/air:learn` Step 4.65 generate/augment `.air-checks.sh` from the wiki's `PROJECT-PROFILE.md`. Custom scripts receive `$AIR_PLUGIN_ROOT` in env so they can delegate to built-ins.
 
 ---
 

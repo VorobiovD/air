@@ -21,7 +21,7 @@ fi
 # Check A: no bare /tmp/<name> operational paths (should be $AIR_TMP/<name>).
 # Allow-list: mktemp calls, find /tmp GC, and /tmp in example/docstring prose.
 STRAY_TMP=$(grep -rn '/tmp/' plugins/air/ managed/prompts/ 2>/dev/null \
-  | grep -v 'mktemp\|find /tmp\|do NOT fall back\|e\.g\.\? */tmp/\|parallel session\|session temp directory')
+  | grep -Ev 'mktemp|find /tmp|do NOT fall back|e\.g\.?[,:]? */tmp/|parallel session|session temp directory')
 if [ -n "$STRAY_TMP" ]; then
   printf '%s\n' "$STRAY_TMP" >&2
   fail "bare /tmp/<name> paths found (should be \$AIR_TMP/<name>)"

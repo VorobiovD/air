@@ -24,12 +24,9 @@ Behavior:
 
 import json
 import os
-import re
+import shlex
 import subprocess
 import sys
-
-
-GIT_COMMIT_RE = re.compile(r"(?:^|[\s;&|])git\s+commit(?:\s|$|-m|--)")
 
 # AIR_PLUGIN_ROOT is the plugins/air/ directory (parent of hooks/ which
 # contains this script).
@@ -55,6 +52,77 @@ def run_script(path, cwd):
     return result.returncode, result.stdout, result.stderr
 
 
+_SUBCOMMAND_SEPARATORS = {";", "&&", "||", "|", "&", "\n"}
+
+
+def _split_subcommands(cmd: str) -> list[list[str]]:
+    """Split a Bash command into argv lists per sub-command (split on ;, &&, ||, |, &).
+
+    Returns a list of argv lists. Falls back to whitespace split if shlex
+    can't handle the quoting.
+    """
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+    subs: list[list[str]] = []
+    current: list[str] = []
+    for t in tokens:
+        if t in _SUBCOMMAND_SEPARATORS:
+            if current:
+                subs.append(current)
+                current = []
+        else:
+            current.append(t)
+    if current:
+        subs.append(current)
+    return subs
+
+
+def _argv_is_git_commit(argv: list[str]) -> bool:
+    """True if argv invokes `git commit` (not commit-tree/commit-graph) at its leader."""
+    if not argv:
+        return False
+    # Strip env-var prefix assignments like `GIT_AUTHOR_NAME=x git commit`.
+    i = 0
+    while i < len(argv) and "=" in argv[i] and not argv[i].startswith("-") and "/" not in argv[i].split("=", 1)[0]:
+        i += 1
+    if i >= len(argv):
+        return False
+    leader = argv[i]
+    if not (leader == "git" or leader.endswith("/git")):
+        return False
+    # Scan past git's own flags to find the subcommand.
+    j = i + 1
+    while j < len(argv):
+        tok = argv[j]
+        if tok.startswith("--git-dir") or tok.startswith("--work-tree") or tok.startswith("--namespace"):
+            j += 1
+            continue
+        if tok in ("-C", "-c"):
+            j += 2
+            continue
+        if tok.startswith("-"):
+            j += 1
+            continue
+        return tok == "commit"
+    return False
+
+
+def _is_git_commit(cmd: str) -> bool:
+    """Return True if any sub-command in `cmd` runs `git commit`."""
+    return any(_argv_is_git_commit(argv) for argv in _split_subcommands(cmd))
+
+
+def _has_no_verify(cmd: str) -> bool:
+    """Return True if `--no-verify` appears as a bare argv token in any sub-command
+    that runs `git commit` (not inside a quoted message body)."""
+    for argv in _split_subcommands(cmd):
+        if _argv_is_git_commit(argv) and "--no-verify" in argv:
+            return True
+    return False
+
+
 def main():
     try:
         data = json.loads(sys.stdin.read())
@@ -65,10 +133,10 @@ def main():
         sys.exit(0)
 
     cmd = (data.get("tool_input") or {}).get("command", "")
-    if not GIT_COMMIT_RE.search(cmd):
+    if not _is_git_commit(cmd):
         sys.exit(0)
 
-    if "--no-verify" in cmd:
+    if _has_no_verify(cmd):
         sys.exit(0)
 
     try:
@@ -103,7 +171,11 @@ def main():
         source = "built-in auto-detection"
 
     if rc == 0:
-        # All clear. Surface the preamble if any (non-blocking info).
+        # Built-ins passed. Emit any preamble to stderr for transcript visibility
+        # (Ctrl-R). Per Claude Code PreToolUse contract, stderr on exit 0 is
+        # surfaced in the transcript but NOT injected into Claude's context —
+        # acceptable for a nudge-style message. Blocking would be too aggressive
+        # since built-ins did pass cleanly.
         if preamble:
             for msg in preamble:
                 print(msg, file=sys.stderr)

@@ -21,8 +21,18 @@ extract_json_version() {
 }
 
 extract_toml_version() {
-  grep -E '^version[[:space:]]*=' "$1" 2>/dev/null | head -1 \
-    | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/'
+  # Handle both "1.2.3" and '1.2.3' quote styles. Reject workspace-inherit
+  # (version = { workspace = true }) and any non-semver shape by validating
+  # the extracted value looks like X.Y.Z before returning.
+  local line v
+  line=$(grep -E '^version[[:space:]]*=' "$1" 2>/dev/null | head -1)
+  [ -z "$line" ] && return
+  v=$(printf '%s' "$line" | sed -E "s/.*=[[:space:]]*[\"']([^\"']+)[\"'].*/\1/")
+  # If sed didn't match (line printed verbatim) or value isn't semver-shaped, bail.
+  case "$v" in
+    [0-9]*.[0-9]*.[0-9]*) printf '%s' "$v" ;;
+    *) return ;;
+  esac
 }
 
 for candidate in package.json plugin.json pyproject.toml Cargo.toml composer.json; do
@@ -66,9 +76,12 @@ if [ -f README.md ]; then
   fi
 fi
 
+# Enumerate candidate doc files via find so nested docs/ trees are covered on
+# macOS bash 3.2 (which lacks `shopt -s globstar`).
+DOC_FILES=$(find CLAUDE.md README.md docs -type f -name '*.md' 2>/dev/null)
+
 # --- Check 2: "currently X.Y.Z" lines in common doc files ---
-for f in CLAUDE.md README.md docs/*.md docs/**/*.md; do
-  [ -f "$f" ] || continue
+for f in $DOC_FILES; do
   BAD=$(grep -En "currently [0-9]+\\.[0-9]+\\.[0-9]+" "$f" 2>/dev/null \
     | grep -v "currently $VERSION_RE" | head -1)
   if [ -n "$BAD" ]; then
@@ -77,8 +90,7 @@ for f in CLAUDE.md README.md docs/*.md docs/**/*.md; do
 done
 
 # --- Check 3: '**Version:** X.Y.Z' markdown headers ---
-for f in CLAUDE.md README.md docs/*.md docs/**/*.md; do
-  [ -f "$f" ] || continue
+for f in $DOC_FILES; do
   BAD=$(grep -En "^\\*\\*Version:\\*\\* [0-9]+\\.[0-9]+\\.[0-9]+" "$f" 2>/dev/null \
     | grep -v "Version:\\*\\* $VERSION_RE" | head -1)
   if [ -n "$BAD" ]; then
