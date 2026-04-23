@@ -293,7 +293,11 @@ This shifts detection of the wiki's `Stale documentation references` and `Flow r
 
 1. **Zero config** — out of the box, the hook runs built-in auto-detection: manifest-file version vs shields.io version badge in README, `currently X.Y.Z` lines in `CLAUDE.md` / `README.md` / `docs/*.md`, and `**Version:** X.Y.Z` markdown headers. Supports `plugin.json`, `package.json`, `pyproject.toml`, `Cargo.toml`, `composer.json` manifests. Catches the most common drift class (version bumps not mirrored in docs) without any setup.
 
-2. **Tailored (auto-generated)** — the first time `/air:review` runs on your repo, the deep-scan agent that generates `PROJECT-PROFILE.md` + `GLOSSARY.md` also emits a `.air-checks.sh` tailored to your project's layout (which manifest, which mirror docs, which sentinel strings matter). File is written non-executable — you review it, `chmod +x`, commit to enable.
+2. **Tailored (auto-generated)** — a `.air-checks.sh` gets generated automatically at two points if one doesn't exist:
+   - First `/air:review` run on your repo — the deep-scan agent that produces `PROJECT-PROFILE.md` + `GLOSSARY.md` also emits `.air-checks.sh` tailored to your project's layout (which manifest, which mirror docs, which sentinel strings).
+   - Any `/air:learn` run — bootstraps from the already-loaded `PROJECT-PROFILE.md` if the file is still missing (e.g., you installed the plugin after the wiki profile already existed, so Step 3.5 never fired on your repo).
+
+   Generated files are written non-executable — review, `chmod +x`, commit to enable.
 
 3. **Custom** — write (or edit) your own `.air-checks.sh` at the repo root. When the hook sees a custom script, it runs *only* that (you take full control). Your script can still delegate to built-ins via `$AIR_PLUGIN_ROOT/hooks/builtin-checks.sh`:
 
@@ -315,7 +319,9 @@ This shifts detection of the wiki's `Stale documentation references` and `Flow r
 
 ### Evolution over time
 
-On each `/air:learn` run (periodic, every 5 reviews or 2 days), the plugin inspects recurring Author Patterns in your wiki REVIEW.md and, if it sees codifiable drift (e.g., "Stale documentation references" flagged 3+ times with specific mirror-file shape), appends **commented-out** suggestions at the bottom of `.air-checks.sh` for you to review-and-uncomment. Suggestions are capped at 3 per run and de-duplicated against existing content.
+Each `/air:learn` run (periodic, every 5 reviews or 2 days):
+- If `.air-checks.sh` doesn't exist yet → generates one from the wiki's `PROJECT-PROFILE.md` (see point 2 above).
+- If it exists → inspects recurring Author Patterns in your wiki `REVIEW.md` and, if it sees codifiable drift (e.g., "Stale documentation references" flagged 3+ times with specific mirror-file shape), appends **commented-out** suggestions at the bottom for you to review-and-uncomment. Suggestions are capped at 3 per run and de-duplicated against existing content.
 
 ### Controls
 
