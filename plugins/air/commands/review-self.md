@@ -2,15 +2,29 @@
 
 When `--self` is passed, this is a completely different flow. No PR needed. Reviews local changes before push.
 
+### Self Step 0: Initialize Session Temp Directory
+
+Before any `/tmp` write, mint a per-invocation session dir so parallel `/air:review --self` runs (or a review + self-review in two Claude Code sessions) don't corrupt each other's wiki files and diffs. Claude Code's Bash tool starts a fresh shell per call, so `export` doesn't persist — capture the literal path from the command below and substitute it into every `$AIR_TMP` reference downstream.
+
+If the orchestrator already minted `$AIR_TMP` (e.g. `/air:review --self` routed through review.md Step 0), reuse it — don't double-mint. Otherwise mint a fresh dir:
+
+```bash
+if [ -z "$AIR_TMP" ]; then
+  find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
+  AIR_TMP=$(mktemp -d "/tmp/air-self-XXXXXX")
+fi
+echo "$AIR_TMP"
+```
+
 ### Self Step 1: Get the diff
 
 ```bash
-git diff HEAD > /tmp/self-review.diff
+git diff HEAD > $AIR_TMP/self-review.diff
 ```
 
 If the diff is empty, try staged only:
 ```bash
-git diff --cached > /tmp/self-review.diff
+git diff --cached > $AIR_TMP/self-review.diff
 ```
 
 If still empty: "No changes to review. Stage or modify files first." and STOP.
@@ -19,13 +33,20 @@ Print summary: "<N> files changed, +<additions>/-<deletions>"
 
 ### Self Step 2: Load Context
 
-Same as regular Step 3 — clone the wiki and copy ALL wiki pages to /tmp/ (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md, GLOSSARY.md). Also read CLAUDE.md from the repo root and the current repo's `.claude/agents/` for any repo-specific review rules. Run Step 3.5 (first-run project discovery — see `commands/review.md` Step 3.5) if PROJECT-PROFILE.md doesn't exist.
+Same as regular Step 3 — clone the wiki (into `$AIR_TMP/review-wiki-self`) and copy ALL wiki pages to `$AIR_TMP/` (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md, GLOSSARY.md). Also read CLAUDE.md from the repo root and the current repo's `.claude/agents/` for any repo-specific review rules. Run Step 3.5 (first-run project discovery — see `commands/review.md` Step 3.5) if PROJECT-PROFILE.md doesn't exist.
 
 Also generate blame summaries and churn data for the changed files (same as Step 4's "Git history context") so all agents — including git-history-reviewer — have the data they need.
 
 ### Self Step 3: Full Review (4 agents + Codex)
 
-Same quality as PR review. Construct a PR Context block (same structure as Step 7 in `commands/review.md`) with the self-review diff summary, blame summaries, churn data, and wiki page availability flags. Pass this context block to all agents. Launch ALL reviewers in parallel:
+Same quality as PR review. Construct a PR Context block (same structure as Step 7 in `commands/review.md`) with the self-review diff summary, blame summaries, churn data, and — critically — the two-field wiki contract:
+
+```
+- Wiki files directory: <literal $AIR_TMP path — e.g. /tmp/air-self-AbCdEf>
+- Wiki files available in that directory: <list which of REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md, GLOSSARY.md actually exist>
+```
+
+The 5 agents require the literal `Wiki files directory:` field to locate wiki patterns — without it they proceed without patterns. Pass this context block to all agents. Launch ALL reviewers in parallel:
 
 **Agent 1: Code Reviewer** - focused on YOUR changes:
 - Bugs you might have introduced
@@ -113,13 +134,13 @@ If `--fix` was NOT passed:
 2. Record any `WIKI DRIFT:` notes in `## Pending Drift` section
 3. Push to wiki:
 ```bash
-WIKI_DIR="/tmp/review-wiki-self"
+WIKI_DIR="$AIR_TMP/review-wiki-self"
 WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 if [ ! -d "$WIKI_DIR/.git" ]; then
-  cd /tmp && git clone --depth 1 "$WIKI_URL" review-wiki-self 2>/dev/null
+  cd "$AIR_TMP" && git clone --depth 1 "$WIKI_URL" review-wiki-self 2>/dev/null
 fi
-cp /tmp/REVIEW.md "$WIKI_DIR/REVIEW.md"
-cp /tmp/ACCEPTED-PATTERNS.md "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
+cp "$AIR_TMP/REVIEW.md" "$WIKI_DIR/REVIEW.md"
+cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
 cd "$WIKI_DIR" && git add REVIEW.md ACCEPTED-PATTERNS.md && { git diff --quiet --cached || git commit -m "review: self-review patterns $(date +%Y-%m-%d)"; } && git push
 ```
 4. Increment the review counter AND check auto-trigger threshold:
@@ -154,6 +175,5 @@ Only skip wiki push if zero findings (clean self-review with nothing to learn).
 ### Self Cleanup
 
 ```bash
-rm -f /tmp/self-review.diff /tmp/REVIEW.md /tmp/REVIEW-HISTORY.md /tmp/PROJECT-PROFILE.md /tmp/ACCEPTED-PATTERNS.md /tmp/SEVERITY-CALIBRATION.md /tmp/GLOSSARY.md
-rm -rf /tmp/review-wiki-self
+[ -n "$AIR_TMP" ] && rm -rf "$AIR_TMP"
 ```

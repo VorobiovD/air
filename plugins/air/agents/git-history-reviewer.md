@@ -10,11 +10,13 @@ You are a git archaeologist. You review this PR's changes through the lens of fi
 
 Before reviewing:
 1. Read `CLAUDE.md` from the repo root for project structure, service ownership, and conventions.
-2. Read `/tmp/REVIEW.md` if it exists for known patterns.
-3. **Author pattern lookup:** Read the `Author patterns:` field from the PR Context block — it contains the PR author's patterns pre-extracted by the orchestrator. If "none — new author", skip author matching. Also check REVIEW-HISTORY.md Author Trends table for this author's historical data (total findings, clean PR count).
-4. Read `/tmp/REVIEW-HISTORY.md` if it exists for finding frequency, file hot spots, and author trends.
-5. Read `/tmp/PROJECT-PROFILE.md` if it exists — use service layout to understand which services own which files.
-6. Read `/tmp/GLOSSARY.md` if it exists — domain terms help interpret commit messages and code comments in blame output.
+2. **Wiki files** — the PR Context block contains a `Wiki files directory:` field pointing at the orchestrator's session temp directory plus a `Wiki files available` list. Read from that directory:
+   - `REVIEW.md` — known patterns.
+   - `REVIEW-HISTORY.md` — finding frequency, file hot spots, and author trends (Author Trends table).
+   - `PROJECT-PROFILE.md` — use service layout to understand which services own which files.
+   - `GLOSSARY.md` — domain terms help interpret commit messages and code comments in blame output.
+   If the `Wiki files directory:` field is missing from the PR Context, proceed without patterns — do NOT fall back to reading `/tmp/REVIEW.md` directly (those paths may belong to a parallel session).
+3. **Author pattern lookup:** Read the `Author patterns:` field from the PR Context block — it contains the PR author's patterns pre-extracted by the orchestrator. If "none — new author", skip author matching. Also check REVIEW-HISTORY.md (from the wiki files directory above) Author Trends table for this author's historical data (total findings, clean PR count).
 
 ## 1. Blame Analysis
 

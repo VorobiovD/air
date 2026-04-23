@@ -25,9 +25,16 @@ git log --oneline -3
 
 # The resource clones only the PR branch. Fetch the base branch for diffs:
 git fetch origin main 2>/dev/null || git fetch origin master 2>/dev/null
+
+# Session temp dir — even if the sandbox isolates /tmp, scoping everything under one
+# dir means a single `rm -rf "$AIR_TMP"` handles cleanup and any future shared-FS
+# scenario (e.g. parallel sub-agent runs inside the same sandbox).
+find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
+AIR_TMP=$(mktemp -d "/tmp/air-managed-XXXXXX")
+echo "$AIR_TMP"
 ```
 
-If the repo is not cloned or auth fails, print the error and STOP.
+If the repo is not cloned or auth fails, print the error and STOP. Capture the printed `$AIR_TMP` path and substitute it into every downstream `$AIR_TMP/<name>` reference in this file (same pattern as the CLI orchestrator).
 
 ## Step 2: Smart Default
 
@@ -67,16 +74,16 @@ cat CLAUDE.md 2>/dev/null
 WIKI_URL="https://x-access-token:$GH_TOKEN@github.com/$REPO.wiki.git"
 git clone --depth 1 "$WIKI_URL" /workspace/wiki 2>/dev/null
 if [ -d "/workspace/wiki/.git" ]; then
-  cp /workspace/wiki/REVIEW.md /tmp/REVIEW.md 2>/dev/null
-  cp /workspace/wiki/REVIEW-HISTORY.md /tmp/REVIEW-HISTORY.md 2>/dev/null
-  cp /workspace/wiki/PROJECT-PROFILE.md /tmp/PROJECT-PROFILE.md 2>/dev/null
-  cp /workspace/wiki/ACCEPTED-PATTERNS.md /tmp/ACCEPTED-PATTERNS.md 2>/dev/null
-  cp /workspace/wiki/SEVERITY-CALIBRATION.md /tmp/SEVERITY-CALIBRATION.md 2>/dev/null
-  cp /workspace/wiki/GLOSSARY.md /tmp/GLOSSARY.md 2>/dev/null
+  cp /workspace/wiki/REVIEW.md "$AIR_TMP/REVIEW.md" 2>/dev/null
+  cp /workspace/wiki/REVIEW-HISTORY.md "$AIR_TMP/REVIEW-HISTORY.md" 2>/dev/null
+  cp /workspace/wiki/PROJECT-PROFILE.md "$AIR_TMP/PROJECT-PROFILE.md" 2>/dev/null
+  cp /workspace/wiki/ACCEPTED-PATTERNS.md "$AIR_TMP/ACCEPTED-PATTERNS.md" 2>/dev/null
+  cp /workspace/wiki/SEVERITY-CALIBRATION.md "$AIR_TMP/SEVERITY-CALIBRATION.md" 2>/dev/null
+  cp /workspace/wiki/GLOSSARY.md "$AIR_TMP/GLOSSARY.md" 2>/dev/null
 fi
 ```
 
-If `/tmp/PROJECT-PROFILE.md` does not exist (first run), deep-scan the repo and generate it.
+If `$AIR_TMP/PROJECT-PROFILE.md` does not exist (first run), deep-scan the repo and generate it.
 
 ## Step 4: Fetch PR Data
 
@@ -87,7 +94,7 @@ cd /workspace/repo
 gh pr view $PR_NUMBER --json number,title,author,baseRefName,headRefName,body,additions,deletions,changedFiles,headRefOid,files,statusCheckRollup,reviewDecision,commits,isDraft,state
 
 # Full diff
-gh pr diff $PR_NUMBER > /tmp/pr.diff
+gh pr diff $PR_NUMBER > $AIR_TMP/pr.diff
 
 # Commits
 gh api repos/$REPO/pulls/$PR_NUMBER/commits --jq '.[] | "\(.sha[:8]) \(.commit.message | split("\n")[0])"'
@@ -123,7 +130,7 @@ done
 
 If re-reviewing:
 1. Parse previous findings from existing review comment.
-2. Generate inter-diff: `git diff $REVIEWED_AT_SHA..HEAD > /tmp/inter-diff.diff`
+2. Generate inter-diff: `git diff $REVIEWED_AT_SHA..HEAD > $AIR_TMP/inter-diff.diff`
 3. Classify each previous finding as FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED.
 4. Pass the inter-diff (not full diff) to reviewers in Step 7.
 
@@ -131,7 +138,7 @@ If re-reviewing:
 
 **CRITICAL: You MUST delegate to your callable sub-agents. Do NOT perform reviews yourself.** You are the orchestrator — prepare context and dispatch.
 
-Build a PR Context block with all metadata, blame summaries, churn data, wiki page availability, and the author's patterns from REVIEW.md.
+Build a PR Context block with all metadata, blame summaries, churn data, `Wiki files directory: $AIR_TMP` + `Wiki files available in that directory:` listing which wiki files exist, and the author's patterns from REVIEW.md. Sub-agents require the literal `Wiki files directory:` field to locate wiki patterns.
 
 **Send messages to ALL 4 reviewer sub-agents simultaneously:**
 
@@ -140,7 +147,7 @@ Build a PR Context block with all metadata, blame summaries, churn data, wiki pa
 3. **air-security-auditor** — "Audit this PR against the 31-item security checklist. Produce a PASS/FAIL table. Here is the context and diff: [PR Context + diff]"
 4. **air-git-history-reviewer** — "Review through git history lens: blame, churn, previous PR comments. Here is the context and diff: [PR Context + diff]"
 
-Each sub-agent has access to the shared filesystem — wiki files in /tmp/ and repo at /workspace/repo.
+Each sub-agent has access to the shared filesystem — wiki files under `$AIR_TMP/` (pass the literal path in the sub-agent prompt's PR Context block as `Wiki files directory:`) and repo at /workspace/repo.
 
 **Wait for ALL 4 to return findings before proceeding.**
 
@@ -160,7 +167,7 @@ Post-processing:
 
 ## Step 9: Consolidate and Format
 
-Write ONE review comment to `/tmp/review-comment.md`.
+Write ONE review comment to `$AIR_TMP/review-comment.md`.
 
 ```
 ## Code Review
@@ -233,7 +240,7 @@ If own-PR → skip review verdict, only post comment.
 **Re-review always posts a NEW comment (never edits existing).**
 
 ```bash
-gh pr comment $PR_NUMBER --body-file /tmp/review-comment.md
+gh pr comment $PR_NUMBER --body-file $AIR_TMP/review-comment.md
 
 # If not own-PR:
 # 0 blockers: gh pr review $PR_NUMBER --approve -b "Approved — 0 blockers."
@@ -242,15 +249,15 @@ gh pr comment $PR_NUMBER --body-file /tmp/review-comment.md
 
 ## Step 11: Learn
 
-1. Read `/tmp/REVIEW.md`
+1. Read `$AIR_TMP/REVIEW.md`
 2. Add new patterns using the author pattern lifecycle format:
    `- **<Pattern name>** (<Nx>: <PR refs> | last <N> PRs: <M> clean): <Description>`
 3. Track clean PRs for non-triggered author patterns
-4. Add verified false positives to `/tmp/ACCEPTED-PATTERNS.md`
+4. Add verified false positives to `$AIR_TMP/ACCEPTED-PATTERNS.md`
 5. Push to wiki. The wiki clone may not have auth — set it explicitly before pushing:
 ```bash
-cp /tmp/REVIEW.md /workspace/wiki/REVIEW.md
-cp /tmp/ACCEPTED-PATTERNS.md /workspace/wiki/ACCEPTED-PATTERNS.md 2>/dev/null
+cp "$AIR_TMP/REVIEW.md" /workspace/wiki/REVIEW.md
+cp "$AIR_TMP/ACCEPTED-PATTERNS.md" /workspace/wiki/ACCEPTED-PATTERNS.md 2>/dev/null
 cd /workspace/wiki
 # Wire auth into wiki remote (the github_repository resource only covers /workspace/repo)
 git remote set-url origin "https://x-access-token:$GH_TOKEN@github.com/$REPO.wiki.git"
@@ -261,9 +268,7 @@ If wiki push fails, skip gracefully — the review comment was already posted.
 ## Step 12: Cleanup
 
 ```bash
-rm -f /tmp/pr.diff /tmp/inter-diff.diff /tmp/review-comment.md
-rm -f /tmp/REVIEW.md /tmp/REVIEW-HISTORY.md /tmp/PROJECT-PROFILE.md
-rm -f /tmp/ACCEPTED-PATTERNS.md /tmp/SEVERITY-CALIBRATION.md /tmp/GLOSSARY.md
+[ -n "$AIR_TMP" ] && rm -rf "$AIR_TMP"
 ```
 
 Print summary:

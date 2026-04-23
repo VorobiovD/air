@@ -7,9 +7,11 @@ model: sonnet
 
 Before reviewing:
 1. Read `CLAUDE.md` from the repo root for project conventions and build commands.
-2. Read `/tmp/REVIEW.md` if it exists. If not found, proceed without patterns.
-3. Read `/tmp/PROJECT-PROFILE.md` if it exists — use service layout to understand shared module locations, languages, and framework conventions.
-4. Read `/tmp/GLOSSARY.md` if it exists — domain terms defined there are intentional naming, not candidates for simplification.
+2. **Wiki files** — the PR Context block contains a `Wiki files directory:` field pointing at the orchestrator's session temp directory plus a `Wiki files available` list. Read from that directory:
+   - `REVIEW.md` — if not listed, proceed without patterns.
+   - `PROJECT-PROFILE.md` — use service layout to understand shared module locations, languages, and framework conventions.
+   - `GLOSSARY.md` — domain terms defined there are intentional naming, not candidates for simplification.
+   If the `Wiki files directory:` field is missing from the PR Context, proceed without patterns — do NOT fall back to reading `/tmp/REVIEW.md` directly (those paths may belong to a parallel session).
 
 Analyze the provided diff. If no diff was provided, print "No diff provided — exiting." and stop.
 

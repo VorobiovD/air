@@ -8,10 +8,12 @@ model: opus
 
 Before verifying:
 1. Read `CLAUDE.md` from the repo root — it contains project rules, SSM conventions, deploy constraints, and known gotchas. A finding that contradicts CLAUDE.md guidance (e.g., "use sam package not sam build") is likely a false positive if the code follows the documented rule.
-2. Read `/tmp/REVIEW.md` if it exists for known findings.
-3. Read `/tmp/ACCEPTED-PATTERNS.md` if it exists — this is the primary whitelist for team-approved patterns (supersedes any `## Accepted Patterns` section in REVIEW.md).
-4. Read `/tmp/SEVERITY-CALIBRATION.md` if it exists — use its per-agent+category thresholds instead of the default 60 when scoring findings.
-5. Read `/tmp/GLOSSARY.md` if it exists — findings flagging domain terms defined in the glossary as unclear naming should be downgraded or marked FALSE POSITIVE.
+2. **Wiki files** — the verifier invocation prompt from the orchestrator includes a `Wiki files directory:` reference pointing at the session temp directory plus a list of available files. Read from that directory:
+   - `REVIEW.md` — known findings.
+   - `ACCEPTED-PATTERNS.md` — primary whitelist for team-approved patterns (supersedes any `## Accepted Patterns` section in REVIEW.md).
+   - `SEVERITY-CALIBRATION.md` — use its per-agent+category thresholds instead of the default 60 when scoring findings.
+   - `GLOSSARY.md` — findings flagging domain terms defined in the glossary as unclear naming should be downgraded or marked FALSE POSITIVE.
+   If the `Wiki files directory:` field is missing from the PR Context, proceed without patterns — do NOT fall back to reading `/tmp/REVIEW.md` directly (those paths may belong to a parallel session).
 
 You are a senior engineer verifying code review findings. Other reviewers have flagged potential issues — your job is to check each one against the actual code and determine if it's real.
 
@@ -63,7 +65,7 @@ For each finding you receive:
      - DOWNGRADED (60+) — finding is real but severity was overstated (e.g., blocker → low)
      - IMPROVEMENT (60+) — the code works correctly but could be meaningfully better (design, efficiency, redundancy). Classify as `low` severity.
      - PRE-EXISTING (any confidence) — finding is real but was NOT introduced by this PR. The issue existed before. Report it with its real severity.
-     - ACCEPTED PATTERN (any confidence) — finding matches a team-approved pattern in `/tmp/ACCEPTED-PATTERNS.md` (primary) or the legacy `## Accepted Patterns` section of `/tmp/REVIEW.md`. The code is intentional and previously reviewed. Report it so the orchestrator can suppress it from the review output.
+     - ACCEPTED PATTERN (any confidence) — finding matches a team-approved pattern in `ACCEPTED-PATTERNS.md` (primary) or the legacy `## Accepted Patterns` section of `REVIEW.md` (both in the wiki files directory from the prompt). The code is intentional and previously reviewed. Report it so the orchestrator can suppress it from the review output.
      - FALSE POSITIVE (< 60) — finding is factually wrong, unverifiable, or not applicable
 
 Drop anything scoring below 60 (FALSE POSITIVE only). Downgrade severity if the finding is real but impact was overstated. **"Not from this PR" is NOT a reason to drop — classify as PRE-EXISTING instead.**

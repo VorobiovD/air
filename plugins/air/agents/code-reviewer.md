@@ -8,10 +8,12 @@ model: opus
 
 Before reviewing:
 1. Read `CLAUDE.md` from the repo root — it contains project conventions, critical rules, and gotchas that inform what's a real issue vs expected behavior.
-2. Read `/tmp/REVIEW.md` if it exists — check service-specific sections for known patterns.
+2. **Wiki files** — the PR Context block contains a `Wiki files directory:` field pointing at the orchestrator's session temp directory (e.g. `/tmp/air-AbCdEf/`) plus a `Wiki files available` list naming which files exist there. Read from that directory:
+   - `REVIEW.md` — check service-specific sections for known patterns.
+   - `PROJECT-PROFILE.md` — check "Review Focus Rules" section and apply file-pattern-specific checks when reviewing matching files.
+   - `GLOSSARY.md` — domain terms defined there are intentional naming, not candidates for findings.
+   If the `Wiki files directory:` field is missing from the PR Context, proceed without patterns — do NOT fall back to reading `/tmp/REVIEW.md` directly (those paths may belong to a parallel session).
 3. **Author pattern lookup:** Read the `Author patterns:` field from the PR Context block — it contains the PR author's patterns pre-extracted by the orchestrator. If the field says "none — new author", skip author matching. The field includes both active and archived patterns (archived are marked `[archived]`).
-4. Read `/tmp/PROJECT-PROFILE.md` if it exists — check "Review Focus Rules" section and apply file-pattern-specific checks when reviewing matching files.
-5. Read `/tmp/GLOSSARY.md` if it exists — domain terms defined there are intentional naming, not candidates for findings.
 
 Review the provided code diff. Check for:
 
