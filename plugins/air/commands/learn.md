@@ -18,6 +18,16 @@ Same as `/air:review` — detect platform from git remote URL (or `AIR_PLATFORM`
 
 All `gh` commands below are written for GitHub. On GitLab, translate using platform-gitlab.md — same as review.md.
 
+## Step 0: Initialize Session Temp Directory
+
+Before any `/tmp` write, mint a per-invocation session dir so a `/air:learn` run and a parallel `/air:review` (or two parallel `/air:learn`) don't overwrite each other's wiki pattern files. Capture the printed path and substitute it into every `$AIR_TMP` reference downstream.
+
+```bash
+find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
+AIR_TMP=$(mktemp -d "/tmp/air-learn-XXXXXX")
+echo "$AIR_TMP"
+```
+
 ## Step 1: Fetch from wiki
 
 ```bash
@@ -25,19 +35,19 @@ All `gh` commands below are written for GitHub. On GitLab, translate using platf
 # GitLab: glab api "projects/$(echo $REMOTE_PATH | sed 's|/|%2F|g')" 2>/dev/null | jq -r '.path_with_namespace'
 CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
 WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
-cd /tmp && rm -rf review-wiki-learn && git clone --depth 1 "$WIKI_URL" review-wiki-learn 2>/dev/null
+cd "$AIR_TMP" && git clone --depth 1 "$WIKI_URL" review-wiki-learn 2>/dev/null
 ```
 
-If the clone succeeded (the directory `/tmp/review-wiki-learn/.git` exists), copy whichever pattern files exist. Each copy is independent — on a first run the wiki may have no pattern files yet:
+If the clone succeeded (the directory `$AIR_TMP/review-wiki-learn/.git` exists), copy whichever pattern files exist. Each copy is independent — on a first run the wiki may have no pattern files yet:
 ```bash
-WIKI_DIR="/tmp/review-wiki-learn"
+WIKI_DIR="$AIR_TMP/review-wiki-learn"
 if [ -d "$WIKI_DIR/.git" ]; then
-  cp "$WIKI_DIR/REVIEW.md" /tmp/REVIEW.md 2>/dev/null
-  cp "$WIKI_DIR/REVIEW-HISTORY.md" /tmp/REVIEW-HISTORY.md 2>/dev/null
-  cp "$WIKI_DIR/PROJECT-PROFILE.md" /tmp/PROJECT-PROFILE.md 2>/dev/null
-  cp "$WIKI_DIR/ACCEPTED-PATTERNS.md" /tmp/ACCEPTED-PATTERNS.md 2>/dev/null
-  cp "$WIKI_DIR/SEVERITY-CALIBRATION.md" /tmp/SEVERITY-CALIBRATION.md 2>/dev/null
-  cp "$WIKI_DIR/GLOSSARY.md" /tmp/GLOSSARY.md 2>/dev/null
+  cp "$WIKI_DIR/REVIEW.md" "$AIR_TMP/REVIEW.md" 2>/dev/null
+  cp "$WIKI_DIR/REVIEW-HISTORY.md" "$AIR_TMP/REVIEW-HISTORY.md" 2>/dev/null
+  cp "$WIKI_DIR/PROJECT-PROFILE.md" "$AIR_TMP/PROJECT-PROFILE.md" 2>/dev/null
+  cp "$WIKI_DIR/ACCEPTED-PATTERNS.md" "$AIR_TMP/ACCEPTED-PATTERNS.md" 2>/dev/null
+  cp "$WIKI_DIR/SEVERITY-CALIBRATION.md" "$AIR_TMP/SEVERITY-CALIBRATION.md" 2>/dev/null
+  cp "$WIKI_DIR/GLOSSARY.md" "$AIR_TMP/GLOSSARY.md" 2>/dev/null
 fi
 ```
 
@@ -69,7 +79,7 @@ Read the entire file and analyze every pattern entry for:
 - **Misplaced patterns** — author patterns that should be service patterns (or vice versa). When moving an author pattern to Common Findings, strip lifecycle metadata (counts, PR refs, clean counter).
 - **Vague patterns** — entries too generic to be actionable. Make them specific or remove. For author patterns, rewrite to be a specific behavioral tendency rather than removing.
 - **Patterns in wrong section** — if learned from one author but applies to everyone, move to Common Findings.
-- **Accepted patterns / false positive calibration in REVIEW.md** — if REVIEW.md has a section named "Accepted Patterns", "False Positive Calibration", or similar, migrate ALL entries to `/tmp/ACCEPTED-PATTERNS.md` (create if it doesn't exist). Format: `- **<pattern>**: <description> (migrated from REVIEW.md)`. Then DELETE that entire section from REVIEW.md. ACCEPTED-PATTERNS.md is the sole store for suppression patterns.
+- **Accepted patterns / false positive calibration in REVIEW.md** — if REVIEW.md has a section named "Accepted Patterns", "False Positive Calibration", or similar, migrate ALL entries to `$AIR_TMP/ACCEPTED-PATTERNS.md` (create if it doesn't exist). Format: `- **<pattern>**: <description> (migrated from REVIEW.md)`. Then DELETE that entire section from REVIEW.md. ACCEPTED-PATTERNS.md is the sole store for suppression patterns.
 
 ## Step 3: Reorganize REVIEW.md
 
@@ -87,9 +97,9 @@ Generate the cleaned-up REVIEW.md content.
 
 **Otherwise (default):**
 
-**If `/tmp/PROJECT-PROFILE.md` does NOT exist** (first run on this project): Run the full Opus deep scan (same as `/air:review` Step 3.5 first-run discovery) to create it now. Print "No PROJECT-PROFILE.md found — running first-run discovery." After generation, write both files to `/tmp/PROJECT-PROFILE.md` and `/tmp/GLOSSARY.md` and push to wiki in Step 6. Skip the lightweight refresh below — the deep scan just generated a fresh profile.
+**If `$AIR_TMP/PROJECT-PROFILE.md` does NOT exist** (first run on this project): Run the full Opus deep scan (same as `/air:review` Step 3.5 first-run discovery) to create it now. Print "No PROJECT-PROFILE.md found — running first-run discovery." After generation, write both files to `$AIR_TMP/PROJECT-PROFILE.md` and `$AIR_TMP/GLOSSARY.md` and push to wiki in Step 6. Skip the lightweight refresh below — the deep scan just generated a fresh profile.
 
-**If `/tmp/PROJECT-PROFILE.md` exists** (lightweight refresh): File-based detection only (~2s, no Opus agent):
+**If `$AIR_TMP/PROJECT-PROFILE.md` exists** (lightweight refresh): File-based detection only (~2s, no Opus agent):
 ```bash
 # Detect new/removed manifest files
 ls go.mod package.json requirements.txt composer.json Makefile Dockerfile *.tf template.yaml 2>/dev/null
@@ -97,7 +107,7 @@ ls go.mod package.json requirements.txt composer.json Makefile Dockerfile *.tf t
 ls -d */ 2>/dev/null | head -20
 ```
 
-Update the `## Languages` and `## Services` sections in `/tmp/PROJECT-PROFILE.md`. Do NOT touch:
+Update the `## Languages` and `## Services` sections in `$AIR_TMP/PROJECT-PROFILE.md`. Do NOT touch:
 - "Review Focus Rules" section — manually curated after initial generation
 - "Applicable Security Checks" section — unless a new language/framework was detected (e.g., SQL files appeared for the first time → add the SQL injection check)
 
@@ -118,10 +128,11 @@ RECENT_PRS=$(gh api "repos/$CURRENT_REPO/pulls?state=closed&per_page=30&sort=upd
 # Fetch issue comments for each PR, cache to temp file, check for air reviews
 # Note: gh api fetches full comment bodies — the jq filter runs client-side on the full response
 REVIEWED_PRS=""
-mkdir -p /tmp/kairos-cache
+KAIROS_CACHE="$HOME/.cache/air/kairos"
+mkdir -p "$KAIROS_CACHE"
 for PR_NUM in $RECENT_PRS; do
-  gh api "repos/$CURRENT_REPO/issues/$PR_NUM/comments" > "/tmp/kairos-cache/$PR_NUM.json" 2>/dev/null
-  HAS_REVIEW=$(cat "/tmp/kairos-cache/$PR_NUM.json" | python3 -c "
+  gh api "repos/$CURRENT_REPO/issues/$PR_NUM/comments" > "$KAIROS_CACHE/$PR_NUM.json" 2>/dev/null
+  HAS_REVIEW=$(cat "$KAIROS_CACHE/$PR_NUM.json" | python3 -c "
 import json, sys
 comments = json.loads(sys.stdin.buffer.read())
 print(sum(1 for c in comments if c['body'].startswith('## Code Review')))
@@ -140,7 +151,7 @@ for PR_NUM in $REVIEWED_PRS; do
   gh api "repos/$CURRENT_REPO/pulls/$PR_NUM/comments" --jq '.[] | {pr: '$PR_NUM', path: .path, body: (.body | split("\n")[0][:200])}' 2>/dev/null
 
   # Extract air reviews from cached Phase 1 data (no API call)
-  cat "/tmp/kairos-cache/$PR_NUM.json" | python3 -c "
+  cat "$KAIROS_CACHE/$PR_NUM.json" | python3 -c "
 import json, sys
 pr_num = int(sys.argv[1])
 comments = json.loads(sys.stdin.buffer.read())
@@ -149,7 +160,7 @@ for c in comments:
         print(json.dumps({'pr': pr_num, 'body': c['body']}))
 " "$PR_NUM"
 done
-rm -rf /tmp/kairos-cache
+# KAIROS cache persists in $HOME/.cache/air/kairos (reused across runs). Not cleaned up here.
 ```
 
 Phase 1 makes 30 API calls (one per PR) and caches the responses. Phase 2 reuses the cached issue comments (0 extra calls) and only fetches inline review comments for reviewed PRs (typically 3-10 calls). Total: ~33-40 calls instead of 60.
@@ -224,7 +235,7 @@ Threshold logic (only apply when 10+ data points for that agent+category):
 - `dispute_rate < 10%` → confidence threshold = 50 (very few disputes — agent is well-calibrated, allow more findings)
 - Otherwise → 60 (default)
 
-Output format for `/tmp/SEVERITY-CALIBRATION.md`:
+Output format for `$AIR_TMP/SEVERITY-CALIBRATION.md`:
 ```markdown
 # Severity Calibration — Auto-generated
 
@@ -247,9 +258,9 @@ If fewer than 10 total data points across all agents, skip this step entirely �
 
 ## Step 4.7: Refresh GLOSSARY.md
 
-**Only run if `/tmp/GLOSSARY.md` exists** (first-run already created it).
+**Only run if `$AIR_TMP/GLOSSARY.md` exists** (first-run already created it).
 
-Scan `/tmp/REVIEW.md`, `/tmp/ACCEPTED-PATTERNS.md`, `CLAUDE.md`, and `README.md` from the repo root for domain-specific terms not yet in the glossary:
+Scan `$AIR_TMP/REVIEW.md`, `$AIR_TMP/ACCEPTED-PATTERNS.md`, `CLAUDE.md`, and `README.md` from the repo root for domain-specific terms not yet in the glossary:
 - Proper nouns (service names, tool names)
 - Abbreviated terms (JWT, API, OTP)
 - Business domain terms (guardrail, variant, tenant)
@@ -295,18 +306,18 @@ If `--dry-run` was specified, print the proposed content and stop.
 Otherwise, push to the wiki:
 
 ```bash
-WIKI_DIR="/tmp/review-wiki-learn"
+WIKI_DIR="$AIR_TMP/review-wiki-learn"
 if [ ! -d "$WIKI_DIR/.git" ]; then
   cd /tmp && git clone --depth 1 "$WIKI_URL" review-wiki-learn 2>/dev/null
 fi
-cp /tmp/REVIEW.md "$WIKI_DIR/REVIEW.md"
-cp /tmp/REVIEW-HISTORY.md "$WIKI_DIR/REVIEW-HISTORY.md" 2>/dev/null
-cp /tmp/PROJECT-PROFILE.md "$WIKI_DIR/PROJECT-PROFILE.md" 2>/dev/null
-cp /tmp/ACCEPTED-PATTERNS.md "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
-cp /tmp/SEVERITY-CALIBRATION.md "$WIKI_DIR/SEVERITY-CALIBRATION.md" 2>/dev/null
-cp /tmp/GLOSSARY.md "$WIKI_DIR/GLOSSARY.md" 2>/dev/null
+cp "$AIR_TMP/REVIEW.md" "$WIKI_DIR/REVIEW.md"
+cp "$AIR_TMP/REVIEW-HISTORY.md" "$WIKI_DIR/REVIEW-HISTORY.md" 2>/dev/null
+cp "$AIR_TMP/PROJECT-PROFILE.md" "$WIKI_DIR/PROJECT-PROFILE.md" 2>/dev/null
+cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
+cp "$AIR_TMP/SEVERITY-CALIBRATION.md" "$WIKI_DIR/SEVERITY-CALIBRATION.md" 2>/dev/null
+cp "$AIR_TMP/GLOSSARY.md" "$WIKI_DIR/GLOSSARY.md" 2>/dev/null
 cd "$WIKI_DIR" && git add REVIEW.md REVIEW-HISTORY.md PROJECT-PROFILE.md ACCEPTED-PATTERNS.md SEVERITY-CALIBRATION.md GLOSSARY.md && { git diff --quiet --cached || git commit -m "review-learn: cleanup + calibration $(date +%Y-%m-%d)"; } && git push
-rm -rf /tmp/review-wiki-learn
+# Session dir cleanup happens at the end of Step 6 via rm -rf "$AIR_TMP"
 ```
 
 ## Step 7: Update meta
@@ -320,5 +331,5 @@ echo '{"last_cleanup": "'$(date +%Y-%m-%d)'", "reviews_since": 0}' > $HOME/.clau
 ## Cleanup
 
 ```bash
-rm -f /tmp/REVIEW.md /tmp/REVIEW-HISTORY.md /tmp/PROJECT-PROFILE.md /tmp/ACCEPTED-PATTERNS.md /tmp/SEVERITY-CALIBRATION.md /tmp/GLOSSARY.md
+[ -n "$AIR_TMP" ] && rm -rf "$AIR_TMP"
 ```

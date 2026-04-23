@@ -4,6 +4,16 @@ All `gh` commands below are written for GitHub. On GitLab, translate using `comm
 
 When `--respond` is passed, this flow automates the developer's side of the review cycle. It reads the existing review, classifies each finding based on local code changes, verifies fixes are correct, runs a self-check on the fix diff, detects additional changes, and posts a structured response that the reviewer's next re-review (Step 6) can parse directly.
 
+### Respond Step 0: Initialize Session Temp Directory
+
+Before any `/tmp` write, mint a per-invocation session dir so parallel `/air:review --respond` runs (or a respond + concurrent review in two Claude Code sessions) don't overwrite each other's wiki files, diffs, or output comments. Capture the printed path and substitute it into every `$AIR_TMP` reference downstream.
+
+```bash
+find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
+AIR_TMP=$(mktemp -d "/tmp/air-respond-XXXXXX")
+echo "$AIR_TMP"
+```
+
 ### Respond Step 1: Find the review and PR
 
 1. Detect the current branch's PR:
@@ -75,7 +85,7 @@ If EITHER diff is non-empty (uncommitted or staged changes exist): "You have unc
 
 Generate the diff of committed changes since the reviewed SHA:
 ```bash
-git diff $REVIEWED_AT_SHA..HEAD > /tmp/respond-diff.diff 2>/dev/null
+git diff $REVIEWED_AT_SHA..HEAD > $AIR_TMP/respond-diff.diff 2>/dev/null
 ```
 Two-dot range: direct range from reviewed SHA to current HEAD (committed changes only).
 
@@ -140,14 +150,14 @@ This step serves TWO purposes: verify "fixed" claims are correct AND catch new b
 ```bash
 WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 cd /tmp && rm -rf review-wiki-respond && git clone --depth 1 "$WIKI_URL" review-wiki-respond 2>/dev/null
-WIKI_DIR="/tmp/review-wiki-respond"
+WIKI_DIR="$AIR_TMP/review-wiki-respond"
 if [ -d "$WIKI_DIR/.git" ]; then
-  cp "$WIKI_DIR/REVIEW.md" /tmp/REVIEW.md 2>/dev/null
-  cp "$WIKI_DIR/REVIEW-HISTORY.md" /tmp/REVIEW-HISTORY.md 2>/dev/null
-  cp "$WIKI_DIR/PROJECT-PROFILE.md" /tmp/PROJECT-PROFILE.md 2>/dev/null
-  cp "$WIKI_DIR/ACCEPTED-PATTERNS.md" /tmp/ACCEPTED-PATTERNS.md 2>/dev/null
-  cp "$WIKI_DIR/SEVERITY-CALIBRATION.md" /tmp/SEVERITY-CALIBRATION.md 2>/dev/null
-  cp "$WIKI_DIR/GLOSSARY.md" /tmp/GLOSSARY.md 2>/dev/null
+  cp "$WIKI_DIR/REVIEW.md" "$AIR_TMP/REVIEW.md" 2>/dev/null
+  cp "$WIKI_DIR/REVIEW-HISTORY.md" "$AIR_TMP/REVIEW-HISTORY.md" 2>/dev/null
+  cp "$WIKI_DIR/PROJECT-PROFILE.md" "$AIR_TMP/PROJECT-PROFILE.md" 2>/dev/null
+  cp "$WIKI_DIR/ACCEPTED-PATTERNS.md" "$AIR_TMP/ACCEPTED-PATTERNS.md" 2>/dev/null
+  cp "$WIKI_DIR/SEVERITY-CALIBRATION.md" "$AIR_TMP/SEVERITY-CALIBRATION.md" 2>/dev/null
+  cp "$WIKI_DIR/GLOSSARY.md" "$AIR_TMP/GLOSSARY.md" 2>/dev/null
 fi
 ```
 
@@ -157,7 +167,7 @@ Also generate blame summaries and churn data for the changed files.
 
 Count the respond diff size:
 ```bash
-DIFF_LINES=$(wc -l < /tmp/respond-diff.diff | tr -d ' ')
+DIFF_LINES=$(wc -l < $AIR_TMP/respond-diff.diff | tr -d ' ')
 echo "Respond diff size: $DIFF_LINES lines"
 ```
 
@@ -205,7 +215,7 @@ Launch review-verifier on all self-check findings. Same verdicts, same confidenc
 
 ### Respond Step 6: Format response
 
-Write the formatted response to `/tmp/respond-comment.md`.
+Write the formatted response to `$AIR_TMP/respond-comment.md`.
 
 ```
 ## Review Response
@@ -273,11 +283,11 @@ Responded at: <current HEAD SHA>
 
 ### Respond Step 7: Post + push
 
-**If `--dry-run`:** Print the contents of `/tmp/respond-comment.md` to console. Print "Dry run — response not posted, branch not pushed." Skip to Respond Cleanup. Do NOT post or push.
+**If `--dry-run`:** Print the contents of `$AIR_TMP/respond-comment.md` to console. Print "Dry run — response not posted, branch not pushed." Skip to Respond Cleanup. Do NOT post or push.
 
 1. Post the response:
 ```bash
-gh pr comment $PR_NUMBER --body-file /tmp/respond-comment.md
+gh pr comment $PR_NUMBER --body-file $AIR_TMP/respond-comment.md
 ```
 
 2. Push the branch:
@@ -302,6 +312,5 @@ The reviewer can now run /air:review to re-review.
 ### Respond Cleanup
 
 ```bash
-rm -f /tmp/respond-diff.diff /tmp/respond-comment.md /tmp/REVIEW.md /tmp/REVIEW-HISTORY.md /tmp/PROJECT-PROFILE.md /tmp/ACCEPTED-PATTERNS.md /tmp/SEVERITY-CALIBRATION.md /tmp/GLOSSARY.md
-rm -rf /tmp/review-wiki-respond
+[ -n "$AIR_TMP" ] && rm -rf "$AIR_TMP"
 ```
