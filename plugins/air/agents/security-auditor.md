@@ -105,16 +105,9 @@ For each FAIL, report:
 - **File**: path and line number(s)
 - **Description**: what the issue is and why it matters
 - **Suggestion**: specific fix
+- **Author pattern annotation**: Check this finding against the PR author's known patterns (loaded in step 3). Security-relevant patterns are high-signal — an author with "Shell injection risk (3x)" who submits `exec()` calls is a strong match. Annotate:
+  - Active: `[matches author pattern: <Pattern name> (<Nx>)]`
+  - Archived: `[matches archived pattern: <Pattern name>]`
+  - Declining: `[matches declining pattern: <Pattern name> (<Nx>)]`
 
 Focus on changed code but also report pre-existing security issues you encounter in touched files — the verifier will classify them as PRE-EXISTING. Do not self-suppress findings.
-
-## Author Pattern Matching
-
-After generating your findings, check EVERY finding against the PR author's known patterns (loaded in step 3 above). Security-relevant author patterns are high-signal — an author with "Shell injection risk (3x)" who submits code with `exec()` calls is a strong match.
-
-For each finding that matches a known author pattern:
-- **Active pattern match:** Annotate with `[matches author pattern: <Pattern name> (<Nx>)]` where `<Nx>` is the occurrence count from the pattern entry in REVIEW.md.
-- **Archived pattern match:** Annotate with `[matches archived pattern: <Pattern name>]` (lower priority — the author had improved but the pattern resurfaced).
-- **Declining pattern match:** Annotate with `[matches declining pattern: <Pattern name> (<Nx>)]` (resets the decline).
-
-If the author has no patterns, skip this step.
