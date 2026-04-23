@@ -35,34 +35,35 @@ First PR auto-bootstraps the agents. Subsequent PRs reuse them.
 
 ## How it works
 
+**Client-side orchestration (v1.7.0+)**: the Python driver is the orchestrator. Anthropic's parallel-sub-agents feature (`callable_agents`) is gated behind a Managed Agents multiagent Research Preview, so we fan out client-side from `review.py` via `asyncio.gather` instead.
+
 ```
 PR opened
   │
   ▼
-GitHub Action triggers
+GitHub Action triggers `python review.py <repo> <pr>`
   │
-  ├── Checks if agents exist (by name via API)
-  ├── If not → creates environment + 5 sub-agents + orchestrator
-  ├── If yes → updates prompts to latest from air repo
-  │
-  ▼
-Creates Managed Agent session
-  │
-  ├── Repo mounted via github_repository resource
-  │   (token in API request, NOT in conversation)
-  ├── PR branch pre-checked-out at /workspace/repo
-  ├── gh CLI authenticated as bot account
+  ├── Syncs 5 specialist agents (creates on first run, updates prompts on subsequent runs)
+  ├── Fetches PR metadata + diff via GitHub API
   │
   ▼
-Orchestrator runs review pipeline
+Python driver orchestrates
   │
-  ├── Fetches PR data, loads wiki context
-  ├── Delegates to 4 reviewer sub-agents
-  │   (parallel when multi-agent enabled, sequential for now)
-  ├── Runs verification agent
-  ├── Posts review as bot account
-  └── Pushes learned patterns to wiki
+  ├── asyncio.gather 4 specialist sessions in parallel (each its own container):
+  │     ├── air-code-reviewer      — bugs, design, test coverage
+  │     ├── air-simplify           — reuse, quality, efficiency
+  │     ├── air-security-auditor   — 31-item checklist
+  │     └── air-git-history-reviewer — blame, churn, recurring patterns
+  │     (each clones repo + wiki, reads patterns, returns findings)
+  │
+  ├── Collects findings from all 4
+  ├── Runs 5th session sequentially: air-review-verifier
+  │     (verifies each finding, drops false positives, formats final review)
+  │
+  └── Posts the review comment to the PR directly via GitHub API
 ```
+
+**Wall-clock:** ~5-8 minutes (4 specialists run concurrently; wall time ≈ slowest specialist + verifier). Without client-side fan-out (prior server-side orchestrator with `callable_agents`) the sub-agent calls returned permission-denied because the feature was access-gated.
 
 ## Manual trigger
 
@@ -71,8 +72,8 @@ export ANTHROPIC_API_KEY=sk-ant-...
 export AIR_BOT_TOKEN=ghp_...
 
 pip install -r requirements.txt
-python review.py myorg/myrepo 123        # stream mode
-python review.py myorg/myrepo 123 --poll  # poll mode
+python review.py myorg/myrepo 123             # post review comment
+python review.py myorg/myrepo 123 --dry-run   # print comment, skip post
 ```
 
 ## Agent updates
@@ -81,8 +82,9 @@ When agent prompts change in the air repo, the workflow auto-updates deployed ag
 
 ## Security
 
-- **Repo clone/push**: authenticated via `github_repository` resource (token in API request, not conversation)
-- **gh CLI (comments, verdicts)**: `GH_TOKEN` passed in session message. This is visible in Anthropic's session logs. Mitigated by: bot account with minimal permissions, classic PAT with `repo` scope only, rotatable.
+- **Repo clone**: authenticated via `github_repository` resource (token in API request, not conversation)
+- **Wiki access from sessions**: each specialist session clones the wiki itself using `GH_TOKEN` injected via the user message — same token as the repo auth. Visible in Anthropic's session logs; mitigated by bot account with minimal permissions, classic PAT with `repo` scope only, rotatable.
+- **Comment posting**: done client-side by `review.py` via GitHub API using `AIR_BOT_TOKEN` from the runner env — never sent to Anthropic.
 - **Permissions**: `repo` scope on bot account (needed for wiki push — fine-grained PATs don't support wiki)
 - **Agent access**: each org's agents are isolated under their own Anthropic API key
 

@@ -192,9 +192,12 @@ def main():
     print("[2] Fetching agent list...")
     agents_by_name = list_agents()
 
-    # 3. Sub-agents
-    print("[3] Sub-agents")
-    sub_agent_refs = []
+    # 3. Specialist agents. No orchestrator — the Python driver in review.py
+    # is the orchestrator. Anthropic's parallel-sub-agents feature
+    # (callable_agents) is gated behind the multiagent Research Preview, so
+    # we fan out client-side from review.py via asyncio.gather instead.
+    print("[3] Specialist agents")
+    synced = []
     for name in SUB_AGENTS:
         prompt_file = AGENTS_DIR / f"{name}.md"
         if not prompt_file.exists():
@@ -217,21 +220,9 @@ def main():
             existing=agents_by_name.get(f"air-{name}"),
             model=model,
         )
-        sub_agent_refs.append({"type": "agent", "id": agent["id"], "version": agent["version"]})
+        synced.append(agent)
 
-    # 4. Orchestrator
-    print("[4] Orchestrator")
-    orchestrator_prompt = (PROMPTS_DIR / "orchestrator.md").read_text()
-
-    orchestrator = create_or_update_agent(
-        name="air-reviewer",
-        system=orchestrator_prompt,
-        tools=[{"type": "agent_toolset_20260401"}],
-        existing=agents_by_name.get("air-reviewer"),
-        callable_agents=sub_agent_refs,
-    )
-
-    print(f"\nDone. Orchestrator: {orchestrator['id']} (v{orchestrator['version']}), {len(sub_agent_refs)} sub-agents")
+    print(f"\nDone. {len(synced)} specialist agents synced. review.py orchestrates client-side.")
 
 
 if __name__ == "__main__":

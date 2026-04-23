@@ -43,7 +43,8 @@ managed/                          # Managed Agent (CI automation)
 ├── setup.py                      # Creates/updates agents + environment via API
 ├── review.py                     # Triggers review sessions
 ├── test-session.py               # Quick 9-test verification script
-├── prompts/orchestrator.md       # System prompt for cloud orchestrator
+├── prompts/learn-orchestrator.md # System prompt for cloud learn agent
+│                                 # (review orchestrator.md deleted in v1.7.0 — review.py orchestrates client-side)
 ├── requirements.txt              # Python dependencies
 └── README.md
 
@@ -88,5 +89,5 @@ managed/                          # Managed Agent (CI automation)
 - Findings must score 60+ confidence from verifier to appear in output
 - Conflict markers in PR diff = automatic blocker finding
 - Security auditor uses a 31-item checklist; PROJECT-PROFILE.md controls which items apply per repo
-- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.6.0)
+- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.7.0)
 - Install via `/plugin marketplace add VorobiovD/air` then `/plugin install air@air`
