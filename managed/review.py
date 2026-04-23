@@ -221,7 +221,11 @@ async def run_session(
 
     parts: list[str] = []
     terminated_reason: str | None = None
-    async with client.beta.sessions.events.stream(session.id) as stream:
+    # AsyncAnthropic's beta.sessions.events.stream is an `async def` that
+    # returns an AsyncStream — must await it before using as a context
+    # manager (it isn't itself the context manager).
+    stream_cm = await client.beta.sessions.events.stream(session.id)
+    async with stream_cm as stream:
         async for event in stream:
             t = getattr(event, "type", "")
             if t == "agent.message":
