@@ -48,6 +48,7 @@ Two commands become available: `/air:review` and `/air:learn`. To enable auto-up
 /air:review --respond                  # Reply to review: classify findings + self-check + push
 /air:review --respond --dry-run        # Preview response without posting
 /air:review --full                     # Review entire codebase (first-time audit)
+/air:review 123 --closed               # Review a closed/merged PR (post-merge audit, pattern backfill)
 /air:review --dry-run                  # Print to console, don't post online
 /air:review --no-codex                 # Skip Codex review pass
 /air:review https://github.com/org/repo/pull/45        # Cross-repo review (GitHub)

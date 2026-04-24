@@ -601,22 +601,25 @@ async def run_review(args):
     meta = fetch_pr_metadata(args.repo, args.pr_number, bot_token)
     head_sha = meta["head"]["sha"]
 
-    # State gate: refuse to review closed/merged PRs by default. Auto-trigger
-    # via GitHub Actions can't reach this path (pull_request: closed isn't in
-    # the trigger list), but manual invocation against a merged PR would
-    # otherwise post a review comment on a PR nobody is looking at. --closed
-    # opts in for legitimate cases — post-merge audit, wiki-pattern backfill
+    # State gate: refuse to review closed/merged PRs by default. Reachable
+    # via manual CLI invocation or `workflow_dispatch` with `closed: false`
+    # against a merged PR — the default `pull_request` trigger never fires
+    # on closed PRs, so this gate doesn't block the common path. --closed
+    # opts in for legitimate cases: post-merge audit, wiki-pattern backfill
     # from historical PRs, dogfooding without opening a new PR.
+    #
+    # Exit 1 (not 0) so a workflow_dispatch refusal shows red on the Actions
+    # run page — a green checkmark on "refused to review" misleads operators
+    # scanning run history.
     pr_state = meta.get("state", "open")
     pr_merged = bool(meta.get("merged"))
-    if (pr_state == "closed" or pr_merged) and not args.closed:
+    if pr_state == "closed" and not args.closed:
         status = "merged" if pr_merged else "closed"
         print(
-            f"PR #{args.pr_number} is {status}. Pass --closed to review anyway "
-            f"(skips the branch-protection verdict; comment still posts).",
+            f"PR #{args.pr_number} is {status}. Pass --closed to review anyway.",
             file=sys.stderr,
         )
-        sys.exit(0)
+        sys.exit(1)
 
     # Pick the ref to check out in each Managed Agent session:
     # - Open PRs: branch name — standard flow.

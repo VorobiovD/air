@@ -85,6 +85,8 @@ CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/nu
 ```
 Then skip to the **Self-Review Flow** section below.
 
+If `--closed` is present, **reject if combined with `--self` or `--full`** — those modes don't fetch PR state or hit Step 5/12, so `--closed` would be a silent no-op. Print "--closed only applies to PR review mode. Drop --self / --full, or drop --closed." and STOP.
+
 If `--respond` is present, **reject if combined with `--self`, `--full`, `--fresh`, `--rewrite`, or `--re-review`** — print "Cannot combine --respond with other mode flags." and STOP. Then set `CURRENT_REPO`:
 ```bash
 CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
@@ -754,7 +756,7 @@ Rules:
 ```
 Compare against the PR/MR author username from Step 4 metadata (`author.login` on GitHub, `author.username` on GitLab). If they match: set `OWN_PR=true`. When `OWN_PR=true`, **skip ALL review verdicts** (`gh pr review --approve`, `gh pr review --request-changes`, `glab mr approve`) in every posting path below. GitHub does not allow self-approval or self-requesting-changes, and attempting it will error. Only post the issue comment.
 
-**Closed-PR guard:** If `--closed` was passed (state was `CLOSED` or `MERGED`), also skip ALL review verdicts. GitHub rejects verdicts on closed/merged PRs with a 422. Only post the issue comment. Treat `--closed` with the same verdict-suppression as `OWN_PR=true`.
+**Closed-PR guard:** If `--closed` was passed AND the PR's `state` is `CLOSED` or `MERGED`, skip ALL review verdicts. GitHub rejects verdicts on closed/merged PRs with a 422. Only post the issue comment. Treat this combination with the same verdict-suppression as `OWN_PR=true`. If `--closed` was passed on an OPEN PR (legal — the flag is permissive in Step 5), post verdicts normally as for any open PR.
 
 If `--dry-run`: print to console. Skip Step 13 entirely (no wiki push on dry runs). Jump to Cleanup.
 
