@@ -1,7 +1,7 @@
 # air — Architecture, Decisions, and Roadmap
 
-**Last updated:** 2026-04-23
-**Version:** 1.7.0
+**Last updated:** 2026-04-24
+**Version:** 1.8.0
 
 ---
 
@@ -39,7 +39,7 @@ VorobiovD/air/
 │   │   ├── pre-commit-drift.py       Narrows to `git commit`, routes custom/built-in
 │   │   └── builtin-checks.sh         Zero-config manifest-version vs doc-mirror greps
 │   └── .claude-plugin/
-│       └── plugin.json             Version 1.7.0
+│       └── plugin.json             Version 1.8.0
 │
 ├── managed/                        ← MANAGED AGENT (Anthropic cloud)
 │   ├── api.py                        Shared helpers: get_headers, list_agents, find_environment

@@ -1,7 +1,7 @@
 # air — Automated Code Review with Verification, Pattern Learning, and Team Knowledge
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../../LICENSE)
-[![Version](https://img.shields.io/badge/version-1.7.0-green.svg)](.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.8.0-green.svg)](.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://claude.ai/code)
 [![GitHub](https://img.shields.io/badge/GitHub-supported-black.svg)](https://github.com)
 [![GitLab](https://img.shields.io/badge/GitLab-supported-orange.svg)](https://gitlab.com)
@@ -331,6 +331,24 @@ Each `/air:learn` run (periodic, every 5 reviews or 2 days):
 - **Not executable:** if `.air-checks.sh` exists but isn't `chmod +x`, the hook prints a nudge and falls back to built-ins so you still get protection while you finish reviewing the auto-generated script.
 
 See `.air-checks.sh` in the air repo itself for a real-world extension example (version consistency from built-ins + air-specific convention-enforcement greps).
+
+## What's New in v1.8.0
+
+**Managed-agent orphan-session cleanup.** If the Python driver dies mid-review (CI kill, Ctrl-C, uncaught exception), still-running sessions on Anthropic's side would previously keep burning tokens until their own idle timeout (~5 min) and block `DELETE /sessions/{id}`. v1.8.0 tracks live session IDs and sends `user.interrupt` on `atexit` + `SIGTERM` + `SIGHUP` (parallelized via daemon threads with a 12s bound so it doesn't starve CI's SIGKILL grace). Mid-review orphans (timed-out specialists) are also interrupted between Phase 1 and Phase 2 so they don't bill through the verifier phase.
+
+**Auto-detect re-review mode (managed).** When a managed review runs on a PR that already has an `air-machine`-authored `## Code Review` comment, the driver now auto-detects and switches modes:
+- Head SHA matches the prior `Reviewed at:` → **skip** (no-op, saves ~$2.30 on synchronize pushes that didn't change the tree)
+- Head SHA advanced → **re-review** — specialists get the inter-diff (not the full PR diff), the prior review body, and any developer PR comments posted since, and classify each prior finding as FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED
+- No prior → full review (existing behavior)
+- `--fresh` forces a full review regardless
+
+**Developer responses as context.** When a developer posts a reply on the PR ("will not fix #3 because Y"), the next managed re-review absorbs it as `<developer-comment>` context and surfaces the rationale in classifications instead of re-flagging the finding. Pair with `/air:review --respond` after pushing fixes for the tightest feedback loop.
+
+**`--closed` opt-in for closed/merged PRs.** Default behavior still refuses to review closed/merged PRs (auto-trigger is event-gated anyway). `--closed` opts in for legitimate cases: post-merge audits, wiki-pattern backfill from historical PRs, dogfooding without opening a new PR. Works through the CLI plugin (`/air:review 123 --closed`), direct invocation (`python managed/review.py <repo> 123 --closed`), and `workflow_dispatch` from the Actions tab.
+
+**`workflow_dispatch` trigger.** The reusable `managed-review.yml` now accepts `pr_number` + `closed` inputs, and the dogfood `air-review.yml` adds a `workflow_dispatch` trigger so any PR can be re-reviewed on demand from the Actions UI. See `managed/README.md` for the updated template.
+
+Plus: pre-flight state gate, commit-checkout for closed PRs (since the head branch is often deleted on merge), and a stack of correctness fixes around session streaming, pagination, threadpool-during-atexit, and workflow input typing.
 
 ## Standalone Wiki Cleanup
 
