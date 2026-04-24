@@ -28,8 +28,8 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests as req
@@ -67,10 +67,10 @@ def _interrupt_live_sessions_sync() -> None:
     print(f"  [shutdown] interrupting {len(sids)} live session(s)", file=sys.stderr)
     # Tight per-request timeout + no retries so a slow/unreachable API can't
     # block atexit for minutes while the CI runner's grace window ticks down
-    # to SIGKILL. Parallelize via thread pool so total shutdown wall-time
-    # is ~10s regardless of N (serial would be 10s * N, which on CI runners
-    # with short SIGTERM→SIGKILL grace can eat the whole window for 4+
-    # sessions; exact grace varies by runtime).
+    # to SIGKILL. Parallelize via raw daemon threads — ThreadPoolExecutor
+    # refuses to schedule work during interpreter shutdown (atexit fires
+    # after concurrent.futures' own shutdown hook), so a pool.map() here
+    # raises "cannot schedule new futures after interpreter shutdown".
     client = Anthropic(timeout=10.0, max_retries=0)
 
     def _interrupt_one(sid: str) -> None:
@@ -80,8 +80,17 @@ def _interrupt_live_sessions_sync() -> None:
         except Exception as e:
             print(f"  [shutdown] interrupt failed for {sid}: {e}", file=sys.stderr)
 
-    with ThreadPoolExecutor(max_workers=min(len(sids), 8)) as pool:
-        list(pool.map(_interrupt_one, sids))
+    threads = [threading.Thread(target=_interrupt_one, args=(sid,), daemon=True) for sid in sids]
+    for t in threads:
+        t.start()
+    # Bound total wait to the per-request timeout — slow tails shouldn't
+    # starve CI's SIGKILL grace. Each interrupt itself has timeout=10.0, so
+    # after ~12s any surviving thread is either making progress or wedged;
+    # we give up rather than block shutdown.
+    deadline = time.monotonic() + 12.0
+    for t in threads:
+        remaining = max(0.0, deadline - time.monotonic())
+        t.join(timeout=remaining)
 
 
 async def _interrupt_session_async(client: AsyncAnthropic, session_id: str) -> None:
