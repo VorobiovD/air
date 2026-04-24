@@ -50,6 +50,18 @@ AIR_TMP=$(mktemp -d "/tmp/air-XXXXXX")
 # Falls back to empty when invoked from outside a git repo; Step 3.5 skips
 # `.air-checks.sh` generation in that case.
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+# Plugin root (used by Step 13's meta.py invocations and hooks).
+# The pre-commit hook exports this for .air-checks.sh; review.md has to
+# derive it independently since Claude Code doesn't pass it to slash
+# commands. We resolve it via the canonical cache path; if the user has
+# the plugin installed elsewhere, they can set AIR_PLUGIN_ROOT manually.
+if [ -z "${AIR_PLUGIN_ROOT:-}" ]; then
+  AIR_PLUGIN_ROOT=$(ls -1d ~/.claude/plugins/cache/air/air/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')
+fi
+if [ -z "$AIR_PLUGIN_ROOT" ] || [ ! -d "$AIR_PLUGIN_ROOT" ]; then
+  echo "warning: AIR_PLUGIN_ROOT not resolvable; Step 13's auto-trigger counter will not increment this run" >&2
+  AIR_PLUGIN_ROOT=""
+fi
 echo "$AIR_TMP"
 ```
 
@@ -801,37 +813,43 @@ The issue comment contains the full review body (searchable by Step 2 for re-rev
 
 **Skip if `CROSS_REPO=true`.** Print "Cross-repo - learn skipped."
 
-**Auto-trigger check:** Before learning, check if a full cleanup is due:
-```bash
-META_FILE="$HOME/.claude/review-learn-meta.json"
-if [ -f "$META_FILE" ]; then
-  LAST_CLEANUP=$(cat "$META_FILE" | grep -o '"last_cleanup" *: *"[^"]*"' | grep -o '[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}')
-  REVIEWS_SINCE=$(cat "$META_FILE" | grep -o '"reviews_since" *: *[0-9]*' | grep -o '[0-9]*$')
-  CLEANUP_EPOCH=$(date -j -f "%Y-%m-%d" "$LAST_CLEANUP" +%s 2>/dev/null || date -d "$LAST_CLEANUP" +%s 2>/dev/null || echo 0)
-  DAYS_SINCE=$(( ($(date +%s) - $CLEANUP_EPOCH) / 86400 ))
-else
-  REVIEWS_SINCE=99
-  DAYS_SINCE=99
-fi
-```
+**Auto-trigger check:** Before learning, decide whether a full cleanup is due.
 
-Print the check result:
+Counter state lives in `.air-meta.json` at the wiki root (cloned into `$WIKI_DIR` by Step 3), so CLI and managed runs share the same counter — both contribute to the cadence. `plugins/air/lib/meta.py` owns the threshold logic; delegate to it:
+
 ```bash
-echo "Auto-trigger check: reviews_since=$REVIEWS_SINCE, days_since=$DAYS_SINCE (threshold: 5 reviews or 2 days)"
+if [ -n "$AIR_PLUGIN_ROOT" ]; then
+  python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number "<number>"
+  python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"
+  META_RC=$?
+else
+  # Step 0 already warned and cleared AIR_PLUGIN_ROOT — counter stays
+  # untouched, treat as "below threshold" so the flow proceeds to the
+  # incremental learn sub-steps without spuriously triggering /air:learn.
+  echo "warning: AIR_PLUGIN_ROOT unresolved — counter not bumped this run" >&2
+  META_RC=0
+fi
 ```
 
 **>>> AUTO-TRIGGER DECISION (do NOT skip this block) <<<**
 
-If `REVIEWS_SINCE >= 5` OR `DAYS_SINCE >= 2`:
-1. Print "Triggering /air:learn (reviews: $REVIEWS_SINCE, days: $DAYS_SINCE)"
-2. Run `/air:learn` (full cleanup + KAIROS history regeneration)
-3. After `/air:learn` completes, skip to wiki push (Step 13 sub-step 5)
-4. **RETURN** — do not fall through to the incremental learn below
+If `$META_RC == 1` (threshold hit — 5+ reviews OR 2+ days with new PRs):
+1. Print "Auto-trigger: running /air:learn"
+2. Run `/air:learn` (full cleanup + KAIROS history regeneration). This is the same slash-command the user can invoke manually — invoke it in the same session.
+3. `/air:learn` clones the wiki itself, does the full pass, and at the end calls `meta.py reset` + pushes `.air-meta.json`. That replaces the push this flow would do in sub-step 5.
+4. **RETURN** from Step 13 — do not fall through to the incremental learn sub-steps below. `/air:learn` supersedes them for this cycle.
 
-Otherwise (threshold not met), increment the counter:
-```bash
-echo '{"last_cleanup": "'$LAST_CLEANUP'", "reviews_since": '$((REVIEWS_SINCE + 1))'}' > "$META_FILE"
-```
+If `$META_RC == 0` (threshold not met):
+- Print "Auto-trigger: incremental learn only"
+- Fall through to sub-steps 2, 2.5, 3, 4, 5 below (existing per-review pattern extraction + author lifecycle + push).
+
+**Threshold rules** (enforced in `meta.py::should_trigger_learn`):
+- `reviews_since >= 5` → trigger
+- `days_since_cleanup >= 2` AND `reviews_since > 0` → trigger
+- `days_since_cleanup >= 2` AND `reviews_since == 0` → skip + bump `last_check` (prevents re-evaluating every review)
+- else → skip
+
+The counter bump and check are atomic from the caller's perspective; only the wiki push (sub-step 5) commits them to the remote.
 
 1. Read `$AIR_TMP/REVIEW.md` (from Step 3)
 2. Add new patterns from this review. This is NOT optional — every review that produced findings MUST update the wiki. For each confirmed/downgraded/improvement finding from Step 8:
@@ -890,7 +908,7 @@ When a disputed finding is **rejected** (explanation insufficient):
 - Optionally add to common findings if this is a recurring dispute: "Developers may claim X is standard — verify compensating controls"
 
 4. Clean: merge duplicates, reorganize, cap Common Findings and Service-Specific sections at ~15 entries. **Author Patterns: NEVER remove because "fixed" or "stale."** Author patterns follow the lifecycle (create → strengthen → decline → archive) managed by sub-step 2.5 above. You may merge semantic duplicates within the same author (combine counts and PR refs, use the higher clean counter).
-5. Push to wiki (reuse clone from Step 3 — no second clone needed):
+5. Push to wiki (reuse clone from Step 3 — no second clone needed). Includes `.air-meta.json` from the auto-trigger check at the top of this step so CLI and managed stay in sync on the shared counter:
 ```bash
 WIKI_DIR="$AIR_TMP/review-wiki-<number>"
 if [ ! -d "$WIKI_DIR/.git" ]; then
@@ -900,7 +918,8 @@ if [ ! -d "$WIKI_DIR/.git" ]; then
 fi
 cp "$AIR_TMP/REVIEW.md" "$WIKI_DIR/REVIEW.md"
 cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
-cd "$WIKI_DIR" && git add REVIEW.md ACCEPTED-PATTERNS.md && { git diff --quiet --cached || git commit -m "review: learned from PR #<number>"; } && git push
+# .air-meta.json is mutated in-place by meta.py earlier in this step, so no copy needed.
+cd "$WIKI_DIR" && git add REVIEW.md ACCEPTED-PATTERNS.md .air-meta.json && { git diff --quiet --cached || git commit -m "review: learned from PR #<number>"; } && git push
 ```
 
 If wiki not found, print guidance. If push fails, warn but don't fail.

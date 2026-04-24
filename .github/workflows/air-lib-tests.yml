@@ -1,0 +1,42 @@
+name: air-lib tests
+
+on:
+  pull_request:
+    paths:
+      - 'plugins/air/lib/**'
+      - '.github/workflows/air-lib-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/air/lib/**'
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tests don't push or fetch after checkout; drop the token from .git/config.
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Configure git identity
+        # test_wiki_git.py needs a git identity to seed the fake remote
+        run: |
+          git config --global user.name "ci-test"
+          git config --global user.email "ci@example.com"
+          git config --global init.defaultBranch master
+
+      - name: Run air-lib tests
+        working-directory: plugins/air/lib
+        run: python -m pytest tests/ -v

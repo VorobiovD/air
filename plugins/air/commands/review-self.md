@@ -13,6 +13,14 @@ if [ -z "$AIR_TMP" ]; then
   find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
   AIR_TMP=$(mktemp -d "/tmp/air-self-XXXXXX")
 fi
+# Plugin root for the meta.py invocations in the wiki-learn block below.
+if [ -z "${AIR_PLUGIN_ROOT:-}" ]; then
+  AIR_PLUGIN_ROOT=$(ls -1d ~/.claude/plugins/cache/air/air/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')
+fi
+if [ -z "$AIR_PLUGIN_ROOT" ] || [ ! -d "$AIR_PLUGIN_ROOT" ]; then
+  echo "warning: AIR_PLUGIN_ROOT not resolvable; Self Step 7's auto-trigger counter will not increment this run" >&2
+  AIR_PLUGIN_ROOT=""
+fi
 echo "$AIR_TMP"
 ```
 
@@ -132,42 +140,60 @@ If `--fix` was NOT passed:
 
 1. Add new patterns from this review to REVIEW.md (same as Step 13 sub-steps 2 and 2.5 — author pattern lifecycle with clean-PR tracking, semantic dedup, all severity levels). For self-review, resolve the author using the same method as the own-PR guard: `gh api user --jq '.login'` (GitHub) or `glab api user 2>/dev/null | jq -r '.username'` (GitLab). This ensures the heading matches `### <author.login>` used in regular PR reviews.
 2. Record any `WIKI DRIFT:` notes in `## Pending Drift` section
-3. Push to wiki:
+3. Bump the shared wiki-backed review counter BEFORE the push so `.air-meta.json` is up-to-date in the same commit. Counter state lives in `.air-meta.json` at the wiki root so CLI and managed runs share the same number — both contribute to the cadence:
+
 ```bash
 WIKI_DIR="$AIR_TMP/review-wiki-self"
 WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 if [ ! -d "$WIKI_DIR/.git" ]; then
   cd "$AIR_TMP" && git clone --depth 1 "$WIKI_URL" review-wiki-self 2>/dev/null
 fi
-cp "$AIR_TMP/REVIEW.md" "$WIKI_DIR/REVIEW.md"
-cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
-cd "$WIKI_DIR" && git add REVIEW.md ACCEPTED-PATTERNS.md && { git diff --quiet --cached || git commit -m "review: self-review patterns $(date +%Y-%m-%d)"; } && git push
-```
-4. Increment the review counter AND check auto-trigger threshold:
-```bash
-META_FILE="$HOME/.claude/air:learn-meta.json"
-if [ -f "$META_FILE" ]; then
-  LAST_CLEANUP=$(cat "$META_FILE" | grep -o '"last_cleanup" *: *"[^"]*"' | grep -o '[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}')
-  REVIEWS_SINCE=$(cat "$META_FILE" | grep -o '"reviews_since" *: *[0-9]*' | grep -o '[0-9]*$')
-  CLEANUP_EPOCH=$(date -j -f "%Y-%m-%d" "$LAST_CLEANUP" +%s 2>/dev/null || date -d "$LAST_CLEANUP" +%s 2>/dev/null || echo 0)
-  DAYS_SINCE=$(( ($(date +%s) - $CLEANUP_EPOCH) / 86400 ))
+if [ -n "$AIR_PLUGIN_ROOT" ]; then
+  # Bump the counter (creates .air-meta.json with defaults on fresh wiki).
+  python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number 0
+  # Threshold check: exit 1 triggers /air:learn.
+  python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"
+  META_RC=$?
 else
-  REVIEWS_SINCE=99
-  DAYS_SINCE=99
+  # Self Step 0 already warned and cleared AIR_PLUGIN_ROOT.
+  echo "warning: AIR_PLUGIN_ROOT unresolved — counter not bumped this run" >&2
+  META_RC=0
 fi
-echo "Auto-trigger check: reviews_since=$REVIEWS_SINCE, days_since=$DAYS_SINCE (threshold: 5 reviews or 2 days)"
 ```
 
-**>>> AUTO-TRIGGER DECISION (do NOT skip) <<<**
+**>>> AUTO-TRIGGER DECISION (do NOT skip this block) <<<**
 
-If `REVIEWS_SINCE >= 5` OR `DAYS_SINCE >= 2`:
-1. Print "Triggering /air:learn (reviews: $((REVIEWS_SINCE + 1)), days: $DAYS_SINCE)"
-2. Run `/air:learn` (full cleanup + KAIROS history regeneration)
-3. After learn completes, RETURN — do not fall through to the counter increment below
+If `$META_RC == 1` (threshold hit — 5+ reviews OR 2+ days with new PRs):
+1. Print "Auto-trigger: running /air:learn"
+2. Run `/air:learn` now (full cleanup + KAIROS history regeneration). It clones the wiki itself, resets `.air-meta.json`, and pushes everything from its own clone.
+3. **RETURN from Self Step 7** — do NOT execute sub-step 4 below. `/air:learn` already pushed REVIEW.md + `.air-meta.json` from its own clone; running our push afterward would be a non-fast-forward race.
 
-Otherwise (threshold not met), increment the counter:
+If `$META_RC == 0` (threshold not met):
+- Print "Auto-trigger: threshold not met — self-review done, push below"
+- Fall through to sub-step 4.
+
+Threshold rules (enforced in `meta.py`): `reviews_since >= 5`, or `days_since_cleanup >= 2` AND `reviews_since > 0`. A self-review counts as a review for counter purposes — no PR number needed (pass 0).
+
+4. Push to wiki (only reached when sub-step 3's auto-trigger said `META_RC == 0` — otherwise we returned from this Step).
+
 ```bash
-echo '{"last_cleanup": "'$LAST_CLEANUP'", "reviews_since": '$((REVIEWS_SINCE + 1))'}' > "$META_FILE"
+# Cd into the wiki dir as a separate guard. Without this, a missing wiki
+# (clone failure) would let `cd` fail silently via the next `|| true` and
+# every subsequent `git push` would fire against the project repo, not
+# the wiki. POSIX `&&`/`||` are equal-precedence left-associative.
+cd "$WIKI_DIR" || { echo "wiki dir missing — skipping wiki push" >&2; exit 0; }
+
+cp "$AIR_TMP/REVIEW.md" REVIEW.md
+cp "$AIR_TMP/ACCEPTED-PATTERNS.md" ACCEPTED-PATTERNS.md 2>/dev/null
+
+# Stage each file independently. `|| true` here covers a missing file
+# (e.g. fresh wiki without ACCEPTED-PATTERNS.md yet) — NOT a missing
+# wiki dir, which we already exited on above.
+git add REVIEW.md 2>/dev/null || true
+git add ACCEPTED-PATTERNS.md 2>/dev/null || true
+git add .air-meta.json 2>/dev/null || true
+git diff --quiet --cached || git commit -m "review: self-review patterns $(date +%Y-%m-%d)"
+git push
 ```
 
 Only skip wiki push if zero findings (clean self-review with nothing to learn).

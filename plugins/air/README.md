@@ -215,7 +215,7 @@ Two files:
 
 ### Auto-trigger Cleanup
 
-A local counter (`~/.claude/review-learn-meta.json`) tracks reviews since last cleanup. Every 5 reviews or 2 days — whichever comes first — whoever runs `/air:review` automatically triggers:
+A wiki-backed counter (`.air-meta.json` at the wiki root) tracks reviews since last cleanup, shared across CLI and managed runs. Every 5 reviews or 2 days (with ≥1 new PR) — whichever comes first — the next `/air:review` or `managed/review.py` automatically triggers:
 - Full REVIEW.md deduplication and reorganization
 - REVIEW-HISTORY.md regeneration from PR comment history
 - Counter resets — distributed across the team

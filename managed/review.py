@@ -1069,6 +1069,89 @@ Raw findings to verify and consolidate:
         sys.exit(1)
     print(f"  Posted: {resp.json()['html_url']}")
 
+    # Epilogue: bump the shared wiki-backed counter and trigger /air:learn if
+    # the threshold fires. All-best-effort — never fail the overall review if
+    # any of this has a hiccup.
+    try:
+        _update_learn_counter(args.repo, args.pr_number, bot_token)
+    except Exception as e:
+        print(f"  [warn] counter update failed: {e}", file=sys.stderr)
+
+
+def _update_learn_counter(repo: str, pr_number: int, bot_token: str) -> None:
+    """Clone wiki, bump `.air-meta.json`, trigger learn subprocess on threshold,
+    push the meta. Isolated so callers can wrap with a broad try/except.
+
+    Uses subprocess invocations of `plugins/air/lib/meta.py` so CLI and
+    managed share one implementation. `managed/review.py` runs alongside
+    a checked-out air repo, so the lib path is relative.
+    """
+    import tempfile
+
+    air_root = Path(__file__).resolve().parent.parent
+    lib_dir = air_root / "plugins" / "air" / "lib"
+    meta_script = lib_dir / "meta.py"
+    if not meta_script.is_file():
+        print(f"  [warn] meta.py not found at {meta_script}", file=sys.stderr)
+        return
+    sys.path.insert(0, str(lib_dir))
+    import wiki_git  # type: ignore
+
+    wiki_url = f"https://x-access-token:{bot_token}@github.com/{repo}.wiki.git"
+    with tempfile.TemporaryDirectory(prefix="air-wiki-") as tmp:
+        wiki_dir = Path(tmp) / "wiki"
+        if not wiki_git.clone_wiki(wiki_url, wiki_dir):
+            return
+        wiki_git.configure_identity(wiki_dir, "air-machine", "air-machine@users.noreply.github.com")
+
+        # 1. Bump the counter.
+        bump = subprocess.run(
+            [sys.executable, str(meta_script), "bump", "--wiki-dir", str(wiki_dir),
+             "--pr-number", str(pr_number)],
+            capture_output=True, text=True,
+        )
+        if bump.returncode != 0:
+            print(f"  [warn] meta bump failed: {bump.stderr.strip()}", file=sys.stderr)
+            return
+        sys.stderr.write(bump.stderr)
+
+        # 2. Check threshold. Exit 1 == trigger.
+        check = subprocess.run(
+            [sys.executable, str(meta_script), "check", "--wiki-dir", str(wiki_dir)],
+            capture_output=True, text=True,
+        )
+        sys.stderr.write(check.stderr)
+
+        if check.returncode == 1:
+            # Threshold fired. Run managed/learn.py SYNCHRONOUSLY in this
+            # same GitHub Actions job — a detached Popen would get torn
+            # down when the runner VM stops. learn.py typically takes
+            # 3-5 min; the review comment has already posted, so we're
+            # just extending the CI job's tail. Worst case the GHA 30-min
+            # timeout kicks in, but that's the same bound we accept for
+            # the review itself.
+            #
+            # learn.py calls `meta.py reset` on success (see
+            # managed/learn.py::_reset_learn_counter). If it errors, the
+            # counter stays elevated and the next review retriggers it.
+            learn_script = air_root / "managed" / "learn.py"
+            if learn_script.is_file():
+                print(f"  [learn] running synchronously: {learn_script} {repo}", file=sys.stderr)
+                learn_result = subprocess.run(
+                    [sys.executable, str(learn_script), repo, "--poll"],
+                    capture_output=False,
+                    # No check=True — we want to finish this review cleanly
+                    # even if learn errors out.
+                )
+                if learn_result.returncode != 0:
+                    print(f"  [warn] learn.py exited {learn_result.returncode} — counter not reset", file=sys.stderr)
+            else:
+                print(f"  [warn] learn.py not found at {learn_script}", file=sys.stderr)
+
+        # 3. Push the meta change (includes bump + any last_check update
+        #    from check). learn.py's reset will push a follow-up commit.
+        wiki_git.commit_meta(wiki_dir, f"meta: bump counter for PR #{pr_number}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Trigger an air review for a PR (client-side parallel orchestrator)")
