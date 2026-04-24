@@ -337,7 +337,7 @@ See `.air-checks.sh` in the air repo itself for a real-world extension example (
 **Managed-agent orphan-session cleanup.** If the Python driver dies mid-review (CI kill, Ctrl-C, uncaught exception), still-running sessions on Anthropic's side would previously keep burning tokens until their own idle timeout (~5 min) and block `DELETE /sessions/{id}`. v1.8.0 tracks live session IDs and sends `user.interrupt` on `atexit` + `SIGTERM` + `SIGHUP` (parallelized via daemon threads with a 12s bound so it doesn't starve CI's SIGKILL grace). Mid-review orphans (timed-out specialists) are also interrupted between Phase 1 and Phase 2 so they don't bill through the verifier phase.
 
 **Auto-detect re-review mode (managed).** When a managed review runs on a PR that already has an `air-machine`-authored `## Code Review` comment, the driver now auto-detects and switches modes:
-- Head SHA matches the prior `Reviewed at:` → **skip** (no-op, saves ~$2.30 on synchronize pushes that didn't change the tree)
+- Head SHA matches the prior `Reviewed at:` → **skip** (no-op, saves a full review cost on synchronize pushes that didn't change the tree)
 - Head SHA advanced → **re-review** — specialists get the inter-diff (not the full PR diff), the prior review body, and any developer PR comments posted since, and classify each prior finding as FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED
 - No prior → full review (existing behavior)
 - `--fresh` forces a full review regardless

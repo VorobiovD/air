@@ -6,6 +6,8 @@
 [![GitHub](https://img.shields.io/badge/GitHub-supported-black.svg)](https://github.com)
 [![GitLab](https://img.shields.io/badge/GitLab-supported-orange.svg)](https://gitlab.com)
 
+> **New in 1.8.0:** managed-agent orphan-session cleanup, auto-detect re-review mode with developer-response context, `--closed` opt-in for closed/merged PRs, `workflow_dispatch` for on-demand reviews. See [plugin README — What's New](plugins/air/README.md#whats-new-in-v180).
+
 ## Why
 
 Code reviews are slow, inconsistent, and lose institutional knowledge when people leave. air fixes this:
