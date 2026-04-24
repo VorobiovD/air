@@ -89,5 +89,23 @@ managed/                          # Managed Agent (CI automation)
 - Findings must score 60+ confidence from verifier to appear in output
 - Conflict markers in PR diff = automatic blocker finding
 - Security auditor uses a 31-item checklist; PROJECT-PROFILE.md controls which items apply per repo
-- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.8.0)
+- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.8.0) <!-- x-release-please-version -->
 - Install via `/plugin marketplace add VorobiovD/air` then `/plugin install air@air`
+
+## Releases (automated via release-please)
+
+Never tag or cut a release manually. Every commit on main that uses Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, etc.) feeds the release PR:
+
+- `.github/workflows/release-please.yml` runs on every push to main
+- It maintains a long-lived "chore(main): release vX.Y.Z" PR on the repo
+- That PR shows: next version (computed from commit types — `feat` → minor bump, `fix` → patch, `BREAKING CHANGE:` in footer → major), all version-mirror files bumped atomically, and a CHANGELOG.md entry
+- Merge that PR when you're ready to release → bot creates the git tag + GitHub Release automatically
+
+Files tracked for version mirroring (via `.release-please-config.json` + `<!-- x-release-please-version -->` markers):
+- `plugins/air/.claude-plugin/plugin.json` (canonical)
+- `README.md` badge
+- `plugins/air/README.md` badge
+- `CLAUDE.md` "currently X.Y.Z" line
+- `docs/architecture.md` Version header + tree caption
+
+If you want to force a specific version bump regardless of commit types, add `Release-As: 1.9.0` in a commit footer.
