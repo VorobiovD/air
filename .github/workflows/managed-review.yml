@@ -26,6 +26,7 @@
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 #         AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
+#         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}    # optional — enables Codex
 #
 # All inputs are `type: string` (not number/boolean) because GitHub's
 # expression operator `${{ ... }}` always resolves to a string — passing
@@ -35,17 +36,16 @@
 # For pull_request triggers, leave `pr_number` / `closed` unset — the
 # reusable workflow falls back to `github.event.pull_request.number` and
 # skips `--closed`.
+#
+# Codex (optional 5th reviewer): set `OPENAI_API_KEY` as a repo/org secret
+# to enable. Without it, the review runs with 4 Claude specialists +
+# verifier only (behavior unchanged from v1.8.0).
 
 name: air managed review
 
 on:
   workflow_call:
     inputs:
-      # Typed as `string` rather than `number`/`boolean` so callers can pass
-      # `${{ inputs.pr_number }}` from their own workflow_dispatch inputs
-      # directly — GitHub expressions always resolve to strings, and a
-      # `type: number` reusable input rejects string values at workflow-load
-      # time. The shell script below handles the conversion naturally.
       pr_number:
         description: 'PR number to review (falls back to github.event.pull_request.number when empty)'
         required: false
@@ -61,11 +61,22 @@ on:
         required: true
       AIR_BOT_TOKEN:
         required: true
+      OPENAI_API_KEY:
+        description: 'Optional — enables Codex as a 5th reviewer alongside the 4 Claude specialists'
+        required: false
 
 jobs:
   review:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    # Job-level env so step-level `if:` can check `env.OPENAI_API_KEY != ''`.
+    # Step-level `if: secrets.X != ''` works in some contexts but is less
+    # reliable across reusable-workflow invocations; env-based gating is the
+    # well-established pattern.
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      PR_NUMBER_RESOLVED: ${{ inputs.pr_number || github.event.pull_request.number }}
 
     steps:
       - name: Setup Python
@@ -73,7 +84,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
         run: pip install anthropic requests
 
       - name: Checkout air repo (for setup.py + agent prompts)
@@ -82,22 +93,43 @@ jobs:
           repository: VorobiovD/air
           path: air
 
+      # Codex-only steps (skipped when OPENAI_API_KEY secret is unset).
+      # The target-repo checkout and codex install add ~30s cold-start, so
+      # we only pay that cost on repos that opted in.
+      - name: Checkout target repo (for Codex)
+        if: ${{ env.OPENAI_API_KEY != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          # refs/pull/<N>/head is always reachable — works for open PRs,
+          # merged PRs (branch often deleted), and synchronize races.
+          ref: refs/pull/${{ env.PR_NUMBER_RESOLVED }}/head
+          path: target-repo
+          fetch-depth: 0
+
+      - name: Install Codex CLI
+        if: ${{ env.OPENAI_API_KEY != '' }}
+        run: |
+          npm install -g @openai/codex
+          # Headless login — reads key from stdin, stores in ~/.codex/auth.json.
+          printenv OPENAI_API_KEY | codex login --with-api-key
+
       - name: Run review
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          PR_NUMBER: ${{ env.PR_NUMBER_RESOLVED }}
           CLOSED: ${{ inputs.closed }}
+          # Absolute path so review.py can invoke `codex review` inside it.
+          # Empty when Codex is disabled; review.py treats empty as "skip".
+          AIR_TARGET_REPO: ${{ env.OPENAI_API_KEY != '' && format('{0}/target-repo', github.workspace) || '' }}
         run: |
           cd air
           if [ -z "$PR_NUMBER" ]; then
             echo "::error::No PR number available. Pass pr_number via workflow_dispatch or use a pull_request trigger." >&2
             exit 1
           fi
-          # Bash array keeps each flag as a separate argv entry — robust if
-          # a second opt-in flag is added later (avoids word-splitting on
-          # future flag values that might contain spaces).
           FLAGS=()
           if [ "$CLOSED" = "true" ]; then
             FLAGS+=(--closed)

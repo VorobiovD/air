@@ -25,6 +25,7 @@ import atexit
 import html
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -170,6 +171,52 @@ class SpecialistSessionError(Exception):
         super().__init__(f"{label}: {reason}")
         self.label = label
         self.reason = reason
+
+
+CODEX_LABEL = "codex"
+
+
+async def run_codex_session(target_repo: str, base_sha: str) -> str:
+    """Invoke `codex review --base <sha>` in the target repo; return stdout.
+
+    Opt-in 5th specialist. The runner-level checkout + CLI install happen
+    only when `OPENAI_API_KEY` is set on the repo (see managed-review.yml),
+    which means `AIR_TARGET_REPO` env is populated and the `codex` binary
+    is on PATH. Any environmental prerequisite missing is treated as
+    "skip, don't fail" — we never want Codex to break the review.
+    """
+    if not target_repo or not os.path.isdir(target_repo):
+        return "(codex skipped: AIR_TARGET_REPO not set or not a directory)"
+    if shutil.which("codex") is None:
+        return "(codex skipped: `codex` CLI not on PATH)"
+    if not os.environ.get("OPENAI_API_KEY"):
+        return "(codex skipped: OPENAI_API_KEY not set)"
+
+    print(f"  [launch] {CODEX_LABEL} → codex review --base {base_sha[:8]}")
+    proc = await asyncio.create_subprocess_exec(
+        "codex", "review", "--base", base_sha,
+        cwd=target_repo,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=SESSION_TIMEOUT_SECS
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        raise
+
+    if proc.returncode != 0:
+        # Don't fail the whole review — return a degraded note so the
+        # verifier can still consolidate the 4 Claude specialists.
+        err = stderr.decode()[:500] if stderr else "(no stderr)"
+        return f"(codex failed: exit {proc.returncode}: {err})"
+
+    output = stdout.decode().strip()
+    print(f"  [done] {CODEX_LABEL}")
+    return output
 
 
 SPECIALIST_TASKS = {
@@ -739,9 +786,27 @@ async def run_review(args):
         if dev_comments:
             print(f"  developer comments since last review: {len(dev_comments)}")
 
+    # Decide whether Codex joins Phase 1 as a 5th parallel source. Opt-in
+    # via the OPENAI_API_KEY secret (which the workflow uses to gate the
+    # CLI install + target-repo checkout). Skipped cleanly if any
+    # prerequisite is missing or the user passed --no-codex.
+    codex_repo = os.environ.get("AIR_TARGET_REPO", "")
+    codex_enabled = (
+        not args.no_codex
+        and codex_repo
+        and shutil.which("codex") is not None
+        and os.environ.get("OPENAI_API_KEY")
+    )
+    # For re-review mode we'd want the inter-diff base; for full review, use
+    # the PR's base branch SHA. Both come from meta.
+    codex_base_sha = (prior_sha if mode == "re-review" else meta["base"]["sha"]) or ""
+
     async with AsyncAnthropic() as client:
-        # Phase 1: 4 specialists in parallel
-        print(f"\n[3] Launching 4 specialist sessions in parallel...")
+        # Phase 1: specialists (4 Claude + Codex if opted in) in parallel
+        n_specialists = len(SPECIALIST_AGENTS) + (1 if codex_enabled else 0)
+        print(f"\n[3] Launching {n_specialists} specialist sessions in parallel...")
+        if codex_enabled:
+            print(f"  codex: enabled (target-repo={codex_repo}, base={codex_base_sha[:8]})")
         t0 = time.monotonic()
 
         # Caller-owned tracking so the between-phase cleanup only interrupts
@@ -763,13 +828,20 @@ async def run_review(args):
             run_with_timeout(name, agents[name], SPECIALIST_TASKS[name])
             for name in SPECIALIST_AGENTS
         ]
+        specialist_labels = list(SPECIALIST_AGENTS)
+        if codex_enabled:
+            specialist_coros.append(asyncio.wait_for(
+                run_codex_session(codex_repo, codex_base_sha),
+                timeout=SESSION_TIMEOUT_SECS,
+            ))
+            specialist_labels.append(CODEX_LABEL)
 
         results = await asyncio.gather(*specialist_coros, return_exceptions=True)
         elapsed = time.monotonic() - t0
 
         specialist_outputs = []
         degraded = []
-        for name, result in zip(SPECIALIST_AGENTS, results):
+        for name, result in zip(specialist_labels, results):
             if isinstance(result, asyncio.TimeoutError):
                 degraded.append(name)
                 specialist_outputs.append(f"(specialist unavailable: timed out after {SESSION_TIMEOUT_SECS}s)")
@@ -785,7 +857,7 @@ async def run_review(args):
             else:
                 specialist_outputs.append(result)
 
-        status = f"{len(SPECIALIST_AGENTS) - len(degraded)}/{len(SPECIALIST_AGENTS)} specialists ok"
+        status = f"{len(specialist_labels) - len(degraded)}/{len(specialist_labels)} specialists ok"
         print(f"  All specialists complete in {elapsed:.1f}s ({status})")
 
         # Interrupt any specialist sessions that timed out, errored, or hit
@@ -814,11 +886,11 @@ async def run_review(args):
         t1 = time.monotonic()
         combined = "\n\n".join(
             f"===== Findings from {name} =====\n\n{out}"
-            for name, out in zip(SPECIALIST_AGENTS, specialist_outputs)
+            for name, out in zip(specialist_labels, specialist_outputs)
         )
         if degraded:
             combined = (
-                f"NOTE: {len(degraded)}/{len(SPECIALIST_AGENTS)} specialists were unavailable "
+                f"NOTE: {len(degraded)}/{len(specialist_labels)} specialists were unavailable "
                 f"({', '.join(degraded)}). Review the available findings only; do not "
                 f"invent findings for the missing specialists.\n\n{combined}"
             )
@@ -992,6 +1064,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print the review comment to stdout, don't post to GitHub")
     parser.add_argument("--fresh", action="store_true", help="Force a full review even if a prior review exists (ignore re-review auto-detect)")
     parser.add_argument("--closed", action="store_true", help="Allow review of closed/merged PRs (default: refuse and exit). Useful for post-merge audits or backfilling wiki patterns from historical PRs.")
+    parser.add_argument("--no-codex", action="store_true", help="Skip the Codex review pass even if OPENAI_API_KEY + AIR_TARGET_REPO are set. Codex otherwise runs automatically when both are available.")
     args = parser.parse_args()
 
     if not REPO_ARG_RE.match(args.repo):

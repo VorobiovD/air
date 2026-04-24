@@ -11,6 +11,7 @@ Automated code review on every PR — zero human trigger needed.
 4. Add two org secrets:
    - `ANTHROPIC_API_KEY` — your Anthropic API key with Managed Agents access
    - `AIR_BOT_TOKEN` — the bot's PAT
+5. Optional: `OPENAI_API_KEY` — adds Codex as a 5th reviewer. Skipped cleanly if unset.
 
 ## Enable on a repo
 
@@ -92,6 +93,7 @@ python review.py myorg/myrepo 123             # post review comment
 python review.py myorg/myrepo 123 --dry-run   # print comment, skip post
 python review.py myorg/myrepo 123 --fresh     # force full review (ignore re-review auto-detect)
 python review.py myorg/myrepo 123 --closed    # review a closed/merged PR (default refuses)
+python review.py myorg/myrepo 123 --no-codex  # skip Codex even if OPENAI_API_KEY is set
 ```
 
 ## Agent updates
