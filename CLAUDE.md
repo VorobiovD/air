@@ -101,11 +101,6 @@ Never tag or cut a release manually. Every commit on main that uses Conventional
 - That PR shows: next version (computed from commit types — `feat` → minor bump, `fix` → patch, `BREAKING CHANGE:` in footer → major), all version-mirror files bumped atomically, and a CHANGELOG.md entry
 - Merge that PR when you're ready to release → bot creates the git tag + GitHub Release automatically
 
-Files tracked for version mirroring (via `.release-please-config.json` + `<!-- x-release-please-version -->` markers):
-- `plugins/air/.claude-plugin/plugin.json` (canonical)
-- `README.md` badge
-- `plugins/air/README.md` badge
-- `CLAUDE.md` "currently X.Y.Z" line
-- `docs/architecture.md` Version header + tree caption
+Files tracked for version mirroring are defined in `.release-please-config.json`'s `extra-files` array. Don't maintain a second list here — keep the config as the single source.
 
-If you want to force a specific version bump regardless of commit types, add `Release-As: 1.9.0` in a commit footer.
+Force a specific version bump regardless of commit types by adding `Release-As: 1.9.0` in a commit footer.
