@@ -154,8 +154,12 @@ PRIOR_REVIEW_MAX_CHARS = 8000
 
 def _github_paginate(url: str, token: str) -> list[dict]:
     """Walk a GitHub list endpoint to completion and return all items.
-    On a page failure, logs to stderr and returns the partial result so
-    callers can distinguish "empty" from "interrupted" via their own signal."""
+    On a page failure, logs to stderr and returns whatever has been
+    collected so far — callers see this as "empty or truncated" and
+    cannot currently distinguish the two. Acceptable because both
+    failure modes lead to a full-review fallback, which is the safe
+    (more expensive) choice.
+    """
     items: list[dict] = []
     while url:
         resp = req.get(
@@ -187,16 +191,25 @@ def fetch_bot_login(token: str) -> str | None:
     return resp.json().get("login")
 
 
-def find_prior_review(
-    repo: str, pr_number: int, token: str, bot_login: str
-) -> dict | None:
+def fetch_issue_comments(repo: str, pr_number: int, token: str) -> list[dict]:
+    """Fetch all issue comments on a PR in one paginated pass.
+
+    Single fetch source so `find_prior_review` and `fetch_comments_since`
+    can share the full comment list instead of paginating the same
+    endpoint twice per re-review (doubles API calls on long-discussion
+    PRs).
+    """
+    url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments?per_page=100"
+    return _github_paginate(url, token)
+
+
+def find_prior_review(comments: list[dict], bot_login: str) -> dict | None:
     """Return the most recent bot-authored ## Code Review comment, or None.
 
     Filters on comment author so a PR participant can't hijack the
-    auto-detect flow by posting a fake review body.
+    auto-detect flow by posting a fake review body. Takes an already-
+    fetched comment list to avoid re-paginating the endpoint.
     """
-    url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments?per_page=100"
-    comments = _github_paginate(url, token)
     reviews = [
         c for c in comments
         if (c.get("user") or {}).get("login") == bot_login
@@ -234,19 +247,19 @@ def fetch_inter_diff(
     return resp.text
 
 
-def fetch_comments_since(
-    repo: str, pr_number: int, token: str, after_comment_id: int
+def filter_comments_after(
+    comments: list[dict], after_comment_id: int
 ) -> list[dict]:
-    """Return PR issue comments posted after `after_comment_id`.
-
-    Uses the numeric comment id as a cursor rather than a timestamp:
-    (a) GitHub's `since` param filters by `updated_at`, not `created_at`;
-    (b) timestamps are second-precision, so strict `>` would drop any
-    comment posted in the same second as the prior review.
+    """Slice an already-fetched comment list to those posted after
+    `after_comment_id`. Uses the numeric comment id as the cursor rather
+    than a timestamp: GitHub's `since` param filters by `updated_at` not
+    `created_at`, and timestamps are second-precision so strict `>`
+    would drop any comment posted in the same second as the prior
+    review.
     """
-    url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments?per_page=100"
-    all_comments = _github_paginate(url, token)
-    return [c for c in all_comments if (c.get("id") or 0) > after_comment_id]
+    if after_comment_id <= 0:
+        return []
+    return [c for c in comments if (c.get("id") or 0) > after_comment_id]
 
 
 def format_developer_responses(comments: list[dict]) -> str:
@@ -309,7 +322,9 @@ If `/workspace/wiki` is empty or missing, proceed without patterns — do NOT fa
     # embed a literal `</prior-review>` and close the untrusted wrapper.
     short_prior = (prior_sha or "")[:8]
     short_head = meta["head"]["sha"][:8]
-    safe_prior = html.escape((prior_review_body or "")[:PRIOR_REVIEW_MAX_CHARS])
+    # Escape FIRST, then truncate — otherwise HTML entities like &amp; inflate
+    # the escaped string beyond PRIOR_REVIEW_MAX_CHARS and defeat the cap.
+    safe_prior = html.escape(prior_review_body or "")[:PRIOR_REVIEW_MAX_CHARS]
     rereview = f"""
 
 **Re-review mode — {short_prior} → {short_head}:**
@@ -463,10 +478,14 @@ async def run_review(args):
     prior_sha = None
     dev_comments: list[dict] = []
 
+    # Fetch the full comment list once; both prior-review lookup and
+    # developer-comment filtering consume the same data.
+    all_comments: list[dict] = []
     if not args.fresh:
         bot_login = fetch_bot_login(bot_token)
         if bot_login:
-            prior = find_prior_review(args.repo, args.pr_number, bot_token, bot_login)
+            all_comments = fetch_issue_comments(args.repo, args.pr_number, bot_token)
+            prior = find_prior_review(all_comments, bot_login)
             if prior:
                 prior_sha = extract_reviewed_at_sha(prior["body"])
                 if prior_sha is None:
@@ -507,17 +526,16 @@ async def run_review(args):
             diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
             dev_context = ""
         elif not inter_diff.strip():
-            # Commits landed but didn't change PR files (e.g. merge
-            # commits that only shift parent pointers). Nothing to review.
+            # Commits landed but the tree is unchanged — empty commits,
+            # force-push to the same tree, or merge-only commits that
+            # shift parent pointers. Nothing to review.
             print(
                 f"No inter-diff between {prior_sha[:8]} and {head_sha[:8]}. Skipping."
             )
             return
         else:
             diff = inter_diff
-            dev_comments = fetch_comments_since(
-                args.repo, args.pr_number, bot_token, prior["id"]
-            )
+            dev_comments = filter_comments_after(all_comments, prior["id"])
             dev_context = format_developer_responses(dev_comments)
     else:
         diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
@@ -526,7 +544,9 @@ async def run_review(args):
     pr_context = build_pr_context(
         meta, args.repo,
         mode=mode,
-        prior_review_body=(prior or {}).get("body", "") if mode == "re-review" else "",
+        # build_pr_context already ignores prior_review_body when
+        # mode != "re-review"; no caller-side guard needed.
+        prior_review_body=(prior or {}).get("body", ""),
         prior_sha=prior_sha,
         dev_context=dev_context,
     )
