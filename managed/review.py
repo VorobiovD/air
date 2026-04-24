@@ -603,18 +603,31 @@ async def run_review(args):
 
     # State gate: refuse to review closed/merged PRs by default. Reachable
     # via manual CLI invocation or `workflow_dispatch` with `closed: false`
-    # against a merged PR — the default `pull_request` trigger never fires
-    # on closed PRs, so this gate doesn't block the common path. --closed
-    # opts in for legitimate cases: post-merge audit, wiki-pattern backfill
-    # from historical PRs, dogfooding without opening a new PR.
+    # against a merged PR, OR via `pull_request: synchronize` that races
+    # with a merge (commit pushed, review queued, PR merged before the
+    # queued run starts executing). --closed opts in for legitimate cases:
+    # post-merge audit, wiki-pattern backfill from historical PRs,
+    # dogfooding without opening a new PR.
     #
-    # Exit 1 (not 0) so a workflow_dispatch refusal shows red on the Actions
-    # run page — a green checkmark on "refused to review" misleads operators
-    # scanning run history.
+    # Exit code depends on how the refusal was triggered:
+    # - `pull_request` event (race-with-merge): exit 0 — the review was
+    #   auto-queued and became redundant. Showing red would alert the
+    #   operator to a non-failure.
+    # - `workflow_dispatch` or local CLI (user intent): exit 1 — the
+    #   operator explicitly asked for a review that won't happen; red is
+    #   the right signal.
     pr_state = meta.get("state", "open")
     pr_merged = bool(meta.get("merged"))
     if pr_state == "closed" and not args.closed:
         status = "merged" if pr_merged else "closed"
+        event = os.environ.get("GITHUB_EVENT_NAME", "")
+        if event == "pull_request":
+            print(
+                f"PR #{args.pr_number} was {status} before the queued review ran. "
+                f"Skipping (race with merge — not an error).",
+                file=sys.stderr,
+            )
+            sys.exit(0)
         print(
             f"PR #{args.pr_number} is {status}. Pass --closed to review anyway.",
             file=sys.stderr,
