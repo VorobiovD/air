@@ -91,7 +91,8 @@ def commit_meta(wiki_dir: Path, message: str) -> bool:
             return True
         _run(["git", "commit", "-m", message], cwd=wiki_dir)
     except subprocess.CalledProcessError as e:
-        print(f"  [wiki] commit failed: {_redact(e.stderr.strip()) if e.stderr else e}", file=sys.stderr)
+        detail = e.stderr.strip() if e.stderr else str(e)
+        print(f"  [wiki] commit failed: {_redact(detail)}", file=sys.stderr)
         return False
 
     # First push attempt.
@@ -110,7 +111,8 @@ def commit_meta(wiki_dir: Path, message: str) -> bool:
         _run(["git", "push"], cwd=wiki_dir)
         return True
     except subprocess.CalledProcessError as e:
-        print(f"  [wiki] push retry failed: {_redact(e.stderr.strip()) if e.stderr else e}", file=sys.stderr)
+        detail = e.stderr.strip() if e.stderr else str(e)
+        print(f"  [wiki] push retry failed: {_redact(detail)}", file=sys.stderr)
         return False
 
 

@@ -18,7 +18,7 @@ if [ -z "${AIR_PLUGIN_ROOT:-}" ]; then
   AIR_PLUGIN_ROOT=$(ls -1d ~/.claude/plugins/cache/air/air/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')
 fi
 if [ -z "$AIR_PLUGIN_ROOT" ] || [ ! -d "$AIR_PLUGIN_ROOT" ]; then
-  echo "warning: AIR_PLUGIN_ROOT not resolvable; Self Step 7's meta.py invocations will be skipped" >&2
+  echo "warning: AIR_PLUGIN_ROOT not resolvable; Self Step 7's auto-trigger counter will not increment this run" >&2
   AIR_PLUGIN_ROOT=""
 fi
 echo "$AIR_TMP"
@@ -148,11 +148,17 @@ WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 if [ ! -d "$WIKI_DIR/.git" ]; then
   cd "$AIR_TMP" && git clone --depth 1 "$WIKI_URL" review-wiki-self 2>/dev/null
 fi
-# Bump the counter (creates .air-meta.json with defaults on fresh wiki).
-python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number 0
-# Threshold check: exit 1 triggers /air:learn.
-python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"
-META_RC=$?
+if [ -n "$AIR_PLUGIN_ROOT" ]; then
+  # Bump the counter (creates .air-meta.json with defaults on fresh wiki).
+  python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number 0
+  # Threshold check: exit 1 triggers /air:learn.
+  python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"
+  META_RC=$?
+else
+  # Self Step 0 already warned and cleared AIR_PLUGIN_ROOT.
+  echo "warning: AIR_PLUGIN_ROOT unresolved — counter not bumped this run" >&2
+  META_RC=0
+fi
 ```
 
 **>>> AUTO-TRIGGER DECISION (do NOT skip this block) <<<**

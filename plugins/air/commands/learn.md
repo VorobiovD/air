@@ -30,8 +30,9 @@ find "$HOME/.cache/air/kairos" -type f -name '*.json' -mtime +30 -delete 2>/dev/
 AIR_TMP=$(mktemp -d "/tmp/air-learn-XXXXXX")
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 # Plugin root for the meta.py reset invocation in Step 7. Same derivation
-# as review.md / review-self.md Step 0 — fall back to the canonical
-# install path if the env override and glob both miss.
+# as review.md / review-self.md Step 0. If the env override and glob both
+# miss, the var is cleared below and Step 7 skips the counter reset (the
+# wiki review-comment regeneration in Steps 4-6 still runs).
 if [ -z "${AIR_PLUGIN_ROOT:-}" ]; then
   AIR_PLUGIN_ROOT=$(ls -1d ~/.claude/plugins/cache/air/air/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')
 fi
@@ -422,17 +423,19 @@ cd "$WIKI_DIR" && git add REVIEW.md REVIEW-HISTORY.md PROJECT-PROFILE.md ACCEPTE
 After successful push, reset the shared auto-trigger counter in the wiki (`.air-meta.json`) so the next review sees `reviews_since: 0` and the cadence restarts. Both CLI and managed read this same file — `meta.py reset` is the canonical API. Skip cleanly if `$AIR_PLUGIN_ROOT` couldn't be resolved (Step 0 prints a warning) — counter staying elevated just means the next review re-triggers learn, which is the safe failure mode.
 
 ```bash
+WIKI_DIR="$AIR_TMP/review-wiki-learn"
 if [ -n "$AIR_PLUGIN_ROOT" ] && [ -d "$WIKI_DIR/.git" ]; then
   python3 "$AIR_PLUGIN_ROOT/lib/meta.py" reset --wiki-dir "$WIKI_DIR" --pr-number 0
   # Use commit_meta from wiki_git (it implements pull --rebase retry on
   # non-fast-forward — between Step 6's push and this one a concurrent CI
-  # review could land its own bump on .air-meta.json upstream).
-  python3 -c "
-import sys
-sys.path.insert(0, '$AIR_PLUGIN_ROOT/lib')
+  # review could land its own bump on .air-meta.json upstream). Pass paths
+  # via env (not shell-interpolation into Python source) so quotes and
+  # backslashes in paths can't corrupt the literal.
+  AIR_PLUGIN_ROOT="$AIR_PLUGIN_ROOT" WIKI_DIR="$WIKI_DIR" python3 -c "
+import os, sys
+sys.path.insert(0, os.environ['AIR_PLUGIN_ROOT'] + '/lib')
 import wiki_git
-ok = wiki_git.commit_meta('$WIKI_DIR', 'meta: reset counter after /air:learn')
-sys.exit(0 if ok else 1)
+sys.exit(0 if wiki_git.commit_meta(os.environ['WIKI_DIR'], 'meta: reset counter after /air:learn') else 1)
 " || echo "warning: meta reset push failed — counter stays elevated, will retrigger" >&2
 else
   echo "Skipping counter reset (AIR_PLUGIN_ROOT unresolved or wiki dir missing)" >&2
