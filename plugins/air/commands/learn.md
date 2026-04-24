@@ -29,6 +29,16 @@ find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
 find "$HOME/.cache/air/kairos" -type f -name '*.json' -mtime +30 -delete 2>/dev/null
 AIR_TMP=$(mktemp -d "/tmp/air-learn-XXXXXX")
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+# Plugin root for the meta.py reset invocation in Step 7. Same derivation
+# as review.md / review-self.md Step 0 — fall back to the canonical
+# install path if the env override and glob both miss.
+if [ -z "${AIR_PLUGIN_ROOT:-}" ]; then
+  AIR_PLUGIN_ROOT=$(ls -1d ~/.claude/plugins/cache/air/air/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')
+fi
+if [ -z "$AIR_PLUGIN_ROOT" ] || [ ! -d "$AIR_PLUGIN_ROOT" ]; then
+  echo "warning: AIR_PLUGIN_ROOT not resolvable; meta.py reset in Step 7 will be skipped" >&2
+  AIR_PLUGIN_ROOT=""
+fi
 echo "$AIR_TMP"
 ```
 
@@ -409,15 +419,25 @@ cd "$WIKI_DIR" && git add REVIEW.md REVIEW-HISTORY.md PROJECT-PROFILE.md ACCEPTE
 
 ## Step 7: Update meta
 
-After successful push, reset the shared auto-trigger counter in the wiki (`.air-meta.json`) so the next review sees `reviews_since: 0` and the cadence restarts. Both CLI and managed read this same file — `meta.py reset` is the canonical API:
+After successful push, reset the shared auto-trigger counter in the wiki (`.air-meta.json`) so the next review sees `reviews_since: 0` and the cadence restarts. Both CLI and managed read this same file — `meta.py reset` is the canonical API. Skip cleanly if `$AIR_PLUGIN_ROOT` couldn't be resolved (Step 0 prints a warning) — counter staying elevated just means the next review re-triggers learn, which is the safe failure mode.
 
 ```bash
-# $WIKI_DIR is the wiki clone from Step 1 (still valid).
-python3 "$AIR_PLUGIN_ROOT/lib/meta.py" reset --wiki-dir "$WIKI_DIR" --pr-number 0
-cd "$WIKI_DIR" && git add .air-meta.json && { git diff --quiet --cached || git commit -m "meta: reset counter after /air:learn"; } && git push
+if [ -n "$AIR_PLUGIN_ROOT" ] && [ -d "$WIKI_DIR/.git" ]; then
+  python3 "$AIR_PLUGIN_ROOT/lib/meta.py" reset --wiki-dir "$WIKI_DIR" --pr-number 0
+  # Use commit_meta from wiki_git (it implements pull --rebase retry on
+  # non-fast-forward — between Step 6's push and this one a concurrent CI
+  # review could land its own bump on .air-meta.json upstream).
+  python3 -c "
+import sys
+sys.path.insert(0, '$AIR_PLUGIN_ROOT/lib')
+import wiki_git
+ok = wiki_git.commit_meta('$WIKI_DIR', 'meta: reset counter after /air:learn')
+sys.exit(0 if ok else 1)
+" || echo "warning: meta reset push failed — counter stays elevated, will retrigger" >&2
+else
+  echo "Skipping counter reset (AIR_PLUGIN_ROOT unresolved or wiki dir missing)" >&2
+fi
 ```
-
-If the wiki is unreachable (cross-repo skipped learn, auth failure), log a warning and continue — the counter staying elevated just means the next review re-triggers learn. Better than failing the whole learn pass.
 
 ## Cleanup
 

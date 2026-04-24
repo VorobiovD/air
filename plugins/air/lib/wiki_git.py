@@ -52,7 +52,12 @@ def clone_wiki(wiki_url: str, dest: Path, depth: int = 1) -> bool:
         if "repository not found" in stderr.lower():
             print(f"  [wiki] {safe_url} doesn't exist yet — skipping counter", file=sys.stderr)
             return False
-        print(f"  [wiki] clone failed: {_redact(stderr.strip()) if stderr else e}", file=sys.stderr)
+        # str(CalledProcessError) embeds the cmd list which contains the
+        # token-bearing wiki URL — route the whole message through _redact
+        # so stderr-empty / signal-killed paths don't leak the PAT on local
+        # terminals (where GH's secret redactor isn't present).
+        detail = stderr.strip() if stderr else str(e)
+        print(f"  [wiki] clone failed: {_redact(detail)}", file=sys.stderr)
         return False
 
 

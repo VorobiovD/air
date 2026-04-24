@@ -16,7 +16,10 @@ fi
 # Plugin root for the meta.py invocations in the wiki-learn block below.
 if [ -z "${AIR_PLUGIN_ROOT:-}" ]; then
   AIR_PLUGIN_ROOT=$(ls -1d ~/.claude/plugins/cache/air/air/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')
-  AIR_PLUGIN_ROOT="${AIR_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/air/air/latest}"
+fi
+if [ -z "$AIR_PLUGIN_ROOT" ] || [ ! -d "$AIR_PLUGIN_ROOT" ]; then
+  echo "warning: AIR_PLUGIN_ROOT not resolvable; Self Step 7's meta.py invocations will be skipped" >&2
+  AIR_PLUGIN_ROOT=""
 fi
 echo "$AIR_TMP"
 ```
@@ -148,30 +151,43 @@ fi
 # Bump the counter (creates .air-meta.json with defaults on fresh wiki).
 python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number 0
 # Threshold check: exit 1 triggers /air:learn.
-if ! python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"; then
-  echo "Auto-trigger: running /air:learn (its epilogue resets the counter)"
-  # Run /air:learn now — see learn.md. It clones the wiki itself and will
-  # reset + push .air-meta.json on completion. After it finishes, skip the
-  # push block below (learn already pushed the counter + REVIEW.md).
-else
-  echo "Auto-trigger: threshold not met — self-review done, push below"
-fi
+python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"
+META_RC=$?
 ```
+
+**>>> AUTO-TRIGGER DECISION (do NOT skip this block) <<<**
+
+If `$META_RC == 1` (threshold hit — 5+ reviews OR 2+ days with new PRs):
+1. Print "Auto-trigger: running /air:learn"
+2. Run `/air:learn` now (full cleanup + KAIROS history regeneration). It clones the wiki itself, resets `.air-meta.json`, and pushes everything from its own clone.
+3. **RETURN from Self Step 7** — do NOT execute sub-step 4 below. `/air:learn` already pushed REVIEW.md + `.air-meta.json` from its own clone; running our push afterward would be a non-fast-forward race.
+
+If `$META_RC == 0` (threshold not met):
+- Print "Auto-trigger: threshold not met — self-review done, push below"
+- Fall through to sub-step 4.
 
 Threshold rules (enforced in `meta.py`): `reviews_since >= 5`, or `days_since_cleanup >= 2` AND `reviews_since > 0`. A self-review counts as a review for counter purposes — no PR number needed (pass 0).
 
-4. Push to wiki. `git add -- :/` with `--` lets missing files be ignored so a fresh wiki without `.air-meta.json` yet doesn't short-circuit:
+4. Push to wiki (only reached when sub-step 3's auto-trigger said `META_RC == 0` — otherwise we returned from this Step).
+
 ```bash
-cp "$AIR_TMP/REVIEW.md" "$WIKI_DIR/REVIEW.md"
-cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
-# Stage each file independently; missing ones are silently skipped (|| true)
-# so the very first self-review on a fresh wiki still pushes REVIEW.md.
-cd "$WIKI_DIR" \
-  && git add REVIEW.md 2>/dev/null || true \
-  && git add ACCEPTED-PATTERNS.md 2>/dev/null || true \
-  && git add .air-meta.json 2>/dev/null || true \
-  && { git diff --quiet --cached || git commit -m "review: self-review patterns $(date +%Y-%m-%d)"; } \
-  && git push
+# Cd into the wiki dir as a separate guard. Without this, a missing wiki
+# (clone failure) would let `cd` fail silently via the next `|| true` and
+# every subsequent `git push` would fire against the project repo, not
+# the wiki. POSIX `&&`/`||` are equal-precedence left-associative.
+cd "$WIKI_DIR" || { echo "wiki dir missing — skipping wiki push" >&2; exit 0; }
+
+cp "$AIR_TMP/REVIEW.md" REVIEW.md
+cp "$AIR_TMP/ACCEPTED-PATTERNS.md" ACCEPTED-PATTERNS.md 2>/dev/null
+
+# Stage each file independently. `|| true` here covers a missing file
+# (e.g. fresh wiki without ACCEPTED-PATTERNS.md yet) — NOT a missing
+# wiki dir, which we already exited on above.
+git add REVIEW.md 2>/dev/null || true
+git add ACCEPTED-PATTERNS.md 2>/dev/null || true
+git add .air-meta.json 2>/dev/null || true
+git diff --quiet --cached || git commit -m "review: self-review patterns $(date +%Y-%m-%d)"
+git push
 ```
 
 Only skip wiki push if zero findings (clean self-review with nothing to learn).

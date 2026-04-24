@@ -10,5 +10,7 @@ Thumbs.db
 managed/config.json
 *.pem
 *.pyc
+__pycache__/
+.pytest_cache/
 air-expansion-plan.md
 architecture-review.md

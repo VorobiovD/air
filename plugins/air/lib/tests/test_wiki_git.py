@@ -110,3 +110,46 @@ def test_clone_wiki_missing_repo(tmp_path):
     ok = wiki_git.clone_wiki(str(tmp_path / "does-not-exist.git"), dest)
     assert ok is False
     assert not dest.exists()
+
+
+# -------- _redact ------------------------------------------------------
+
+def test_redact_strips_token_from_url():
+    url = "https://x-access-token:ghp_abcdef1234@github.com/foo/bar.wiki.git"
+    out = wiki_git._redact(url)
+    assert "ghp_abcdef" not in out
+    assert "***" in out
+    assert "github.com/foo/bar.wiki.git" in out  # rest of URL preserved
+
+
+def test_redact_strips_token_from_git_stderr_message():
+    msg = "fatal: repository 'https://x-access-token:ghp_secretXYZ@github.com/foo/bar.wiki.git/' not found"
+    out = wiki_git._redact(msg)
+    assert "ghp_secretXYZ" not in out
+    assert "fatal: repository" in out
+    assert "not found" in out
+
+
+def test_redact_passes_through_no_token():
+    msg = "fatal: not a git repository"
+    assert wiki_git._redact(msg) == msg
+
+
+def test_redact_handles_empty_string():
+    assert wiki_git._redact("") == ""
+    assert wiki_git._redact(None) == ""
+
+
+def test_redact_handles_calledprocess_error_str():
+    """str(CalledProcessError) embeds the cmd list — ensure we redact the
+    URL when it appears inside that representation."""
+    # Path is illustrative; using a non-temp-dir path so the air-checks.sh
+    # bare-tempdir scanner doesn't flag the fixture.
+    cmd_repr = (
+        "Command '['git', 'clone', '--depth', '1', "
+        "'https://x-access-token:ghp_xyz@github.com/foo/bar.wiki.git', '/var/work/wiki']' "
+        "returned non-zero exit status 128."
+    )
+    out = wiki_git._redact(cmd_repr)
+    assert "ghp_xyz" not in out
+    assert "x-access-token:***@github.com" in out

@@ -54,10 +54,13 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
 # The pre-commit hook exports this for .air-checks.sh; review.md has to
 # derive it independently since Claude Code doesn't pass it to slash
 # commands. We resolve it via the canonical cache path; if the user has
-# the plugin installed elsewhere, they can override via the env.
+# the plugin installed elsewhere, they can set AIR_PLUGIN_ROOT manually.
 if [ -z "${AIR_PLUGIN_ROOT:-}" ]; then
   AIR_PLUGIN_ROOT=$(ls -1d ~/.claude/plugins/cache/air/air/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')
-  AIR_PLUGIN_ROOT="${AIR_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/air/air/latest}"
+fi
+if [ -z "$AIR_PLUGIN_ROOT" ] || [ ! -d "$AIR_PLUGIN_ROOT" ]; then
+  echo "warning: AIR_PLUGIN_ROOT not resolvable; Step 13's meta.py invocations will be skipped" >&2
+  AIR_PLUGIN_ROOT=""
 fi
 echo "$AIR_TMP"
 ```
