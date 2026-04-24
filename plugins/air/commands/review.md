@@ -1,6 +1,6 @@
 ---
 description: Automated code review with verification, pattern learning, and team knowledge — review PRs, self-check before pushing, or track fixes across iterations
-argument-hint: [<pr-number-or-url>] [--self] [--fix] [--fresh] [--rewrite] [--re-review] [--respond] [--full] [--no-codex] [--dry-run]
+argument-hint: [<pr-number-or-url>] [--self] [--fix] [--fresh] [--rewrite] [--re-review] [--respond] [--full] [--closed] [--no-codex] [--dry-run]
 ---
 
 Review code using specialized agents. If a PR number is given, review that PR. If no arguments, auto-detect: review the current branch's PR if one exists, or self-review local changes if not.
@@ -68,6 +68,7 @@ Extract from `$ARGUMENTS`:
 - **--re-review**: delta review — track FIXED/NOT FIXED on previous findings + review new changes.
 - **--respond**: respond to an existing review. Auto-classifies each finding as fixed/unfixed based on local changes, verifies fixes are correct, runs a self-check on the fix diff to catch regressions, detects additional changes beyond fixes, and posts a structured response the reviewer's re-review can parse. Pushes the branch afterward.
 - **--full**: review the ENTIRE codebase (all committed files). Generates a diff from empty tree to HEAD. For first-time audits of new repos, small projects, or full codebase security reviews. Review output to console only (never posts a PR comment). Wiki learning still runs normally.
+- **--closed**: allow review of closed/merged PRs. Default is to refuse (Step 5 pre-flight) to avoid wasting tokens on PRs nobody's looking at. Opt-in for legitimate cases: post-merge audit, wiki-pattern backfill from historical PRs, or dogfooding without opening a new PR. Skips the approve / request-changes verdict in Step 12 (GitHub rejects verdicts on closed PRs); the review comment still posts.
 - **--no-codex**: skip the Codex review pass. By default Codex runs if available.
 - **--dry-run**: print to console, don't post. Works with all modes including `--respond`.
 
@@ -427,7 +428,7 @@ All data comes from Step 4 — no additional API calls.
 
 **GitLab normalization:** Before running pre-flight checks, normalize GitLab field names to match the GitHub names used below: `state: "opened"` → `"OPEN"`, `state: "closed"` → `"CLOSED"`, `state: "merged"` → `"MERGED"`, `draft` → `isDraft`. This ensures the checks work identically on both platforms.
 
-1. **State:** If `state` is `CLOSED` or `MERGED`, print and STOP.
+1. **State:** If `state` is `CLOSED` or `MERGED` and `--closed` was NOT passed, print "PR is <state>. Pass --closed to review anyway." and STOP. If `--closed` was passed, print "Proceeding on <state> PR (verdict will be skipped)." and continue.
 2. **Draft:** If `isDraft` is true, print "Draft PR — proceeding with review" but continue.
 3. **Code changes:** If `changedFiles` is 0, STOP.
 4. **CI status** (from `statusCheckRollup`):
@@ -752,6 +753,8 @@ Rules:
 # GitLab: glab api user 2>/dev/null | jq -r '.username'
 ```
 Compare against the PR/MR author username from Step 4 metadata (`author.login` on GitHub, `author.username` on GitLab). If they match: set `OWN_PR=true`. When `OWN_PR=true`, **skip ALL review verdicts** (`gh pr review --approve`, `gh pr review --request-changes`, `glab mr approve`) in every posting path below. GitHub does not allow self-approval or self-requesting-changes, and attempting it will error. Only post the issue comment.
+
+**Closed-PR guard:** If `--closed` was passed (state was `CLOSED` or `MERGED`), also skip ALL review verdicts. GitHub rejects verdicts on closed/merged PRs with a 422. Only post the issue comment. Treat `--closed` with the same verdict-suppression as `OWN_PR=true`.
 
 If `--dry-run`: print to console. Skip Step 13 entirely (no wiki push on dry runs). Jump to Cleanup.
 

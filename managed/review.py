@@ -600,6 +600,23 @@ async def run_review(args):
     pr_branch = meta["head"]["ref"]
     head_sha = meta["head"]["sha"]
 
+    # State gate: refuse to review closed/merged PRs by default. Auto-trigger
+    # via GitHub Actions can't reach this path (pull_request: closed isn't in
+    # the trigger list), but manual invocation against a merged PR would
+    # otherwise post a review comment on a PR nobody is looking at. --closed
+    # opts in for legitimate cases — post-merge audit, wiki-pattern backfill
+    # from historical PRs, dogfooding without opening a new PR.
+    pr_state = meta.get("state", "open")
+    pr_merged = bool(meta.get("merged"))
+    if (pr_state == "closed" or pr_merged) and not args.closed:
+        status = "merged" if pr_merged else "closed"
+        print(
+            f"PR #{args.pr_number} is {status}. Pass --closed to review anyway "
+            f"(skips the branch-protection verdict; comment still posts).",
+            file=sys.stderr,
+        )
+        sys.exit(0)
+
     # Mode detection: RE-REVIEW if a prior bot-authored review comment
     # exists and the head SHA advanced since it. SKIP if the head SHA
     # hasn't moved. Otherwise FULL review.
@@ -944,6 +961,7 @@ def main():
     parser.add_argument("pr_number", type=int, help="PR number to review")
     parser.add_argument("--dry-run", action="store_true", help="Print the review comment to stdout, don't post to GitHub")
     parser.add_argument("--fresh", action="store_true", help="Force a full review even if a prior review exists (ignore re-review auto-detect)")
+    parser.add_argument("--closed", action="store_true", help="Allow review of closed/merged PRs (default: refuse and exit). Useful for post-merge audits or backfilling wiki patterns from historical PRs.")
     args = parser.parse_args()
 
     if not REPO_ARG_RE.match(args.repo):

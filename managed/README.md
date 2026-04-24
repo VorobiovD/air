@@ -22,16 +22,32 @@ name: air review
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review (works on closed/merged PRs)'
+        required: true
+        type: number
+      closed:
+        description: 'Allow review of closed/merged PR'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   review:
     uses: VorobiovD/air/.github/workflows/managed-review.yml@main
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      closed: ${{ inputs.closed }}
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
 ```
 
 First PR auto-bootstraps the agents. Subsequent PRs reuse them.
+
+The `workflow_dispatch` trigger lets you review any PR on-demand from the Actions tab — including closed or merged PRs (post-merge audits, wiki-pattern backfills from history). For `pull_request` triggers, `pr_number` / `closed` defaults apply (current PR, state gate enforced).
 
 ## How it works
 
@@ -74,6 +90,8 @@ export AIR_BOT_TOKEN=ghp_...
 pip install -r requirements.txt
 python review.py myorg/myrepo 123             # post review comment
 python review.py myorg/myrepo 123 --dry-run   # print comment, skip post
+python review.py myorg/myrepo 123 --fresh     # force full review (ignore re-review auto-detect)
+python review.py myorg/myrepo 123 --closed    # review a closed/merged PR (default refuses)
 ```
 
 ## Agent updates
