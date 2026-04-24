@@ -1,0 +1,26 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Serialize runs so two rapid pushes don't try to reconcile the same
+# long-lived release PR concurrently. Keep in-progress runs — each needs to
+# commit to the release PR branch, so cancelling mid-reconcile can leave it
+# in a partially-updated state.
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: .release-please-config.json
+          manifest-file: .release-please-manifest.json
