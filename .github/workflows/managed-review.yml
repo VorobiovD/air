@@ -17,12 +17,18 @@
 #           required: false
 #           type: string
 #           default: 'true'
+#         no_codex:
+#           description: 'Skip Codex even if OPENAI_API_KEY is set'
+#           required: false
+#           type: string
+#           default: 'false'
 #   jobs:
 #     review:
 #       uses: VorobiovD/air/.github/workflows/managed-review.yml@main
 #       with:
 #         pr_number: ${{ inputs.pr_number }}
 #         closed: ${{ inputs.closed }}
+#         no_codex: ${{ inputs.no_codex }}
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 #         AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
@@ -53,6 +59,11 @@ on:
         default: ''
       closed:
         description: 'Allow review of closed/merged PRs — set to "true" to pass --closed to review.py'
+        required: false
+        type: string
+        default: 'false'
+      no_codex:
+        description: 'Skip Codex even when OPENAI_API_KEY is set — set to "true" to pass --no-codex'
         required: false
         type: string
         default: 'false'
@@ -93,11 +104,15 @@ jobs:
           repository: VorobiovD/air
           path: air
 
-      # Codex-only steps (skipped when OPENAI_API_KEY secret is unset).
-      # The target-repo checkout and codex install add ~30s cold-start, so
+      # Codex-only steps (skipped when OPENAI_API_KEY secret is unset, the
+      # no_codex input is "true", or the PR number hasn't resolved — that
+      # last check prevents actions/checkout from failing with
+      # `fatal: couldn't find remote ref refs/pull//head` before the
+      # friendlier "No PR number available" error in the Run review step).
+      # The target-repo checkout + codex install add ~30s cold-start, so
       # we only pay that cost on repos that opted in.
       - name: Checkout target repo (for Codex)
-        if: ${{ env.OPENAI_API_KEY != '' }}
+        if: ${{ env.OPENAI_API_KEY != '' && inputs.no_codex != 'true' && env.PR_NUMBER_RESOLVED != '' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
@@ -108,9 +123,12 @@ jobs:
           fetch-depth: 0
 
       - name: Install Codex CLI
-        if: ${{ env.OPENAI_API_KEY != '' }}
+        if: ${{ env.OPENAI_API_KEY != '' && inputs.no_codex != 'true' && env.PR_NUMBER_RESOLVED != '' }}
         run: |
-          npm install -g @openai/codex
+          # Pin version — global install executes unknown code as the
+          # runner user, which has all secrets (including the repo-scope
+          # bot PAT) in env. Bump deliberately after reviewing releases.
+          npm install -g @openai/codex@0.124.0
           # Headless login — reads key from stdin, stores in ~/.codex/auth.json.
           printenv OPENAI_API_KEY | codex login --with-api-key
 
@@ -121,9 +139,10 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ env.PR_NUMBER_RESOLVED }}
           CLOSED: ${{ inputs.closed }}
+          NO_CODEX: ${{ inputs.no_codex }}
           # Absolute path so review.py can invoke `codex review` inside it.
           # Empty when Codex is disabled; review.py treats empty as "skip".
-          AIR_TARGET_REPO: ${{ env.OPENAI_API_KEY != '' && format('{0}/target-repo', github.workspace) || '' }}
+          AIR_TARGET_REPO: ${{ env.OPENAI_API_KEY != '' && inputs.no_codex != 'true' && format('{0}/target-repo', github.workspace) || '' }}
         run: |
           cd air
           if [ -z "$PR_NUMBER" ]; then
@@ -133,5 +152,8 @@ jobs:
           FLAGS=()
           if [ "$CLOSED" = "true" ]; then
             FLAGS+=(--closed)
+          fi
+          if [ "$NO_CODEX" = "true" ]; then
+            FLAGS+=(--no-codex)
           fi
           python managed/review.py "$REPO" "$PR_NUMBER" "${FLAGS[@]}"

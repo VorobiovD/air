@@ -179,18 +179,24 @@ CODEX_LABEL = "codex"
 async def run_codex_session(target_repo: str, base_sha: str) -> str:
     """Invoke `codex review --base <sha>` in the target repo; return stdout.
 
-    Opt-in 5th specialist. The runner-level checkout + CLI install happen
-    only when `OPENAI_API_KEY` is set on the repo (see managed-review.yml),
-    which means `AIR_TARGET_REPO` env is populated and the `codex` binary
-    is on PATH. Any environmental prerequisite missing is treated as
-    "skip, don't fail" — we never want Codex to break the review.
+    Opt-in 5th specialist. The caller (`run_review`) is responsible for
+    deciding whether to launch this — the three environmental
+    preconditions (OPENAI_API_KEY, codex binary, AIR_TARGET_REPO) are
+    gated there, not here. The single safety check below catches a
+    directory that disappeared between the gate and this call.
+
+    Raises SpecialistSessionError on any non-success path so the caller's
+    existing degraded-specialist handling surfaces a clear NOTE to the
+    verifier instead of silently posting a failure string as if it were
+    findings.
+
+    Subprocess lifecycle: the outer asyncio.wait_for in run_review cancels
+    this coroutine on timeout, which raises CancelledError into our
+    try/finally — finally path kills the subprocess so it doesn't outlive
+    the review and burn OpenAI tokens.
     """
-    if not target_repo or not os.path.isdir(target_repo):
-        return "(codex skipped: AIR_TARGET_REPO not set or not a directory)"
-    if shutil.which("codex") is None:
-        return "(codex skipped: `codex` CLI not on PATH)"
-    if not os.environ.get("OPENAI_API_KEY"):
-        return "(codex skipped: OPENAI_API_KEY not set)"
+    if not os.path.isdir(target_repo):
+        raise SpecialistSessionError(CODEX_LABEL, f"target repo not found: {target_repo}")
 
     print(f"  [launch] {CODEX_LABEL} → codex review --base {base_sha[:8]}")
     proc = await asyncio.create_subprocess_exec(
@@ -200,21 +206,26 @@ async def run_codex_session(target_repo: str, base_sha: str) -> str:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=SESSION_TIMEOUT_SECS
-        )
-    except asyncio.TimeoutError:
+        stdout, stderr = await proc.communicate()
+    except asyncio.CancelledError:
+        # Outer wait_for timed out; kill the subprocess before re-raising
+        # so it doesn't orphan on the runner.
         proc.kill()
-        await proc.communicate()
+        try:
+            await proc.communicate()
+        except Exception:
+            pass
         raise
 
     if proc.returncode != 0:
-        # Don't fail the whole review — return a degraded note so the
-        # verifier can still consolidate the 4 Claude specialists.
         err = stderr.decode()[:500] if stderr else "(no stderr)"
-        return f"(codex failed: exit {proc.returncode}: {err})"
+        raise SpecialistSessionError(
+            CODEX_LABEL, f"exit {proc.returncode}: {err}"
+        )
 
     output = stdout.decode().strip()
+    if not output:
+        raise SpecialistSessionError(CODEX_LABEL, "empty stdout")
     print(f"  [done] {CODEX_LABEL}")
     return output
 
@@ -791,15 +802,17 @@ async def run_review(args):
     # CLI install + target-repo checkout). Skipped cleanly if any
     # prerequisite is missing or the user passed --no-codex.
     codex_repo = os.environ.get("AIR_TARGET_REPO", "")
-    codex_enabled = (
+    # For re-review mode the base is the prior Reviewed-at SHA (from the
+    # review comment body); for full review, it's the PR's base branch SHA
+    # (from meta["base"]).
+    codex_base_sha = (prior_sha if mode == "re-review" else meta["base"]["sha"]) or ""
+    codex_enabled = bool(
         not args.no_codex
         and codex_repo
+        and codex_base_sha
         and shutil.which("codex") is not None
         and os.environ.get("OPENAI_API_KEY")
     )
-    # For re-review mode we'd want the inter-diff base; for full review, use
-    # the PR's base branch SHA. Both come from meta.
-    codex_base_sha = (prior_sha if mode == "re-review" else meta["base"]["sha"]) or ""
 
     async with AsyncAnthropic() as client:
         # Phase 1: specialists (4 Claude + Codex if opted in) in parallel
@@ -896,7 +909,7 @@ async def run_review(args):
             )
 
         if mode == "re-review":
-            verifier_task = f"""You have raw findings from 4 specialist reviewers below. They were run in
+            verifier_task = f"""You have raw findings from {n_specialists} specialist reviewers below. They were run in
 RE-REVIEW MODE — each result contains both (a) a classification of each
 prior finding (FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED) and (b) any
 NEW findings in the inter-diff.
@@ -944,7 +957,7 @@ Raw findings to verify and consolidate:
 {combined}
 """
         else:
-            verifier_task = f"""You have raw findings from 4 specialist reviewers below. Verify each one per your
+            verifier_task = f"""You have raw findings from {n_specialists} specialist reviewers below. Verify each one per your
 system prompt (CONFIRMED / DOWNGRADED / IMPROVEMENT / PRE-EXISTING / ACCEPTED PATTERN /
 FALSE POSITIVE with a confidence score). Drop FALSE POSITIVE / below-threshold findings.
 
