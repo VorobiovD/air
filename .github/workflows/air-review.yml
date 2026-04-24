@@ -18,6 +18,11 @@ on:
         required: false
         type: string
         default: 'true'
+      no_codex:
+        description: 'Skip Codex even if OPENAI_API_KEY is set'
+        required: false
+        type: string
+        default: 'false'
 
 jobs:
   review:
@@ -28,6 +33,8 @@ jobs:
       # reusable inputs reject strings at workflow-load time.
       pr_number: ${{ inputs.pr_number }}
       closed: ${{ inputs.closed }}
+      no_codex: ${{ inputs.no_codex }}
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

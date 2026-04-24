@@ -11,6 +11,7 @@ Automated code review on every PR — zero human trigger needed.
 4. Add two org secrets:
    - `ANTHROPIC_API_KEY` — your Anthropic API key with Managed Agents access
    - `AIR_BOT_TOKEN` — the bot's PAT
+5. Optional: `OPENAI_API_KEY` — adds Codex as a 5th reviewer. Skipped cleanly if unset.
 
 ## Enable on a repo
 
@@ -65,21 +66,23 @@ GitHub Action triggers `python review.py <repo> <pr>`
   ▼
 Python driver orchestrates
   │
-  ├── asyncio.gather 4 specialist sessions in parallel (each its own container):
+  ├── asyncio.gather 4–5 specialist sessions in parallel (each its own container):
   │     ├── air-code-reviewer      — bugs, design, test coverage
   │     ├── air-simplify           — reuse, quality, efficiency
   │     ├── air-security-auditor   — 31-item checklist
-  │     └── air-git-history-reviewer — blame, churn, recurring patterns
-  │     (each clones repo + wiki, reads patterns, returns findings)
+  │     ├── air-git-history-reviewer — blame, churn, recurring patterns
+  │     └── codex (opt-in)         — OpenAI Codex (adds 5th source if OPENAI_API_KEY is set)
+  │     (each Claude specialist clones repo + wiki, reads patterns, returns findings;
+  │      codex runs as a subprocess in the runner against a locally-cloned target repo)
   │
-  ├── Collects findings from all 4
-  ├── Runs 5th session sequentially: air-review-verifier
+  ├── Collects findings from all 4–5
+  ├── Runs final session sequentially: air-review-verifier
   │     (verifies each finding, drops false positives, formats final review)
   │
   └── Posts the review comment to the PR directly via GitHub API
 ```
 
-**Wall-clock:** ~5-8 minutes (4 specialists run concurrently; wall time ≈ slowest specialist + verifier). Without client-side fan-out (prior server-side orchestrator with `callable_agents`) the sub-agent calls returned permission-denied because the feature was access-gated.
+**Wall-clock:** ~5-8 minutes (specialists run concurrently; wall time ≈ slowest specialist + verifier, regardless of whether Codex is enabled). Without client-side fan-out (prior server-side orchestrator with `callable_agents`) the sub-agent calls returned permission-denied because the feature was access-gated.
 
 ## Manual trigger
 
@@ -92,6 +95,7 @@ python review.py myorg/myrepo 123             # post review comment
 python review.py myorg/myrepo 123 --dry-run   # print comment, skip post
 python review.py myorg/myrepo 123 --fresh     # force full review (ignore re-review auto-detect)
 python review.py myorg/myrepo 123 --closed    # review a closed/merged PR (default refuses)
+python review.py myorg/myrepo 123 --no-codex  # skip Codex even if OPENAI_API_KEY is set
 ```
 
 ## Agent updates
@@ -108,4 +112,6 @@ When agent prompts change in the air repo, the workflow auto-updates deployed ag
 
 ## Cost
 
-~$2.30 per review (v1.5.0 with model tiering at Opus 4.7 + Sonnet 4.6 pricing). At 40 reviews/month: ~$90/month.
+Claude-only (default): ~$2.30 per review (model tiering at Opus 4.7 + Sonnet 4.6 pricing). At 40 reviews/month: ~$90/month.
+
+With Codex enabled (`OPENAI_API_KEY` set): +$1–2 per review depending on diff size and Codex's default model (gpt-5.4 at the time of writing). Opt-out with the `no_codex` workflow input or `--no-codex` on manual invocation.
