@@ -11,12 +11,12 @@
 #         pr_number:
 #           description: 'PR number to review'
 #           required: true
-#           type: number
+#           type: string
 #         closed:
 #           description: 'Allow review of closed/merged PRs'
 #           required: false
-#           type: boolean
-#           default: true
+#           type: string
+#           default: 'true'
 #   jobs:
 #     review:
 #       uses: VorobiovD/air/.github/workflows/managed-review.yml@main
@@ -27,23 +27,35 @@
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 #         AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
 #
-# For pull_request triggers, leave `pr_number` / `closed` unset — the reusable
-# workflow falls back to `github.event.pull_request.number` and `closed: false`.
+# All inputs are `type: string` (not number/boolean) because GitHub's
+# expression operator `${{ ... }}` always resolves to a string — passing
+# that to a typed reusable input fails at workflow-load time. The shell
+# script below handles the conversion naturally.
+#
+# For pull_request triggers, leave `pr_number` / `closed` unset — the
+# reusable workflow falls back to `github.event.pull_request.number` and
+# skips `--closed`.
 
 name: air managed review
 
 on:
   workflow_call:
     inputs:
+      # Typed as `string` rather than `number`/`boolean` so callers can pass
+      # `${{ inputs.pr_number }}` from their own workflow_dispatch inputs
+      # directly — GitHub expressions always resolve to strings, and a
+      # `type: number` reusable input rejects string values at workflow-load
+      # time. The shell script below handles the conversion naturally.
       pr_number:
-        description: 'PR number to review (falls back to github.event.pull_request.number)'
+        description: 'PR number to review (falls back to github.event.pull_request.number when empty)'
         required: false
-        type: number
+        type: string
+        default: ''
       closed:
-        description: 'Allow review of closed/merged PRs (passes --closed to review.py)'
+        description: 'Allow review of closed/merged PRs — set to "true" to pass --closed to review.py'
         required: false
-        type: boolean
-        default: false
+        type: string
+        default: 'false'
     secrets:
       ANTHROPIC_API_KEY:
         required: true
