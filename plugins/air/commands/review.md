@@ -50,6 +50,15 @@ AIR_TMP=$(mktemp -d "/tmp/air-XXXXXX")
 # Falls back to empty when invoked from outside a git repo; Step 3.5 skips
 # `.air-checks.sh` generation in that case.
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+# Plugin root (used by Step 13's meta.py invocations and hooks).
+# The pre-commit hook exports this for .air-checks.sh; review.md has to
+# derive it independently since Claude Code doesn't pass it to slash
+# commands. We resolve it via the canonical cache path; if the user has
+# the plugin installed elsewhere, they can override via the env.
+if [ -z "${AIR_PLUGIN_ROOT:-}" ]; then
+  AIR_PLUGIN_ROOT=$(ls -1d ~/.claude/plugins/cache/air/air/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')
+  AIR_PLUGIN_ROOT="${AIR_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/air/air/latest}"
+fi
 echo "$AIR_TMP"
 ```
 
@@ -807,20 +816,21 @@ Counter state lives in `.air-meta.json` at the wiki root (cloned into `$WIKI_DIR
 
 ```bash
 python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number "<number>"
-if python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"; then
-  # Exit 0: skip full cleanup — threshold not met. Fall through to
-  # incremental learn below.
-  echo "Auto-trigger: threshold not met — incremental learn only"
-else
-  # Exit 1: threshold hit (5+ reviews OR 2+ days with new PRs).
-  echo "Auto-trigger: running /air:learn"
-  # Run /air:learn (full cleanup + KAIROS history regeneration). After it
-  # completes, skip to wiki push (sub-step 5). Do NOT fall through to the
-  # incremental learn below — /air:learn replaces it. /air:learn's own
-  # epilogue calls `meta.py reset` which zeros the counter.
-  # (Invocation details follow the existing /air:learn runner logic.)
-fi
+python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"
+META_RC=$?
 ```
+
+**>>> AUTO-TRIGGER DECISION (do NOT skip this block) <<<**
+
+If `$META_RC == 1` (threshold hit — 5+ reviews OR 2+ days with new PRs):
+1. Print "Auto-trigger: running /air:learn"
+2. Run `/air:learn` (full cleanup + KAIROS history regeneration). This is the same slash-command the user can invoke manually — invoke it in the same session.
+3. `/air:learn` clones the wiki itself, does the full pass, and at the end calls `meta.py reset` + pushes `.air-meta.json`. That replaces the push this flow would do in sub-step 5.
+4. **RETURN** from Step 13 — do not fall through to the incremental learn sub-steps below. `/air:learn` supersedes them for this cycle.
+
+If `$META_RC == 0` (threshold not met):
+- Print "Auto-trigger: incremental learn only"
+- Fall through to sub-steps 2, 2.5, 3, 4, 5 below (existing per-review pattern extraction + author lifecycle + push).
 
 **Threshold rules** (enforced in `meta.py::should_trigger_learn`):
 - `reviews_since >= 5` → trigger

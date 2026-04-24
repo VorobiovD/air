@@ -409,11 +409,15 @@ cd "$WIKI_DIR" && git add REVIEW.md REVIEW-HISTORY.md PROJECT-PROFILE.md ACCEPTE
 
 ## Step 7: Update meta
 
-After successful push, update the auto-trigger metadata:
+After successful push, reset the shared auto-trigger counter in the wiki (`.air-meta.json`) so the next review sees `reviews_since: 0` and the cadence restarts. Both CLI and managed read this same file — `meta.py reset` is the canonical API:
 
 ```bash
-echo '{"last_cleanup": "'$(date +%Y-%m-%d)'", "reviews_since": 0}' > $HOME/.claude/review-learn-meta.json
+# $WIKI_DIR is the wiki clone from Step 1 (still valid).
+python3 "$AIR_PLUGIN_ROOT/lib/meta.py" reset --wiki-dir "$WIKI_DIR" --pr-number 0
+cd "$WIKI_DIR" && git add .air-meta.json && { git diff --quiet --cached || git commit -m "meta: reset counter after /air:learn"; } && git push
 ```
+
+If the wiki is unreachable (cross-repo skipped learn, auth failure), log a warning and continue — the counter staying elevated just means the next review re-triggers learn. Better than failing the whole learn pass.
 
 ## Cleanup
 

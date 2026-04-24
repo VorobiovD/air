@@ -13,6 +13,11 @@ if [ -z "$AIR_TMP" ]; then
   find /tmp -maxdepth 1 -name 'air-*' -mtime +1 -exec rm -rf {} + 2>/dev/null
   AIR_TMP=$(mktemp -d "/tmp/air-self-XXXXXX")
 fi
+# Plugin root for the meta.py invocations in the wiki-learn block below.
+if [ -z "${AIR_PLUGIN_ROOT:-}" ]; then
+  AIR_PLUGIN_ROOT=$(ls -1d ~/.claude/plugins/cache/air/air/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')
+  AIR_PLUGIN_ROOT="${AIR_PLUGIN_ROOT:-$HOME/.claude/plugins/cache/air/air/latest}"
+fi
 echo "$AIR_TMP"
 ```
 
@@ -132,32 +137,42 @@ If `--fix` was NOT passed:
 
 1. Add new patterns from this review to REVIEW.md (same as Step 13 sub-steps 2 and 2.5 — author pattern lifecycle with clean-PR tracking, semantic dedup, all severity levels). For self-review, resolve the author using the same method as the own-PR guard: `gh api user --jq '.login'` (GitHub) or `glab api user 2>/dev/null | jq -r '.username'` (GitLab). This ensures the heading matches `### <author.login>` used in regular PR reviews.
 2. Record any `WIKI DRIFT:` notes in `## Pending Drift` section
-3. Push to wiki:
+3. Bump the shared wiki-backed review counter BEFORE the push so `.air-meta.json` is up-to-date in the same commit. Counter state lives in `.air-meta.json` at the wiki root so CLI and managed runs share the same number — both contribute to the cadence:
+
 ```bash
 WIKI_DIR="$AIR_TMP/review-wiki-self"
 WIKI_URL="https://$PLATFORM_DOMAIN/$CURRENT_REPO.wiki.git"
 if [ ! -d "$WIKI_DIR/.git" ]; then
   cd "$AIR_TMP" && git clone --depth 1 "$WIKI_URL" review-wiki-self 2>/dev/null
 fi
-cp "$AIR_TMP/REVIEW.md" "$WIKI_DIR/REVIEW.md"
-cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
-cd "$WIKI_DIR" && git add REVIEW.md ACCEPTED-PATTERNS.md .air-meta.json && { git diff --quiet --cached || git commit -m "review: self-review patterns $(date +%Y-%m-%d)"; } && git push
-```
-4. Bump the shared wiki-backed review counter and check the auto-trigger threshold. Counter state lives in `.air-meta.json` at the wiki root so CLI and managed runs share the same number — both contribute to the cadence:
-
-```bash
+# Bump the counter (creates .air-meta.json with defaults on fresh wiki).
 python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number 0
-if python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"; then
-  echo "Auto-trigger: threshold not met — self-review done"
+# Threshold check: exit 1 triggers /air:learn.
+if ! python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"; then
+  echo "Auto-trigger: running /air:learn (its epilogue resets the counter)"
+  # Run /air:learn now — see learn.md. It clones the wiki itself and will
+  # reset + push .air-meta.json on completion. After it finishes, skip the
+  # push block below (learn already pushed the counter + REVIEW.md).
 else
-  echo "Auto-trigger: running /air:learn"
-  # Run /air:learn. Its own epilogue resets the counter via `meta.py reset`.
+  echo "Auto-trigger: threshold not met — self-review done, push below"
 fi
 ```
 
 Threshold rules (enforced in `meta.py`): `reviews_since >= 5`, or `days_since_cleanup >= 2` AND `reviews_since > 0`. A self-review counts as a review for counter purposes — no PR number needed (pass 0).
 
-Include `.air-meta.json` in the wiki-push from sub-step 3 above (add it to the `git add` line).
+4. Push to wiki. `git add -- :/` with `--` lets missing files be ignored so a fresh wiki without `.air-meta.json` yet doesn't short-circuit:
+```bash
+cp "$AIR_TMP/REVIEW.md" "$WIKI_DIR/REVIEW.md"
+cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
+# Stage each file independently; missing ones are silently skipped (|| true)
+# so the very first self-review on a fresh wiki still pushes REVIEW.md.
+cd "$WIKI_DIR" \
+  && git add REVIEW.md 2>/dev/null || true \
+  && git add ACCEPTED-PATTERNS.md 2>/dev/null || true \
+  && git add .air-meta.json 2>/dev/null || true \
+  && { git diff --quiet --cached || git commit -m "review: self-review patterns $(date +%Y-%m-%d)"; } \
+  && git push
+```
 
 Only skip wiki push if zero findings (clean self-review with nothing to learn).
 

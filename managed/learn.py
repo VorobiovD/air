@@ -13,7 +13,9 @@ Usage:
 import argparse
 import os
 import signal
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -123,9 +125,6 @@ def _reset_learn_counter(repo: str, bot_token: str) -> None:
     """Clone the wiki, call `meta.py reset`, push. Mirrors the update path
     in managed/review.py::_update_learn_counter but calls `reset` instead
     of `bump`+`check`."""
-    import subprocess
-    import tempfile
-
     air_root = Path(__file__).resolve().parent.parent
     lib_dir = air_root / "plugins" / "air" / "lib"
     meta_script = lib_dir / "meta.py"

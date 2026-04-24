@@ -1123,20 +1123,28 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str) -> None:
         sys.stderr.write(check.stderr)
 
         if check.returncode == 1:
-            # Threshold fired. Fire-and-forget subprocess to managed/learn.py
-            # so it outlives the current review and stays decoupled from our
-            # session/shutdown machinery.
+            # Threshold fired. Run managed/learn.py SYNCHRONOUSLY in this
+            # same GitHub Actions job — a detached Popen would get torn
+            # down when the runner VM stops. learn.py typically takes
+            # 3-5 min; the review comment has already posted, so we're
+            # just extending the CI job's tail. Worst case the GHA 30-min
+            # timeout kicks in, but that's the same bound we accept for
+            # the review itself.
+            #
+            # learn.py calls `meta.py reset` on success (see
+            # managed/learn.py::_reset_learn_counter). If it errors, the
+            # counter stays elevated and the next review retriggers it.
             learn_script = air_root / "managed" / "learn.py"
             if learn_script.is_file():
-                print(f"  [learn] firing subprocess: {learn_script} {repo}", file=sys.stderr)
-                subprocess.Popen(
-                    [sys.executable, str(learn_script), repo],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    start_new_session=True,
+                print(f"  [learn] running synchronously: {learn_script} {repo}", file=sys.stderr)
+                learn_result = subprocess.run(
+                    [sys.executable, str(learn_script), repo, "--poll"],
+                    capture_output=False,
+                    # No check=True — we want to finish this review cleanly
+                    # even if learn errors out.
                 )
-                # Don't reset the counter here — learn.py does that itself on
-                # successful completion via `meta.py reset`. If it fails, the
-                # counter stays elevated and retriggers next review.
+                if learn_result.returncode != 0:
+                    print(f"  [warn] learn.py exited {learn_result.returncode} — counter not reset", file=sys.stderr)
             else:
                 print(f"  [warn] learn.py not found at {learn_script}", file=sys.stderr)
 

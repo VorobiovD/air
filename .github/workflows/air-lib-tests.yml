@@ -10,11 +10,17 @@ on:
     paths:
       - 'plugins/air/lib/**'
 
+permissions:
+  contents: read
+
 jobs:
   pytest:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tests don't push or fetch after checkout; drop the token from .git/config.
+          persist-credentials: false
 
       - name: Setup Python
         uses: actions/setup-python@v5

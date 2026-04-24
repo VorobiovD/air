@@ -32,7 +32,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-META_FILENAME = ".air-meta.json"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from wiki_git import META_FILENAME  # single source for the file name
 
 # Threshold constants — mirror the CLI prose values in review.md Step 13.
 REVIEWS_THRESHOLD = 5
@@ -153,7 +154,10 @@ def cmd_reset(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
+    # __doc__ starts with a newline, so .splitlines()[0] is empty. Pick the
+    # first non-blank line for a useful --help description.
+    desc = next((l for l in (__doc__ or "").splitlines() if l.strip()), "")
+    parser = argparse.ArgumentParser(description=desc)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_bump = sub.add_parser("bump", help="Increment reviews_since after a successful review")
