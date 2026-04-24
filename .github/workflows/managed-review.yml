@@ -6,17 +6,44 @@
 #   on:
 #     pull_request:
 #       types: [opened, synchronize, reopened]
+#     workflow_dispatch:
+#       inputs:
+#         pr_number:
+#           description: 'PR number to review'
+#           required: true
+#           type: number
+#         closed:
+#           description: 'Allow review of closed/merged PRs'
+#           required: false
+#           type: boolean
+#           default: true
 #   jobs:
 #     review:
 #       uses: VorobiovD/air/.github/workflows/managed-review.yml@main
+#       with:
+#         pr_number: ${{ inputs.pr_number }}
+#         closed: ${{ inputs.closed }}
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 #         AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
+#
+# For pull_request triggers, leave `pr_number` / `closed` unset — the reusable
+# workflow falls back to `github.event.pull_request.number` and `closed: false`.
 
 name: air managed review
 
 on:
   workflow_call:
+    inputs:
+      pr_number:
+        description: 'PR number to review (falls back to github.event.pull_request.number)'
+        required: false
+        type: number
+      closed:
+        description: 'Allow review of closed/merged PRs (passes --closed to review.py)'
+        required: false
+        type: boolean
+        default: false
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -48,7 +75,16 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          CLOSED: ${{ inputs.closed }}
         run: |
           cd air
-          python managed/review.py "$REPO" "$PR_NUMBER"
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::error::No PR number available. Pass pr_number via workflow_dispatch or use a pull_request trigger." >&2
+            exit 1
+          fi
+          FLAGS=""
+          if [ "$CLOSED" = "true" ]; then
+            FLAGS="--closed"
+          fi
+          python managed/review.py "$REPO" "$PR_NUMBER" $FLAGS
