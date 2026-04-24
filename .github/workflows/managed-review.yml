@@ -95,8 +95,11 @@ jobs:
             echo "::error::No PR number available. Pass pr_number via workflow_dispatch or use a pull_request trigger." >&2
             exit 1
           fi
-          FLAGS=""
+          # Bash array keeps each flag as a separate argv entry — robust if
+          # a second opt-in flag is added later (avoids word-splitting on
+          # future flag values that might contain spaces).
+          FLAGS=()
           if [ "$CLOSED" = "true" ]; then
-            FLAGS="--closed"
+            FLAGS+=(--closed)
           fi
-          python managed/review.py "$REPO" "$PR_NUMBER" $FLAGS
+          python managed/review.py "$REPO" "$PR_NUMBER" "${FLAGS[@]}"

@@ -68,9 +68,11 @@ Extract from `$ARGUMENTS`:
 - **--re-review**: delta review — track FIXED/NOT FIXED on previous findings + review new changes.
 - **--respond**: respond to an existing review. Auto-classifies each finding as fixed/unfixed based on local changes, verifies fixes are correct, runs a self-check on the fix diff to catch regressions, detects additional changes beyond fixes, and posts a structured response the reviewer's re-review can parse. Pushes the branch afterward.
 - **--full**: review the ENTIRE codebase (all committed files). Generates a diff from empty tree to HEAD. For first-time audits of new repos, small projects, or full codebase security reviews. Review output to console only (never posts a PR comment). Wiki learning still runs normally.
-- **--closed**: allow review of closed/merged PRs. Default is to refuse (Step 5 pre-flight) to avoid wasting tokens on PRs nobody's looking at. Opt-in for legitimate cases: post-merge audit, wiki-pattern backfill from historical PRs, or dogfooding without opening a new PR. Skips the approve / request-changes verdict in Step 12 (GitHub rejects verdicts on closed PRs); the review comment still posts.
+- **--closed**: allow review of closed/merged PRs. Default is to refuse (Step 5 pre-flight) to avoid wasting tokens on PRs nobody's looking at. Opt-in for legitimate cases: post-merge audit, wiki-pattern backfill from historical PRs, or dogfooding without opening a new PR. Step 12 skips the approve / request-changes verdict ONLY when state is CLOSED or MERGED (GitHub 422s verdicts on those); `--closed` on an OPEN PR posts verdicts normally. The review comment always posts.
 - **--no-codex**: skip the Codex review pass. By default Codex runs if available.
 - **--dry-run**: print to console, don't post. Works with all modes including `--respond`.
+
+If `--closed` is present, **reject if combined with `--self`, `--full`, or `--respond`** — those modes divert away from the PR-review flow (Step 5 / Step 12) where `--closed` is honored, so combining them is a silent no-op. Print "--closed only applies to PR review mode. Drop --self / --full / --respond, or drop --closed." and STOP. This check must run BEFORE the `--full` and `--self` flow-diverters below, otherwise those branches short-circuit past the guard.
 
 If `--full` is present, **ignore `--fix` if also passed** (full-codebase review is read-only). Then generate the diff and skip directly to **Self Step 2** (do NOT execute Self Step 1 — it would overwrite this diff):
 ```bash
@@ -754,7 +756,7 @@ Rules:
 ```
 Compare against the PR/MR author username from Step 4 metadata (`author.login` on GitHub, `author.username` on GitLab). If they match: set `OWN_PR=true`. When `OWN_PR=true`, **skip ALL review verdicts** (`gh pr review --approve`, `gh pr review --request-changes`, `glab mr approve`) in every posting path below. GitHub does not allow self-approval or self-requesting-changes, and attempting it will error. Only post the issue comment.
 
-**Closed-PR guard:** If `--closed` was passed (state was `CLOSED` or `MERGED`), also skip ALL review verdicts. GitHub rejects verdicts on closed/merged PRs with a 422. Only post the issue comment. Treat `--closed` with the same verdict-suppression as `OWN_PR=true`.
+**Closed-PR guard:** If `--closed` was passed AND the PR's `state` is `CLOSED` or `MERGED`, skip ALL review verdicts. GitHub rejects verdicts on closed/merged PRs with a 422. Only post the issue comment. Treat this combination with the same verdict-suppression as `OWN_PR=true`. If `--closed` was passed on an OPEN PR (legal — the flag is permissive in Step 5), post verdicts normally as for any open PR.
 
 If `--dry-run`: print to console. Skip Step 13 entirely (no wiki push on dry runs). Jump to Cleanup.
 

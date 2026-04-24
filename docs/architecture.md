@@ -78,7 +78,7 @@ VorobiovD/air/
 | Learn logic | learn.md | learn-orchestrator.md | NO — duplicated (single-agent flow, not fanned out) |
 | Auth | User's local gh auth | Bot PAT via github_repository resource | Different |
 | Trigger | Manual: /air:review | Automatic: GitHub Action on PR | Different |
-| Modes | --self, --respond (+ --dry-run), --full, --re-review, --fresh, --rewrite, --dry-run | auto, fresh, re-review | CLI has more |
+| Modes | --self, --respond (+ --dry-run), --full, --re-review, --fresh, --rewrite, --closed, --dry-run | auto, fresh, re-review, closed | CLI has more |
 | Respond self-check | Scales by diff size: < 50 lines = code-reviewer + verifier only | Same (in orchestrator) | YES — same logic |
 | Cross-repo wiki | Reads TARGET repo's wiki (skip write only) | N/A | Changed in v1.4.0 |
 | Codex (GPT-5.4) | Optional 5th reviewer | Not available | CLI only |
