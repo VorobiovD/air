@@ -49,7 +49,9 @@ managed/                          # Managed Agent (CI automation)
 └── README.md
 
 .github/workflows/
-└── managed-review.yml            # Reusable GitHub Action for teams
+├── managed-review.yml            # Reusable GitHub Action (teams reference this)
+├── air-review.yml                # Dogfood caller for this repo (PR + workflow_dispatch)
+└── release-please.yml            # Automated tag + GitHub Release on version bumps
 ```
 
 ## Architecture
