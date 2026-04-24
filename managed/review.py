@@ -627,7 +627,7 @@ async def run_review(args):
     #   often deleted on merge. GitHub keeps the PR's head SHA reachable via
     #   refs/pull/<N>/head forever, and Anthropic's github_repository
     #   resource accepts a commit SHA directly.
-    if pr_state == "closed" or pr_merged:
+    if pr_state == "closed":
         checkout = {"type": "commit", "sha": head_sha}
         status = "merged" if pr_merged else "closed"
         print(f"  reviewing {status} PR — checking out head SHA {head_sha[:8]}")
