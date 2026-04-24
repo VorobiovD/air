@@ -1,7 +1,7 @@
 # air — Architecture, Decisions, and Roadmap
 
-**Last updated:** 2026-04-23
-**Version:** 1.7.0
+**Last updated:** 2026-04-24
+**Version:** 1.8.0
 
 ---
 
@@ -39,7 +39,7 @@ VorobiovD/air/
 │   │   ├── pre-commit-drift.py       Narrows to `git commit`, routes custom/built-in
 │   │   └── builtin-checks.sh         Zero-config manifest-version vs doc-mirror greps
 │   └── .claude-plugin/
-│       └── plugin.json             Version 1.7.0
+│       └── plugin.json             Version 1.8.0
 │
 ├── managed/                        ← MANAGED AGENT (Anthropic cloud)
 │   ├── api.py                        Shared helpers: get_headers, list_agents, find_environment
@@ -384,6 +384,9 @@ Subagents cannot nest in Claude Code — only the main session can use the Agent
 
 | Priority | Item | Effort | Impact | Status |
 |---|---|---|---|---|
+| **Done** | Orphan-session cleanup on driver shutdown | 0.5 day | Token savings + cleaner ops | v1.8.0 — atexit + SIGTERM/SIGHUP interrupts tracked session ids |
+| **Done** | Auto-detect re-review mode (managed) | 1 day | Cost + feedback loop | v1.8.0 — inter-diff + prior review + dev comments as context |
+| **Done** | `--closed` opt-in for closed/merged PRs | 0.5 day | Post-merge audit, pattern backfill | v1.8.0 — state gate + commit-checkout + workflow_dispatch |
 | **Done** | Parallel execution for managed reviews | 1 day | 12 min → ~5-8 min | v1.7.0 — client-side asyncio fan-out (Python driver), replaces server-side callable_agents dependency |
 | **Blocked** | Server-side parallel sub-agents (callable_agents) | Would simplify review.py | Marginal — client-side fan-out already parallel | Waiting for Research Preview access; `managed/test-parallel.py` detects readiness |
 | **Done** | Slim review.md (1319 → 879 lines) | 1 day | CLI consistency | v1.4.0 — extracted --self + --respond |

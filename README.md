@@ -1,10 +1,12 @@
 # air — Automated Code Review with Verification, Pattern Learning, and Team Knowledge
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.7.0-green.svg)](plugins/air/.claude-plugin/plugin.json)
+[![Version](https://img.shields.io/badge/version-1.8.0-green.svg)](plugins/air/.claude-plugin/plugin.json)
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://claude.ai/code)
 [![GitHub](https://img.shields.io/badge/GitHub-supported-black.svg)](https://github.com)
 [![GitLab](https://img.shields.io/badge/GitLab-supported-orange.svg)](https://gitlab.com)
+
+> **New in 1.8.0:** managed-agent orphan-session cleanup, auto-detect re-review mode with developer-response context, `--closed` opt-in for closed/merged PRs, `workflow_dispatch` for on-demand reviews. See [plugin README — What's New](plugins/air/README.md#whats-new-in-v180).
 
 ## Why
 
