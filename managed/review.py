@@ -471,7 +471,7 @@ async def run_session(
     agent_version: int,
     env_id: str,
     repo: str,
-    pr_branch: str,
+    checkout: dict,
     bot_token: str,
     user_text: str,
     label: str,
@@ -479,11 +479,13 @@ async def run_session(
 ) -> str:
     """Create a session, send the user prompt, stream events, return collected agent text.
 
-    Mounts two github_repository resources — the PR branch at /workspace/repo
-    and the wiki at /workspace/wiki. Both auth tokens go in the resource
-    config (API request body), never in the session transcript or agent
-    message text. The wiki resource mounts empty if the repo has no wiki
-    (Managed Agents treats a 404 on push-only wikis as an empty mount).
+    Mounts two github_repository resources — the PR source at /workspace/repo
+    (per the supplied `checkout` dict — branch name for open PRs, commit SHA
+    for closed/merged PRs) and the wiki at /workspace/wiki. Both auth tokens
+    go in the resource config (API request body), never in the session
+    transcript or agent message text. The wiki resource mounts empty if the
+    repo has no wiki (Managed Agents treats a 404 on push-only wikis as an
+    empty mount).
     """
     # try/finally narrows the race window between sessions.create() returning
     # and LIVE_SESSIONS.add() running: if SystemExit (from SIGTERM) fires
@@ -502,7 +504,7 @@ async def run_session(
                     "type": "github_repository",
                     "url": f"https://github.com/{repo}",
                     "authorization_token": bot_token,
-                    "checkout": {"type": "branch", "name": pr_branch},
+                    "checkout": checkout,
                     "mount_path": "/workspace/repo",
                 },
                 {
@@ -597,7 +599,6 @@ async def run_review(args):
 
     print(f"[2] Fetching PR #{args.pr_number} on {args.repo}...")
     meta = fetch_pr_metadata(args.repo, args.pr_number, bot_token)
-    pr_branch = meta["head"]["ref"]
     head_sha = meta["head"]["sha"]
 
     # State gate: refuse to review closed/merged PRs by default. Auto-trigger
@@ -616,6 +617,19 @@ async def run_review(args):
             file=sys.stderr,
         )
         sys.exit(0)
+
+    # Pick the ref to check out in each Managed Agent session:
+    # - Open PRs: branch name — standard flow.
+    # - Closed/merged PRs: head SHA via commit-checkout — the head branch is
+    #   often deleted on merge. GitHub keeps the PR's head SHA reachable via
+    #   refs/pull/<N>/head forever, and Anthropic's github_repository
+    #   resource accepts a commit SHA directly.
+    if pr_state == "closed" or pr_merged:
+        checkout = {"type": "commit", "sha": head_sha}
+        status = "merged" if pr_merged else "closed"
+        print(f"  reviewing {status} PR — checking out head SHA {head_sha[:8]}")
+    else:
+        checkout = {"type": "branch", "name": meta["head"]["ref"]}
 
     # Mode detection: RE-REVIEW if a prior bot-authored review comment
     # exists and the head SHA advanced since it. SKIP if the head SHA
@@ -723,7 +737,7 @@ async def run_review(args):
             return await asyncio.wait_for(
                 run_session(
                     client, agent["id"], agent["version"], env_id,
-                    args.repo, pr_branch, bot_token, user_text, name,
+                    args.repo, checkout, bot_token, user_text, name,
                     tracking=specialist_ids,
                 ),
                 timeout=SESSION_TIMEOUT_SECS,
@@ -911,7 +925,7 @@ Raw findings to verify and consolidate:
         verifier_out = await asyncio.wait_for(
             run_session(
                 client, agents[VERIFIER_AGENT]["id"], agents[VERIFIER_AGENT]["version"],
-                env_id, args.repo, pr_branch, bot_token, verifier_user_text, VERIFIER_AGENT,
+                env_id, args.repo, checkout, bot_token, verifier_user_text, VERIFIER_AGENT,
             ),
             timeout=SESSION_TIMEOUT_SECS,
         )
