@@ -12,17 +12,20 @@ on:
       pr_number:
         description: 'PR number to review (works on closed/merged PRs)'
         required: true
-        type: number
+        type: string
       closed:
         description: 'Allow review of closed/merged PR'
         required: false
-        type: boolean
-        default: true
+        type: string
+        default: 'true'
 
 jobs:
   review:
     uses: VorobiovD/air/.github/workflows/managed-review.yml@main
     with:
+      # Reusable declares these as `type: string` so we can pass expression
+      # results directly — `${{ inputs.X }}` resolves to a string, and typed
+      # reusable inputs reject strings at workflow-load time.
       pr_number: ${{ inputs.pr_number }}
       closed: ${{ inputs.closed }}
     secrets:

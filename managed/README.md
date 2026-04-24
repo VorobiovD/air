@@ -27,12 +27,12 @@ on:
       pr_number:
         description: 'PR number to review (works on closed/merged PRs)'
         required: true
-        type: number
+        type: string
       closed:
         description: 'Allow review of closed/merged PR'
         required: false
-        type: boolean
-        default: true
+        type: string
+        default: 'true'
 
 jobs:
   review:
