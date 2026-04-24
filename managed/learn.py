@@ -110,6 +110,47 @@ def main():
     else:
         stream(client, session.id)
 
+    # Reset the shared `/air:learn` trigger counter on the wiki so the next
+    # review sees a clean `reviews_since: 0` and the cadence restarts.
+    # Best-effort — never fails the overall learn run.
+    try:
+        _reset_learn_counter(args.repo, bot_token)
+    except Exception as e:
+        print(f"  [warn] counter reset failed: {e}", file=sys.stderr)
+
+
+def _reset_learn_counter(repo: str, bot_token: str) -> None:
+    """Clone the wiki, call `meta.py reset`, push. Mirrors the update path
+    in managed/review.py::_update_learn_counter but calls `reset` instead
+    of `bump`+`check`."""
+    import subprocess
+    import tempfile
+
+    air_root = Path(__file__).resolve().parent.parent
+    lib_dir = air_root / "plugins" / "air" / "lib"
+    meta_script = lib_dir / "meta.py"
+    if not meta_script.is_file():
+        print(f"  [warn] meta.py not found at {meta_script}", file=sys.stderr)
+        return
+    sys.path.insert(0, str(lib_dir))
+    import wiki_git  # type: ignore
+
+    wiki_url = f"https://x-access-token:{bot_token}@github.com/{repo}.wiki.git"
+    with tempfile.TemporaryDirectory(prefix="air-wiki-learn-") as tmp:
+        wiki_dir = Path(tmp) / "wiki"
+        if not wiki_git.clone_wiki(wiki_url, wiki_dir):
+            return
+        wiki_git.configure_identity(wiki_dir, "air-machine", "air-machine@users.noreply.github.com")
+        result = subprocess.run(
+            [sys.executable, str(meta_script), "reset", "--wiki-dir", str(wiki_dir),
+             "--pr-number", "0"],
+            capture_output=True, text=True,
+        )
+        sys.stderr.write(result.stderr)
+        if result.returncode != 0:
+            return
+        wiki_git.commit_meta(wiki_dir, "meta: reset counter after /air:learn")
+
 
 def stream(client, session_id: str):
     signal.signal(signal.SIGALRM, lambda *_: (print("\nTimed out."), sys.exit(1)))

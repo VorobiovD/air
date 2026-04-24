@@ -801,37 +801,34 @@ The issue comment contains the full review body (searchable by Step 2 for re-rev
 
 **Skip if `CROSS_REPO=true`.** Print "Cross-repo - learn skipped."
 
-**Auto-trigger check:** Before learning, check if a full cleanup is due:
+**Auto-trigger check:** Before learning, decide whether a full cleanup is due.
+
+Counter state lives in `.air-meta.json` at the wiki root (cloned into `$WIKI_DIR` by Step 3), so CLI and managed runs share the same counter — both contribute to the cadence. `plugins/air/lib/meta.py` owns the threshold logic; delegate to it:
+
 ```bash
-META_FILE="$HOME/.claude/review-learn-meta.json"
-if [ -f "$META_FILE" ]; then
-  LAST_CLEANUP=$(cat "$META_FILE" | grep -o '"last_cleanup" *: *"[^"]*"' | grep -o '[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}')
-  REVIEWS_SINCE=$(cat "$META_FILE" | grep -o '"reviews_since" *: *[0-9]*' | grep -o '[0-9]*$')
-  CLEANUP_EPOCH=$(date -j -f "%Y-%m-%d" "$LAST_CLEANUP" +%s 2>/dev/null || date -d "$LAST_CLEANUP" +%s 2>/dev/null || echo 0)
-  DAYS_SINCE=$(( ($(date +%s) - $CLEANUP_EPOCH) / 86400 ))
+python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number "<number>"
+if python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"; then
+  # Exit 0: skip full cleanup — threshold not met. Fall through to
+  # incremental learn below.
+  echo "Auto-trigger: threshold not met — incremental learn only"
 else
-  REVIEWS_SINCE=99
-  DAYS_SINCE=99
+  # Exit 1: threshold hit (5+ reviews OR 2+ days with new PRs).
+  echo "Auto-trigger: running /air:learn"
+  # Run /air:learn (full cleanup + KAIROS history regeneration). After it
+  # completes, skip to wiki push (sub-step 5). Do NOT fall through to the
+  # incremental learn below — /air:learn replaces it. /air:learn's own
+  # epilogue calls `meta.py reset` which zeros the counter.
+  # (Invocation details follow the existing /air:learn runner logic.)
 fi
 ```
 
-Print the check result:
-```bash
-echo "Auto-trigger check: reviews_since=$REVIEWS_SINCE, days_since=$DAYS_SINCE (threshold: 5 reviews or 2 days)"
-```
+**Threshold rules** (enforced in `meta.py::should_trigger_learn`):
+- `reviews_since >= 5` → trigger
+- `days_since_cleanup >= 2` AND `reviews_since > 0` → trigger
+- `days_since_cleanup >= 2` AND `reviews_since == 0` → skip + bump `last_check` (prevents re-evaluating every review)
+- else → skip
 
-**>>> AUTO-TRIGGER DECISION (do NOT skip this block) <<<**
-
-If `REVIEWS_SINCE >= 5` OR `DAYS_SINCE >= 2`:
-1. Print "Triggering /air:learn (reviews: $REVIEWS_SINCE, days: $DAYS_SINCE)"
-2. Run `/air:learn` (full cleanup + KAIROS history regeneration)
-3. After `/air:learn` completes, skip to wiki push (Step 13 sub-step 5)
-4. **RETURN** — do not fall through to the incremental learn below
-
-Otherwise (threshold not met), increment the counter:
-```bash
-echo '{"last_cleanup": "'$LAST_CLEANUP'", "reviews_since": '$((REVIEWS_SINCE + 1))'}' > "$META_FILE"
-```
+The counter bump and check are atomic from the caller's perspective; only the wiki push (sub-step 5) commits them to the remote.
 
 1. Read `$AIR_TMP/REVIEW.md` (from Step 3)
 2. Add new patterns from this review. This is NOT optional — every review that produced findings MUST update the wiki. For each confirmed/downgraded/improvement finding from Step 8:
@@ -890,7 +887,7 @@ When a disputed finding is **rejected** (explanation insufficient):
 - Optionally add to common findings if this is a recurring dispute: "Developers may claim X is standard — verify compensating controls"
 
 4. Clean: merge duplicates, reorganize, cap Common Findings and Service-Specific sections at ~15 entries. **Author Patterns: NEVER remove because "fixed" or "stale."** Author patterns follow the lifecycle (create → strengthen → decline → archive) managed by sub-step 2.5 above. You may merge semantic duplicates within the same author (combine counts and PR refs, use the higher clean counter).
-5. Push to wiki (reuse clone from Step 3 — no second clone needed):
+5. Push to wiki (reuse clone from Step 3 — no second clone needed). Includes `.air-meta.json` from the auto-trigger check at the top of this step so CLI and managed stay in sync on the shared counter:
 ```bash
 WIKI_DIR="$AIR_TMP/review-wiki-<number>"
 if [ ! -d "$WIKI_DIR/.git" ]; then
@@ -900,7 +897,8 @@ if [ ! -d "$WIKI_DIR/.git" ]; then
 fi
 cp "$AIR_TMP/REVIEW.md" "$WIKI_DIR/REVIEW.md"
 cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
-cd "$WIKI_DIR" && git add REVIEW.md ACCEPTED-PATTERNS.md && { git diff --quiet --cached || git commit -m "review: learned from PR #<number>"; } && git push
+# .air-meta.json is mutated in-place by meta.py earlier in this step, so no copy needed.
+cd "$WIKI_DIR" && git add REVIEW.md ACCEPTED-PATTERNS.md .air-meta.json && { git diff --quiet --cached || git commit -m "review: learned from PR #<number>"; } && git push
 ```
 
 If wiki not found, print guidance. If push fails, warn but don't fail.

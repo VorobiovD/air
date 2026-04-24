@@ -1069,6 +1069,81 @@ Raw findings to verify and consolidate:
         sys.exit(1)
     print(f"  Posted: {resp.json()['html_url']}")
 
+    # Epilogue: bump the shared wiki-backed counter and trigger /air:learn if
+    # the threshold fires. All-best-effort — never fail the overall review if
+    # any of this has a hiccup.
+    try:
+        _update_learn_counter(args.repo, args.pr_number, bot_token)
+    except Exception as e:
+        print(f"  [warn] counter update failed: {e}", file=sys.stderr)
+
+
+def _update_learn_counter(repo: str, pr_number: int, bot_token: str) -> None:
+    """Clone wiki, bump `.air-meta.json`, trigger learn subprocess on threshold,
+    push the meta. Isolated so callers can wrap with a broad try/except.
+
+    Uses subprocess invocations of `plugins/air/lib/meta.py` so CLI and
+    managed share one implementation. `managed/review.py` runs alongside
+    a checked-out air repo, so the lib path is relative.
+    """
+    import tempfile
+
+    air_root = Path(__file__).resolve().parent.parent
+    lib_dir = air_root / "plugins" / "air" / "lib"
+    meta_script = lib_dir / "meta.py"
+    if not meta_script.is_file():
+        print(f"  [warn] meta.py not found at {meta_script}", file=sys.stderr)
+        return
+    sys.path.insert(0, str(lib_dir))
+    import wiki_git  # type: ignore
+
+    wiki_url = f"https://x-access-token:{bot_token}@github.com/{repo}.wiki.git"
+    with tempfile.TemporaryDirectory(prefix="air-wiki-") as tmp:
+        wiki_dir = Path(tmp) / "wiki"
+        if not wiki_git.clone_wiki(wiki_url, wiki_dir):
+            return
+        wiki_git.configure_identity(wiki_dir, "air-machine", "air-machine@users.noreply.github.com")
+
+        # 1. Bump the counter.
+        bump = subprocess.run(
+            [sys.executable, str(meta_script), "bump", "--wiki-dir", str(wiki_dir),
+             "--pr-number", str(pr_number)],
+            capture_output=True, text=True,
+        )
+        if bump.returncode != 0:
+            print(f"  [warn] meta bump failed: {bump.stderr.strip()}", file=sys.stderr)
+            return
+        sys.stderr.write(bump.stderr)
+
+        # 2. Check threshold. Exit 1 == trigger.
+        check = subprocess.run(
+            [sys.executable, str(meta_script), "check", "--wiki-dir", str(wiki_dir)],
+            capture_output=True, text=True,
+        )
+        sys.stderr.write(check.stderr)
+
+        if check.returncode == 1:
+            # Threshold fired. Fire-and-forget subprocess to managed/learn.py
+            # so it outlives the current review and stays decoupled from our
+            # session/shutdown machinery.
+            learn_script = air_root / "managed" / "learn.py"
+            if learn_script.is_file():
+                print(f"  [learn] firing subprocess: {learn_script} {repo}", file=sys.stderr)
+                subprocess.Popen(
+                    [sys.executable, str(learn_script), repo],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                # Don't reset the counter here — learn.py does that itself on
+                # successful completion via `meta.py reset`. If it fails, the
+                # counter stays elevated and retriggers next review.
+            else:
+                print(f"  [warn] learn.py not found at {learn_script}", file=sys.stderr)
+
+        # 3. Push the meta change (includes bump + any last_check update
+        #    from check). learn.py's reset will push a follow-up commit.
+        wiki_git.commit_meta(wiki_dir, f"meta: bump counter for PR #{pr_number}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Trigger an air review for a PR (client-side parallel orchestrator)")

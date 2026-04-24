@@ -141,34 +141,23 @@ if [ ! -d "$WIKI_DIR/.git" ]; then
 fi
 cp "$AIR_TMP/REVIEW.md" "$WIKI_DIR/REVIEW.md"
 cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
-cd "$WIKI_DIR" && git add REVIEW.md ACCEPTED-PATTERNS.md && { git diff --quiet --cached || git commit -m "review: self-review patterns $(date +%Y-%m-%d)"; } && git push
+cd "$WIKI_DIR" && git add REVIEW.md ACCEPTED-PATTERNS.md .air-meta.json && { git diff --quiet --cached || git commit -m "review: self-review patterns $(date +%Y-%m-%d)"; } && git push
 ```
-4. Increment the review counter AND check auto-trigger threshold:
+4. Bump the shared wiki-backed review counter and check the auto-trigger threshold. Counter state lives in `.air-meta.json` at the wiki root so CLI and managed runs share the same number — both contribute to the cadence:
+
 ```bash
-META_FILE="$HOME/.claude/air:learn-meta.json"
-if [ -f "$META_FILE" ]; then
-  LAST_CLEANUP=$(cat "$META_FILE" | grep -o '"last_cleanup" *: *"[^"]*"' | grep -o '[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}')
-  REVIEWS_SINCE=$(cat "$META_FILE" | grep -o '"reviews_since" *: *[0-9]*' | grep -o '[0-9]*$')
-  CLEANUP_EPOCH=$(date -j -f "%Y-%m-%d" "$LAST_CLEANUP" +%s 2>/dev/null || date -d "$LAST_CLEANUP" +%s 2>/dev/null || echo 0)
-  DAYS_SINCE=$(( ($(date +%s) - $CLEANUP_EPOCH) / 86400 ))
+python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number 0
+if python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"; then
+  echo "Auto-trigger: threshold not met — self-review done"
 else
-  REVIEWS_SINCE=99
-  DAYS_SINCE=99
+  echo "Auto-trigger: running /air:learn"
+  # Run /air:learn. Its own epilogue resets the counter via `meta.py reset`.
 fi
-echo "Auto-trigger check: reviews_since=$REVIEWS_SINCE, days_since=$DAYS_SINCE (threshold: 5 reviews or 2 days)"
 ```
 
-**>>> AUTO-TRIGGER DECISION (do NOT skip) <<<**
+Threshold rules (enforced in `meta.py`): `reviews_since >= 5`, or `days_since_cleanup >= 2` AND `reviews_since > 0`. A self-review counts as a review for counter purposes — no PR number needed (pass 0).
 
-If `REVIEWS_SINCE >= 5` OR `DAYS_SINCE >= 2`:
-1. Print "Triggering /air:learn (reviews: $((REVIEWS_SINCE + 1)), days: $DAYS_SINCE)"
-2. Run `/air:learn` (full cleanup + KAIROS history regeneration)
-3. After learn completes, RETURN — do not fall through to the counter increment below
-
-Otherwise (threshold not met), increment the counter:
-```bash
-echo '{"last_cleanup": "'$LAST_CLEANUP'", "reviews_since": '$((REVIEWS_SINCE + 1))'}' > "$META_FILE"
-```
+Include `.air-meta.json` in the wiki-push from sub-step 3 above (add it to the `git add` line).
 
 Only skip wiki push if zero findings (clean self-review with nothing to learn).
 

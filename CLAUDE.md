@@ -30,6 +30,9 @@ plugins/air/
 │   ├── hooks.json             # PreToolUse hook registration
 │   ├── pre-commit-drift.py    # Wrapper: narrows to `git commit`, routes custom/built-in
 │   └── builtin-checks.sh      # Zero-config auto-detection (version mirror + badge)
+├── lib/                 # Shared Python helpers (stdlib-only, called by CLI + managed)
+│   ├── meta.py                # Wiki-backed /air:learn trigger counter
+│   └── wiki_git.py            # Clone + commit-meta-with-retry
 └── .claude-plugin/
     └── plugin.json      # Plugin metadata (name, version, author)
 

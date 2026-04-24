@@ -37,6 +37,9 @@ VorobiovD/air/
 │   │   ├── hooks.json                PreToolUse registration on Bash
 │   │   ├── pre-commit-drift.py       Narrows to `git commit`, routes custom/built-in
 │   │   └── builtin-checks.sh         Zero-config manifest-version vs doc-mirror greps
+│   ├── lib/                        ← Shared Python helpers (stdlib-only)
+│   │   ├── meta.py                   `.air-meta.json` read/write + /air:learn trigger threshold
+│   │   └── wiki_git.py               clone + commit-meta-with-retry helpers
 │   └── .claude-plugin/
 │       └── plugin.json             Plugin manifest (version source of truth)
 │
@@ -385,6 +388,12 @@ Subagents cannot nest in Claude Code — only the main session can use the Agent
 
 | Priority | Item | Effort | Impact | Status |
 |---|---|---|---|---|
+| **Done** | Wiki-backed shared `/air:learn` counter | 0.5 day | Managed reviews now contribute to the learn cadence | `plugins/air/lib/meta.py` owns threshold logic; CLI + managed both bump the same wiki `.air-meta.json` |
+| **Future** | Managed per-review wiki writes (Layer 1) | ~3 days | Managed contributes patterns every review instead of only via periodic deep pass | Requires `json-patterns` verifier contract + module expansion (`wiki_learn.py`, `author_patterns.py`, `review_md.py`, `learned_patterns.py`) |
+| **Future** | CLI Step 13 sub-steps 2 + 2.5 migration to Python | ~2 days | Deterministic author-pattern lifecycle; saves ~15–20K tokens per CLI review | Depends on the module expansion landing first |
+| **Future** | LLM-sanitization helper for disputed findings | ~1 day | Closes CLI/managed asymmetry on ACCEPTED-PATTERNS.md (sub-step 3) | Small Python helper calling Anthropic API; both orchestrators call it |
+| **Future** | Inter-diff + respond + self-review logic unification | ~3 days | Shared helpers for non-orchestration logic paths | Modular — can ship one at a time |
+| **Future** | GitLab platform support in managed | ~1 week | Managed works on GitLab MRs | Abstract `fetch_pr_*` + `github_repository` resource shape |
 | **Done** | Orphan-session cleanup on driver shutdown | 0.5 day | Token savings + cleaner ops | v1.8.0 — atexit + SIGTERM/SIGHUP interrupts tracked session ids |
 | **Done** | Auto-detect re-review mode (managed) | 1 day | Cost + feedback loop | v1.8.0 — inter-diff + prior review + dev comments as context |
 | **Done** | `--closed` opt-in for closed/merged PRs | 0.5 day | Post-merge audit, pattern backfill | v1.8.0 — state gate + commit-checkout + workflow_dispatch |
