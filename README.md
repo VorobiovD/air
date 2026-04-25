@@ -98,7 +98,7 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 1. **Parse** — PR number or URL, flags, cross-repo detection
 2. **Smart default** — detect existing reviews, auto re-review or self-review
 3. **Load context** — CLAUDE.md, wiki patterns (REVIEW.md), finding history (REVIEW-HISTORY.md), project memory, session context
-4. **Fetch** — batched API call (1 call for all metadata), diff, commits, blame summaries, file churn, previous PR comments, CI status, file statuses (A/M/D/R)
+4. **Fetch** — batched API call (1 call for all metadata), diff, commits, blame summaries, file churn, previous PR comments (cross-PR pattern signal), current PR conversation (humans + other AI bots on this PR), CI status, file statuses (A/M/D/R)
 5. **Pre-flight** — CI failures flagged to agents, conflict markers = automatic blocker, file complexity alerts, pure-promotion PR detection
 6. **Re-review** — inter-diff generation, developer response parsing, FIXED/NOT FIXED/DISPUTED tracking
 7. **Review** — 5 agents + Codex in parallel, each receives full PR Context block including history data

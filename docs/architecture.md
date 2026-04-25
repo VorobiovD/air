@@ -39,7 +39,8 @@ VorobiovD/air/
 │   │   └── builtin-checks.sh         Zero-config manifest-version vs doc-mirror greps
 │   ├── lib/                        ← Shared Python helpers (stdlib-only)
 │   │   ├── meta.py                   `.air-meta.json` read/write + /air:learn trigger threshold
-│   │   └── wiki_git.py               clone + commit-meta-with-retry helpers
+│   │   ├── wiki_git.py               clone + commit-meta-with-retry helpers
+│   │   └── pr_conversation.py        merge GitHub PR comments/reviews into `<pr-conversation>` agent context
 │   └── .claude-plugin/
 │       └── plugin.json             Plugin manifest (version source of truth)
 │
@@ -99,7 +100,7 @@ VorobiovD/air/
   ├── Step 2: Smart default (check existing reviews, auto re-review)
   ├── Step 3: Load context (CLAUDE.md, wiki patterns, project memory, session context)
   ├── Step 3.5: First-run project discovery (PROJECT-PROFILE.md + GLOSSARY.md + `.air-checks.sh` [v1.6.0+])
-  ├── Step 4: Fetch PR data (batched API, diff, commits, blame, churn, previous PR comments)
+  ├── Step 4: Fetch PR data (batched API, diff, commits, blame, churn, previous PR comments, current PR conversation)
   ├── Step 5: Pre-flight checks (state, draft, CI, conflict markers, file complexity, pure-promotion detection)
   ├── Step 6: Re-review mode (inter-diff, developer responses, FIXED/NOT FIXED tracking)
   │

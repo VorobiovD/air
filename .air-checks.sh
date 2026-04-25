@@ -51,6 +51,21 @@ for f in plugins/air/agents/code-reviewer.md \
     || fail "$f missing canonical 'do NOT fall back' sentence"
 done
 
+# Check D: all 4 specialist agents must carry the duplicate-flagging
+# instruction (verifier sees the annotated output but doesn't produce
+# findings, so it's exempt). Anchor on the section header literal
+# `PR conversation duplicate-flagging:` rather than the bracket marker
+# `[already raised by @` — the latter could appear in any quoted
+# example or unrelated context, so its presence isn't a reliable signal
+# the actual instruction is intact.
+for f in plugins/air/agents/code-reviewer.md \
+         plugins/air/agents/simplify.md \
+         plugins/air/agents/security-auditor.md \
+         plugins/air/agents/git-history-reviewer.md; do
+  grep -qF 'PR conversation duplicate-flagging:' "$f" \
+    || fail "$f missing 'PR conversation duplicate-flagging:' section header"
+done
+
 if [ "$status" -eq 0 ]; then
   printf 'air drift-check: all checks passed.\n'
 fi
