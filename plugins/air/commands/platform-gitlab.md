@@ -39,6 +39,7 @@ PROJECT_ID=$(glab api "projects/$(echo $CURRENT_REPO | sed 's|/|%2F|g')" 2>/dev/
 | `repos/<owner>/<repo>/pulls?state=closed` | `projects/$PROJECT_ID/merge_requests?state=merged&order_by=updated_at&sort=desc` | Use `state=merged` not `state=closed` |
 | `repos/<owner>/<repo>/pulls/<N>/files` | `projects/$PROJECT_ID/merge_requests/<iid>/changes` | Response: `.changes[].new_path` instead of `.[].filename` |
 | `repos/<owner>/<repo>/pulls/<N>/comments` | `projects/$PROJECT_ID/merge_requests/<iid>/discussions` | Inline code comments are discussion threads |
+| `repos/<owner>/<repo>/pulls/<N>/reviews` | (none — fold into `approvals` + `notes`) | GitLab has no top-level "review" object. APPROVED state comes from `approvals`; CHANGES_REQUESTED has no exact equivalent (approval just isn't given) |
 | `repos/<owner>/<repo>/compare/<sha1>...<sha2>` | `projects/$PROJECT_ID/repository/compare?from=<sha1>&to=<sha2>` | Response: `.diffs[].new_path` instead of `.files[].filename` |
 | `repos/<owner>/<repo>/issues/comments/<id>` PATCH | `projects/$PROJECT_ID/merge_requests/<iid>/notes/<note_id>` PUT | PUT not PATCH |
 | `repos/<owner>/<repo>/contents/<path>` | `projects/$PROJECT_ID/repository/files/<url-encoded-path>/raw?ref=<branch>` | Path must be URL-encoded |
@@ -141,6 +142,33 @@ The `--jq` filters for finding `## Code Review` comments remain the same — jus
 
 GitHub: `gh api repos/.../issues/comments/<id> --method PATCH -f body="..."`
 GitLab: `glab api projects/$PROJECT_ID/merge_requests/<iid>/notes/<note_id> --method PUT -f body="..."`
+
+### 7. Current PR Conversation Block (`<pr-conversation>`)
+
+Step 4 of `review.md` (and Respond Step 1.5 of `review-respond.md`) fetches three GitHub endpoints in parallel — `/issues/<N>/comments`, `/pulls/<N>/reviews`, `/pulls/<N>/comments` — and merges them into a single `<pr-conversation>` block via `plugins/air/lib/pr_conversation.py`.
+
+On GitLab, the three calls collapse to **two**:
+- `/notes` covers GitHub's `/issues/<N>/comments` (top-level discussion).
+- `/discussions` covers GitHub's `/pulls/<N>/comments` (inline diff threads). Each discussion contains one or more notes, some pinned to a `position` (file/line) and some not.
+- GitHub's `/pulls/<N>/reviews` has no direct GitLab equivalent — APPROVED state is captured via `/approvals`, and CHANGES_REQUESTED simply manifests as "approval not given." For the purposes of `<pr-conversation>`, leave the third file empty (the merger gracefully renders no review entries) and let the approval state surface through Behavioral Difference #3 instead.
+
+Field mapping for the merger (each note → one normalized record):
+- `note.author.username` → `user.login`
+- `note.body` → `body`
+- `note.created_at` → `created_at`
+- For inline notes (`note.position` non-null): `position.new_path` → `path`, `position.new_line` → `line`. The merger already falls back to `original_line` when `line` is null, which works for GitLab's outdated-anchor notes too.
+
+Concrete bash to feed the merger on GitLab:
+```bash
+glab api "projects/$PROJECT_ID/merge_requests/<iid>/notes?per_page=100" > "$AIR_TMP/conv-issues.json" 2>/dev/null &
+glab api "projects/$PROJECT_ID/merge_requests/<iid>/discussions?per_page=100" \
+  | jq '[.[] | .notes[] | select(.position != null) | {user: {login: .author.username}, body: .body, path: .position.new_path, line: .position.new_line, created_at: .created_at}]' \
+  > "$AIR_TMP/conv-inline.json" 2>/dev/null &
+echo '[]' > "$AIR_TMP/conv-reviews.json"  # No reviews equivalent on GitLab.
+wait
+```
+
+The merger's `--bot-login` flag still applies — pass the GitLab bot username (`glab api user --jq '.username'`) for the same self-filtering behavior.
 
 Note: PUT not PATCH. The note ID comes from the initial notes query (`.id` field in the response).
 
