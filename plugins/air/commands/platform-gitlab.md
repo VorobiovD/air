@@ -158,9 +158,16 @@ Field mapping for the merger (each note → one normalized record):
 - `note.created_at` → `created_at`
 - For inline notes (`note.position` non-null): `position.new_path` → `path`, `position.new_line` → `line`. The merger already falls back to `original_line` when `line` is null, which works for GitLab's outdated-anchor notes too.
 
-Concrete bash to feed the merger on GitLab:
+Concrete bash to feed the merger on GitLab. **Both** the `/notes` and `/discussions` calls must remap `note.author.username → user.login` via `jq`, otherwise the merger's `_normalize` drops every entry at the missing-user guard:
 ```bash
-glab api "projects/$PROJECT_ID/merge_requests/<iid>/notes?per_page=100" 2>/dev/null > "$AIR_TMP/conv-issues.json" &
+# /notes — top-level discussion. Remap username → user.login + flatten
+# so the merger (which expects GitHub-shaped {user: {login}, body, ...})
+# accepts the entries instead of silently dropping them.
+glab api "projects/$PROJECT_ID/merge_requests/<iid>/notes?per_page=100" 2>/dev/null \
+  | jq '[.[] | {user: {login: .author.username}, body: .body, created_at: .created_at}]' \
+  > "$AIR_TMP/conv-issues.json" &
+# /discussions — inline diff comments. Same remap, plus flatten the
+# nested .notes[] and pull file:line out of .position.
 # Anchor `2>/dev/null` to `glab api` itself — `cmd | jq > file 2>/dev/null`
 # would only redirect jq's stderr, leaving glab's rate-limit / 403 /
 # network errors visible in the terminal mid-review.

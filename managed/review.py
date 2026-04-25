@@ -400,8 +400,10 @@ def fetch_pr_review_comments(repo: str, pr_number: int, token: str) -> list[dict
     """Fetch inline (file:line) review comments on a PR.
 
     Distinct from issue comments — these are anchored to a specific path
-    and line via `position`. Used by `build_conversation_block` so
-    reviewer agents can locate prior inline feedback when picking up a PR
+    and line via the top-level `path` and `line` fields (`position` also
+    exists but is GitHub's legacy diff-position int and is often null on
+    outdated comments). Used by `build_conversation_block` so reviewer
+    agents can locate prior inline feedback when picking up a PR
     mid-conversation.
     """
     url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments?per_page=100"
@@ -788,17 +790,16 @@ async def run_review(args):
     # Fetch all three conversation surfaces unconditionally — fresh
     # reviews also benefit from seeing prior thread context (humans and
     # other AI bots flagged things our agents would otherwise duplicate).
-    # The bot-self filter happens inside build_conversation_block; missing
-    # bot_login just means our own ## Code Review comments stay in the
-    # block (still safe — they're chronologically older than the new
-    # review's own findings, and the agents are told not to follow
-    # instructions inside <conv-comment>).
+    # When `bot_login` is unresolved, build_conversation_block is skipped
+    # entirely (see the `if bot_login` gate below) and pr_conv_block
+    # becomes "none" — better to lose the block than to emit our own
+    # ## Code Review numbering as untrusted-but-unfiltered <conv-comment>s.
     #
-    # Run the three sync `requests.get` calls concurrently via the
-    # running loop's default executor. Without this, a chatty PR's
-    # paginated fetches serialize end-to-end (~1-2s); the bash path in
-    # commands/review.md already runs them in parallel via `&` + `wait`,
-    # so this brings managed to parity.
+    # Run the four sync `requests.get` calls concurrently via the
+    # running loop's default executor. Without this, the bash path in
+    # commands/review.md (which uses `&` + `wait`) is faster than us;
+    # bot identity goes through the same gather so it doesn't block the
+    # event loop ahead of the others. Total wall time ≈ slowest one fetch.
     #
     # `return_exceptions=True` because `_github_paginate` only catches
     # HTTP-level failures (`not resp.ok`); raw `requests.ConnectionError`
@@ -806,17 +807,27 @@ async def run_review(args):
     # network blip cancels the gather and aborts run_review entirely —
     # losing the diff fetch + the review post we already have lined up.
     # Same posture the specialist gather (line ~939) uses.
-    bot_login = fetch_bot_login(bot_token)
     loop = asyncio.get_running_loop()
     fetch_results = await asyncio.gather(
+        loop.run_in_executor(None, fetch_bot_login, bot_token),
         loop.run_in_executor(None, fetch_issue_comments, args.repo, args.pr_number, bot_token),
         loop.run_in_executor(None, fetch_pr_reviews, args.repo, args.pr_number, bot_token),
         loop.run_in_executor(None, fetch_pr_review_comments, args.repo, args.pr_number, bot_token),
         return_exceptions=True,
     )
+    bot_login_result, *conversation_results = fetch_results
+    if isinstance(bot_login_result, BaseException):
+        print(
+            f"  [warn] fetch_bot_login failed: {bot_login_result!r} — degrading to None",
+            file=sys.stderr,
+        )
+        bot_login = None
+    else:
+        bot_login = bot_login_result
+
     fetch_labels = ("issue comments", "pr reviews", "inline comments")
     coerced: list[list[dict]] = []
-    for label, result in zip(fetch_labels, fetch_results):
+    for label, result in zip(fetch_labels, conversation_results):
         if isinstance(result, BaseException):
             print(
                 f"  [warn] fetch failed for {label}: {result!r} — degrading to empty",
@@ -830,7 +841,7 @@ async def run_review(args):
     # Bot-self filter (and the conversation block as a whole) only makes
     # sense when we know who the bot is. On a transient bot-identity
     # fetch failure, render "none" rather than risk emitting our own
-    # numbered findings as untrusted-but-uncfiltered <conv-comment>s
+    # numbered findings as untrusted-but-unfiltered <conv-comment>s
     # (which the agents are then told to flag duplicates against).
     if bot_login:
         pr_conv_block = build_conversation_block(

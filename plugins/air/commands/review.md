@@ -430,18 +430,25 @@ else
 fi
 ```
 
-Fetch all three GitHub conversation surfaces in parallel and merge into a single chronological block ready to drop into the PR Context block. Add `sort=created&direction=desc` to the comment endpoints — GitHub's default sort is ASC, so `?per_page=100` alone returns the OLDEST 100 on a chatty PR. Reviews don't accept sort params (no equivalent), but PRs with >100 review submissions are vanishingly rare:
+Fetch all three GitHub conversation surfaces in parallel and merge into a single chronological block. Use `--paginate` so we walk every page, not just the first 100; the merger's 100-entry cap then keeps the most-recent 100 AND emits `<conv-truncated total="N" shown="100"/>` when the cap actually binds. Add `sort=created&direction=desc` to the comment endpoints — GitHub's default sort is ASC, so without it a chatty PR's `--paginate` walks oldest-to-newest while we want newest-first ordering. Reviews don't accept sort params; PRs with >100 review submissions are vanishingly rare:
 ```bash
-gh api "repos/<owner>/<repo>/issues/<number>/comments?per_page=100&sort=created&direction=desc" $REPO_FLAG > "$AIR_TMP/conv-issues.json" 2>/dev/null &
-gh api "repos/<owner>/<repo>/pulls/<number>/reviews?per_page=100" $REPO_FLAG > "$AIR_TMP/conv-reviews.json" 2>/dev/null &
-gh api "repos/<owner>/<repo>/pulls/<number>/comments?per_page=100&sort=created&direction=desc" $REPO_FLAG > "$AIR_TMP/conv-inline.json" 2>/dev/null &
+gh api --paginate "repos/<owner>/<repo>/issues/<number>/comments?per_page=100&sort=created&direction=desc" $REPO_FLAG > "$AIR_TMP/conv-issues.json" 2>/dev/null &
+gh api --paginate "repos/<owner>/<repo>/pulls/<number>/reviews?per_page=100" $REPO_FLAG > "$AIR_TMP/conv-reviews.json" 2>/dev/null &
+gh api --paginate "repos/<owner>/<repo>/pulls/<number>/comments?per_page=100&sort=created&direction=desc" $REPO_FLAG > "$AIR_TMP/conv-inline.json" 2>/dev/null &
 wait
 
 # Merge → filter our own bot's reviews → cap at 100 most recent → truncate
 # bodies to 1500 chars → render <conv-comment> elements. Returns the
 # literal "none" if everything is empty/filtered, keeping the PR Context
 # prefix byte-stable across PRs of varying chattiness (cache-friendly).
-if [ -n "$AIR_PLUGIN_ROOT" ]; then
+if [ -z "$BOT_LOGIN" ]; then
+  # Mirror managed/review.py: with no bot identity, the bot-self filter
+  # is a no-op and our own ## Code Review numbering would leak into the
+  # block as untrusted-but-unfiltered <conv-comment>s. Render none and
+  # warn — same posture as the AIR_PLUGIN_ROOT-missing fallback below.
+  echo "warning: BOT_LOGIN unresolved (no prior review and gh api user empty) — rendering empty <pr-conversation>" >&2
+  PR_CONVERSATION="none"
+elif [ -n "$AIR_PLUGIN_ROOT" ]; then
   PR_CONVERSATION=$(python3 "$AIR_PLUGIN_ROOT/lib/pr_conversation.py" \
     --issues "$AIR_TMP/conv-issues.json" \
     --reviews "$AIR_TMP/conv-reviews.json" \
@@ -452,6 +459,12 @@ else
   # agents still get the rest of the context, just no conversation block.
   PR_CONVERSATION="none"
 fi
+
+# Belt-and-suspenders: if the python invocation crashed silently (broken
+# venv, partial install ImportError) PR_CONVERSATION would be empty, and
+# the downstream PR Context would render <pr-conversation>\n\n</pr-conversation>
+# instead of the byte-stable "none" sentinel — breaking prompt-cache reuse.
+: "${PR_CONVERSATION:=none}"
 ```
 
 Save as `PR_CONVERSATION`. Always set (defaults to `"none"`). Works cross-repo because all three fetches use `$REPO_FLAG` and the merge is local. The `<conv-comment>` schema is documented in `plugins/air/lib/pr_conversation.py` — agents see the rendered XML, not the raw API response.

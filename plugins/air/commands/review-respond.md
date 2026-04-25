@@ -71,19 +71,28 @@ else
   BOT_LOGIN=$(gh api user --jq '.login' 2>/dev/null)
 fi
 
-# Add sort=created&direction=desc to the comment endpoints — GitHub's
-# default sort is ASC, so without it `?per_page=100` returns the OLDEST
-# 100 on a chatty PR. Reviews don't accept sort params.
-gh api "repos/<owner>/<repo>/issues/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" 2>/dev/null > "$AIR_TMP/conv-issues.json" &
-gh api "repos/<owner>/<repo>/pulls/$PR_NUMBER/reviews?per_page=100" 2>/dev/null > "$AIR_TMP/conv-reviews.json" &
-gh api "repos/<owner>/<repo>/pulls/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" 2>/dev/null > "$AIR_TMP/conv-inline.json" &
+# Use --paginate so the merger sees every comment (and can fire the
+# <conv-truncated> marker accurately on chatty PRs). Add
+# sort=created&direction=desc to the comment endpoints — GitHub's
+# default sort is ASC, so paginate alone would walk oldest-first.
+# Reviews don't accept sort params.
+gh api --paginate "repos/<owner>/<repo>/issues/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" 2>/dev/null > "$AIR_TMP/conv-issues.json" &
+gh api --paginate "repos/<owner>/<repo>/pulls/$PR_NUMBER/reviews?per_page=100" 2>/dev/null > "$AIR_TMP/conv-reviews.json" &
+gh api --paginate "repos/<owner>/<repo>/pulls/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" 2>/dev/null > "$AIR_TMP/conv-inline.json" &
 wait
 
 if [ -z "${AIR_PLUGIN_ROOT:-}" ]; then
   AIR_PLUGIN_ROOT=$(ls -1d ~/.claude/plugins/cache/air/air/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')
 fi
 
-if [ -n "$AIR_PLUGIN_ROOT" ] && [ -d "$AIR_PLUGIN_ROOT" ]; then
+if [ -z "$BOT_LOGIN" ]; then
+  # Mirror managed: with no bot identity, render none rather than risk
+  # leaking the bot's own ## Code Review numbering as untrusted-but-
+  # unfiltered <conv-comment>s the responder is told to flag duplicates
+  # against.
+  echo "warning: BOT_LOGIN unresolved — rendering empty <pr-conversation>" >&2
+  PR_CONVERSATION="none"
+elif [ -n "$AIR_PLUGIN_ROOT" ] && [ -d "$AIR_PLUGIN_ROOT" ]; then
   PR_CONVERSATION=$(python3 "$AIR_PLUGIN_ROOT/lib/pr_conversation.py" \
     --issues "$AIR_TMP/conv-issues.json" \
     --reviews "$AIR_TMP/conv-reviews.json" \
@@ -93,6 +102,11 @@ else
   echo "warning: AIR_PLUGIN_ROOT not resolvable; <pr-conversation> will be 'none' for this respond run" >&2
   PR_CONVERSATION="none"
 fi
+
+# Belt-and-suspenders: if the python invocation crashed silently the var
+# would be empty and the PR Context would render an empty block instead
+# of the byte-stable "none" sentinel — breaking prompt-cache reuse.
+: "${PR_CONVERSATION:=none}"
 ```
 
 Save as `PR_CONVERSATION` for use in Respond Step 5b's PR Context block. Note that the responder will see its OWN prior `## Review Response` comments (those don't match the bot-self filter, which is `## Code Review`-prefix-only) — that's intentional: it helps the responder avoid contradicting prior responses.
