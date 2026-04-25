@@ -32,7 +32,8 @@ plugins/air/
 │   └── builtin-checks.sh      # Zero-config auto-detection (version mirror + badge)
 ├── lib/                 # Shared Python helpers (stdlib-only, called by CLI + managed)
 │   ├── meta.py                # Wiki-backed /air:learn trigger counter
-│   └── wiki_git.py            # Clone + commit-meta-with-retry
+│   ├── wiki_git.py            # Clone + commit-meta-with-retry
+│   └── pr_conversation.py     # Merge GitHub PR comments/reviews into <pr-conversation> agent context
 └── .claude-plugin/
     └── plugin.json      # Plugin metadata (name, version, author)
 

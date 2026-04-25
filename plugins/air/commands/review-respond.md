@@ -60,12 +60,23 @@ gh pr view $PR_NUMBER --json headRefOid,baseRefName --jq '{headRefOid, baseRefNa
 
 Same as Step 4 in `review.md` — fetch the *current* PR's conversation (issue comments + top-level reviews + inline review comments) and merge into a single `<pr-conversation>` block. The responder benefits from seeing whether other reviewers already disputed or accepted findings before claiming fixes.
 
+Bot-login resolution: prefer the author of any prior `## Code Review` comment on this PR (authoritative); fall back to `gh api user` (the current CLI user). On a developer's CLI, `gh api user` returns the *developer*, not the bot — without the prior-comment fallback, the bot-self filter is a no-op and the bot's prior numbered findings leak into `<pr-conversation>`:
 ```bash
-BOT_LOGIN=$(gh api user --jq '.login' 2>/dev/null)
+BOT_LOGIN=""
+PRIOR_BOT=$(gh api "repos/<owner>/<repo>/issues/$PR_NUMBER/comments" \
+  --jq '[.[] | select(.body | startswith("## Code Review"))] | last | .user.login' 2>/dev/null)
+if [ -n "$PRIOR_BOT" ] && [ "$PRIOR_BOT" != "null" ]; then
+  BOT_LOGIN="$PRIOR_BOT"
+else
+  BOT_LOGIN=$(gh api user --jq '.login' 2>/dev/null)
+fi
 
-gh api "repos/<owner>/<repo>/issues/$PR_NUMBER/comments?per_page=100" > "$AIR_TMP/conv-issues.json" 2>/dev/null &
-gh api "repos/<owner>/<repo>/pulls/$PR_NUMBER/reviews?per_page=100" > "$AIR_TMP/conv-reviews.json" 2>/dev/null &
-gh api "repos/<owner>/<repo>/pulls/$PR_NUMBER/comments?per_page=100" > "$AIR_TMP/conv-inline.json" 2>/dev/null &
+# Add sort=created&direction=desc to the comment endpoints — GitHub's
+# default sort is ASC, so without it `?per_page=100` returns the OLDEST
+# 100 on a chatty PR. Reviews don't accept sort params.
+gh api "repos/<owner>/<repo>/issues/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" 2>/dev/null > "$AIR_TMP/conv-issues.json" &
+gh api "repos/<owner>/<repo>/pulls/$PR_NUMBER/reviews?per_page=100" 2>/dev/null > "$AIR_TMP/conv-reviews.json" &
+gh api "repos/<owner>/<repo>/pulls/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" 2>/dev/null > "$AIR_TMP/conv-inline.json" &
 wait
 
 if [ -z "${AIR_PLUGIN_ROOT:-}" ]; then

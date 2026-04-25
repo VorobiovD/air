@@ -504,7 +504,7 @@ def build_pr_context(
     prior_review_body: str = "",
     prior_sha: str | None = None,
     dev_context: str = "",
-    pr_conversation: str = "none",
+    pr_conv_block: str = "none",
 ) -> str:
     """Build the PR Context block shared by every specialist session.
 
@@ -512,11 +512,13 @@ def build_pr_context(
     <pr-title>/<pr-body> wrapper tags and inject instructions into the trusted
     context.
 
-    `pr_conversation` carries the chronological discussion thread for this
+    `pr_conv_block` carries the chronological discussion thread for this
     PR (humans + other bots, bot-self-filtered) — built by
     `build_conversation_block` and dropped in unchanged. Defaults to "none"
     so callers that don't fetch it (e.g. older test paths) still produce a
-    valid block.
+    valid block. Named distinctly from the module-top `pr_conversation`
+    import to keep that reference unshadowed for any future code in this
+    function's scope.
 
     In `re-review` mode, appends the prior review body and any developer
     responses so specialists can classify previous findings as FIXED /
@@ -537,7 +539,7 @@ def build_pr_context(
 - Repo: {repo}
 - Review mode: {mode}
 - <pr-conversation>
-{pr_conversation}
+{pr_conv_block}
 </pr-conversation>
 - Wiki files directory: /workspace/wiki (pre-mounted — if empty, the repo has no wiki yet)
 
@@ -797,16 +799,49 @@ async def run_review(args):
     # paginated fetches serialize end-to-end (~1-2s); the bash path in
     # commands/review.md already runs them in parallel via `&` + `wait`,
     # so this brings managed to parity.
+    #
+    # `return_exceptions=True` because `_github_paginate` only catches
+    # HTTP-level failures (`not resp.ok`); raw `requests.ConnectionError`
+    # / `Timeout` / `SSLError` propagate. Without this, one transient
+    # network blip cancels the gather and aborts run_review entirely —
+    # losing the diff fetch + the review post we already have lined up.
+    # Same posture the specialist gather (line ~939) uses.
     bot_login = fetch_bot_login(bot_token)
     loop = asyncio.get_running_loop()
-    all_comments, pr_reviews_raw, pr_inline_raw = await asyncio.gather(
+    fetch_results = await asyncio.gather(
         loop.run_in_executor(None, fetch_issue_comments, args.repo, args.pr_number, bot_token),
         loop.run_in_executor(None, fetch_pr_reviews, args.repo, args.pr_number, bot_token),
         loop.run_in_executor(None, fetch_pr_review_comments, args.repo, args.pr_number, bot_token),
+        return_exceptions=True,
     )
-    pr_conversation = build_conversation_block(
-        all_comments, pr_reviews_raw, pr_inline_raw, bot_login
-    )
+    fetch_labels = ("issue comments", "pr reviews", "inline comments")
+    coerced: list[list[dict]] = []
+    for label, result in zip(fetch_labels, fetch_results):
+        if isinstance(result, BaseException):
+            print(
+                f"  [warn] fetch failed for {label}: {result!r} — degrading to empty",
+                file=sys.stderr,
+            )
+            coerced.append([])
+        else:
+            coerced.append(result)
+    all_comments, pr_reviews_raw, pr_inline_raw = coerced
+
+    # Bot-self filter (and the conversation block as a whole) only makes
+    # sense when we know who the bot is. On a transient bot-identity
+    # fetch failure, render "none" rather than risk emitting our own
+    # numbered findings as untrusted-but-uncfiltered <conv-comment>s
+    # (which the agents are then told to flag duplicates against).
+    if bot_login:
+        pr_conv_block = build_conversation_block(
+            all_comments, pr_reviews_raw, pr_inline_raw, bot_login
+        )
+    else:
+        print(
+            "  [warn] bot identity unresolved — rendering empty <pr-conversation>",
+            file=sys.stderr,
+        )
+        pr_conv_block = "none"
 
     # Re-review detection (only when not --fresh). Reuses the same
     # all_comments fetch above so we don't re-paginate the endpoint.
@@ -875,7 +910,7 @@ async def run_review(args):
         prior_review_body=(prior or {}).get("body", ""),
         prior_sha=prior_sha,
         dev_context=dev_context,
-        pr_conversation=pr_conversation,
+        pr_conv_block=pr_conv_block,
     )
 
     print(f"  {meta['title']} | +{meta['additions']}/-{meta['deletions']} | {meta['changed_files']} files")

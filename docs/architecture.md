@@ -39,7 +39,8 @@ VorobiovD/air/
 │   │   └── builtin-checks.sh         Zero-config manifest-version vs doc-mirror greps
 │   ├── lib/                        ← Shared Python helpers (stdlib-only)
 │   │   ├── meta.py                   `.air-meta.json` read/write + /air:learn trigger threshold
-│   │   └── wiki_git.py               clone + commit-meta-with-retry helpers
+│   │   ├── wiki_git.py               clone + commit-meta-with-retry helpers
+│   │   └── pr_conversation.py        merge GitHub PR comments/reviews into `<pr-conversation>` agent context
 │   └── .claude-plugin/
 │       └── plugin.json             Plugin manifest (version source of truth)
 │

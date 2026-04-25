@@ -418,16 +418,23 @@ Save as `PREVIOUS_PR_COMMENTS`. Cap at 5 PRs checked. Falls back gracefully if r
 
 **Current PR conversation context** (works cross-repo, ~3s for three parallel fetches):
 
-Resolve the bot's own login once so we can filter out our own prior `## Code Review` comments downstream (re-review delta tracking owns those — `<pr-conversation>` is broader background):
+Resolve the bot's own login so we can filter out our own prior `## Code Review` comments downstream (re-review delta tracking owns those — `<pr-conversation>` is broader background). Two-step resolution because `gh api user` returns the *current gh-CLI user*, which on a developer's CLI is the developer (not the bot). Prefer the author of any prior `## Code Review` comment on this PR — that's authoritative — and only fall back to `gh api user` if no prior review exists yet:
 ```bash
-BOT_LOGIN=$(gh api user --jq '.login' 2>/dev/null)
+BOT_LOGIN=""
+PRIOR_BOT=$(gh api "repos/<owner>/<repo>/issues/<number>/comments" $REPO_FLAG \
+  --jq '[.[] | select(.body | startswith("## Code Review"))] | last | .user.login' 2>/dev/null)
+if [ -n "$PRIOR_BOT" ] && [ "$PRIOR_BOT" != "null" ]; then
+  BOT_LOGIN="$PRIOR_BOT"
+else
+  BOT_LOGIN=$(gh api user --jq '.login' 2>/dev/null)
+fi
 ```
 
-Fetch all three GitHub conversation surfaces in parallel and merge into a single chronological block ready to drop into the PR Context block:
+Fetch all three GitHub conversation surfaces in parallel and merge into a single chronological block ready to drop into the PR Context block. Add `sort=created&direction=desc` to the comment endpoints — GitHub's default sort is ASC, so `?per_page=100` alone returns the OLDEST 100 on a chatty PR. Reviews don't accept sort params (no equivalent), but PRs with >100 review submissions are vanishingly rare:
 ```bash
-gh api "repos/<owner>/<repo>/issues/<number>/comments?per_page=100" $REPO_FLAG > "$AIR_TMP/conv-issues.json" 2>/dev/null &
+gh api "repos/<owner>/<repo>/issues/<number>/comments?per_page=100&sort=created&direction=desc" $REPO_FLAG > "$AIR_TMP/conv-issues.json" 2>/dev/null &
 gh api "repos/<owner>/<repo>/pulls/<number>/reviews?per_page=100" $REPO_FLAG > "$AIR_TMP/conv-reviews.json" 2>/dev/null &
-gh api "repos/<owner>/<repo>/pulls/<number>/comments?per_page=100" $REPO_FLAG > "$AIR_TMP/conv-inline.json" 2>/dev/null &
+gh api "repos/<owner>/<repo>/pulls/<number>/comments?per_page=100&sort=created&direction=desc" $REPO_FLAG > "$AIR_TMP/conv-inline.json" 2>/dev/null &
 wait
 
 # Merge → filter our own bot's reviews → cap at 100 most recent → truncate
