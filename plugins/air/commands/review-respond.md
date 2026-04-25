@@ -60,15 +60,18 @@ gh pr view $PR_NUMBER --json headRefOid,baseRefName --jq '{headRefOid, baseRefNa
 
 Same as Step 4 in `review.md` — fetch the *current* PR's conversation (issue comments + top-level reviews + inline review comments) and merge into a single `<pr-conversation>` block. The responder benefits from seeing whether other reviewers already disputed or accepted findings before claiming fixes.
 
-Bot-login resolution: prefer the author of any prior `## Code Review` comment on this PR (authoritative); fall back to `gh api user` (the current CLI user). On a developer's CLI, `gh api user` returns the *developer*, not the bot — without the prior-comment fallback, the bot-self filter is a no-op and the bot's prior numbered findings leak into `<pr-conversation>`:
+Bot-login resolution: prefer the author of any prior `## Code Review` comment on this PR (authoritative); fall back to `gh api user` (the current CLI user). On a developer's CLI, `gh api user` returns the *developer*, not the bot — without the prior-comment fallback, the bot-self filter is a no-op and the bot's prior numbered findings leak into `<pr-conversation>`. The probe uses the same `--paginate&per_page=100&sort=created&direction=desc` shape as the conversation fetches below; the trailing `\n` on `## Code Review\n` matches `BOT_REVIEW_PREFIXES` in `pr_conversation.py` and rejects `## Code Reviewers Guide`-style lookalikes:
 ```bash
 BOT_LOGIN=""
-PRIOR_BOT=$(gh api "repos/<owner>/<repo>/issues/$PR_NUMBER/comments" \
-  --jq '[.[] | select(.body | startswith("## Code Review"))] | last | .user.login' 2>/dev/null)
+PRIOR_BOT=$(gh api --paginate "repos/<owner>/<repo>/issues/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" \
+  --jq '[.[] | select(.body | startswith("## Code Review\n"))] | first | .user.login' 2>/dev/null)
 if [ -n "$PRIOR_BOT" ] && [ "$PRIOR_BOT" != "null" ]; then
   BOT_LOGIN="$PRIOR_BOT"
 else
-  BOT_LOGIN=$(gh api user --jq '.login' 2>/dev/null)
+  RAW_LOGIN=$(gh api user --jq '.login' 2>/dev/null)
+  if [ -n "$RAW_LOGIN" ] && [ "$RAW_LOGIN" != "null" ]; then
+    BOT_LOGIN="$RAW_LOGIN"
+  fi
 fi
 
 # Use --paginate so the merger sees every comment (and can fire the

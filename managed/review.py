@@ -380,8 +380,16 @@ def fetch_issue_comments(repo: str, pr_number: int, token: str) -> list[dict]:
     can share the full comment list instead of paginating the same
     endpoint twice per re-review (doubles API calls on long-discussion
     PRs).
+
+    `sort=created&direction=desc` is symmetric with the bash CLI fetch
+    URL and gives newest-first ordering. In the happy path the merger
+    re-sorts records anyway. The win is partial-fetch resilience: if
+    `_github_paginate` returns early on a transient `not resp.ok`, the
+    caller gets the *newest* slice (what specialists need) instead of
+    the oldest slice. `find_prior_review` reads this same list and is
+    written for desc ordering — keep them in sync.
     """
-    url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments?per_page=100"
+    url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments?per_page=100&sort=created&direction=desc"
     return _github_paginate(url, token)
 
 
@@ -404,9 +412,10 @@ def fetch_pr_review_comments(repo: str, pr_number: int, token: str) -> list[dict
     exists but is GitHub's legacy diff-position int and is often null on
     outdated comments). Used by `build_conversation_block` so reviewer
     agents can locate prior inline feedback when picking up a PR
-    mid-conversation.
+    mid-conversation. Same `sort=created&direction=desc` as issue
+    comments for partial-fetch resilience.
     """
-    url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments?per_page=100"
+    url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments?per_page=100&sort=created&direction=desc"
     return _github_paginate(url, token)
 
 
@@ -416,14 +425,8 @@ def build_conversation_block(
     inline: list[dict],
     bot_login: str | None,
 ) -> str:
-    """Render the <pr-conversation> body for the agent context block.
-
-    Thin wrapper over the shared merger imported at module top — kept as
-    its own function so callers in run_review have a single, named entry
-    point to pass the three raw API responses into. Returns the literal
-    string "none" when there's nothing to render, keeping the PR Context
-    byte-stable across runs (prompt cache stays warm).
-    """
+    """Thin pass-through to `pr_conversation.build_pr_conversation` — see
+    that function for the filter/cap/truncate/render contract."""
     return pr_conversation.build_pr_conversation(issues, reviews, inline, bot_login)
 
 
@@ -433,13 +436,18 @@ def find_prior_review(comments: list[dict], bot_login: str) -> dict | None:
     Filters on comment author so a PR participant can't hijack the
     auto-detect flow by posting a fake review body. Takes an already-
     fetched comment list to avoid re-paginating the endpoint.
+
+    Assumes `comments` arrived in desc order (newest-first), matching
+    `fetch_issue_comments`'s URL params. Walks the list and returns on
+    first match — that's the most recent. Walking + early-return is
+    also cheaper than building a full filtered list when the bot's
+    review is among the first few entries (the common case).
     """
-    reviews = [
-        c for c in comments
-        if (c.get("user") or {}).get("login") == bot_login
-        and (c.get("body") or "").startswith(REVIEW_COMMENT_PREFIXES)
-    ]
-    return reviews[-1] if reviews else None
+    for c in comments:
+        if (c.get("user") or {}).get("login") == bot_login \
+           and (c.get("body") or "").startswith(REVIEW_COMMENT_PREFIXES):
+            return c
+    return None
 
 
 def extract_reviewed_at_sha(body: str) -> str | None:

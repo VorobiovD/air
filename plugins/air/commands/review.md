@@ -418,15 +418,23 @@ Save as `PREVIOUS_PR_COMMENTS`. Cap at 5 PRs checked. Falls back gracefully if r
 
 **Current PR conversation context** (works cross-repo, ~3s for three parallel fetches):
 
-Resolve the bot's own login so we can filter out our own prior `## Code Review` comments downstream (re-review delta tracking owns those — `<pr-conversation>` is broader background). Two-step resolution because `gh api user` returns the *current gh-CLI user*, which on a developer's CLI is the developer (not the bot). Prefer the author of any prior `## Code Review` comment on this PR — that's authoritative — and only fall back to `gh api user` if no prior review exists yet:
+Resolve the bot's own login so we can filter out our own prior `## Code Review` comments downstream (re-review delta tracking owns those — `<pr-conversation>` is broader background). Two-step resolution because `gh api user` returns the *current gh-CLI user*, which on a developer's CLI is the developer (not the bot). Prefer the author of any prior `## Code Review` comment on this PR — that's authoritative — and only fall back to `gh api user` if no prior review exists yet.
+
+The probe must use the same `--paginate&per_page=100&sort=created&direction=desc` shape the conversation fetches use below — without `--paginate`, GitHub's default `per_page=30` + ASC means we'd see the OLDEST 30 comments on a chatty PR and miss the most-recent bot review. With desc + `first`, we pick the newest matching bot review. The trailing `\n` on `## Code Review\n` mirrors `BOT_REVIEW_PREFIXES` in `pr_conversation.py` — without it, a comment titled `## Code Reviewers Guide` would falsely match and we'd treat its author as the bot:
 ```bash
 BOT_LOGIN=""
-PRIOR_BOT=$(gh api "repos/<owner>/<repo>/issues/<number>/comments" $REPO_FLAG \
-  --jq '[.[] | select(.body | startswith("## Code Review"))] | last | .user.login' 2>/dev/null)
+PRIOR_BOT=$(gh api --paginate "repos/<owner>/<repo>/issues/<number>/comments?per_page=100&sort=created&direction=desc" $REPO_FLAG \
+  --jq '[.[] | select(.body | startswith("## Code Review\n"))] | first | .user.login' 2>/dev/null)
 if [ -n "$PRIOR_BOT" ] && [ "$PRIOR_BOT" != "null" ]; then
   BOT_LOGIN="$PRIOR_BOT"
 else
-  BOT_LOGIN=$(gh api user --jq '.login' 2>/dev/null)
+  RAW_LOGIN=$(gh api user --jq '.login' 2>/dev/null)
+  # Treat literal "null" the same as empty — jq emits "null" when .login
+  # is missing/null on a malformed API response; the downstream `[ -z ]`
+  # check would otherwise treat it as a real login and break filtering.
+  if [ -n "$RAW_LOGIN" ] && [ "$RAW_LOGIN" != "null" ]; then
+    BOT_LOGIN="$RAW_LOGIN"
+  fi
 fi
 ```
 
