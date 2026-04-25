@@ -470,10 +470,21 @@ def filter_comments_after(
     `created_at`, and timestamps are second-precision so strict `>`
     would drop any comment posted in the same second as the prior
     review.
+
+    Returns the matches in chronological (oldest-first) order regardless
+    of input order. `fetch_issue_comments` returns desc-sorted (newest
+    first) for partial-fetch resilience; the re-review agent classifies
+    findings via developer responses' chronology, so a "fixed" then
+    "actually reverted" sequence must arrive in that order — not the
+    reverse.
     """
     if after_comment_id <= 0:
         return []
-    return [c for c in comments if (c.get("id") or 0) > after_comment_id]
+    matches = [c for c in comments if (c.get("id") or 0) > after_comment_id]
+    # Comment IDs increase monotonically with creation time; sort ascending
+    # to recover chronological order regardless of input ordering.
+    matches.sort(key=lambda c: c.get("id") or 0)
+    return matches
 
 
 def format_developer_responses(comments: list[dict]) -> str:

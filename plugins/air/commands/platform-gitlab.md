@@ -180,7 +180,7 @@ glab api "projects/$PROJECT_ID/merge_requests/<iid>/notes?per_page=100" 2>/dev/n
 # would only redirect jq's stderr, leaving glab's rate-limit / 403 /
 # network errors visible in the terminal mid-review.
 glab api "projects/$PROJECT_ID/merge_requests/<iid>/discussions?per_page=100" 2>/dev/null \
-  | jq '[.[] | .notes[] | select(.position != null) | {user: {login: .author.username}, body: .body, path: .position.new_path, line: .position.new_line, created_at: .created_at}]' \
+  | jq '[.[] | .notes[] | select(.position != null) | {user: {login: .author.username}, body: .body, path: (.position.new_path // .position.old_path), line: (.position.new_line // .position.old_line), created_at: .created_at}]' \
   > "$AIR_TMP/conv-inline.json" &
 echo '[]' > "$AIR_TMP/conv-reviews.json"  # No reviews equivalent on GitLab.
 wait
