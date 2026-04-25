@@ -61,7 +61,7 @@ def _load_json_array(path: Path | None) -> list[dict]:
 
 
 def _attr_escape(s: str) -> str:
-    return html.escape(str(s), quote=True)
+    return html.escape(s, quote=True)
 
 
 def _normalize(entry: dict, kind: str) -> dict | None:

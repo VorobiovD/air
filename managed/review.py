@@ -422,9 +422,8 @@ def find_prior_review(comments: list[dict], bot_login: str) -> dict | None:
 
     Assumes `comments` arrived in desc order (newest-first), matching
     `fetch_issue_comments`'s URL params. Walks the list and returns on
-    first match — that's the most recent. Walking + early-return is
-    also cheaper than building a full filtered list when the bot's
-    review is among the first few entries (the common case).
+    first match so we get the deterministically newest bot review
+    without materializing a full filtered list.
     """
     for c in comments:
         if (c.get("user") or {}).get("login") == bot_login \
@@ -795,7 +794,7 @@ async def run_review(args):
     # / `Timeout` / `SSLError` propagate. Without this, one transient
     # network blip cancels the gather and aborts run_review entirely —
     # losing the diff fetch + the review post we already have lined up.
-    # Same posture the specialist gather (line ~939) uses.
+    # Same posture as the SPECIALIST_AGENTS gather later in this function.
     loop = asyncio.get_running_loop()
     fetch_results = await asyncio.gather(
         loop.run_in_executor(None, fetch_bot_login, bot_token),

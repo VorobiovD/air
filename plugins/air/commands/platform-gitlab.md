@@ -162,9 +162,17 @@ Concrete bash to feed the merger on GitLab. **Both** the `/notes` and `/discussi
 ```bash
 # /notes — top-level discussion. Remap username → user.login + flatten
 # so the merger (which expects GitHub-shaped {user: {login}, body, ...})
-# accepts the entries instead of silently dropping them.
+# accepts the entries instead of silently dropping them. The select()
+# filter drops two classes of entries the merger shouldn't surface:
+#   - system notes (`system: true`) — auto-generated GitLab events like
+#     "added 1 commit", "approved this merge request", milestone changes;
+#     every push generates one and they'd crowd out real comments under
+#     the 100-entry cap.
+#   - inline-positioned notes (`position` non-null) — already pulled by
+#     the /discussions stanza below; without this guard each inline note
+#     would appear twice in <pr-conversation>.
 glab api "projects/$PROJECT_ID/merge_requests/<iid>/notes?per_page=100" 2>/dev/null \
-  | jq '[.[] | {user: {login: .author.username}, body: .body, created_at: .created_at}]' \
+  | jq '[.[] | select(.position == null and .system != true) | {user: {login: .author.username}, body: .body, created_at: .created_at}]' \
   > "$AIR_TMP/conv-issues.json" &
 # /discussions — inline diff comments. Same remap, plus flatten the
 # nested .notes[] and pull file:line out of .position.

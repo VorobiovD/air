@@ -418,13 +418,20 @@ Save as `PREVIOUS_PR_COMMENTS`. Cap at 5 PRs checked. Falls back gracefully if r
 
 **Current PR conversation context** (works cross-repo, ~3s for three parallel fetches):
 
-Resolve the bot's own login so we can filter out our own prior `## Code Review` comments downstream (re-review delta tracking owns those — `<pr-conversation>` is broader background). Two-step resolution because `gh api user` returns the *current gh-CLI user*, which on a developer's CLI is the developer (not the bot). Prefer the author of any prior `## Code Review` comment on this PR — that's authoritative — and only fall back to `gh api user` if no prior review exists yet.
+Fetch all three GitHub conversation surfaces in parallel. Use `--paginate` so we walk every page, not just the first 100; the merger's 100-entry cap then keeps the most-recent 100 AND emits `<conv-truncated total="N" shown="100"/>` when the cap actually binds. Add `sort=created&direction=desc` to the comment endpoints — GitHub's default sort is ASC, so without it a chatty PR's `--paginate` walks oldest-to-newest while we want newest-first ordering. Reviews don't accept sort params; PRs with >100 review submissions are vanishingly rare:
+```bash
+gh api --paginate "repos/<owner>/<repo>/issues/<number>/comments?per_page=100&sort=created&direction=desc" $REPO_FLAG > "$AIR_TMP/conv-issues.json" 2>/dev/null &
+gh api --paginate "repos/<owner>/<repo>/pulls/<number>/reviews?per_page=100" $REPO_FLAG > "$AIR_TMP/conv-reviews.json" 2>/dev/null &
+gh api --paginate "repos/<owner>/<repo>/pulls/<number>/comments?per_page=100&sort=created&direction=desc" $REPO_FLAG > "$AIR_TMP/conv-inline.json" 2>/dev/null &
+wait
+```
 
-The probe must use the same `--paginate&per_page=100&sort=created&direction=desc` shape the conversation fetches use below — without `--paginate`, GitHub's default `per_page=30` + ASC means we'd see the OLDEST 30 comments on a chatty PR and miss the most-recent bot review. With desc + `first`, we pick the newest matching bot review. The trailing `\n` on `## Code Review\n` mirrors `BOT_REVIEW_PREFIXES` in `pr_conversation.py` — without it, a comment titled `## Code Reviewers Guide` would falsely match and we'd treat its author as the bot:
+Now resolve the bot's own login so we can filter out our own prior `## Code Review` comments downstream (re-review delta tracking owns those — `<pr-conversation>` is broader background). Two-step resolution because `gh api user` returns the *current gh-CLI user*, which on a developer's CLI is the developer (not the bot). Prefer the author of any prior `## Code Review` comment on this PR — that's authoritative — and only fall back to `gh api user` if no prior review exists yet.
+
+The probe reads `conv-issues.json` we just fetched (no extra round trip) and applies the same `## Code Review\n` prefix the merger uses (`BOT_REVIEW_PREFIXES` in `pr_conversation.py`). The trailing `\n` is load-bearing — without it, a comment titled `## Code Reviewers Guide` would falsely match and we'd treat its author as the bot:
 ```bash
 BOT_LOGIN=""
-PRIOR_BOT=$(gh api --paginate "repos/<owner>/<repo>/issues/<number>/comments?per_page=100&sort=created&direction=desc" $REPO_FLAG \
-  --jq '[.[] | select(.body | startswith("## Code Review\n"))] | first | .user.login' 2>/dev/null)
+PRIOR_BOT=$(jq -r '[.[] | select(.body | startswith("## Code Review\n"))] | first | .user.login // empty' "$AIR_TMP/conv-issues.json" 2>/dev/null)
 if [ -n "$PRIOR_BOT" ] && [ "$PRIOR_BOT" != "null" ]; then
   BOT_LOGIN="$PRIOR_BOT"
 else
@@ -436,14 +443,6 @@ else
     BOT_LOGIN="$RAW_LOGIN"
   fi
 fi
-```
-
-Fetch all three GitHub conversation surfaces in parallel and merge into a single chronological block. Use `--paginate` so we walk every page, not just the first 100; the merger's 100-entry cap then keeps the most-recent 100 AND emits `<conv-truncated total="N" shown="100"/>` when the cap actually binds. Add `sort=created&direction=desc` to the comment endpoints — GitHub's default sort is ASC, so without it a chatty PR's `--paginate` walks oldest-to-newest while we want newest-first ordering. Reviews don't accept sort params; PRs with >100 review submissions are vanishingly rare:
-```bash
-gh api --paginate "repos/<owner>/<repo>/issues/<number>/comments?per_page=100&sort=created&direction=desc" $REPO_FLAG > "$AIR_TMP/conv-issues.json" 2>/dev/null &
-gh api --paginate "repos/<owner>/<repo>/pulls/<number>/reviews?per_page=100" $REPO_FLAG > "$AIR_TMP/conv-reviews.json" 2>/dev/null &
-gh api --paginate "repos/<owner>/<repo>/pulls/<number>/comments?per_page=100&sort=created&direction=desc" $REPO_FLAG > "$AIR_TMP/conv-inline.json" 2>/dev/null &
-wait
 
 # Merge → filter our own bot's reviews → cap at 100 most recent → truncate
 # bodies to 1500 chars → render <conv-comment> elements. Returns the
@@ -456,15 +455,16 @@ if [ -z "$BOT_LOGIN" ]; then
   # warn — same posture as the AIR_PLUGIN_ROOT-missing fallback below.
   echo "warning: BOT_LOGIN unresolved (no prior review and gh api user empty) — rendering empty <pr-conversation>" >&2
   PR_CONVERSATION="none"
-elif [ -n "$AIR_PLUGIN_ROOT" ]; then
+elif [ -n "$AIR_PLUGIN_ROOT" ] && [ -d "$AIR_PLUGIN_ROOT" ]; then
   PR_CONVERSATION=$(python3 "$AIR_PLUGIN_ROOT/lib/pr_conversation.py" \
     --issues "$AIR_TMP/conv-issues.json" \
     --reviews "$AIR_TMP/conv-reviews.json" \
     --inline "$AIR_TMP/conv-inline.json" \
     --bot-login "$BOT_LOGIN")
 else
-  # Step 0 already warned and cleared AIR_PLUGIN_ROOT — degrade gracefully:
-  # agents still get the rest of the context, just no conversation block.
+  # Step 0 already warned and cleared AIR_PLUGIN_ROOT (or it resolved to a
+  # non-existent directory). Degrade gracefully: agents still get the rest
+  # of the context, just no conversation block.
   PR_CONVERSATION="none"
 fi
 

@@ -60,11 +60,21 @@ gh pr view $PR_NUMBER --json headRefOid,baseRefName --jq '{headRefOid, baseRefNa
 
 Same as Step 4 in `review.md` — fetch the *current* PR's conversation (issue comments + top-level reviews + inline review comments) and merge into a single `<pr-conversation>` block. The responder benefits from seeing whether other reviewers already disputed or accepted findings before claiming fixes.
 
-Bot-login resolution: prefer the author of any prior `## Code Review` comment on this PR (authoritative); fall back to `gh api user` (the current CLI user). On a developer's CLI, `gh api user` returns the *developer*, not the bot — without the prior-comment fallback, the bot-self filter is a no-op and the bot's prior numbered findings leak into `<pr-conversation>`. The probe uses the same `--paginate&per_page=100&sort=created&direction=desc` shape as the conversation fetches below; the trailing `\n` on `## Code Review\n` matches `BOT_REVIEW_PREFIXES` in `pr_conversation.py` and rejects `## Code Reviewers Guide`-style lookalikes:
+**Note:** `--respond` is **same-repo only** by design — the developer's local working tree is the source of truth for fixes, so cross-repo Respond doesn't make sense. None of the `gh api` calls below thread `$REPO_FLAG` (which isn't set in this flow anyway).
+
+Fetch all three GitHub conversation surfaces in parallel first, then probe `conv-issues.json` for the bot-login (one fewer `/issues/<n>/comments` round trip than re-paginating the same endpoint just for the probe). Use `--paginate` so the merger sees every comment and can fire the `<conv-truncated>` marker accurately. Add `sort=created&direction=desc` to the comment endpoints — GitHub's default sort is ASC, so paginate alone would walk oldest-first. Reviews don't accept sort params.
+
+```bash
+gh api --paginate "repos/<owner>/<repo>/issues/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" 2>/dev/null > "$AIR_TMP/conv-issues.json" &
+gh api --paginate "repos/<owner>/<repo>/pulls/$PR_NUMBER/reviews?per_page=100" 2>/dev/null > "$AIR_TMP/conv-reviews.json" &
+gh api --paginate "repos/<owner>/<repo>/pulls/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" 2>/dev/null > "$AIR_TMP/conv-inline.json" &
+wait
+```
+
+Bot-login resolution: prefer the author of any prior `## Code Review` comment on this PR (authoritative); fall back to `gh api user` (the current CLI user). On a developer's CLI, `gh api user` returns the *developer*, not the bot — without the prior-comment fallback, the bot-self filter is a no-op and the bot's prior numbered findings leak into `<pr-conversation>`. Reads `conv-issues.json` we just fetched; the trailing `\n` on `## Code Review\n` matches `BOT_REVIEW_PREFIXES` in `pr_conversation.py` and rejects `## Code Reviewers Guide`-style lookalikes:
 ```bash
 BOT_LOGIN=""
-PRIOR_BOT=$(gh api --paginate "repos/<owner>/<repo>/issues/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" \
-  --jq '[.[] | select(.body | startswith("## Code Review\n"))] | first | .user.login' 2>/dev/null)
+PRIOR_BOT=$(jq -r '[.[] | select(.body | startswith("## Code Review\n"))] | first | .user.login // empty' "$AIR_TMP/conv-issues.json" 2>/dev/null)
 if [ -n "$PRIOR_BOT" ] && [ "$PRIOR_BOT" != "null" ]; then
   BOT_LOGIN="$PRIOR_BOT"
 else
@@ -73,16 +83,6 @@ else
     BOT_LOGIN="$RAW_LOGIN"
   fi
 fi
-
-# Use --paginate so the merger sees every comment (and can fire the
-# <conv-truncated> marker accurately on chatty PRs). Add
-# sort=created&direction=desc to the comment endpoints — GitHub's
-# default sort is ASC, so paginate alone would walk oldest-first.
-# Reviews don't accept sort params.
-gh api --paginate "repos/<owner>/<repo>/issues/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" 2>/dev/null > "$AIR_TMP/conv-issues.json" &
-gh api --paginate "repos/<owner>/<repo>/pulls/$PR_NUMBER/reviews?per_page=100" 2>/dev/null > "$AIR_TMP/conv-reviews.json" &
-gh api --paginate "repos/<owner>/<repo>/pulls/$PR_NUMBER/comments?per_page=100&sort=created&direction=desc" 2>/dev/null > "$AIR_TMP/conv-inline.json" &
-wait
 
 if [ -z "${AIR_PLUGIN_ROOT:-}" ]; then
   AIR_PLUGIN_ROOT=$(ls -1d ~/.claude/plugins/cache/air/air/*/ 2>/dev/null | sort -V | tail -1 | sed 's:/$::')
