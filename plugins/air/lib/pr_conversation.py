@@ -26,7 +26,17 @@ from pathlib import Path
 
 DEFAULT_MAX_ENTRIES = 100
 DEFAULT_MAX_BODY = 1500
-BOT_PREFIX = "## Code Review"
+
+# Single source of truth for what the bot's own review comments look like.
+# Used both here (to filter the bot's own ## Code Review out of the
+# conversation block) and by managed/review.py (to detect a prior review
+# for re-review delta tracking). Trailing `\n` guards against false
+# matches on documentation lines like "## Code Reviewers Guide" — login
+# filtering already handles spoofing, but defense in depth.
+BOT_REVIEW_PREFIXES: tuple[str, ...] = (
+    "## Code Review\n",
+    "## Code Review (Re-review)\n",
+)
 
 
 def _load_json_array(path: Path | None) -> list[dict]:
@@ -105,7 +115,7 @@ def _is_bot_self(record: dict, bot_login: str | None) -> bool:
         return False
     if record["author"] != bot_login:
         return False
-    return record["body"].startswith(BOT_PREFIX)
+    return record["body"].startswith(BOT_REVIEW_PREFIXES)
 
 
 def _truncate(body: str, max_chars: int) -> str:
@@ -144,18 +154,11 @@ def build_pr_conversation(
     max_body: int = DEFAULT_MAX_BODY,
 ) -> str:
     records: list[dict] = []
-    for entry in issues:
-        r = _normalize(entry, "issue")
-        if r is not None:
-            records.append(r)
-    for entry in reviews:
-        r = _normalize(entry, "review")
-        if r is not None:
-            records.append(r)
-    for entry in inline:
-        r = _normalize(entry, "inline")
-        if r is not None:
-            records.append(r)
+    for entries, kind in [(issues, "issue"), (reviews, "review"), (inline, "inline")]:
+        for entry in entries:
+            r = _normalize(entry, kind)
+            if r is not None:
+                records.append(r)
 
     records = [r for r in records if not _is_bot_self(r, bot_login)]
     records.sort(key=lambda r: r["ts"])

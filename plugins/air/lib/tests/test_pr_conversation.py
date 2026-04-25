@@ -9,8 +9,6 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
-
 HERE = Path(__file__).resolve().parent
 LIB = HERE.parent
 sys.path.insert(0, str(LIB))
@@ -73,6 +71,37 @@ def test_keeps_bot_response_comments():
     out = pc.build_pr_conversation(issues, [], [], "bot")
     assert "## Review Response" in out
     assert "## Code Review" not in out
+
+
+def test_filter_bot_re_review_prefix():
+    """`## Code Review (Re-review)` is also a bot-self header — locks
+    in that BOT_REVIEW_PREFIXES covers both anchored variants. Without
+    this test, a future regression that drops one tuple element would
+    silently re-introduce duplicate bot reviews into the conversation
+    block."""
+    issues = [
+        _issue(
+            "bot",
+            "## Code Review (Re-review)\n\n_Re-reviewed at `abc1234`..._",
+            "2026-01-01T01:00:00Z",
+        ),
+        _issue("alice", "follow-up", "2026-01-01T02:00:00Z"),
+    ]
+    out = pc.build_pr_conversation(issues, [], [], "bot")
+    assert "## Code Review" not in out
+    assert "alice" in out
+
+
+def test_lookalike_header_not_filtered():
+    """A doc-header like `## Code Reviewers Guide` posted by the bot
+    must NOT be filtered — the trailing `\\n` in BOT_REVIEW_PREFIXES
+    is a guard against this. Login filtering compounds, but defense in
+    depth requires the prefix to be tight."""
+    issues = [
+        _issue("bot", "## Code Reviewers Guide\n\n...", "2026-01-01T01:00:00Z"),
+    ]
+    out = pc.build_pr_conversation(issues, [], [], "bot")
+    assert "Reviewers Guide" in out
 
 
 def test_no_bot_login_filters_nothing():

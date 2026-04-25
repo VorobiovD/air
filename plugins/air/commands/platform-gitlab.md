@@ -160,10 +160,13 @@ Field mapping for the merger (each note → one normalized record):
 
 Concrete bash to feed the merger on GitLab:
 ```bash
-glab api "projects/$PROJECT_ID/merge_requests/<iid>/notes?per_page=100" > "$AIR_TMP/conv-issues.json" 2>/dev/null &
-glab api "projects/$PROJECT_ID/merge_requests/<iid>/discussions?per_page=100" \
+glab api "projects/$PROJECT_ID/merge_requests/<iid>/notes?per_page=100" 2>/dev/null > "$AIR_TMP/conv-issues.json" &
+# Anchor `2>/dev/null` to `glab api` itself — `cmd | jq > file 2>/dev/null`
+# would only redirect jq's stderr, leaving glab's rate-limit / 403 /
+# network errors visible in the terminal mid-review.
+glab api "projects/$PROJECT_ID/merge_requests/<iid>/discussions?per_page=100" 2>/dev/null \
   | jq '[.[] | .notes[] | select(.position != null) | {user: {login: .author.username}, body: .body, path: .position.new_path, line: .position.new_line, created_at: .created_at}]' \
-  > "$AIR_TMP/conv-inline.json" 2>/dev/null &
+  > "$AIR_TMP/conv-inline.json" &
 echo '[]' > "$AIR_TMP/conv-reviews.json"  # No reviews equivalent on GitLab.
 wait
 ```
@@ -172,7 +175,7 @@ The merger's `--bot-login` flag still applies — pass the GitLab bot username (
 
 Note: PUT not PATCH. The note ID comes from the initial notes query (`.id` field in the response).
 
-### 7. Nested Project Paths
+### 8. Nested Project Paths
 
 GitLab allows `group/subgroup/project` paths. When using the API with a path instead of numeric ID, URL-encode slashes:
 ```bash
@@ -183,7 +186,7 @@ glab api "projects/$ENCODED_PATH" 2>/dev/null | jq -r '.id'
 
 Alternatively, resolve the numeric project ID once and use it for all subsequent API calls.
 
-### 8. MR URL Parsing (Cross-Repo Detection)
+### 9. MR URL Parsing (Cross-Repo Detection)
 
 GitHub PR URL: `https://github.com/owner/repo/pull/123`
 GitLab MR URL: `https://gitlab.com/group/project/-/merge_requests/123`

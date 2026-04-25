@@ -99,7 +99,7 @@ VorobiovD/air/
   ├── Step 2: Smart default (check existing reviews, auto re-review)
   ├── Step 3: Load context (CLAUDE.md, wiki patterns, project memory, session context)
   ├── Step 3.5: First-run project discovery (PROJECT-PROFILE.md + GLOSSARY.md + `.air-checks.sh` [v1.6.0+])
-  ├── Step 4: Fetch PR data (batched API, diff, commits, blame, churn, previous PR comments)
+  ├── Step 4: Fetch PR data (batched API, diff, commits, blame, churn, previous PR comments, current PR conversation)
   ├── Step 5: Pre-flight checks (state, draft, CI, conflict markers, file complexity, pure-promotion detection)
   ├── Step 6: Re-review mode (inter-diff, developer responses, FIXED/NOT FIXED tracking)
   │

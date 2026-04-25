@@ -38,6 +38,18 @@ from anthropic import Anthropic, APIStatusError, AsyncAnthropic
 
 from api import list_agents, find_environment
 
+# Make plugins/air/lib importable so we share stdlib helpers (the
+# conversation merger and the review-header constant) with the CLI path
+# at top-level rather than via per-call sys.path inserts. Crash loudly if
+# the layout is broken — degrading silently here would let managed runs
+# diverge from the CLI on bot-self-filter behavior.
+_AIR_LIB_DIR = Path(__file__).resolve().parent.parent / "plugins" / "air" / "lib"
+if str(_AIR_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_AIR_LIB_DIR))
+
+import pr_conversation  # noqa: E402  (deferred import; relies on sys.path tweak above)
+from pr_conversation import BOT_REVIEW_PREFIXES  # noqa: E402
+
 
 # Tracks live session IDs so cleanup handlers can send interrupts to
 # anything still running when the driver dies unexpectedly (CI job killed,
@@ -306,9 +318,12 @@ def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
     return resp.text
 
 
-# Anchored prefixes so we don't match human comments quoting an unrelated
-# doc like "## Code Reviewers" — require the next char to be a newline.
-REVIEW_COMMENT_PREFIXES = ("## Code Review\n", "## Code Review (Re-review)\n")
+# Bot-review header is centralized in plugins/air/lib/pr_conversation.py
+# so CLI (review.md / review-self.md) and managed share one source of
+# truth. We import it at module top and re-export under the historical
+# name so existing references in this file (and any downstream caller)
+# don't have to change.
+REVIEW_COMMENT_PREFIXES = BOT_REVIEW_PREFIXES
 # Require a full 40-char SHA. A shorter match would break the strict
 # `prior_sha == head_sha` equality at the skip gate, silently triggering a
 # costly full review instead of no-op.
@@ -401,27 +416,12 @@ def build_conversation_block(
 ) -> str:
     """Render the <pr-conversation> body for the agent context block.
 
-    Lazy-imports plugins/air/lib/pr_conversation so this module's import
-    graph stays clean for non-review entry points (api.py / setup.py /
-    test-session.py); the merger is stdlib-only so the cost is just a
-    sys.path insert + module load.
-
-    Returns the literal string "none" when there's nothing to render —
-    keeps the PR Context byte-stable across runs (prompt cache stays warm)
-    and lets the caller drop it in unconditionally.
+    Thin wrapper over the shared merger imported at module top — kept as
+    its own function so callers in run_review have a single, named entry
+    point to pass the three raw API responses into. Returns the literal
+    string "none" when there's nothing to render, keeping the PR Context
+    byte-stable across runs (prompt cache stays warm).
     """
-    air_root = Path(__file__).resolve().parent.parent
-    lib_dir = air_root / "plugins" / "air" / "lib"
-    if str(lib_dir) not in sys.path:
-        sys.path.insert(0, str(lib_dir))
-    try:
-        import pr_conversation  # type: ignore
-    except ImportError as e:
-        # Lib path is part of the same checkout — this should never fire
-        # in practice. Degrade gracefully so a layout glitch doesn't kill
-        # the review.
-        print(f"  [warn] pr_conversation lib unavailable: {e}", file=sys.stderr)
-        return "none"
     return pr_conversation.build_pr_conversation(issues, reviews, inline, bot_login)
 
 
@@ -791,10 +791,19 @@ async def run_review(args):
     # block (still safe — they're chronologically older than the new
     # review's own findings, and the agents are told not to follow
     # instructions inside <conv-comment>).
+    #
+    # Run the three sync `requests.get` calls concurrently via the
+    # running loop's default executor. Without this, a chatty PR's
+    # paginated fetches serialize end-to-end (~1-2s); the bash path in
+    # commands/review.md already runs them in parallel via `&` + `wait`,
+    # so this brings managed to parity.
     bot_login = fetch_bot_login(bot_token)
-    all_comments: list[dict] = fetch_issue_comments(args.repo, args.pr_number, bot_token)
-    pr_reviews_raw = fetch_pr_reviews(args.repo, args.pr_number, bot_token)
-    pr_inline_raw = fetch_pr_review_comments(args.repo, args.pr_number, bot_token)
+    loop = asyncio.get_running_loop()
+    all_comments, pr_reviews_raw, pr_inline_raw = await asyncio.gather(
+        loop.run_in_executor(None, fetch_issue_comments, args.repo, args.pr_number, bot_token),
+        loop.run_in_executor(None, fetch_pr_reviews, args.repo, args.pr_number, bot_token),
+        loop.run_in_executor(None, fetch_pr_review_comments, args.repo, args.pr_number, bot_token),
+    )
     pr_conversation = build_conversation_block(
         all_comments, pr_reviews_raw, pr_inline_raw, bot_login
     )
