@@ -47,7 +47,9 @@ Also generate blame summaries and churn data for the changed files (same as Step
 
 ### Self Step 3: Full Review (4 agents + Codex)
 
-Same quality as PR review. Construct a PR Context block (same structure as Step 7 in `commands/review.md`) with the self-review diff summary, blame summaries, churn data, and — critically — the two-field wiki contract:
+Same quality as PR review. Construct a PR Context block (same structure as Step 7 in `commands/review.md`) with the self-review diff summary, blame summaries, churn data, and — critically — the two-field wiki contract.
+
+**Omit the `<pr-conversation>` field — there is no PR yet, so there is no conversation to fetch.** The 4 specialist agent prompts are written conditionally (`If the PR Context block contains a <pr-conversation> field…`) and gracefully skip the duplicate-flagging step when the field is absent. Do not attempt the Step 4 conversation fetches in self-review mode — they're scoped to a real PR number that doesn't exist here.
 
 ```
 - Wiki files directory: <literal $AIR_TMP path — e.g. /tmp/air-self-AbCdEf>

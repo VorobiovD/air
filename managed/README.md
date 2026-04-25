@@ -62,6 +62,9 @@ GitHub Action triggers `python review.py <repo> <pr>`
   │
   ├── Syncs 5 specialist agents (creates on first run, updates prompts on subsequent runs)
   ├── Fetches PR metadata + diff via GitHub API
+  ├── Fetches current PR conversation via GitHub API (issue comments + reviews + inline comments,
+  │     concurrent with bot-identity lookup) — humans + other AI bots are surfaced to specialists
+  │     as <pr-conversation> so findings can flag overlap with [already raised by @<author>]
   │
   ▼
 Python driver orchestrates

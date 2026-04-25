@@ -318,12 +318,6 @@ def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
     return resp.text
 
 
-# Bot-review header is centralized in plugins/air/lib/pr_conversation.py
-# so CLI (review.md / review-self.md) and managed share one source of
-# truth. We import it at module top and re-export under the historical
-# name so existing references in this file (and any downstream caller)
-# don't have to change.
-REVIEW_COMMENT_PREFIXES = BOT_REVIEW_PREFIXES
 # Require a full 40-char SHA. A shorter match would break the strict
 # `prior_sha == head_sha` equality at the skip gate, silently triggering a
 # costly full review instead of no-op.
@@ -376,7 +370,7 @@ def fetch_bot_login(token: str) -> str | None:
 def fetch_issue_comments(repo: str, pr_number: int, token: str) -> list[dict]:
     """Fetch all issue comments on a PR in one paginated pass.
 
-    Single fetch source so `find_prior_review` and `fetch_comments_since`
+    Single fetch source so `find_prior_review` and `filter_comments_after`
     can share the full comment list instead of paginating the same
     endpoint twice per re-review (doubles API calls on long-discussion
     PRs).
@@ -397,7 +391,7 @@ def fetch_pr_reviews(repo: str, pr_number: int, token: str) -> list[dict]:
     """Fetch all top-level PR reviews (APPROVED / CHANGES_REQUESTED / COMMENTED).
 
     Distinct from issue comments — these carry a `state` field and are
-    submitted via the GitHub review UI. Used by `build_conversation_block`
+    submitted via the GitHub review UI. Used by `pr_conversation.build_pr_conversation`
     so reviewer agents see formal approval state, not just chat.
     """
     url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews?per_page=100"
@@ -410,24 +404,13 @@ def fetch_pr_review_comments(repo: str, pr_number: int, token: str) -> list[dict
     Distinct from issue comments — these are anchored to a specific path
     and line via the top-level `path` and `line` fields (`position` also
     exists but is GitHub's legacy diff-position int and is often null on
-    outdated comments). Used by `build_conversation_block` so reviewer
+    outdated comments). Used by `pr_conversation.build_pr_conversation` so reviewer
     agents can locate prior inline feedback when picking up a PR
     mid-conversation. Same `sort=created&direction=desc` as issue
     comments for partial-fetch resilience.
     """
     url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments?per_page=100&sort=created&direction=desc"
     return _github_paginate(url, token)
-
-
-def build_conversation_block(
-    issues: list[dict],
-    reviews: list[dict],
-    inline: list[dict],
-    bot_login: str | None,
-) -> str:
-    """Thin pass-through to `pr_conversation.build_pr_conversation` — see
-    that function for the filter/cap/truncate/render contract."""
-    return pr_conversation.build_pr_conversation(issues, reviews, inline, bot_login)
 
 
 def find_prior_review(comments: list[dict], bot_login: str) -> dict | None:
@@ -445,7 +428,7 @@ def find_prior_review(comments: list[dict], bot_login: str) -> dict | None:
     """
     for c in comments:
         if (c.get("user") or {}).get("login") == bot_login \
-           and (c.get("body") or "").startswith(REVIEW_COMMENT_PREFIXES):
+           and (c.get("body") or "").startswith(BOT_REVIEW_PREFIXES):
             return c
     return None
 
@@ -524,11 +507,9 @@ def build_pr_context(
 
     `pr_conv_block` carries the chronological discussion thread for this
     PR (humans + other bots, bot-self-filtered) — built by
-    `build_conversation_block` and dropped in unchanged. Defaults to "none"
-    so callers that don't fetch it (e.g. older test paths) still produce a
-    valid block. Named distinctly from the module-top `pr_conversation`
-    import to keep that reference unshadowed for any future code in this
-    function's scope.
+    `pr_conversation.build_pr_conversation` and dropped in unchanged.
+    Defaults to "none" so callers that don't fetch it (e.g. older test
+    paths) still produce a valid block.
 
     In `re-review` mode, appends the prior review body and any developer
     responses so specialists can classify previous findings as FIXED /
@@ -798,7 +779,7 @@ async def run_review(args):
     # Fetch all three conversation surfaces unconditionally — fresh
     # reviews also benefit from seeing prior thread context (humans and
     # other AI bots flagged things our agents would otherwise duplicate).
-    # When `bot_login` is unresolved, build_conversation_block is skipped
+    # When `bot_login` is unresolved, pr_conversation.build_pr_conversation is skipped
     # entirely (see the `if bot_login` gate below) and pr_conv_block
     # becomes "none" — better to lose the block than to emit our own
     # ## Code Review numbering as untrusted-but-unfiltered <conv-comment>s.
@@ -852,7 +833,7 @@ async def run_review(args):
     # numbered findings as untrusted-but-unfiltered <conv-comment>s
     # (which the agents are then told to flag duplicates against).
     if bot_login:
-        pr_conv_block = build_conversation_block(
+        pr_conv_block = pr_conversation.build_pr_conversation(
             all_comments, pr_reviews_raw, pr_inline_raw, bot_login
         )
     else:
@@ -1175,8 +1156,8 @@ Raw findings to verify and consolidate:
 
     # Extract review comment from verifier output (single-scan). Partitions
     # on the shared prefix of both "## Code Review" and
-    # "## Code Review (Re-review)" — both REVIEW_COMMENT_PREFIXES start
-    # with this literal.
+    # "## Code Review (Re-review)" — both entries in BOT_REVIEW_PREFIXES
+    # start with this literal.
     _review_header = "## Code Review"
     _, marker, tail = verifier_out.partition(_review_header)
     if marker:
