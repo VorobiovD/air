@@ -1,0 +1,412 @@
+diff --git a/.github/workflows/air-review.yml b/.github/workflows/air-review.yml
+index a77d3c9..a0dcba5 100644
+--- a/.github/workflows/air-review.yml
++++ b/.github/workflows/air-review.yml
+@@ -18,6 +18,11 @@ on:
+         required: false
+         type: string
+         default: 'true'
++      no_codex:
++        description: 'Skip Codex even if OPENAI_API_KEY is set'
++        required: false
++        type: string
++        default: 'false'
+ 
+ jobs:
+   review:
+@@ -28,6 +33,8 @@ jobs:
+       # reusable inputs reject strings at workflow-load time.
+       pr_number: ${{ inputs.pr_number }}
+       closed: ${{ inputs.closed }}
++      no_codex: ${{ inputs.no_codex }}
+     secrets:
+       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
++      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+diff --git a/.github/workflows/managed-review.yml b/.github/workflows/managed-review.yml
+index b451bd1..1598c16 100644
+--- a/.github/workflows/managed-review.yml
++++ b/.github/workflows/managed-review.yml
+@@ -17,15 +17,22 @@
+ #           required: false
+ #           type: string
+ #           default: 'true'
++#         no_codex:
++#           description: 'Skip Codex even if OPENAI_API_KEY is set'
++#           required: false
++#           type: string
++#           default: 'false'
+ #   jobs:
+ #     review:
+ #       uses: VorobiovD/air/.github/workflows/managed-review.yml@main
+ #       with:
+ #         pr_number: ${{ inputs.pr_number }}
+ #         closed: ${{ inputs.closed }}
++#         no_codex: ${{ inputs.no_codex }}
+ #       secrets:
+ #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+ #         AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
++#         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}    # optional — enables Codex
+ #
+ # All inputs are `type: string` (not number/boolean) because GitHub's
+ # expression operator `${{ ... }}` always resolves to a string — passing
+@@ -35,17 +42,16 @@
+ # For pull_request triggers, leave `pr_number` / `closed` unset — the
+ # reusable workflow falls back to `github.event.pull_request.number` and
+ # skips `--closed`.
++#
++# Codex (optional 5th reviewer): set `OPENAI_API_KEY` as a repo/org secret
++# to enable. Without it, the review runs with 4 Claude specialists +
++# verifier only (behavior unchanged from v1.8.0).
+ 
+ name: air managed review
+ 
+ on:
+   workflow_call:
+     inputs:
+-      # Typed as `string` rather than `number`/`boolean` so callers can pass
+-      # `${{ inputs.pr_number }}` from their own workflow_dispatch inputs
+-      # directly — GitHub expressions always resolve to strings, and a
+-      # `type: number` reusable input rejects string values at workflow-load
+-      # time. The shell script below handles the conversion naturally.
+       pr_number:
+         description: 'PR number to review (falls back to github.event.pull_request.number when empty)'
+         required: false
+@@ -56,24 +62,40 @@ on:
+         required: false
+         type: string
+         default: 'false'
++      no_codex:
++        description: 'Skip Codex even when OPENAI_API_KEY is set — set to "true" to pass --no-codex'
++        required: false
++        type: string
++        default: 'false'
+     secrets:
+       ANTHROPIC_API_KEY:
+         required: true
+       AIR_BOT_TOKEN:
+         required: true
++      OPENAI_API_KEY:
++        description: 'Optional — enables Codex as a 5th reviewer alongside the 4 Claude specialists'
++        required: false
+ 
+ jobs:
+   review:
+     runs-on: ubuntu-latest
+     timeout-minutes: 30
+ 
++    # Job-level env so step-level `if:` can check `env.OPENAI_API_KEY != ''`.
++    # Step-level `if: secrets.X != ''` works in some contexts but is less
++    # reliable across reusable-workflow invocations; env-based gating is the
++    # well-established pattern.
++    env:
++      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
++      PR_NUMBER_RESOLVED: ${{ inputs.pr_number || github.event.pull_request.number }}
++
+     steps:
+       - name: Setup Python
+         uses: actions/setup-python@v5
+         with:
+           python-version: "3.12"
+ 
+-      - name: Install dependencies
++      - name: Install Python dependencies
+         run: pip install anthropic requests
+ 
+       - name: Checkout air repo (for setup.py + agent prompts)
+@@ -82,24 +104,56 @@ jobs:
+           repository: VorobiovD/air
+           path: air
+ 
++      # Codex-only steps (skipped when OPENAI_API_KEY secret is unset, the
++      # no_codex input is "true", or the PR number hasn't resolved — that
++      # last check prevents actions/checkout from failing with
++      # `fatal: couldn't find remote ref refs/pull//head` before the
++      # friendlier "No PR number available" error in the Run review step).
++      # The target-repo checkout + codex install add ~30s cold-start, so
++      # we only pay that cost on repos that opted in.
++      - name: Checkout target repo (for Codex)
++        if: ${{ env.OPENAI_API_KEY != '' && inputs.no_codex != 'true' && env.PR_NUMBER_RESOLVED != '' }}
++        uses: actions/checkout@v4
++        with:
++          repository: ${{ github.repository }}
++          # refs/pull/<N>/head is always reachable — works for open PRs,
++          # merged PRs (branch often deleted), and synchronize races.
++          ref: refs/pull/${{ env.PR_NUMBER_RESOLVED }}/head
++          path: target-repo
++          fetch-depth: 0
++
++      - name: Install Codex CLI
++        if: ${{ env.OPENAI_API_KEY != '' && inputs.no_codex != 'true' && env.PR_NUMBER_RESOLVED != '' }}
++        run: |
++          # Pin version — global install executes unknown code as the
++          # runner user, which has all secrets (including the repo-scope
++          # bot PAT) in env. Bump deliberately after reviewing releases.
++          npm install -g @openai/codex@0.124.0
++          # Headless login — reads key from stdin, stores in ~/.codex/auth.json.
++          printenv OPENAI_API_KEY | codex login --with-api-key
++
+       - name: Run review
+         env:
+           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+           AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
+           REPO: ${{ github.repository }}
+-          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
++          PR_NUMBER: ${{ env.PR_NUMBER_RESOLVED }}
+           CLOSED: ${{ inputs.closed }}
++          NO_CODEX: ${{ inputs.no_codex }}
++          # Absolute path so review.py can invoke `codex review` inside it.
++          # Empty when Codex is disabled; review.py treats empty as "skip".
++          AIR_TARGET_REPO: ${{ env.OPENAI_API_KEY != '' && inputs.no_codex != 'true' && format('{0}/target-repo', github.workspace) || '' }}
+         run: |
+           cd air
+           if [ -z "$PR_NUMBER" ]; then
+             echo "::error::No PR number available. Pass pr_number via workflow_dispatch or use a pull_request trigger." >&2
+             exit 1
+           fi
+-          # Bash array keeps each flag as a separate argv entry — robust if
+-          # a second opt-in flag is added later (avoids word-splitting on
+-          # future flag values that might contain spaces).
+           FLAGS=()
+           if [ "$CLOSED" = "true" ]; then
+             FLAGS+=(--closed)
+           fi
++          if [ "$NO_CODEX" = "true" ]; then
++            FLAGS+=(--no-codex)
++          fi
+           python managed/review.py "$REPO" "$PR_NUMBER" "${FLAGS[@]}"
+diff --git a/managed/README.md b/managed/README.md
+index 33c3c5c..aad2016 100644
+--- a/managed/README.md
++++ b/managed/README.md
+@@ -11,6 +11,7 @@ Automated code review on every PR — zero human trigger needed.
+ 4. Add two org secrets:
+    - `ANTHROPIC_API_KEY` — your Anthropic API key with Managed Agents access
+    - `AIR_BOT_TOKEN` — the bot's PAT
++5. Optional: `OPENAI_API_KEY` — adds Codex as a 5th reviewer. Skipped cleanly if unset.
+ 
+ ## Enable on a repo
+ 
+@@ -65,21 +66,23 @@ GitHub Action triggers `python review.py <repo> <pr>`
+   ▼
+ Python driver orchestrates
+   │
+-  ├── asyncio.gather 4 specialist sessions in parallel (each its own container):
++  ├── asyncio.gather 4–5 specialist sessions in parallel (each its own container):
+   │     ├── air-code-reviewer      — bugs, design, test coverage
+   │     ├── air-simplify           — reuse, quality, efficiency
+   │     ├── air-security-auditor   — 31-item checklist
+-  │     └── air-git-history-reviewer — blame, churn, recurring patterns
+-  │     (each clones repo + wiki, reads patterns, returns findings)
++  │     ├── air-git-history-reviewer — blame, churn, recurring patterns
++  │     └── codex (opt-in)         — OpenAI Codex (adds 5th source if OPENAI_API_KEY is set)
++  │     (each Claude specialist clones repo + wiki, reads patterns, returns findings;
++  │      codex runs as a subprocess in the runner against a locally-cloned target repo)
+   │
+-  ├── Collects findings from all 4
+-  ├── Runs 5th session sequentially: air-review-verifier
++  ├── Collects findings from all 4–5
++  ├── Runs final session sequentially: air-review-verifier
+   │     (verifies each finding, drops false positives, formats final review)
+   │
+   └── Posts the review comment to the PR directly via GitHub API
+ ```
+ 
+-**Wall-clock:** ~5-8 minutes (4 specialists run concurrently; wall time ≈ slowest specialist + verifier). Without client-side fan-out (prior server-side orchestrator with `callable_agents`) the sub-agent calls returned permission-denied because the feature was access-gated.
++**Wall-clock:** ~5-8 minutes (specialists run concurrently; wall time ≈ slowest specialist + verifier, regardless of whether Codex is enabled). Without client-side fan-out (prior server-side orchestrator with `callable_agents`) the sub-agent calls returned permission-denied because the feature was access-gated.
+ 
+ ## Manual trigger
+ 
+@@ -92,6 +95,7 @@ python review.py myorg/myrepo 123             # post review comment
+ python review.py myorg/myrepo 123 --dry-run   # print comment, skip post
+ python review.py myorg/myrepo 123 --fresh     # force full review (ignore re-review auto-detect)
+ python review.py myorg/myrepo 123 --closed    # review a closed/merged PR (default refuses)
++python review.py myorg/myrepo 123 --no-codex  # skip Codex even if OPENAI_API_KEY is set
+ ```
+ 
+ ## Agent updates
+@@ -108,4 +112,6 @@ When agent prompts change in the air repo, the workflow auto-updates deployed ag
+ 
+ ## Cost
+ 
+-~$2.30 per review (v1.5.0 with model tiering at Opus 4.7 + Sonnet 4.6 pricing). At 40 reviews/month: ~$90/month.
++Claude-only (default): ~$2.30 per review (model tiering at Opus 4.7 + Sonnet 4.6 pricing). At 40 reviews/month: ~$90/month.
++
++With Codex enabled (`OPENAI_API_KEY` set): +$1–2 per review depending on diff size and Codex's default model (gpt-5.4 at the time of writing). Opt-out with the `no_codex` workflow input or `--no-codex` on manual invocation.
+diff --git a/managed/review.py b/managed/review.py
+index 76cf552..4d25cce 100644
+--- a/managed/review.py
++++ b/managed/review.py
+@@ -25,6 +25,7 @@
+ import html
+ import os
+ import re
++import shutil
+ import signal
+ import subprocess
+ import sys
+@@ -172,6 +173,63 @@ def __init__(self, label: str, reason: str):
+         self.reason = reason
+ 
+ 
++CODEX_LABEL = "codex"
++
++
++async def run_codex_session(target_repo: str, base_sha: str) -> str:
++    """Invoke `codex review --base <sha>` in the target repo; return stdout.
++
++    Opt-in 5th specialist. The caller (`run_review`) is responsible for
++    deciding whether to launch this — the three environmental
++    preconditions (OPENAI_API_KEY, codex binary, AIR_TARGET_REPO) are
++    gated there, not here. The single safety check below catches a
++    directory that disappeared between the gate and this call.
++
++    Raises SpecialistSessionError on any non-success path so the caller's
++    existing degraded-specialist handling surfaces a clear NOTE to the
++    verifier instead of silently posting a failure string as if it were
++    findings.
++
++    Subprocess lifecycle: the outer asyncio.wait_for in run_review cancels
++    this coroutine on timeout, which raises CancelledError into our
++    try/finally — finally path kills the subprocess so it doesn't outlive
++    the review and burn OpenAI tokens.
++    """
++    if not os.path.isdir(target_repo):
++        raise SpecialistSessionError(CODEX_LABEL, f"target repo not found: {target_repo}")
++
++    print(f"  [launch] {CODEX_LABEL} → codex review --base {base_sha[:8]}")
++    proc = await asyncio.create_subprocess_exec(
++        "codex", "review", "--base", base_sha,
++        cwd=target_repo,
++        stdout=asyncio.subprocess.PIPE,
++        stderr=asyncio.subprocess.PIPE,
++    )
++    try:
++        stdout, stderr = await proc.communicate()
++    except asyncio.CancelledError:
++        # Outer wait_for timed out; kill the subprocess before re-raising
++        # so it doesn't orphan on the runner.
++        proc.kill()
++        try:
++            await proc.communicate()
++        except Exception:
++            pass
++        raise
++
++    if proc.returncode != 0:
++        err = stderr.decode()[:500] if stderr else "(no stderr)"
++        raise SpecialistSessionError(
++            CODEX_LABEL, f"exit {proc.returncode}: {err}"
++        )
++
++    output = stdout.decode().strip()
++    if not output:
++        raise SpecialistSessionError(CODEX_LABEL, "empty stdout")
++    print(f"  [done] {CODEX_LABEL}")
++    return output
++
++
+ SPECIALIST_TASKS = {
+     "air-code-reviewer": (
+         "Review the diff below for bugs, logic errors, error handling, design issues, "
+@@ -739,9 +797,29 @@ async def run_review(args):
+         if dev_comments:
+             print(f"  developer comments since last review: {len(dev_comments)}")
+ 
++    # Decide whether Codex joins Phase 1 as a 5th parallel source. Opt-in
++    # via the OPENAI_API_KEY secret (which the workflow uses to gate the
++    # CLI install + target-repo checkout). Skipped cleanly if any
++    # prerequisite is missing or the user passed --no-codex.
++    codex_repo = os.environ.get("AIR_TARGET_REPO", "")
++    # For re-review mode the base is the prior Reviewed-at SHA (from the
++    # review comment body); for full review, it's the PR's base branch SHA
++    # (from meta["base"]).
++    codex_base_sha = (prior_sha if mode == "re-review" else meta["base"]["sha"]) or ""
++    codex_enabled = bool(
++        not args.no_codex
++        and codex_repo
++        and codex_base_sha
++        and shutil.which("codex") is not None
++        and os.environ.get("OPENAI_API_KEY")
++    )
++
+     async with AsyncAnthropic() as client:
+-        # Phase 1: 4 specialists in parallel
+-        print(f"\n[3] Launching 4 specialist sessions in parallel...")
++        # Phase 1: specialists (4 Claude + Codex if opted in) in parallel
++        n_specialists = len(SPECIALIST_AGENTS) + (1 if codex_enabled else 0)
++        print(f"\n[3] Launching {n_specialists} specialist sessions in parallel...")
++        if codex_enabled:
++            print(f"  codex: enabled (target-repo={codex_repo}, base={codex_base_sha[:8]})")
+         t0 = time.monotonic()
+ 
+         # Caller-owned tracking so the between-phase cleanup only interrupts
+@@ -763,13 +841,20 @@ async def run_with_timeout(name, agent, task):
+             run_with_timeout(name, agents[name], SPECIALIST_TASKS[name])
+             for name in SPECIALIST_AGENTS
+         ]
++        specialist_labels = list(SPECIALIST_AGENTS)
++        if codex_enabled:
++            specialist_coros.append(asyncio.wait_for(
++                run_codex_session(codex_repo, codex_base_sha),
++                timeout=SESSION_TIMEOUT_SECS,
++            ))
++            specialist_labels.append(CODEX_LABEL)
+ 
+         results = await asyncio.gather(*specialist_coros, return_exceptions=True)
+         elapsed = time.monotonic() - t0
+ 
+         specialist_outputs = []
+         degraded = []
+-        for name, result in zip(SPECIALIST_AGENTS, results):
++        for name, result in zip(specialist_labels, results):
+             if isinstance(result, asyncio.TimeoutError):
+                 degraded.append(name)
+                 specialist_outputs.append(f"(specialist unavailable: timed out after {SESSION_TIMEOUT_SECS}s)")
+@@ -785,7 +870,7 @@ async def run_with_timeout(name, agent, task):
+             else:
+                 specialist_outputs.append(result)
+ 
+-        status = f"{len(SPECIALIST_AGENTS) - len(degraded)}/{len(SPECIALIST_AGENTS)} specialists ok"
++        status = f"{len(specialist_labels) - len(degraded)}/{len(specialist_labels)} specialists ok"
+         print(f"  All specialists complete in {elapsed:.1f}s ({status})")
+ 
+         # Interrupt any specialist sessions that timed out, errored, or hit
+@@ -814,17 +899,17 @@ async def run_with_timeout(name, agent, task):
+         t1 = time.monotonic()
+         combined = "\n\n".join(
+             f"===== Findings from {name} =====\n\n{out}"
+-            for name, out in zip(SPECIALIST_AGENTS, specialist_outputs)
++            for name, out in zip(specialist_labels, specialist_outputs)
+         )
+         if degraded:
+             combined = (
+-                f"NOTE: {len(degraded)}/{len(SPECIALIST_AGENTS)} specialists were unavailable "
++                f"NOTE: {len(degraded)}/{len(specialist_labels)} specialists were unavailable "
+                 f"({', '.join(degraded)}). Review the available findings only; do not "
+                 f"invent findings for the missing specialists.\n\n{combined}"
+             )
+ 
+         if mode == "re-review":
+-            verifier_task = f"""You have raw findings from 4 specialist reviewers below. They were run in
++            verifier_task = f"""You have raw findings from {n_specialists} specialist reviewers below. They were run in
+ RE-REVIEW MODE — each result contains both (a) a classification of each
+ prior finding (FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED) and (b) any
+ NEW findings in the inter-diff.
+@@ -872,7 +957,7 @@ async def run_with_timeout(name, agent, task):
+ {combined}
+ """
+         else:
+-            verifier_task = f"""You have raw findings from 4 specialist reviewers below. Verify each one per your
++            verifier_task = f"""You have raw findings from {n_specialists} specialist reviewers below. Verify each one per your
+ system prompt (CONFIRMED / DOWNGRADED / IMPROVEMENT / PRE-EXISTING / ACCEPTED PATTERN /
+ FALSE POSITIVE with a confidence score). Drop FALSE POSITIVE / below-threshold findings.
+ 
+@@ -992,6 +1077,7 @@ def main():
+     parser.add_argument("--dry-run", action="store_true", help="Print the review comment to stdout, don't post to GitHub")
+     parser.add_argument("--fresh", action="store_true", help="Force a full review even if a prior review exists (ignore re-review auto-detect)")
+     parser.add_argument("--closed", action="store_true", help="Allow review of closed/merged PRs (default: refuse and exit). Useful for post-merge audits or backfilling wiki patterns from historical PRs.")
++    parser.add_argument("--no-codex", action="store_true", help="Skip the Codex review pass even if OPENAI_API_KEY + AIR_TARGET_REPO are set. Codex otherwise runs automatically when both are available.")
+     args = parser.parse_args()
+ 
+     if not REPO_ARG_RE.match(args.repo):

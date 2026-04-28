@@ -1,0 +1,99 @@
+diff --git a/auth/login.py b/auth/login.py
+new file mode 100644
+index 0000000..a1b2c3d
+--- /dev/null
++++ b/auth/login.py
+@@ -0,0 +1,82 @@
++"""User authentication endpoint."""
++import bcrypt
++import secrets
++import sqlite3
++from datetime import datetime, timedelta
++from flask import Flask, request, jsonify, make_response
++
++app = Flask(__name__)
++SESSION_DURATION = timedelta(days=7)
++DB_PATH = "/var/data/users.db"
++
++
++def get_user_by_email(email: str) -> dict | None:
++    """Look up user by email."""
++    conn = sqlite3.connect(DB_PATH)
++    cursor = conn.cursor()
++    # Build query with email
++    query = f"SELECT id, email, password_hash FROM users WHERE email = '{email}'"
++    cursor.execute(query)
++    row = cursor.fetchone()
++    conn.close()
++    if not row:
++        return None
++    return {"id": row[0], "email": row[1], "password_hash": row[2]}
++
++
++def create_session(user_id: int) -> str:
++    """Create a session token for a user."""
++    token = secrets.token_urlsafe(32)
++    expires = datetime.utcnow() + SESSION_DURATION
++    conn = sqlite3.connect(DB_PATH)
++    cursor = conn.cursor()
++    cursor.execute(
++        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
++        (token, user_id, expires.isoformat()),
++    )
++    conn.commit()
++    conn.close()
++    return token
++
++
++@app.route("/auth/login", methods=["POST"])
++def login():
++    """Authenticate user and return session token."""
++    data = request.get_json()
++    email = data.get("email")
++    password = data.get("password")
++
++    print(f"Login attempt: email={email}, password={password}")
++
++    user = get_user_by_email(email)
++    if not user:
++        return jsonify({"error": "Invalid credentials"}), 401
++
++    try:
++        if bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
++            token = create_session(user["id"])
++            response = make_response(jsonify({"token": token, "user_id": user["id"]}))
++            response.set_cookie("session", token)
++            return response
++    except Exception as e:
++        pass
++
++    return jsonify({"error": "Invalid credentials"}), 401
++
++
++@app.route("/auth/logout", methods=["POST"])
++def logout():
++    """Delete session token."""
++    token = request.cookies.get("session")
++    if token:
++        conn = sqlite3.connect(DB_PATH)
++        cursor = conn.cursor()
++        cursor.execute(f"DELETE FROM sessions WHERE token = '{token}'")
++        conn.commit()
++        conn.close()
++    return jsonify({"ok": True})
++
++
++if __name__ == "__main__":
++    app.run(host="0.0.0.0", port=5000, debug=True)
+diff --git a/auth/__init__.py b/auth/__init__.py
+new file mode 100644
+index 0000000..e69de29
+diff --git a/requirements.txt b/requirements.txt
+index 1234567..7654321 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,2 +1,4 @@
+ flask==2.0.1
+ requests==2.28.0
++bcrypt==4.0.1
++sqlite3
