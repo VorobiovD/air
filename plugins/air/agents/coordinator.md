@@ -45,21 +45,23 @@ This is your final response. Two parts in one message:
 
 **Part A** — output the verifier's response **VERBATIM** as the start of your message. The orchestrator extracts the `## Code Review` body and posts it to GitHub. Do not add anything before or after it. Do not summarize.
 
-**Part B** — immediately after Part A, run a single Bash tool call to update the wiki:
+**Part B** — immediately after Part A, run a single Bash tool call to update the wiki.
+
+Decide what to write FIRST (before the bash call):
+1. Read REVIEW.md and look for a section keyed on the PR's author (provided in the user message's PR Context block).
+2. Check the verifier's findings: if 2+ findings of the same category exist for this author across this and prior reviews, that's a recurring pattern worth recording.
+3. If yes, edit REVIEW.md to add/update the author's pattern entry. If no recurring pattern, leave REVIEW.md unchanged.
+
+Then run the bash. Substitute `<pr_number>` in the commit message with the actual PR number. The push has a one-shot rebase-retry so a concurrent reviewer doesn't drop our commit. The `AIR_WIKI_PUSH_FAILED` token on the failure path is a recognizable signal so the orchestrator can detect silent wiki failures from the session output:
 
 ```bash
 cd /workspace/wiki
-# Read REVIEW.md — does it have a section for the PR's author?
-# Author was provided in the user message's PR Context block.
-# Look at the verifier's findings: if 2+ findings of the same category exist
-# for this author across this and prior reviews, this is a repeated pattern
-# worth recording.
-# If yes, edit REVIEW.md to add/update the author's pattern entry.
-# If no recurring pattern, leave REVIEW.md unchanged.
 git diff --quiet REVIEW.md || {
   git add REVIEW.md
   git commit -m "review: patterns from PR #<pr_number>" 2>&1
-  git push 2>&1
+  git push 2>&1 || {
+    git pull --rebase 2>&1 && git push 2>&1 || echo "AIR_WIKI_PUSH_FAILED: rebase-retry exhausted — review already posted, learning will catch up on the next review"
+  }
 }
 echo "wiki update done"
 ```

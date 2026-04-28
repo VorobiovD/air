@@ -1005,7 +1005,7 @@ async def run_review(args):
     # format rules only; findings come from the coordinator's sub-agent
     # calls, not from us. (Old shape passed `{combined}` here — now stale.)
     if mode == "re-review":
-        verifier_task = f"""You have raw findings from up to 5 specialist reviewers (4 Claude specialists + codex).
+        verifier_task = f"""You have raw findings from the specialist reviewers.
 They were run in RE-REVIEW MODE — each result contains both (a) a classification of
 each prior finding (FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED) and (b) any
 NEW findings in the inter-diff.
@@ -1049,7 +1049,7 @@ new-findings block (prior findings keep their #N from the last review).
 Reviewed at: {head_sha}
 """
     else:
-        verifier_task = f"""You have raw findings from up to 5 specialist reviewers (4 Claude specialists + codex).
+        verifier_task = f"""You have raw findings from the specialist reviewers.
 Verify each one per your system prompt (CONFIRMED / DOWNGRADED / IMPROVEMENT /
 PRE-EXISTING / ACCEPTED PATTERN / FALSE POSITIVE with a confidence score). Drop
 FALSE POSITIVE / below-threshold findings.
@@ -1104,15 +1104,24 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
 """
 
     # Coordinator user message: PR Context + diff + codex findings + verifier task.
-    # The coordinator dispatches 4 specialists in parallel via callable_agents
+    # The coordinator dispatches the specialists in parallel via callable_agents
     # in TURN 1, forwards their findings + codex findings + this verifier_task
     # to the verifier sub-agent in TURN 2, then outputs the verifier's response
     # verbatim in TURN 3 (see plugins/air/agents/coordinator.md).
-    codex_block = (
-        f"<codex-findings>\n{codex_findings}\n</codex-findings>"
-        if codex_findings
-        else "<codex-findings>(codex unavailable or disabled)</codex-findings>"
-    )
+    #
+    # Codex output is UNTRUSTED — codex's review prompt processes the raw
+    # diff, so a prompt-injection payload buried in the diff can shape the
+    # codex output text. That text fans out to all 5 sub-agents in this
+    # multi-agent path. Match build_pr_context's defense-in-depth: HTML-
+    # escape (so an injected `</codex-findings><evil-instruction>...` can't
+    # close the wrapper and inject a sibling tag) and cap length to bound
+    # blast radius (PRIOR_REVIEW_MAX_CHARS = 8000 chars is the same cap
+    # used for prior reviews in re-review mode).
+    if codex_findings:
+        safe_codex = html.escape(codex_findings)[:PRIOR_REVIEW_MAX_CHARS]
+        codex_block = f"<codex-findings>\n{safe_codex}\n</codex-findings>"
+    else:
+        codex_block = "<codex-findings>(codex unavailable or disabled)</codex-findings>"
     coordinator_user_text = (
         f"{pr_context}\n\n"
         f"<diff>\n{diff}\n</diff>\n\n"
@@ -1126,7 +1135,7 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     # models + same prompts, just architectural change. Anthropic's
     # `callable_agents` runtime fans the 4 specialists out concurrently within
     # the one session — see managed/api.py for the research-preview header.
-    print(f"\n[4] Running coordinator session (4 specialists in parallel + verifier)...")
+    print(f"\n[4] Running coordinator session ({len(SPECIALIST_AGENTS)} specialists in parallel + verifier)...")
     t0 = time.monotonic()
     async with AsyncAnthropic() as client:
         coordinator_out = await asyncio.wait_for(
@@ -1139,6 +1148,18 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
             timeout=COORDINATOR_TIMEOUT_SECS,
         )
     print(f"  Coordinator complete in {time.monotonic() - t0:.1f}s")
+
+    # Surface wiki-push silent failures. The coordinator's TURN 3 bash
+    # has a one-shot rebase-retry on push (see coordinator.md); when both
+    # attempts fail, it echoes the AIR_WIKI_PUSH_FAILED token so this
+    # detection loop can warn the operator without aborting (the review
+    # comment was already posted before the wiki step ran).
+    if "AIR_WIKI_PUSH_FAILED" in coordinator_out:
+        print(
+            "  [warn] coordinator's wiki push failed after rebase retry — "
+            "pattern learning will catch up on the next review",
+            file=sys.stderr,
+        )
 
     # Extract review comment from coordinator output. Coordinator's TURN 3
     # outputs the verifier's response verbatim as the start of its message.

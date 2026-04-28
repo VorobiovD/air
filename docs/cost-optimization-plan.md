@@ -17,7 +17,7 @@ The biggest finding: **multi-agent's value depends entirely on model choice.** W
 
 ## Methodology
 
-We built a comparison harness at `managed/experiments/cost_test.py` that runs the same review work across 14 architectural variants, capturing:
+We built a comparison harness (kept local-only, gitignored under `managed/experiments/`) that runs the same review work across 14 architectural variants, capturing:
 - Per-thread token usage (cache_read, cache_create, output, input)
 - Active session-hour compute time
 - Wall-clock time
@@ -224,17 +224,17 @@ API verified:
 
 ## Test harness
 
-Lives at `managed/experiments/`. Reusable for future cost evaluation work.
+Lives at `managed/experiments/` on developer machines (gitignored, not checked in — see commit `0103446`). Reusable for future cost evaluation work; rebuild fresh fixtures from a recent PR when re-running.
 
 ```
-managed/experiments/
+managed/experiments/        (local-only, gitignored)
 ├── cost_test.py             # 14-variant test harness
 ├── README.md                # Usage docs
 ├── fixtures/
 │   ├── test_pr.diff         # Synthetic 80-line auth handler (3 deliberate bugs)
 │   ├── real_pr38/           # Real PR #38 fixtures (diff + wiki snapshot)
 │   └── real_pr40/           # Real PR #40 fixtures
-└── results.jsonl            # Append-only result log (gitignored)
+└── results.jsonl            # Append-only result log
 ```
 
 To run a variant: `python3 managed/experiments/cost_test.py --variant <name>`. Override fixture: `EXPERIMENTS_PR_FIXTURE=real_pr40 python3 ...`. Generate report: `... --report`. Cleanup: `... --cleanup`.

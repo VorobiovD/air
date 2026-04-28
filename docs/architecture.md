@@ -79,14 +79,14 @@ VorobiovD/air/
 | Agent prompts (5 files) | Loaded as subagent_type | Read by setup.py → API agents | **YES — single source** |
 | Wiki patterns (6 files) | git clone/push locally | git clone/push from sandbox | **YES — same wiki** |
 | Review output format | Defined in review.md | Templated in review.py verifier prompt | Equivalent — same markdown shape |
-| Orchestrator logic | review.md (markdown → Claude Code) | review.py (Python → asyncio.gather) | Implementation-specific by design |
+| Orchestrator logic | review.md (markdown → Claude Code) | review.py (upstream prep) → air-coordinator session (callable_agents) | Mirror architectures since v1.9.0 |
 | Learn logic | learn.md | learn-orchestrator.md | NO — duplicated (single-agent flow, not fanned out) |
 | Auth | User's local gh auth | Bot PAT via github_repository resource | Different |
 | Trigger | Manual: /air:review | Automatic: GitHub Action on PR | Different |
 | Modes | --self, --respond (+ --dry-run), --full, --re-review, --fresh, --rewrite, --closed, --dry-run | auto, fresh, re-review, closed | CLI has more |
 | Respond self-check | Scales by diff size: < 50 lines = code-reviewer + verifier only | Same (in orchestrator) | YES — same logic |
 | Cross-repo wiki | Reads TARGET repo's wiki (skip write only) | N/A | Changed in v1.4.0 |
-| Codex (GPT-5.4) | Optional 5th reviewer | Not available | CLI only |
+| Codex (GPT-5.4) | Optional 5th reviewer (CLI subprocess) | Optional 5th source — GHA subprocess, output threaded into coordinator user message | YES — both gated on OPENAI_API_KEY |
 | GitLab | Supported via platform-gitlab.md | Not yet | CLI only |
 
 ---
@@ -129,28 +129,31 @@ VorobiovD/air/
 
 ---
 
-## Managed Agent Pipeline (v1.7.0 — client-side orchestrator)
+## Managed Agent Pipeline (v1.9.0 — multi-agent coordinator)
 
 ```
-PR opened → GitHub Action → managed/review.py
+PR opened (or air-machine requested as reviewer) → GitHub Action → managed/review.py
   │
-  ├── [1] Sync 5 specialist agents (setup.py: find by name → create or PATCH with latest prompts)
+  ├── [1] Sync 5 specialist agents + air-coordinator (setup.py: find by name → create or PATCH)
   ├── [2] Fetch PR metadata + diff from GitHub API (via AIR_BOT_TOKEN on the runner)
   ├── [3] Build PR Context block (Python)
+  ├── [4] Optional codex pass (Pattern B, GHA-side sequential): `codex review --base <sha>`
+  │       output threaded into the coordinator user message as <codex-findings>...</codex-findings>
+  │       (html-escaped + length-capped to bound prompt-injection blast radius)
   │
-  ├── [4] asyncio.gather 4 specialist sessions in parallel:
-  │     ├── air-code-reviewer       (own container, clones repo + wiki, returns findings)
-  │     ├── air-simplify            (own container, same)
-  │     ├── air-security-auditor    (own container, same)
-  │     └── air-git-history-reviewer (own container, same)
+  ├── [5] One air-coordinator session (callable_agents multi-agent runtime, beta header
+  │       `managed-agents-2026-04-01-research-preview`):
+  │     ├── TURN 1: dispatches the 4 Claude specialists in parallel as sub-agents
+  │     │     (air-code-reviewer, air-simplify, air-security-auditor, air-git-history-reviewer)
+  │     ├── TURN 2: dispatches air-review-verifier with all specialist findings + codex findings
+  │     │     + the verifier_task template
+  │     └── TURN 3: outputs verifier verdict verbatim + bash to update wiki REVIEW.md
   │
-  ├── [5] Sequential verifier session (air-review-verifier receives all 4 findings sets,
-  │       filters false positives, emits final review comment markdown)
-  │
-  └── [6] Python posts the review comment directly via GitHub API (no 6th session)
+  └── [6] Python posts the review comment via GitHub API + runs the /air:learn epilogue when
+        the wiki-backed counter threshold fires
 ```
 
-The orchestrator is the **Python driver**, not a server-side agent. Anthropic's `callable_agents` (server-side parallel sub-agents) is gated behind a Managed Agents multiagent Research Preview, so we fan out client-side. Each specialist session spawns its own container for tool execution — same as the CLI plugin's `Agent`-tool fan-out, just one container per specialist instead of one Claude Code process with parallel subagents.
+The Python driver does upstream prep (fetch PR data, state gates, build context, optionally run codex), then hands off to a single **`air-coordinator` session** that dispatches the specialists in parallel + verifier as `callable_agents` sub-agents within one Anthropic session — mirroring the local CLI's Claude Code orchestrator. This replaced v1.7's client-side `asyncio.gather` over 5 separate sessions once Anthropic granted research-preview access for `callable_agents` on 2026-04-25 (beta header `managed-agents-2026-04-01-research-preview`).
 
 ---
 
@@ -353,11 +356,10 @@ v1.5.0 model tiering (simplify + git-history-reviewer → Sonnet) removes ~$1/re
 ## Known Limitations
 
 **Managed Agent:**
-- Parallel execution via client-side orchestration (v1.7.0+). 4 specialists run concurrently in separate sessions; wall-clock ≈ slowest specialist + verifier (~5-8 min).
-- Server-side parallel sub-agents (`callable_agents`) remain unavailable — gated behind Anthropic's Managed Agents multiagent Research Preview. `managed/test-parallel.py` smoke-tests access; as of 2026-04-23 we do not have it.
+- Parallel execution via server-side `callable_agents` (v1.9.0+, multi-agent coordinator). Specialists fan out concurrently as sub-agents within one Anthropic session; wall-clock ≈ slowest specialist + verifier (~10-25 min depending on PR size). Beta header `managed-agents-2026-04-01-research-preview`.
 - GH_TOKEN visible in Anthropic session logs (mitigated by bot account minimal permissions, rotatable).
-- Wiki push can timeout in sandbox (5-min command limit). Mitigated with explicit token in wiki remote URL; each specialist session clones the wiki independently.
-- No Codex (GPT-5.4) — CLI-only feature, requires OpenAI plugin.
+- Wiki push can timeout in sandbox (5-min command limit). The coordinator's TURN 3 bash has a one-shot rebase-retry to recover from concurrent reviewer pushes; failures are logged, not fatal (the review comment is already posted).
+- Codex (GPT-5.4) runs as a GHA-side subprocess sequentially before the coordinator (Pattern B); output is html-escaped and length-capped before being threaded into the coordinator's user message. Gated on `OPENAI_API_KEY` GHA secret.
 - GitHub-only — no GitLab support yet.
 - `github_repository` resource only clones the PR branch — base branch must be fetched separately (`git fetch origin main`).
 

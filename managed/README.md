@@ -52,40 +52,45 @@ The `workflow_dispatch` trigger lets you review any PR on-demand from the Action
 
 ## How it works
 
-**Client-side orchestration (v1.7.0+)**: the Python driver is the orchestrator. Anthropic's parallel-sub-agents feature (`callable_agents`) is gated behind a Managed Agents multiagent Research Preview, so we fan out client-side from `review.py` via `asyncio.gather` instead.
+**Multi-agent coordinator (v1.9.0+)**: the Python driver does upstream prep (fetch PR data, state gates, build context, optionally run codex), then hands off to a single `air-coordinator` session that dispatches the specialists in parallel + verifier as `callable_agents` sub-agents within one Anthropic session — mirroring the local CLI's architecture. This replaced v1.7's client-side `asyncio.gather` over 5 separate sessions once Anthropic granted research-preview access for `callable_agents` on 2026-04-25.
 
 ```
-PR opened
+PR opened (or air-machine requested as reviewer)
   │
   ▼
 GitHub Action triggers `python review.py <repo> <pr>`
   │
-  ├── Syncs 5 specialist agents (creates on first run, updates prompts on subsequent runs)
+  ├── Syncs 5 specialist agents + air-coordinator (creates on first run, updates prompts otherwise)
   ├── Fetches PR metadata + diff via GitHub API
-  ├── Fetches current PR conversation via GitHub API (issue comments + reviews + inline comments,
-  │     concurrent with bot-identity lookup) — humans + other AI bots are surfaced to specialists
-  │     as <pr-conversation> so findings can flag overlap with [already raised by @<author>]
+  ├── Fetches current PR conversation (issue comments + reviews + inline comments) and bot identity
+  │     concurrently — humans + other AI bots are surfaced to specialists as <pr-conversation>
+  │     so findings can flag overlap with [already raised by @<author>]
+  ├── Optional: runs `codex review --base <sha>` as a subprocess (Pattern B: GHA-side, sequential
+  │     before the coordinator) — output threaded into the coordinator's user message as
+  │     <codex-findings>...</codex-findings>, html-escaped and length-capped
   │
   ▼
-Python driver orchestrates
+Single air-coordinator session (callable_agents multi-agent runtime)
   │
-  ├── asyncio.gather 4–5 specialist sessions in parallel (each its own container):
-  │     ├── air-code-reviewer      — bugs, design, test coverage
-  │     ├── air-simplify           — reuse, quality, efficiency
-  │     ├── air-security-auditor   — 31-item checklist
-  │     ├── air-git-history-reviewer — blame, churn, recurring patterns
-  │     └── codex (opt-in)         — OpenAI Codex (adds 5th source if OPENAI_API_KEY is set)
-  │     (each Claude specialist clones repo + wiki, reads patterns, returns findings;
-  │      codex runs as a subprocess in the runner against a locally-cloned target repo)
+  ├── TURN 1: dispatches specialists in parallel as sub-agents (one Anthropic session, one container):
+  │     ├── air-code-reviewer       — bugs, design, test coverage
+  │     ├── air-simplify            — reuse, quality, efficiency
+  │     ├── air-security-auditor    — 31-item checklist
+  │     └── air-git-history-reviewer — blame, churn, recurring patterns
   │
-  ├── Collects findings from all 4–5
-  ├── Runs final session sequentially: air-review-verifier
-  │     (verifies each finding, drops false positives, formats final review)
+  ├── TURN 2: dispatches air-review-verifier with the 4 specialist findings + codex findings +
+  │           the verifier_task template (verifies each finding, drops false positives, emits markdown)
   │
-  └── Posts the review comment to the PR directly via GitHub API
+  └── TURN 3: outputs verifier's response verbatim + bash tool call to update the wiki (REVIEW.md
+              author-pattern entry on recurring findings, with one-shot rebase-retry on push)
+  │
+  ▼
+Python driver posts the review comment to the PR via GitHub API,
+then bumps the wiki-backed counter and runs the /air:learn epilogue
+synchronously when the threshold fires.
 ```
 
-**Wall-clock:** ~5-8 minutes (specialists run concurrently; wall time ≈ slowest specialist + verifier, regardless of whether Codex is enabled). Without client-side fan-out (prior server-side orchestrator with `callable_agents`) the sub-agent calls returned permission-denied because the feature was access-gated.
+**Wall-clock:** ~10-25 min depending on PR size (specialists run concurrently in the coordinator; wall ≈ slowest specialist + verifier + optional codex). Beta header `managed-agents-2026-04-01-research-preview` unlocks `callable_agents`.
 
 ## Manual trigger
 
