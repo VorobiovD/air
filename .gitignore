@@ -8,6 +8,7 @@ Thumbs.db
 
 # Managed agent
 managed/config.json
+managed/experiments/
 *.pem
 *.pyc
 __pycache__/
