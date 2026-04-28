@@ -213,19 +213,39 @@ async def run_codex_session(target_repo: str, base_sha: str) -> str:
     # shell command... failed in the provided sandbox`).
     #
     # `--dangerously-bypass-approvals-and-sandbox` tells codex to skip its
-    # internal sandbox AND approval prompts — appropriate here because the
-    # GHA runner IS the sandbox: ephemeral VM, no production credentials,
-    # destroyed after the job. The flag's docstring explicitly calls out
-    # this case ("intended solely for running in environments that are
-    # externally sandboxed"). We use it unconditionally because the only
-    # caller of run_codex_session today is the GHA workflow path; running
-    # locally is rare and would still be safe given codex review is
-    # read-only.
+    # internal sandbox AND approval prompts. The runner IS sandboxed at
+    # the OS level (ephemeral VM, destroyed after the job), but it does
+    # carry secrets — AIR_BOT_TOKEN (repo write), ANTHROPIC_API_KEY (cost
+    # exposure), OPENAI_API_KEY (cost exposure). Without sandbox/approval
+    # gates, a prompt-injection payload buried in a PR diff could ask the
+    # codex model to run shell commands that exfiltrate those.
+    #
+    # Mitigation: pass a narrow `env=` that omits all three. Codex reads
+    # OPENAI_API_KEY from ~/.codex/auth.json (written by the workflow's
+    # `codex login` step), so it doesn't need it in env. AIR_BOT_TOKEN and
+    # ANTHROPIC_API_KEY are unrelated to codex.
+    #
+    # Residual risk: a prompt-injected codex run could still `cat
+    # ~/.codex/auth.json` (the model has shell access) — but that file
+    # only leaks OPENAI_API_KEY, not the GitHub or Anthropic tokens.
+    # External-contributor PR diffs remain the main attack surface; the
+    # dogfood workflow gates on `air-machine` review-requested only, but
+    # the reusable `managed-review.yml` example still shows the broader
+    # `[opened, synchronize]` trigger — consumers handling untrusted
+    # contributors should switch to review-requested.
+    narrow_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "USER": os.environ.get("USER", ""),
+        "TERM": os.environ.get("TERM", "dumb"),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
     print(f"  [launch] {CODEX_LABEL} → codex review --base {base_sha[:8]}")
     proc = await asyncio.create_subprocess_exec(
         "codex", "--dangerously-bypass-approvals-and-sandbox",
         "review", "--base", base_sha,
         cwd=target_repo,
+        env=narrow_env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
