@@ -6,9 +6,16 @@ import sys
 import requests
 
 API_BASE = "https://api.anthropic.com/v1"
+# Research-preview header unlocks `callable_agents` (multi-agent), Memory,
+# and Outcomes. Phase 1 only uses callable_agents — the air-coordinator
+# agent dispatches the 4 specialists + verifier as sub-agents in one
+# session instead of the prior 5 separate sessions. Memory and Outcomes
+# remain unused but share this header. Anthropic's email (2026-04-25)
+# targets a stable May release with breaking changes expected — re-pin
+# after stable lands.
 HEADERS = {
     "anthropic-version": "2023-06-01",
-    "anthropic-beta": "managed-agents-2026-04-01",
+    "anthropic-beta": "managed-agents-2026-04-01-research-preview",
     "content-type": "application/json",
 }
 

@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
-Trigger an air review via Managed Agents — client-side parallel orchestrator.
+Trigger an air review via Managed Agents — single multi-agent coordinator.
 
-The Python driver is the orchestrator: it fetches PR data, launches 4
-specialist review sessions concurrently via asyncio, collects findings,
-runs a verifier sequentially, then posts the consolidated review comment
-to the PR directly via the GitHub API.
+The Python driver does upstream client-side prep (fetch PR data, state
+gates, mode detection, build PR context, optionally run codex), then
+hands off to a single `air-coordinator` session that dispatches the 4
+specialists in parallel + verifier as `callable_agents` sub-agents
+within one Anthropic session, mirroring the local CLI's architecture.
 
-This replaces the prior server-side `air-reviewer` orchestrator agent.
-Anthropic's `callable_agents` / parallel-sub-agents feature is gated
-behind a Managed Agents multiagent Research Preview we don't have access
-to, so we do the fan-out client-side instead.
+Codex stays client-side and runs sequentially BEFORE the coordinator
+session — Sonnet coordinator with codex inside doesn't parallelize
+reliably and Opus coordinator costs ~2.5× the Sonnet equivalent. Pattern
+B (GHA-side codex → coordinator user message) keeps clean parallelism.
+
+Replaces the prior asyncio.gather over 4 specialist sessions + sequential
+verifier session (5 sessions → 1) introduced in v1.7.0; that shape was
+chosen when `callable_agents` was research-preview and inaccessible.
 
 Usage:
     export ANTHROPIC_API_KEY=sk-ant-...
@@ -34,7 +39,7 @@ import time
 from pathlib import Path
 
 import requests as req
-from anthropic import Anthropic, APIStatusError, AsyncAnthropic
+from anthropic import Anthropic, AsyncAnthropic
 
 from api import list_agents, find_environment
 
@@ -106,29 +111,6 @@ def _interrupt_live_sessions_sync() -> None:
         t.join(timeout=remaining)
 
 
-async def _interrupt_session_async(client: AsyncAnthropic, session_id: str) -> None:
-    """Fire-and-forget async interrupt from inside the event loop.
-
-    Used to promptly terminate orphaned specialist sessions mid-review
-    (e.g. after a specialist times out) so they don't burn tokens while
-    Phase 2's verifier runs.
-
-    4xx (except 429) means the session is in a state the interrupt doesn't
-    apply to — typically already idled. Discard; there's no retry that
-    would succeed. 5xx / network / timeout / 429 are transient; leave
-    tracked so the atexit fallback gets another shot.
-    """
-    try:
-        await client.beta.sessions.events.send(session_id, events=[INTERRUPT_EVENT])
-        LIVE_SESSIONS.discard(session_id)
-    except APIStatusError as e:
-        if 400 <= e.status_code < 500 and e.status_code != 429:
-            LIVE_SESSIONS.discard(session_id)
-        print(f"  [interrupt] {session_id}: {e.status_code} {e}", file=sys.stderr)
-    except Exception as e:
-        print(f"  [interrupt] {session_id}: {e}", file=sys.stderr)
-
-
 def _install_shutdown_handlers() -> None:
     """Register shutdown hygiene. Called from main() — not at import time —
     so test harnesses and other importers don't inherit the SIGTERM handler
@@ -166,12 +148,19 @@ SPECIALIST_AGENTS = [
 
 VERIFIER_AGENT = "air-review-verifier"
 
+COORDINATOR_AGENT = "air-coordinator"
+
 # Per-session cap so one hung stream can't stall the whole review until the
-# GitHub Actions job timeout (default 30 min) kills it. gather() wraps each
-# call with asyncio.wait_for(); on expiry the coroutine raises TimeoutError
-# which gather() captures (return_exceptions=True) and surfaces as a degraded
-# specialist note.
+# GitHub Actions job timeout (default 30 min) kills it. asyncio.wait_for()
+# wraps each call; on expiry the coroutine raises TimeoutError. Used for
+# codex (subprocess) which usually finishes in ~5 min.
 SESSION_TIMEOUT_SECS = 600
+
+# Coordinator runs 4 specialists in parallel + verifier sequentially in
+# ONE session. Empirical wall time on PR #40 was ~10 min; bumped to 900s
+# so the GHA 30-min budget still covers state gates + codex (≤10 min) +
+# coordinator (≤15 min) + post-comment with margin.
+COORDINATOR_TIMEOUT_SECS = 900
 
 REPO_ARG_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
@@ -197,9 +186,9 @@ async def run_codex_session(target_repo: str, base_sha: str) -> str:
     gated there, not here. The single safety check below catches a
     directory that disappeared between the gate and this call.
 
-    Raises SpecialistSessionError on any non-success path so the caller's
-    existing degraded-specialist handling surfaces a clear NOTE to the
-    verifier instead of silently posting a failure string as if it were
+    Raises SpecialistSessionError on any non-success path so the caller
+    can include `(codex unavailable or disabled)` in the coordinator user
+    message instead of silently posting a failure string as if it were
     findings.
 
     Subprocess lifecycle: the outer asyncio.wait_for in run_review cancels
@@ -240,33 +229,6 @@ async def run_codex_session(target_repo: str, base_sha: str) -> str:
         raise SpecialistSessionError(CODEX_LABEL, "empty stdout")
     print(f"  [done] {CODEX_LABEL}")
     return output
-
-
-SPECIALIST_TASKS = {
-    "air-code-reviewer": (
-        "Review the diff below for bugs, logic errors, error handling, design issues, "
-        "and test coverage gaps. Consult REVIEW.md / PROJECT-PROFILE.md / GLOSSARY.md "
-        "in the wiki directory for patterns (see Wiki instructions in PR Context). "
-        "For EVERY finding include file:line. Severity: blocker/medium/low/nit. "
-        "Annotate author-pattern matches per your Before-reviewing instructions."
-    ),
-    "air-simplify": (
-        "Review the diff below for Code Reuse, Code Quality, and Efficiency. Consult "
-        "PROJECT-PROFILE.md + GLOSSARY.md in the wiki directory for shared-module locations "
-        "and intentional names. Actively search the codebase with Grep/Glob before flagging "
-        "duplication. Every finding MUST include file:line."
-    ),
-    "air-security-auditor": (
-        "Audit the diff below against the 31-item security checklist. Read PROJECT-PROFILE.md's "
-        "Applicable Security Checks section in the wiki directory — ONLY audit checks listed there. "
-        "Produce a PASS/FAIL table + findings for each FAIL. Every finding MUST include file:line."
-    ),
-    "air-git-history-reviewer": (
-        "Review the diff below through the git history lens — blame, churn, previous PR comments "
-        "on same files. Read REVIEW-HISTORY.md in the wiki directory for finding frequency and "
-        "file hot spots. Every finding MUST include file:line. Annotate author-pattern matches."
-    ),
-}
 
 
 def sync_agents():
@@ -601,7 +563,6 @@ async def run_session(
     bot_token: str,
     user_text: str,
     label: str,
-    tracking: set[str] | None = None,
 ) -> str:
     """Create a session, send the user prompt, stream events, return collected agent text.
 
@@ -644,8 +605,6 @@ async def run_session(
     finally:
         if session is not None:
             LIVE_SESSIONS.add(session.id)
-            if tracking is not None:
-                tracking.add(session.id)
 
     print(f"  [launch] {label} → {session.id}")
 
@@ -655,9 +614,11 @@ async def run_session(
     )
 
     # Stop reasons we treat as a clean end-of-turn. Anything else (explicit
-    # error, cancelled, unknown future types) is surfaced to the caller so
-    # gather() can record a degraded specialist note instead of silently
-    # reporting empty findings as a successful review.
+    # error, cancelled, unknown future types) is surfaced via
+    # SpecialistSessionError so the caller can decide how to fail —
+    # currently the coordinator session being absent is fatal (no findings
+    # to post), unlike the prior 5-session shape where individual
+    # specialists could degrade gracefully.
     TERMINAL_SUCCESS = {"end_turn", "stop_sequence", "max_tokens"}
 
     parts: list[str] = []
@@ -700,8 +661,6 @@ async def run_session(
     # cheap no-op.
     if terminated_reason is None:
         LIVE_SESSIONS.discard(session.id)
-        if tracking is not None:
-            tracking.discard(session.id)
 
     output = "".join(parts).strip()
     if terminated_reason and not output:
@@ -717,7 +676,7 @@ async def run_review(args):
     agents = list_agents()
     env_id = find_environment()
 
-    required = SPECIALIST_AGENTS + [VERIFIER_AGENT]
+    required = SPECIALIST_AGENTS + [VERIFIER_AGENT, COORDINATOR_AGENT]
     missing = [n for n in required if n not in agents]
     if missing or not env_id:
         print(f"Missing agents: {missing}, env={env_id}. Run setup.py first.", file=sys.stderr)
@@ -929,10 +888,13 @@ async def run_review(args):
         if dev_comments:
             print(f"  developer comments since last review: {len(dev_comments)}")
 
-    # Decide whether Codex joins Phase 1 as a 5th parallel source. Opt-in
-    # via the OPENAI_API_KEY secret (which the workflow uses to gate the
-    # CLI install + target-repo checkout). Skipped cleanly if any
-    # prerequisite is missing or the user passed --no-codex.
+    # Codex: opt-in 5th specialist. Runs sequentially BEFORE the coordinator
+    # session (Pattern B). Sonnet coordinator with codex inside doesn't
+    # parallelize reliably (it serializes bash → specialists, ~13 min wall);
+    # Opus coordinator parallelizes but costs ~2.5× the Sonnet equivalent.
+    # GHA-side codex → coordinator-user-message keeps clean parallelism for
+    # the 4 Claude specialists at the cost of one extra wall-time leg
+    # (codex ≤5 min before coordinator's ~10 min).
     codex_repo = os.environ.get("AIR_TARGET_REPO", "")
     # For re-review mode the base is the prior Reviewed-at SHA (from the
     # review comment body); for full review, it's the PR's base branch SHA
@@ -946,104 +908,38 @@ async def run_review(args):
         and os.environ.get("OPENAI_API_KEY")
     )
 
-    async with AsyncAnthropic() as client:
-        # Phase 1: specialists (4 Claude + Codex if opted in) in parallel
-        n_specialists = len(SPECIALIST_AGENTS) + (1 if codex_enabled else 0)
-        print(f"\n[3] Launching {n_specialists} specialist sessions in parallel...")
-        if codex_enabled:
-            print(f"  codex: enabled (target-repo={codex_repo}, base={codex_base_sha[:8]})")
-        t0 = time.monotonic()
-
-        # Caller-owned tracking so the between-phase cleanup only interrupts
-        # specialist sessions, not whatever else might be in LIVE_SESSIONS.
-        specialist_ids: set[str] = set()
-
-        async def run_with_timeout(name, agent, task):
-            user_text = f"{pr_context}\n\n{task}\n\n<diff>\n{diff}\n</diff>"
-            return await asyncio.wait_for(
-                run_session(
-                    client, agent["id"], agent["version"], env_id,
-                    args.repo, checkout, bot_token, user_text, name,
-                    tracking=specialist_ids,
-                ),
-                timeout=SESSION_TIMEOUT_SECS,
-            )
-
-        specialist_coros = [
-            run_with_timeout(name, agents[name], SPECIALIST_TASKS[name])
-            for name in SPECIALIST_AGENTS
-        ]
-        specialist_labels = list(SPECIALIST_AGENTS)
-        if codex_enabled:
-            specialist_coros.append(asyncio.wait_for(
+    codex_findings = ""
+    if codex_enabled:
+        print(f"\n[3] Running codex (target-repo={codex_repo}, base={codex_base_sha[:8]})...")
+        t_codex = time.monotonic()
+        try:
+            codex_findings = await asyncio.wait_for(
                 run_codex_session(codex_repo, codex_base_sha),
                 timeout=SESSION_TIMEOUT_SECS,
-            ))
-            specialist_labels.append(CODEX_LABEL)
-
-        results = await asyncio.gather(*specialist_coros, return_exceptions=True)
-        elapsed = time.monotonic() - t0
-
-        specialist_outputs = []
-        degraded = []
-        for name, result in zip(specialist_labels, results):
-            if isinstance(result, asyncio.TimeoutError):
-                degraded.append(name)
-                specialist_outputs.append(f"(specialist unavailable: timed out after {SESSION_TIMEOUT_SECS}s)")
-                print(f"  [timeout] {name}", file=sys.stderr)
-            elif isinstance(result, SpecialistSessionError):
-                degraded.append(name)
-                specialist_outputs.append(f"(specialist unavailable: {result.reason})")
-                print(f"  [failed] {name}: {result.reason}", file=sys.stderr)
-            elif isinstance(result, Exception):
-                degraded.append(name)
-                specialist_outputs.append(f"(specialist unavailable: {type(result).__name__}: {result})")
-                print(f"  [error] {name}: {type(result).__name__}: {result}", file=sys.stderr)
-            else:
-                specialist_outputs.append(result)
-
-        status = f"{len(specialist_labels) - len(degraded)}/{len(specialist_labels)} specialists ok"
-        print(f"  All specialists complete in {elapsed:.1f}s ({status})")
-
-        # Interrupt any specialist sessions that timed out, errored, or hit
-        # an unknown-idle state. Doing this between phases (instead of
-        # deferring to atexit) stops them from burning tokens through the
-        # verifier phase, which can itself run up to SESSION_TIMEOUT_SECS.
-        # Scoped to the caller-owned `specialist_ids` set, so an unrelated
-        # session in LIVE_SESSIONS (e.g. from a future pre-Phase-1 step)
-        # would NOT be caught here — only specialists launched above.
-        orphans = list(specialist_ids)
-        if orphans:
-            print(f"  [cleanup] interrupting {len(orphans)} orphan specialist session(s)", file=sys.stderr)
-            # No return_exceptions=True — _interrupt_session_async catches
-            # internally and never raises.
-            await asyncio.gather(
-                *(_interrupt_session_async(client, sid) for sid in orphans),
             )
-            # Keep specialist_ids in sync with the post-cleanup LIVE_SESSIONS
-            # so a future reader of the set doesn't see already-interrupted
-            # stale ids. _interrupt_session_async only discards from the
-            # global set; this line propagates that to the caller-owned one.
-            specialist_ids.intersection_update(LIVE_SESSIONS)
-
-        # Phase 2: verifier sequential
-        print(f"\n[4] Running verifier on consolidated findings...")
-        t1 = time.monotonic()
-        combined = "\n\n".join(
-            f"===== Findings from {name} =====\n\n{out}"
-            for name, out in zip(specialist_labels, specialist_outputs)
-        )
-        if degraded:
-            combined = (
-                f"NOTE: {len(degraded)}/{len(specialist_labels)} specialists were unavailable "
-                f"({', '.join(degraded)}). Review the available findings only; do not "
-                f"invent findings for the missing specialists.\n\n{combined}"
+            print(f"  codex complete in {time.monotonic() - t_codex:.1f}s")
+        except asyncio.TimeoutError:
+            print(
+                f"  [warn] codex timed out after {SESSION_TIMEOUT_SECS}s — proceeding without it",
+                file=sys.stderr,
+            )
+        except SpecialistSessionError as e:
+            print(f"  [warn] codex failed: {e.reason} — proceeding without it", file=sys.stderr)
+        except Exception as e:
+            print(
+                f"  [warn] codex error: {type(e).__name__}: {e} — proceeding without it",
+                file=sys.stderr,
             )
 
-        if mode == "re-review":
-            verifier_task = f"""You have raw findings from {n_specialists} specialist reviewers below. They were run in
-RE-REVIEW MODE — each result contains both (a) a classification of each
-prior finding (FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED) and (b) any
+    # Build the verifier_task template — coordinator forwards this verbatim
+    # to the verifier sub-agent in TURN 2, after appending all 4 specialist
+    # findings + codex findings (per coordinator.md). The template owns
+    # format rules only; findings come from the coordinator's sub-agent
+    # calls, not from us. (Old shape passed `{combined}` here — now stale.)
+    if mode == "re-review":
+        verifier_task = f"""You have raw findings from up to 5 specialist reviewers (4 Claude specialists + codex).
+They were run in RE-REVIEW MODE — each result contains both (a) a classification of
+each prior finding (FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED) and (b) any
 NEW findings in the inter-diff.
 
 Verify each finding per your system prompt and drop FALSE POSITIVE /
@@ -1083,15 +979,12 @@ new-findings block (prior findings keep their #N from the last review).
 ---
 
 Reviewed at: {head_sha}
-
-Raw findings to verify and consolidate:
-
-{combined}
 """
-        else:
-            verifier_task = f"""You have raw findings from {n_specialists} specialist reviewers below. Verify each one per your
-system prompt (CONFIRMED / DOWNGRADED / IMPROVEMENT / PRE-EXISTING / ACCEPTED PATTERN /
-FALSE POSITIVE with a confidence score). Drop FALSE POSITIVE / below-threshold findings.
+    else:
+        verifier_task = f"""You have raw findings from up to 5 specialist reviewers (4 Claude specialists + codex).
+Verify each one per your system prompt (CONFIRMED / DOWNGRADED / IMPROVEMENT /
+PRE-EXISTING / ACCEPTED PATTERN / FALSE POSITIVE with a confidence score). Drop
+FALSE POSITIVE / below-threshold findings.
 
 Then emit the FINAL REVIEW COMMENT as markdown, exactly in this shape (start with
 `## Code Review` on the first line — nothing before it):
@@ -1140,43 +1033,65 @@ Reviewed at: {head_sha}
 
 Rules: sequential numbering across all sections, empty sections omitted,
 Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
-
-Raw findings to verify and consolidate:
-
-{combined}
 """
 
-        # The verifier confirms findings that already cite file:line pairs and
-        # can read the checked-out repo directly — it doesn't need the full
-        # diff re-sent, which would ~5x the tokens across specialists+verifier.
-        verifier_user_text = f"{pr_context}\n\n{verifier_task}"
+    # Coordinator user message: PR Context + diff + codex findings + verifier task.
+    # The coordinator dispatches 4 specialists in parallel via callable_agents
+    # in TURN 1, forwards their findings + codex findings + this verifier_task
+    # to the verifier sub-agent in TURN 2, then outputs the verifier's response
+    # verbatim in TURN 3 (see plugins/air/agents/coordinator.md).
+    codex_block = (
+        f"<codex-findings>\n{codex_findings}\n</codex-findings>"
+        if codex_findings
+        else "<codex-findings>(codex unavailable or disabled)</codex-findings>"
+    )
+    coordinator_user_text = (
+        f"{pr_context}\n\n"
+        f"<diff>\n{diff}\n</diff>\n\n"
+        f"{codex_block}\n\n"
+        f"<verifier-task>\n{verifier_task}\n</verifier-task>"
+    )
 
-        # No tracking= set for the verifier: the between-phase cleanup above
-        # already fired on specialists, and any orphaned verifier session is
-        # caught by atexit (LIVE_SESSIONS holds it until the process exits).
-        # There's no Phase-3 that needs a scoped cleanup set.
-        verifier_out = await asyncio.wait_for(
+    # Single coordinator session replaces v1.7's 4-specialist asyncio.gather +
+    # sequential verifier session (5 sessions → 1). Empirical -49% cost vs the
+    # prior 5-session shape on PR #40 fixture (managed/experiments/), same
+    # models + same prompts, just architectural change. Anthropic's
+    # `callable_agents` runtime fans the 4 specialists out concurrently within
+    # the one session — see managed/api.py for the research-preview header.
+    print(f"\n[4] Running coordinator session (4 specialists in parallel + verifier)...")
+    t0 = time.monotonic()
+    async with AsyncAnthropic() as client:
+        coordinator_out = await asyncio.wait_for(
             run_session(
-                client, agents[VERIFIER_AGENT]["id"], agents[VERIFIER_AGENT]["version"],
-                env_id, args.repo, checkout, bot_token, verifier_user_text, VERIFIER_AGENT,
+                client,
+                agents[COORDINATOR_AGENT]["id"], agents[COORDINATOR_AGENT]["version"],
+                env_id, args.repo, checkout, bot_token,
+                coordinator_user_text, COORDINATOR_AGENT,
             ),
-            timeout=SESSION_TIMEOUT_SECS,
+            timeout=COORDINATOR_TIMEOUT_SECS,
         )
-        print(f"  Verifier complete in {time.monotonic() - t1:.1f}s")
+    print(f"  Coordinator complete in {time.monotonic() - t0:.1f}s")
 
-    # Extract review comment from verifier output (single-scan). Partitions
-    # on the shared prefix of both "## Code Review" and
-    # "## Code Review (Re-review)" — both entries in BOT_REVIEW_PREFIXES
-    # start with this literal.
-    _review_header = "## Code Review"
-    _, marker, tail = verifier_out.partition(_review_header)
+    # Extract review comment from coordinator output. Coordinator's TURN 3
+    # outputs the verifier's response verbatim as the start of its message.
+    # Partition on `\n## Code Review` (with leading newline) so a literal
+    # mention of "## Code Review" inside narration text doesn't trigger the
+    # extraction — only a real top-level markdown header will. Prepending a
+    # newline makes the prefix match even when the header is the very first
+    # line of output. The bug being fixed: the v1.7 partition on bare
+    # "## Code Review" caught the verifier's own narration ("the
+    # `## Code Review` header to extract...") and prepended ~50 lines of
+    # safety preamble to posted reviews — visible in every production_clone
+    # test we ran.
+    _review_header = "\n## Code Review"
+    _, marker, tail = ("\n" + coordinator_out).partition(_review_header)
     if marker:
-        review_body = marker + tail
+        review_body = "## Code Review" + tail
     else:
-        # Fallback — verifier didn't follow the format; post raw
-        review_body = verifier_out
+        # Fallback — coordinator didn't follow the format; post raw
+        review_body = coordinator_out
         print(
-            f"  [warn] verifier output didn't start with {_review_header!r} — posting raw",
+            f"  [warn] coordinator output didn't contain {_review_header!r} — posting raw",
             file=sys.stderr,
         )
 
@@ -1286,7 +1201,7 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Trigger an air review for a PR (client-side parallel orchestrator)")
+    parser = argparse.ArgumentParser(description="Trigger an air review for a PR (single multi-agent coordinator)")
     parser.add_argument("repo", help="owner/repo (e.g., myorg/myrepo)")
     parser.add_argument("pr_number", type=int, help="PR number to review")
     parser.add_argument("--dry-run", action="store_true", help="Print the review comment to stdout, don't post to GitHub")

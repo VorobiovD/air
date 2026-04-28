@@ -192,12 +192,12 @@ def main():
     print("[2] Fetching agent list...")
     agents_by_name = list_agents()
 
-    # 3. Specialist agents. No orchestrator — the Python driver in review.py
-    # is the orchestrator. Anthropic's parallel-sub-agents feature
-    # (callable_agents) is gated behind the multiagent Research Preview, so
-    # we fan out client-side from review.py via asyncio.gather instead.
+    # 3. Specialist agents. They become `callable_agents` of the
+    # coordinator below — the coordinator dispatches them as sub-agents
+    # within a single session, replacing the prior client-side
+    # asyncio.gather over 5 separate sessions.
     print("[3] Specialist agents")
-    synced = []
+    synced: dict[str, dict] = {}
     for name in SUB_AGENTS:
         prompt_file = AGENTS_DIR / f"{name}.md"
         if not prompt_file.exists():
@@ -220,9 +220,46 @@ def main():
             existing=agents_by_name.get(f"air-{name}"),
             model=model,
         )
-        synced.append(agent)
+        synced[name] = agent
 
-    print(f"\nDone. {len(synced)} specialist agents synced. review.py orchestrates client-side.")
+    # 4. Coordinator agent. Multi-agent orchestrator that calls all 5
+    # specialists as sub-agents via callable_agents. Skipped if
+    # coordinator.md is absent (lets older trees still sync specialists
+    # without erroring).
+    coordinator_file = AGENTS_DIR / "coordinator.md"
+    coordinator: dict | None = None
+    if coordinator_file.exists():
+        print("[4] Coordinator agent (multi-agent dispatcher)")
+        if len(synced) < len(SUB_AGENTS):
+            print(
+                f"  air-coordinator: SKIPPED — only {len(synced)}/{len(SUB_AGENTS)} "
+                f"sub-agents synced; coordinator needs all 5 to declare callable_agents",
+                file=sys.stderr,
+            )
+        else:
+            system = read_prompt(coordinator_file)
+            tools = parse_agent_tools(coordinator_file)
+            model = parse_agent_model(coordinator_file, default=MODEL_ALIASES["sonnet"])
+            tool_configs = [{"name": t, "enabled": True} for t in tools]
+            callable_agents = [
+                {"type": "agent", "id": synced[n]["id"], "version": synced[n]["version"]}
+                for n in SUB_AGENTS
+            ]
+            coordinator = create_or_update_agent(
+                name="air-coordinator",
+                system=system,
+                tools=[{
+                    "type": "agent_toolset_20260401",
+                    "default_config": {"enabled": False},
+                    "configs": tool_configs,
+                }],
+                existing=agents_by_name.get("air-coordinator"),
+                callable_agents=callable_agents,
+                model=model,
+            )
+
+    coord_status = "+ coordinator" if coordinator else "(coordinator absent)"
+    print(f"\nDone. {len(synced)} specialist agents synced {coord_status}.")
 
 
 if __name__ == "__main__":
