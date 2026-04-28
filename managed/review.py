@@ -157,15 +157,24 @@ COORDINATOR_AGENT = "air-coordinator"
 SESSION_TIMEOUT_SECS = 600
 
 # Coordinator runs 4 specialists in parallel + verifier sequentially in
-# ONE session. Empirical wall on PR #40 was ~10 min; PR #41 (larger) took
-# 24m server-side. Set just under the 30-min GHA job budget so we get a
-# clean Python TimeoutError (and our `_interrupt_live_sessions_sync`
-# shutdown hook firing on the live session) instead of GHA SIGKILLing
-# the runner — the latter leaves the coordinator orphan-running on
-# Anthropic's side and burning tokens until its own server-side idle.
-# An earlier 900s value caused a false-positive timeout on PR #41 while
-# the coordinator was still actively dispatching sub-agents.
-COORDINATOR_TIMEOUT_SECS = 1680
+# ONE session. Empirical wall times observed so far:
+#   - PR #40 (~3K lines):   ~10 min
+#   - PR #41 (5648 lines):  24 min
+#   - qai-be #593 (~3.5K):  28 min 13 sec   ← timed out our 1680s cap
+# qai-be #593 finished server-side just 13s past the 1680s ceiling, with
+# the full review present in the final agent.message — but our Python
+# wait_for() had already raised TimeoutError, sending an interrupt that
+# crossed the wire as the session was naturally idling. Wall time is
+# weakly correlated with diff size; PR shape (file count, language mix,
+# re-review classification overhead) drives most of the variance.
+#
+# Set well above the observed worst case so we don't lose work on a
+# near-miss. GHA `timeout-minutes` is bumped in lockstep — the Python
+# timeout must remain less than the GHA cap so the script's shutdown
+# hook gets a chance to interrupt the live session cleanly before GHA
+# SIGKILLs the runner (a SIGKILL leaves the coordinator orphan-running
+# and burning tokens until its own server-side idle).
+COORDINATOR_TIMEOUT_SECS = 2700
 
 REPO_ARG_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
