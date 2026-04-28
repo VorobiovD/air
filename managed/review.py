@@ -718,7 +718,31 @@ async def run_session(
                 terminated_reason = "session terminated"
                 break
             elif t == "session.error":
-                terminated_reason = f"session error: {getattr(event, 'error', '?')}"
+                # `session.error` events carry a `retry_status` field on the
+                # error object. When `retry_status.type == "retrying"`,
+                # Anthropic is recovering server-side and the session is
+                # still alive — breaking here would (a) abandon a session
+                # that may complete fine seconds later, and (b) trigger our
+                # atexit interrupt, which can actively cancel Anthropic's
+                # in-progress retry. Only abort on terminal errors.
+                #
+                # PR #41 final run failed this way: a transient
+                # `BetaManagedAgentsUnknownError(retry_status=retrying)`
+                # fired ~6 min in; we aborted, the cleanup interrupt landed
+                # right as Anthropic's retry was running, and the session
+                # idled 30s later — wasting the run. Let the stream
+                # continue when retry_status says retrying.
+                error = getattr(event, "error", None)
+                retry_status = getattr(error, "retry_status", None) if error else None
+                retry_type = getattr(retry_status, "type", None) if retry_status else None
+                if retry_type == "retrying":
+                    print(
+                        f"  [warn] {label}: transient session error (Anthropic retrying): "
+                        f"{getattr(error, 'message', '?')}",
+                        file=sys.stderr,
+                    )
+                    continue
+                terminated_reason = f"session error: {error!r}"
                 break
 
     # Only drop from LIVE_SESSIONS on clean success. Error events, unknown
