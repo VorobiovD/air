@@ -79,14 +79,14 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
-    # Budget: codex (≤10 min, SESSION_TIMEOUT_SECS) + coordinator (≤28 min,
-    # COORDINATOR_TIMEOUT_SECS) + learn epilogue (~3-5 min when the wiki-
-    # counter threshold fires) = 41-43 min worst case. 30 min was too tight
-    # on PR #41 where the review took 28 min and learn was killed at the
-    # 30-min cap, leaving the counter elevated and re-firing on the next
-    # review. 60 min gives ~17 min of real headroom for slow wiki clones,
-    # rebase-retry on the wiki push, and learn-side specialist sessions.
-    timeout-minutes: 60
+    # Budget: codex (≤10 min, SESSION_TIMEOUT_SECS) + coordinator (≤45 min,
+    # COORDINATOR_TIMEOUT_SECS = 2700s) + learn epilogue (~3-5 min when
+    # the wiki-counter threshold fires) = 58-60 min worst case. 60 min
+    # was tight after qai-be #593 hit 28m13s on a re-review (~3.5K lines)
+    # and the coordinator gradient with 1680s left no margin. 75 min
+    # gives ~15 min of headroom for slow wiki clones, rebase-retry on
+    # the wiki push, and learn-side specialist sessions.
+    timeout-minutes: 75
 
     # Job-level env so step-level `if:` can check `env.OPENAI_API_KEY != ''`.
     # Step-level `if: secrets.X != ''` works in some contexts but is less
