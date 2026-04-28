@@ -128,6 +128,18 @@ jobs:
           ref: refs/pull/${{ env.PR_NUMBER_RESOLVED }}/head
           path: target-repo
           fetch-depth: 0
+          # Authenticate as the bot, not GITHUB_TOKEN. Callers using
+          # least-privilege `permissions: {}` (per the example in the
+          # docblock above) zero out GITHUB_TOKEN — actions/checkout's
+          # default fallback then 404s with "Repository not found"
+          # against the caller's own repo. The Run review step below
+          # already authenticates with AIR_BOT_TOKEN; mirror it here so
+          # the docblock's "the reusable workflow authenticates via
+          # AIR_BOT_TOKEN" promise is true at every checkout site.
+          # Diagnosed against qai-be PR #593 — every bot-review run
+          # failed identically here regardless of which PAT was in
+          # AIR_BOT_TOKEN, because this step never read it.
+          token: ${{ secrets.AIR_BOT_TOKEN }}
 
       - name: Install Codex CLI
         if: ${{ env.OPENAI_API_KEY != '' && inputs.no_codex != 'true' && env.PR_NUMBER_RESOLVED != '' }}
