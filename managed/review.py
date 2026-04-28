@@ -684,7 +684,15 @@ async def run_session(
             if t == "agent.message":
                 for block in event.content:
                     text = getattr(block, "text", None)
-                    if text:
+                    # Multi-agent runtime emits agent.message events with
+                    # the literal text "[empty message]" (15 chars) between
+                    # tool-dispatch turns when the coordinator has no real
+                    # response, just tool_use blocks. Skip them — otherwise
+                    # they prepend onto the verifier's verbatim output and
+                    # break the `\n## Code Review` partition anchor (PR #41
+                    # second run posted `[empty message]## Code Review...`
+                    # because the placeholder ran flush against the header).
+                    if text and text.strip() != "[empty message]":
                         parts.append(text)
             elif t == "session.thread_created":
                 open_threads += 1
