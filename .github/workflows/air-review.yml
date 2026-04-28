@@ -1,12 +1,19 @@
 # Dogfood: air reviews its own PRs via the Managed Agent.
 # Uses the reusable workflow in this same repo (pinned to @main so PRs can't
 # modify the review logic that reviews them).
+#
+# Trigger model: review-on-request. The workflow only fires when the
+# `air-machine` bot account is explicitly requested as a reviewer on the
+# PR. Pushing commits / opening / reopening PRs does NOT auto-trigger.
+# This avoids burning a $4-9 review every push during active development.
+# To trigger: open the PR's "Reviewers" panel and select `air-machine`,
+# or run workflow_dispatch (Actions tab → "air review" → Run workflow).
 
 name: air review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [review_requested]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -26,6 +33,11 @@ on:
 
 jobs:
   review:
+    # On `review_requested`, fire only when the `air-machine` bot is the
+    # requested reviewer — requesting human reviewers must not trigger the
+    # paid review. workflow_dispatch has no requested_reviewer field, so
+    # the OR condition lets manual runs through unconditionally.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.requested_reviewer.login == 'air-machine' }}
     uses: VorobiovD/air/.github/workflows/managed-review.yml@main
     with:
       # Reusable declares these as `type: string` so we can pass expression
