@@ -199,9 +199,27 @@ async def run_codex_session(target_repo: str, base_sha: str) -> str:
     if not os.path.isdir(target_repo):
         raise SpecialistSessionError(CODEX_LABEL, f"target repo not found: {target_repo}")
 
+    # Codex's default sandbox uses bubblewrap (Linux user namespaces) to
+    # isolate model-generated shell commands. GHA runners run inside
+    # containers that block nested user namespaces — bwrap fails with
+    # `RTM_NEWADDR: Operation not permitted`, so codex can't even run
+    # `git diff` and emits a one-line apology instead of findings (PR #41
+    # first run: 24.9s, output `I could not inspect the diff because every
+    # shell command... failed in the provided sandbox`).
+    #
+    # `--dangerously-bypass-approvals-and-sandbox` tells codex to skip its
+    # internal sandbox AND approval prompts — appropriate here because the
+    # GHA runner IS the sandbox: ephemeral VM, no production credentials,
+    # destroyed after the job. The flag's docstring explicitly calls out
+    # this case ("intended solely for running in environments that are
+    # externally sandboxed"). We use it unconditionally because the only
+    # caller of run_codex_session today is the GHA workflow path; running
+    # locally is rare and would still be safe given codex review is
+    # read-only.
     print(f"  [launch] {CODEX_LABEL} → codex review --base {base_sha[:8]}")
     proc = await asyncio.create_subprocess_exec(
-        "codex", "review", "--base", base_sha,
+        "codex", "--dangerously-bypass-approvals-and-sandbox",
+        "review", "--base", base_sha,
         cwd=target_repo,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
