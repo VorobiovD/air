@@ -157,10 +157,15 @@ COORDINATOR_AGENT = "air-coordinator"
 SESSION_TIMEOUT_SECS = 600
 
 # Coordinator runs 4 specialists in parallel + verifier sequentially in
-# ONE session. Empirical wall time on PR #40 was ~10 min; bumped to 900s
-# so the GHA 30-min budget still covers state gates + codex (≤10 min) +
-# coordinator (≤15 min) + post-comment with margin.
-COORDINATOR_TIMEOUT_SECS = 900
+# ONE session. Empirical wall on PR #40 was ~10 min; PR #41 (larger) took
+# 24m server-side. Set just under the 30-min GHA job budget so we get a
+# clean Python TimeoutError (and our `_interrupt_live_sessions_sync`
+# shutdown hook firing on the live session) instead of GHA SIGKILLing
+# the runner — the latter leaves the coordinator orphan-running on
+# Anthropic's side and burning tokens until its own server-side idle.
+# An earlier 900s value caused a false-positive timeout on PR #41 while
+# the coordinator was still actively dispatching sub-agents.
+COORDINATOR_TIMEOUT_SECS = 1680
 
 REPO_ARG_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 
