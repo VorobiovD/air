@@ -615,11 +615,19 @@ async def run_session(
 
     # Stop reasons we treat as a clean end-of-turn. Anything else (explicit
     # error, cancelled, unknown future types) is surfaced via
-    # SpecialistSessionError so the caller can decide how to fail —
-    # currently the coordinator session being absent is fatal (no findings
-    # to post), unlike the prior 5-session shape where individual
-    # specialists could degrade gracefully.
+    # SpecialistSessionError so the caller can decide how to fail.
     TERMINAL_SUCCESS = {"end_turn", "stop_sequence", "max_tokens"}
+
+    # Multi-agent sessions emit `session.status_idle stop=end_turn` BETWEEN
+    # the coordinator's turns while sub-agents are still running — the
+    # coordinator's main turn ends, sub-agent threads continue, then the
+    # session goes running again when results arrive. The TRUE terminal
+    # is end_turn idle when no sub-agent threads are still open.
+    # `session.thread_created` opens a sub-agent thread (callable_agents
+    # dispatch); `session.thread_idle` closes one. The first run on PR #41
+    # broke on the first intermediate end_turn idle, returned an empty
+    # output, and posted `422 Validation Failed` to GitHub.
+    open_threads = 0
 
     parts: list[str] = []
     terminated_reason: str | None = None
@@ -635,6 +643,10 @@ async def run_session(
                     text = getattr(block, "text", None)
                     if text:
                         parts.append(text)
+            elif t == "session.thread_created":
+                open_threads += 1
+            elif t == "session.thread_idle":
+                open_threads = max(0, open_threads - 1)
             elif t == "session.status_idle":
                 stop_reason = getattr(event, "stop_reason", None)
                 stop_type = getattr(stop_reason, "type", None) if stop_reason else None
@@ -643,6 +655,11 @@ async def run_session(
                     # send any here, so keep draining the stream.
                     continue
                 if stop_type in TERMINAL_SUCCESS:
+                    if open_threads > 0:
+                        # Coordinator turn ended but sub-agent threads are
+                        # still running — keep streaming until they idle and
+                        # the coordinator's next turn (or final turn) fires.
+                        continue
                     break
                 terminated_reason = f"idle with stop_reason={stop_type!r}"
                 break
