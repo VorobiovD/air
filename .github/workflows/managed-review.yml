@@ -79,7 +79,13 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Budget: codex (≤10 min) + coordinator (≤28 min, the Python-side
+    # COORDINATOR_TIMEOUT_SECS) + post-comment + learn epilogue (~3-5 min
+    # when the wiki-counter threshold fires). 30 min was too tight on
+    # PR #41 where the review took 28 min and learn was killed at the
+    # 30-min cap, leaving the counter elevated and re-firing on the next
+    # review. 45 min covers the worst case with margin.
+    timeout-minutes: 45
 
     # Job-level env so step-level `if:` can check `env.OPENAI_API_KEY != ''`.
     # Step-level `if: secrets.X != ''` works in some contexts but is less
