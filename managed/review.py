@@ -368,24 +368,32 @@ def submit_review_verdict(
     token: str,
     event: str,
     body: str,
+    commit_id: str,
 ) -> None:
     """POST a formal pull-request review (APPROVE / REQUEST_CHANGES / COMMENT).
 
-    The CLI plugin's review.md Step 12 always submits a formal verdict in
-    addition to the issue comment; managed mode used to skip this and
-    only post the comment, leaving `reviewDecision` stuck at
-    REVIEW_REQUIRED no matter what the review said. This helper closes
-    that gap. Failures are logged but never fatal — the issue comment is
-    already published, so the review's signal isn't lost.
+    `commit_id` MUST be the SHA the review actually examined. Without it
+    GitHub attaches the verdict to the PR's *current* head — if the
+    developer pushed new commits during our 28-min coordinator session,
+    we'd silently approve (or block) unreviewed code while the comment
+    body still says `Reviewed at: <old sha>`. Pinning to the reviewed
+    SHA makes the verdict honest: GitHub shows it as a stale review on
+    later commits and the next push triggers a fresh re-review.
 
-    GitHub rejects self-reviews (PR author == reviewer) with 422, and
-    silently ignores duplicate verdicts on the same SHA from the same
-    reviewer. Caller is responsible for the own-PR guard.
+    The CLI plugin's review.md Step 12 always submits a formal verdict
+    in addition to the issue comment; managed mode used to skip this
+    and only post the comment, leaving `reviewDecision` stuck at
+    REVIEW_REQUIRED no matter what the review said. This helper closes
+    that gap. Failures are logged but never fatal — the issue comment
+    is already published, so the review's signal isn't lost.
+
+    GitHub rejects self-reviews (PR author == reviewer) with 422.
+    Caller is responsible for the own-PR guard.
     """
     resp = req.post(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
-        json={"event": event, "body": body},
+        json={"event": event, "body": body, "commit_id": commit_id},
     )
     if not resp.ok:
         print(
@@ -395,7 +403,7 @@ def submit_review_verdict(
             file=sys.stderr,
         )
         return
-    print(f"  Verdict: {event}")
+    print(f"  Verdict: {event} (commit {commit_id[:8]})")
 
 
 def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
@@ -1311,9 +1319,15 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     _, marker, tail = ("\n" + coordinator_out).partition(_review_header)
     if marker:
         review_body = "## Code Review" + tail
+        review_extracted = True
     else:
-        # Fallback — coordinator didn't follow the format; post raw
+        # Fallback — coordinator didn't follow the format; post raw.
+        # The raw output may still contain `### Blockers` / `**1.`
+        # snippets echoed from verifier_task templates, so the verdict
+        # logic below MUST NOT run on this path — it would flip
+        # branch-protection state on a malformed review.
         review_body = coordinator_out
+        review_extracted = False
         print(
             f"  [warn] coordinator output didn't contain {_review_header!r} — posting raw",
             file=sys.stderr,
@@ -1352,7 +1366,9 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     # (state-gate above already caught --closed=false; if we're here on
     # a closed PR via --closed, also skip — verdicts on closed PRs 422).
     own_pr = bool(bot_login) and bot_login == meta["user"]["login"]
-    if own_pr:
+    if not review_extracted:
+        print("  [info] coordinator output was malformed (raw fallback) — skipping verdict (would parse template snippets as findings)")
+    elif own_pr:
         print(f"  [info] bot is the PR author ({bot_login}) — skipping verdict (GitHub disallows self-review)")
     elif pr_state == "closed":
         print("  [info] PR is closed/merged — skipping verdict (GitHub 422s verdicts on those)")
@@ -1363,12 +1379,14 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
                 args.repo, args.pr_number, bot_token,
                 event="REQUEST_CHANGES",
                 body=f"Changes requested — {reason}. See review comment above.",
+                commit_id=head_sha,
             )
         else:
             submit_review_verdict(
                 args.repo, args.pr_number, bot_token,
                 event="APPROVE",
                 body="Approved — 0 blockers found. See review comment for medium/low/nit findings.",
+                commit_id=head_sha,
             )
 
     # Epilogue: bump the shared wiki-backed counter and trigger /air:learn if
