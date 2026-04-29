@@ -1305,20 +1305,35 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         )
 
     # Extract review comment from coordinator output. Coordinator's TURN 3
-    # outputs the verifier's response verbatim as the start of its message.
-    # Partition on `\n## Code Review` (with leading newline) so a literal
-    # mention of "## Code Review" inside narration text doesn't trigger the
-    # extraction — only a real top-level markdown header will. Prepending a
-    # newline makes the prefix match even when the header is the very first
-    # line of output. The bug being fixed: the v1.7 partition on bare
-    # "## Code Review" caught the verifier's own narration ("the
-    # `## Code Review` header to extract...") and prepended ~50 lines of
-    # safety preamble to posted reviews — visible in every production_clone
-    # test we ran.
-    _review_header = "\n## Code Review"
-    _, marker, tail = ("\n" + coordinator_out).partition(_review_header)
-    if marker:
-        review_body = "## Code Review" + tail
+    # outputs the verifier's response verbatim — typically as the LAST
+    # agent.message of the session, sometimes with a leading
+    # `<agent-notification thread_id="...">` runtime wrapper that the
+    # multi-agent runtime injects when forwarding sub-agent output through
+    # the coordinator's stream. The partition must:
+    #   1. Anchor `## Code Review` to start-of-line OR right after a `>`
+    #      (closing a notification tag), so the wrapper doesn't defeat
+    #      anchoring (qai-be #617: posted with `<agent-notification>...`
+    #      prefix because partition required `\n` before the header).
+    #   2. Reject mid-narration mentions (e.g. inline-code "the
+    #      `## Code Review` header to extract...") that would prepend a
+    #      preamble — that was the v1.7 bare-substring bug, fixed by
+    #      requiring a structural delimiter immediately before the header.
+    #   3. Trim any trailing `</agent-notification>` close tag and any
+    #      content beyond it (the runtime sometimes appends "wiki update
+    #      done" status as a separate notification; that belongs in the
+    #      log, not in the GitHub comment body).
+    _review_match = re.search(
+        r"(?:^|[>\n])(## Code Review.*?)(?=<agent-notification\b|\Z)",
+        coordinator_out,
+        re.DOTALL,
+    )
+    if _review_match:
+        review_body = _review_match.group(1).rstrip()
+        # Strip any stray closing tag that ended up inside the captured
+        # block (defensive — happens when the runtime closes the wrapper
+        # mid-review-body before re-opening it for the wiki status).
+        if review_body.endswith("</agent-notification>"):
+            review_body = review_body[: -len("</agent-notification>")].rstrip()
         review_extracted = True
     else:
         # Fallback — coordinator didn't follow the format; post raw.
@@ -1329,7 +1344,9 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         review_body = coordinator_out
         review_extracted = False
         print(
-            f"  [warn] coordinator output didn't contain {_review_header!r} — posting raw",
+            "  [warn] coordinator output didn't contain a `## Code Review` "
+            "header anchored to start-of-line or after a `<agent-notification>` "
+            "wrapper — posting raw",
             file=sys.stderr,
         )
 
