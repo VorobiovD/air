@@ -46,6 +46,12 @@
 # Codex (optional 5th reviewer): set `OPENAI_API_KEY` as a repo/org secret
 # to enable. Without it, the review runs with 4 Claude specialists +
 # verifier only (behavior unchanged from v1.8.0).
+#
+# Cross-repo benchmarking: when pinning the `uses:` line at a non-main
+# air branch (e.g. `@feat/...`), pass `air_ref` with the same value so
+# setup.py reads agent frontmatter from the same branch the reusable
+# workflow loaded from — otherwise setup.py reads main's frontmatter
+# and reverts any feature-branch model-tier changes mid-run.
 
 name: air managed review
 
@@ -67,6 +73,21 @@ on:
         required: false
         type: string
         default: 'false'
+      air_ref:
+        description: |
+          air repo ref for the setup.py + agent prompts checkout. Defaults
+          to `main` for production. Override only when benchmarking a
+          feature branch — setup.py reads agent frontmatter and syncs to
+          Anthropic, so `air_ref` MUST point at the same air branch the
+          caller's `uses:` line pins. Otherwise setup.py reads main's
+          frontmatter and silently reverts any model-tier changes that
+          exist only on the feature branch (qai-be benchmark surfaced
+          this when `uses: ...managed-review.yml@feat/...` ran setup.py
+          against main's frontmatter and resynced specialists from the
+          test tier back to production tier).
+        required: false
+        type: string
+        default: 'main'
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -105,21 +126,34 @@ jobs:
       - name: Install Python dependencies
         run: pip install anthropic requests
 
+      # `actions/checkout@v4` defaults to the default branch when
+      # `repository:` is set to a different repo than the caller's. For
+      # cross-repo benchmarking (e.g., qai-be → air@feature-branch) the
+      # caller must pass `air_ref` as an input so setup.py reads agent
+      # frontmatter from the SAME air ref that the reusable workflow
+      # was loaded from — otherwise setup.py syncs main's frontmatter
+      # to the live agents and silently reverts any feature-branch
+      # model-tier changes. github.workflow_ref returns the CALLER's
+      # ref inside a reusable workflow (not the reusable's own), so
+      # there's no built-in way to derive this — must be an explicit
+      # input.
       - name: Checkout air repo (for setup.py + agent prompts)
         uses: actions/checkout@v4
         with:
           repository: VorobiovD/air
           path: air
+          ref: ${{ inputs.air_ref }}
 
-      # Codex-only steps (skipped when OPENAI_API_KEY secret is unset, the
-      # no_codex input is "true", or the PR number hasn't resolved — that
-      # last check prevents actions/checkout from failing with
-      # `fatal: couldn't find remote ref refs/pull//head` before the
-      # friendlier "No PR number available" error in the Run review step).
-      # The target-repo checkout + codex install add ~30s cold-start, so
-      # we only pay that cost on repos that opted in.
-      - name: Checkout target repo (for Codex)
-        if: ${{ env.OPENAI_API_KEY != '' && inputs.no_codex != 'true' && env.PR_NUMBER_RESOLVED != '' }}
+      # Always check out the target repo — Codex needs it (when enabled),
+      # AND review.py uses it for client-side pre-computation (blame /
+      # churn / diff-check / file-status summaries embedded in the PR
+      # Context, so specialists don't burn tool round-trips re-deriving
+      # them from inside their containers). Gate only on
+      # PR_NUMBER_RESOLVED — without a PR number `refs/pull//head` is
+      # invalid. Codex install + login below stays gated on OPENAI_API_KEY
+      # (no point installing the CLI if it won't run).
+      - name: Checkout target repo (for Codex + pre-computation)
+        if: ${{ env.PR_NUMBER_RESOLVED != '' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
@@ -159,9 +193,13 @@ jobs:
           PR_NUMBER: ${{ env.PR_NUMBER_RESOLVED }}
           CLOSED: ${{ inputs.closed }}
           NO_CODEX: ${{ inputs.no_codex }}
-          # Absolute path so review.py can invoke `codex review` inside it.
-          # Empty when Codex is disabled; review.py treats empty as "skip".
-          AIR_TARGET_REPO: ${{ env.OPENAI_API_KEY != '' && inputs.no_codex != 'true' && format('{0}/target-repo', github.workspace) || '' }}
+          # Absolute path to the local checkout. review.py uses it for
+          # both `codex review` (when enabled) and client-side
+          # pre-computation (blame/churn/file-status/diff-check
+          # summaries embedded in the PR Context). Set whenever the
+          # target-repo checkout step ran (PR_NUMBER_RESOLVED != '');
+          # empty otherwise so review.py skips both legs gracefully.
+          AIR_TARGET_REPO: ${{ env.PR_NUMBER_RESOLVED != '' && format('{0}/target-repo', github.workspace) || '' }}
         run: |
           cd air
           if [ -z "$PR_NUMBER" ]; then

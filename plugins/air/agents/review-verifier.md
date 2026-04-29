@@ -3,7 +3,7 @@ name: review-verifier
 description: Verify code review findings against actual source code. Filter false positives, score confidence, and confirm real issues.
 tools: Read, Grep, Glob, Bash
 # Bash is ONLY for: git blame, git log. Do not run other shell commands.
-model: opus
+model: sonnet
 ---
 
 Before verifying:
