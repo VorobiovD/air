@@ -105,11 +105,35 @@ jobs:
       - name: Install Python dependencies
         run: pip install anthropic requests
 
+      # Pin the air checkout to the SAME ref as the reusable workflow
+      # itself. Otherwise actions/checkout@v4 defaults to air's main
+      # branch (since repository != calling repo), which means setup.py
+      # reads agent frontmatter from main and silently reverts any
+      # model-tier changes that exist only on a feature branch. Bug
+      # surfaced when benchmarking the precomp branch from qai-be: the
+      # reusable workflow was pinned to feat/pre-computation-and-model-
+      # tiering, but setup.py read main's frontmatter and re-synced
+      # specialists from haiku/sonnet back to sonnet/opus.
+      #
+      # github.workflow_ref looks like "<owner>/<repo>/<path>@<full-ref>"
+      # — strip everything before @, plus any refs/heads/ prefix, to get
+      # the branch/tag name actions/checkout accepts.
+      - name: Resolve air ref for checkout
+        id: air_ref
+        run: |
+          FULL_REF='${{ github.workflow_ref }}'
+          REF="${FULL_REF##*@}"
+          REF="${REF#refs/heads/}"
+          REF="${REF#refs/tags/}"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Resolved air ref: $REF"
+
       - name: Checkout air repo (for setup.py + agent prompts)
         uses: actions/checkout@v4
         with:
           repository: VorobiovD/air
           path: air
+          ref: ${{ steps.air_ref.outputs.ref }}
 
       # Always check out the target repo — Codex needs it (when enabled),
       # AND review.py uses it for client-side pre-computation (blame /
