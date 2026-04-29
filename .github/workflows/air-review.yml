@@ -38,7 +38,10 @@ jobs:
     # paid review. workflow_dispatch has no requested_reviewer field, so
     # the OR condition lets manual runs through unconditionally.
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.requested_reviewer.login == 'air-machine' }}
-    uses: VorobiovD/air/.github/workflows/managed-review.yml@main
+    # TEMPORARILY PINNED to the test branch so workflow_dispatch on this
+    # branch exercises the new pre-comp + model-tiering reusable workflow.
+    # MUST revert to @main before merging this PR.
+    uses: VorobiovD/air/.github/workflows/managed-review.yml@feat/pre-computation-and-model-tiering
     with:
       # Reusable declares these as `type: string` so we can pass expression
       # results directly — `${{ inputs.X }}` resolves to a string, and typed
