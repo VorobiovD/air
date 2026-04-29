@@ -46,6 +46,12 @@
 # Codex (optional 5th reviewer): set `OPENAI_API_KEY` as a repo/org secret
 # to enable. Without it, the review runs with 4 Claude specialists +
 # verifier only (behavior unchanged from v1.8.0).
+#
+# Cross-repo benchmarking: when pinning the `uses:` line at a non-main
+# air branch (e.g. `@feat/...`), pass `air_ref` with the same value so
+# setup.py reads agent frontmatter from the same branch the reusable
+# workflow loaded from — otherwise setup.py reads main's frontmatter
+# and reverts any feature-branch model-tier changes mid-run.
 
 name: air managed review
 
@@ -67,6 +73,21 @@ on:
         required: false
         type: string
         default: 'false'
+      air_ref:
+        description: |
+          air repo ref for the setup.py + agent prompts checkout. Defaults
+          to `main` for production. Override only when benchmarking a
+          feature branch — setup.py reads agent frontmatter and syncs to
+          Anthropic, so `air_ref` MUST point at the same air branch the
+          caller's `uses:` line pins. Otherwise setup.py reads main's
+          frontmatter and silently reverts any model-tier changes that
+          exist only on the feature branch (qai-be benchmark surfaced
+          this when `uses: ...managed-review.yml@feat/...` ran setup.py
+          against main's frontmatter and resynced specialists from the
+          test tier back to production tier).
+        required: false
+        type: string
+        default: 'main'
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -105,18 +126,23 @@ jobs:
       - name: Install Python dependencies
         run: pip install anthropic requests
 
-      # TEMPORARY for benchmarking: hardcoded to this test branch.
-      # github.workflow_ref returns the CALLER's ref in a reusable
-      # workflow, not the reusable's own — there's no built-in way for a
-      # reusable workflow to learn its own ref. Long-term fix is an
-      # `air_ref` input parameter the caller passes; for now hardcode.
-      # MUST revert to `main` (or remove `ref:`) before merging this PR.
+      # `actions/checkout@v4` defaults to the default branch when
+      # `repository:` is set to a different repo than the caller's. For
+      # cross-repo benchmarking (e.g., qai-be → air@feature-branch) the
+      # caller must pass `air_ref` as an input so setup.py reads agent
+      # frontmatter from the SAME air ref that the reusable workflow
+      # was loaded from — otherwise setup.py syncs main's frontmatter
+      # to the live agents and silently reverts any feature-branch
+      # model-tier changes. github.workflow_ref returns the CALLER's
+      # ref inside a reusable workflow (not the reusable's own), so
+      # there's no built-in way to derive this — must be an explicit
+      # input.
       - name: Checkout air repo (for setup.py + agent prompts)
         uses: actions/checkout@v4
         with:
           repository: VorobiovD/air
           path: air
-          ref: feat/pre-computation-and-model-tiering
+          ref: ${{ inputs.air_ref }}
 
       # Always check out the target repo — Codex needs it (when enabled),
       # AND review.py uses it for client-side pre-computation (blame /
