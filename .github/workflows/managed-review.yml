@@ -111,15 +111,16 @@ jobs:
           repository: VorobiovD/air
           path: air
 
-      # Codex-only steps (skipped when OPENAI_API_KEY secret is unset, the
-      # no_codex input is "true", or the PR number hasn't resolved — that
-      # last check prevents actions/checkout from failing with
-      # `fatal: couldn't find remote ref refs/pull//head` before the
-      # friendlier "No PR number available" error in the Run review step).
-      # The target-repo checkout + codex install add ~30s cold-start, so
-      # we only pay that cost on repos that opted in.
-      - name: Checkout target repo (for Codex)
-        if: ${{ env.OPENAI_API_KEY != '' && inputs.no_codex != 'true' && env.PR_NUMBER_RESOLVED != '' }}
+      # Always check out the target repo — Codex needs it (when enabled),
+      # AND review.py uses it for client-side pre-computation (blame /
+      # churn / diff-check / file-status summaries embedded in the PR
+      # Context, so specialists don't burn tool round-trips re-deriving
+      # them from inside their containers). Gate only on
+      # PR_NUMBER_RESOLVED — without a PR number `refs/pull//head` is
+      # invalid. Codex install + login below stays gated on OPENAI_API_KEY
+      # (no point installing the CLI if it won't run).
+      - name: Checkout target repo (for Codex + pre-computation)
+        if: ${{ env.PR_NUMBER_RESOLVED != '' }}
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
@@ -159,9 +160,13 @@ jobs:
           PR_NUMBER: ${{ env.PR_NUMBER_RESOLVED }}
           CLOSED: ${{ inputs.closed }}
           NO_CODEX: ${{ inputs.no_codex }}
-          # Absolute path so review.py can invoke `codex review` inside it.
-          # Empty when Codex is disabled; review.py treats empty as "skip".
-          AIR_TARGET_REPO: ${{ env.OPENAI_API_KEY != '' && inputs.no_codex != 'true' && format('{0}/target-repo', github.workspace) || '' }}
+          # Absolute path to the local checkout. review.py uses it for
+          # both `codex review` (when enabled) and client-side
+          # pre-computation (blame/churn/file-status/diff-check
+          # summaries embedded in the PR Context). Set whenever the
+          # target-repo checkout step ran (PR_NUMBER_RESOLVED != '');
+          # empty otherwise so review.py skips both legs gracefully.
+          AIR_TARGET_REPO: ${{ env.PR_NUMBER_RESOLVED != '' && format('{0}/target-repo', github.workspace) || '' }}
         run: |
           cd air
           if [ -z "$PR_NUMBER" ]; then
