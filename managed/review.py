@@ -334,6 +334,31 @@ def count_blockers(review_body: str) -> int:
     return len(_BLOCKER_ENTRY_RE.findall(section.group(1)))
 
 
+def _count_gating_unfixed(review_body: str) -> int:
+    """Count prior findings that should block re-review approval.
+
+    Walks the `### Previous Findings Status` entries, skips FIXED /
+    DISPUTED / DEFERRED (none of those should gate), and counts
+    NOT FIXED + PARTIALLY FIXED entries whose original severity is
+    blocker or medium. Low/nit entries left unfixed don't gate — a
+    developer who deferred a nit shouldn't be blocked from merge.
+
+    Severity defaults to `medium` (gating) when the verifier omits the
+    `[severity]` tag — preserves the v1.10 conservative gating behavior
+    on re-reviews emitted before the severity tag was added to the
+    template.
+    """
+    count = 0
+    for m in _PRIOR_STATUS_RE.finditer(review_body):
+        severity = (m.group(1) or "medium").lower()
+        # `re.sub` to normalize "NOT  FIXED" / "PARTIALLY  FIXED" with
+        # any whitespace shape into the canonical form for set lookup.
+        status = re.sub(r"\s+", " ", m.group(2).upper()).strip()
+        if status in _GATING_STATUSES and severity in _GATING_SEVERITIES:
+            count += 1
+    return count
+
+
 def should_request_changes(review_body: str) -> tuple[bool, str]:
     """Decide whether to submit REQUEST_CHANGES instead of APPROVE.
 
@@ -341,21 +366,23 @@ def should_request_changes(review_body: str) -> tuple[bool, str]:
     and branch-protection state.
 
     - Fresh review: REQUEST_CHANGES if any blockers exist.
-    - Re-review: REQUEST_CHANGES if any new blockers exist OR any prior
-      finding is still NOT FIXED / PARTIALLY FIXED. The latter is
-      conservative — a developer can clear the gate by either fixing the
-      finding or disputing it with a rationale (which the verifier
-      promotes to DISPUTED status, not NOT FIXED).
+    - Re-review: REQUEST_CHANGES if any NEW blockers exist OR any prior
+      finding originally classified as blocker/medium is still NOT FIXED
+      or PARTIALLY FIXED. Low/nit findings left unfixed don't gate; a
+      developer can clear the gate by either fixing, explicitly
+      disputing (verifier marks DISPUTED), or punting with a ticket
+      reference (verifier marks DEFERRED — only acceptable for non-
+      blocker findings).
     """
     blockers = count_blockers(review_body)
     if _REREVIEW_HEADER_RE.search(review_body):
-        unfixed = len(_UNFIXED_PRIOR_RE.findall(review_body))
+        unfixed = _count_gating_unfixed(review_body)
         if blockers > 0 and unfixed > 0:
-            return True, f"{blockers} new blocker(s), {unfixed} prior finding(s) still unfixed"
+            return True, f"{blockers} new blocker(s), {unfixed} prior blocker/medium still unfixed"
         if blockers > 0:
             return True, f"{blockers} new blocker(s)"
         if unfixed > 0:
-            return True, f"{unfixed} prior finding(s) still unfixed"
+            return True, f"{unfixed} prior blocker/medium still unfixed"
         return False, ""
     if blockers > 0:
         return True, f"{blockers} blocker(s)"
@@ -434,17 +461,35 @@ _BLOCKERS_SECTION_RE = re.compile(
 )
 _BLOCKER_ENTRY_RE = re.compile(r"^\*\*\d+\.", re.MULTILINE)
 # In re-review mode, the "Previous Findings Status" section lists each
-# prior finding as `- **#N** — FIXED / NOT FIXED / PARTIALLY FIXED /
-# DISPUTED — rationale`. Anything left as NOT FIXED or PARTIALLY FIXED
-# means the developer didn't address (or insufficiently addressed) work
-# we already flagged worth raising — should not auto-approve. DISPUTED
-# is excluded because it indicates the developer pushed back with a
-# rationale; the verifier weighs that into the kept-or-suppressed
-# decision before this point.
-_UNFIXED_PRIOR_RE = re.compile(
-    r"^-\s+\*\*#\d+\*\*\s+—\s+(?:NOT\s+FIXED|PARTIALLY\s+FIXED)\b",
-    re.MULTILINE,
+# prior finding as:
+#   - **#N** [severity] — STATUS — rationale
+# where severity ∈ {blocker, medium, low, nit} (carried from the prior
+# review) and STATUS ∈ {FIXED, NOT FIXED, PARTIALLY FIXED, DEFERRED,
+# DISPUTED}. The severity tag is optional for backward compatibility
+# with reviews emitted before v1.12 — when missing, default to `medium`
+# so legacy bodies retain the v1.10 conservative gating behavior.
+#
+# Verdict gating semantics:
+# - FIXED / DISPUTED / DEFERRED: never gate. DISPUTED means the
+#   developer pushed back with rationale the verifier accepted; DEFERRED
+#   means they explicitly punted with a ticket reference.
+# - NOT FIXED / PARTIALLY FIXED: gate only if severity ∈ {blocker,
+#   medium}. Low/nit issues left unfixed are noise, not approval gates.
+# - New blockers under `#### Blockers`: always gate (existing behavior).
+# Without severity-awareness, qai-fe #239 triggered REQUEST_CHANGES on a
+# re-review where all originally-flagged blockers were fixed, just
+# because 10 prior nits/lows were marked NOT FIXED (deferred) — that
+# was technically correct under v1.10 logic but didn't match operator
+# intent.
+_PRIOR_STATUS_RE = re.compile(
+    r"^-\s+\*\*#\d+\*\*"
+    r"(?:\s*\[(blocker|medium|low|nit)\])?"
+    r"\s+—\s+"
+    r"(FIXED|NOT\s+FIXED|PARTIALLY\s+FIXED|DEFERRED|DISPUTED)\b",
+    re.MULTILINE | re.IGNORECASE,
 )
+_GATING_SEVERITIES = {"blocker", "medium"}
+_GATING_STATUSES = {"NOT FIXED", "PARTIALLY FIXED"}
 _REREVIEW_HEADER_RE = re.compile(r"^##\s+Code Review\s*\(Re-review\)", re.MULTILINE)
 # Cap the prior review body before inlining into specialist prompts. A noisy
 # 10K-token review would blow up re-review context ~5x across agents and
@@ -1384,8 +1429,16 @@ async def run_review(args):
     if mode == "re-review":
         verifier_task = f"""You have raw findings from the specialist reviewers.
 They were run in RE-REVIEW MODE — each result contains both (a) a classification of
-each prior finding (FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED) and (b) any
-NEW findings in the inter-diff.
+each prior finding and (b) any NEW findings in the inter-diff.
+
+For each prior finding, choose ONE status:
+- FIXED — the flagged code changed and addresses the finding.
+- PARTIALLY FIXED — code changed but doesn't fully address.
+- NOT FIXED — code unchanged, finding still applies.
+- DEFERRED — author explicitly punted with a ticket reference (e.g.
+  "tracked as PRM-3686"). ONLY acceptable for non-blocker findings; do
+  NOT use this status for findings originally classified as `blocker`.
+- DISPUTED — author pushed back with rationale you accept.
 
 Verify each finding per your system prompt and drop FALSE POSITIVE /
 below-threshold entries. Consolidate classifications across specialists —
@@ -1405,8 +1458,20 @@ _Re-reviewed at `{head_sha[:8]}`, previous review at `{(prior_sha or '')[:8]}`._
 
 ### Previous Findings Status
 
-- **#1** — FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED — brief rationale
-- **#2** — ...
+For each prior finding, emit one line in this shape:
+  - **#N** [<severity>] — <STATUS> — brief rationale
+
+Where `<severity>` is the original severity from the prior review (one of
+`blocker`, `medium`, `low`, `nit`) — copy it from the prior review's
+section heading where finding #N originally appeared. The orchestrator
+parses these tags to gate APPROVE/REQUEST_CHANGES on un-addressed
+high-severity prior findings only; lower-severity unfixed entries no
+longer block merge.
+
+Examples:
+- **#1** [blocker] — FIXED — `narrow_env` dict at L236-242 now omits secrets.
+- **#5** [low] — DEFERRED — Pagination tracked as PRM-3686.
+- **#7** [medium] — PARTIALLY FIXED — Banner added; server-side search deferred.
 
 ### New Findings (introduced since last review)
 
