@@ -1304,49 +1304,84 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
             file=sys.stderr,
         )
 
-    # Extract review comment from coordinator output. Coordinator's TURN 3
-    # outputs the verifier's response verbatim — typically as the LAST
-    # agent.message of the session, sometimes with a leading
-    # `<agent-notification thread_id="...">` runtime wrapper that the
-    # multi-agent runtime injects when forwarding sub-agent output through
-    # the coordinator's stream. The partition must:
-    #   1. Anchor `## Code Review` to start-of-line OR right after a `>`
-    #      (closing a notification tag), so the wrapper doesn't defeat
-    #      anchoring (qai-be #617: posted with `<agent-notification>...`
-    #      prefix because partition required `\n` before the header).
-    #   2. Reject mid-narration mentions (e.g. inline-code "the
-    #      `## Code Review` header to extract...") that would prepend a
-    #      preamble — that was the v1.7 bare-substring bug, fixed by
-    #      requiring a structural delimiter immediately before the header.
-    #   3. Trim any trailing `</agent-notification>` close tag and any
-    #      content beyond it (the runtime sometimes appends "wiki update
-    #      done" status as a separate notification; that belongs in the
-    #      log, not in the GitHub comment body).
-    _review_match = re.search(
-        r"(?:^|[>\n])(## Code Review.*?)(?=<agent-notification\b|\Z)",
-        coordinator_out,
-        re.DOTALL,
-    )
-    if _review_match:
-        review_body = _review_match.group(1).rstrip()
-        # Strip any stray closing tag that ended up inside the captured
-        # block (defensive — happens when the runtime closes the wrapper
-        # mid-review-body before re-opening it for the wiki status).
-        if review_body.endswith("</agent-notification>"):
-            review_body = review_body[: -len("</agent-notification>")].rstrip()
+    # Extract review comment from coordinator output. The runtime
+    # interleaves sub-agent forwards (`<agent-notification thread_id=
+    # "...">...</agent-notification>` blocks) with the coordinator's own
+    # voice (TURN 3 emits the verifier's response verbatim, not always
+    # wrapped). Empirical shapes seen in production:
+    #   - Clean: header at byte 0, footer at end
+    #   - Wrapped: `<agent-notification>...## Code Review...Reviewed at:
+    #     <sha></agent-notification>` (qai-be early shapes)
+    #   - Bundled (qai-be #617): N specialist forwards as notification
+    #     blocks, then `</agent-notification>## Code Review\n...Reviewed
+    #     at: <sha>...wiki update done` flat in the tail
+    #
+    # Strategy: ignore segmentation — anchor on the `Reviewed at: <head_sha>`
+    # footer the verifier ALWAYS emits, walk back to the most recent
+    # `## Code Review` line-start, and validate the captured SHA matches
+    # the actual head_sha we reviewed. The SHA validation closes the
+    # verdict-flip prompt-injection surface that the security audit on
+    # PR #47 v1 raised — an attacker echoing PR diff content through a
+    # specialist can fake the `## Code Review` header and `### Blockers`
+    # template, but they can't predict head_sha (it's the commit's own
+    # SHA, not in the diff). All `## Code Review` candidates whose footer
+    # SHA doesn't match are rejected.
+    #
+    # Tag-stripping flattens both `<agent-notification ...>` opening tags
+    # and `</agent-notification>` closing tags into newlines so the
+    # `(?m)^## Code Review` anchor works whether the header is at byte 0,
+    # right after a wrapper close, or after a `\n`. Mid-narration mentions
+    # like "the `## Code Review` header" (backtick-prefixed, not at line
+    # start) are rejected — preserves the v1.7 bare-substring fix.
+    _flattened = re.sub(r"</?agent-notification\b[^>]*>", "\n", coordinator_out)
+    # Walk every `^## Code Review[^\n]*` line in the flattened output.
+    # For each, look forward for a `Reviewed at: <40-hex>` footer that
+    # falls BEFORE the next `^## ` heading (any other H2). This bounds
+    # each candidate block so a specialist's `## Code Review Findings`
+    # header doesn't swallow content all the way through the verifier's
+    # output to the only `Reviewed at:` in the stream — without the
+    # next-heading bound, a single overlong match would pass the SHA
+    # check on the verifier's footer despite starting at a specialist's
+    # header. Walk candidates in reverse and pick the first whose
+    # `Reviewed at:` SHA matches the head we reviewed.
+    _header_re = re.compile(r"(?m)^## Code Review[^\n]*\n")
+    _next_h2_re = re.compile(r"(?m)^## ")
+    _footer_re = re.compile(r"\nReviewed at:\s+([0-9a-f]{40})\b[^\n]*")
+    _candidates = []
+    for _hm in _header_re.finditer(_flattened):
+        _body_start = _hm.end()
+        _next_h2 = _next_h2_re.search(_flattened, _body_start)
+        _bound = _next_h2.start() if _next_h2 else len(_flattened)
+        _fm = _footer_re.search(_flattened, _body_start, _bound)
+        if _fm is None:
+            continue
+        _candidates.append((_hm.start(), _fm.end(), _fm.group(1)))
+    review_body = ""
+    review_extracted = False
+    for _start, _end, _sha in reversed(_candidates):
+        if _sha != head_sha:
+            print(
+                f"  [warn] discarding `## Code Review` block at offset "
+                f"{_start} — `Reviewed at:` SHA {_sha[:8]} doesn't match "
+                f"head_sha {head_sha[:8]}",
+                file=sys.stderr,
+            )
+            continue
+        review_body = _flattened[_start:_end].rstrip()
         review_extracted = True
-    else:
-        # Fallback — coordinator didn't follow the format; post raw.
-        # The raw output may still contain `### Blockers` / `**1.`
-        # snippets echoed from verifier_task templates, so the verdict
-        # logic below MUST NOT run on this path — it would flip
-        # branch-protection state on a malformed review.
+        break
+
+    if not review_extracted:
+        # Fallback — no candidate had a head_sha-matching footer. Post
+        # raw so the operator sees the malformed output; the verdict
+        # logic below MUST NOT run on this path (review_extracted=False)
+        # because a malformed body may still contain `### Blockers` /
+        # `**1.` template snippets that count_blockers would mis-parse.
         review_body = coordinator_out
-        review_extracted = False
         print(
-            "  [warn] coordinator output didn't contain a `## Code Review` "
-            "header anchored to start-of-line or after a `<agent-notification>` "
-            "wrapper — posting raw",
+            "  [warn] coordinator output had no `## Code Review` block whose "
+            f"`Reviewed at:` footer matched head_sha {head_sha[:8]} — posting "
+            "raw, verdict will be skipped",
             file=sys.stderr,
         )
 
