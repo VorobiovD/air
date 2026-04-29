@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.10.0](https://github.com/VorobiovD/air/compare/v1.9.0...v1.10.0) (2026-04-29)
+
+
+### Features
+
+* submit formal review verdict (APPROVE / REQUEST_CHANGES) in managed mode ([#45](https://github.com/VorobiovD/air/issues/45)) ([d306b0a](https://github.com/VorobiovD/air/commit/d306b0a5014b253645ca77ac9767c7662375b2f2))
+
+
+### Bug Fixes
+
+* bump coordinator + GHA timeouts to fit larger re-reviews ([#43](https://github.com/VorobiovD/air/issues/43)) ([34ac6e7](https://github.com/VorobiovD/air/commit/34ac6e7555b9554f4d4f2dbb7165d1cd6d2d9ed7))
+
 ## [1.9.0](https://github.com/VorobiovD/air/compare/v1.8.0...v1.9.0) (2026-04-28)
 
 
