@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.11.0](https://github.com/VorobiovD/air/compare/v1.10.0...v1.11.0) (2026-04-29)
+
+
+### Features
+
+* pre-computation + tier verifier/git-history models ([#46](https://github.com/VorobiovD/air/issues/46)) ([98cda8b](https://github.com/VorobiovD/air/commit/98cda8b03ba4fb618ed535ef542b3ba90e257165))
+
+
+### Bug Fixes
+
+* extract review through &lt;agent-notification&gt; wrappers in coordinator output ([#47](https://github.com/VorobiovD/air/issues/47)) ([3ab594f](https://github.com/VorobiovD/air/commit/3ab594f302767dfd0179c5b36b4400a5b5b3246c))
+
 ## [1.10.0](https://github.com/VorobiovD/air/compare/v1.9.0...v1.10.0) (2026-04-29)
 
 
