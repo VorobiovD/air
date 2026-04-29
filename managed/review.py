@@ -321,6 +321,83 @@ def fetch_pr_metadata(repo: str, pr_number: int, token: str) -> dict:
     return resp.json()
 
 
+def count_blockers(review_body: str) -> int:
+    """Count `**N. ...` numbered entries under a Blockers heading.
+
+    Handles both fresh review (`### Blockers`) and re-review's new-
+    findings subsection (`#### Blockers`) via a permissive heading match.
+    Returns 0 if no Blockers section exists.
+    """
+    section = _BLOCKERS_SECTION_RE.search(review_body)
+    if not section:
+        return 0
+    return len(_BLOCKER_ENTRY_RE.findall(section.group(1)))
+
+
+def should_request_changes(review_body: str) -> tuple[bool, str]:
+    """Decide whether to submit REQUEST_CHANGES instead of APPROVE.
+
+    Returns (request_changes, reason). The verdict drives `reviewDecision`
+    and branch-protection state.
+
+    - Fresh review: REQUEST_CHANGES if any blockers exist.
+    - Re-review: REQUEST_CHANGES if any new blockers exist OR any prior
+      finding is still NOT FIXED / PARTIALLY FIXED. The latter is
+      conservative — a developer can clear the gate by either fixing the
+      finding or disputing it with a rationale (which the verifier
+      promotes to DISPUTED status, not NOT FIXED).
+    """
+    blockers = count_blockers(review_body)
+    if _REREVIEW_HEADER_RE.search(review_body):
+        unfixed = len(_UNFIXED_PRIOR_RE.findall(review_body))
+        if blockers > 0 and unfixed > 0:
+            return True, f"{blockers} new blocker(s), {unfixed} prior finding(s) still unfixed"
+        if blockers > 0:
+            return True, f"{blockers} new blocker(s)"
+        if unfixed > 0:
+            return True, f"{unfixed} prior finding(s) still unfixed"
+        return False, ""
+    if blockers > 0:
+        return True, f"{blockers} blocker(s)"
+    return False, ""
+
+
+def submit_review_verdict(
+    repo: str,
+    pr_number: int,
+    token: str,
+    event: str,
+    body: str,
+) -> None:
+    """POST a formal pull-request review (APPROVE / REQUEST_CHANGES / COMMENT).
+
+    The CLI plugin's review.md Step 12 always submits a formal verdict in
+    addition to the issue comment; managed mode used to skip this and
+    only post the comment, leaving `reviewDecision` stuck at
+    REVIEW_REQUIRED no matter what the review said. This helper closes
+    that gap. Failures are logged but never fatal — the issue comment is
+    already published, so the review's signal isn't lost.
+
+    GitHub rejects self-reviews (PR author == reviewer) with 422, and
+    silently ignores duplicate verdicts on the same SHA from the same
+    reviewer. Caller is responsible for the own-PR guard.
+    """
+    resp = req.post(
+        f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        json={"event": event, "body": body},
+    )
+    if not resp.ok:
+        print(
+            f"  [warn] verdict submission failed ({event}): "
+            f"{_github_error_message(resp)} — issue comment was posted, "
+            f"branch-protection state unchanged",
+            file=sys.stderr,
+        )
+        return
+    print(f"  Verdict: {event}")
+
+
 def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
     resp = req.get(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
@@ -336,6 +413,31 @@ def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
 # `prior_sha == head_sha` equality at the skip gate, silently triggering a
 # costly full review instead of no-op.
 REVIEWED_AT_RE = re.compile(r"Reviewed at:\s*([0-9a-f]{40})", re.IGNORECASE)
+
+# Counts numbered findings (`**N. ...`) under a Blockers heading.
+# Fresh review uses `### Blockers`; re-review nests new blockers under
+# `#### Blockers` inside `### New Findings (introduced since last review)`.
+# Match 3-or-4 hashes to cover both shapes; section terminates on the
+# next heading at the same OR shallower depth, so blocker counts don't
+# bleed into adjacent Medium/Low/Nits.
+_BLOCKERS_SECTION_RE = re.compile(
+    r"^#{3,4}\s+Blockers\s*$\n(.*?)(?=^#{1,4}\s+|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+_BLOCKER_ENTRY_RE = re.compile(r"^\*\*\d+\.", re.MULTILINE)
+# In re-review mode, the "Previous Findings Status" section lists each
+# prior finding as `- **#N** — FIXED / NOT FIXED / PARTIALLY FIXED /
+# DISPUTED — rationale`. Anything left as NOT FIXED or PARTIALLY FIXED
+# means the developer didn't address (or insufficiently addressed) work
+# we already flagged worth raising — should not auto-approve. DISPUTED
+# is excluded because it indicates the developer pushed back with a
+# rationale; the verifier weighs that into the kept-or-suppressed
+# decision before this point.
+_UNFIXED_PRIOR_RE = re.compile(
+    r"^-\s+\*\*#\d+\*\*\s+—\s+(?:NOT\s+FIXED|PARTIALLY\s+FIXED)\b",
+    re.MULTILINE,
+)
+_REREVIEW_HEADER_RE = re.compile(r"^##\s+Code Review\s*\(Re-review\)", re.MULTILINE)
 # Cap the prior review body before inlining into specialist prompts. A noisy
 # 10K-token review would blow up re-review context ~5x across agents and
 # defeat the inter-diff savings.
@@ -1237,6 +1339,37 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         print(f"Error posting comment: {_github_error_message(resp)}", file=sys.stderr)
         sys.exit(1)
     print(f"  Posted: {resp.json()['html_url']}")
+
+    # Submit the formal review verdict so `reviewDecision` updates and
+    # branch-protection rules see this review. The issue comment above
+    # makes the body discoverable for re-review detection but does NOT
+    # affect the protection state — that's a separate API call (POST
+    # /pulls/{n}/reviews). The CLI plugin (commands/review.md Step 12)
+    # has always done both; managed mode used to skip the verdict, so
+    # qai-be #595 stayed at REVIEW_REQUIRED with 0 blockers — operator
+    # had to approve manually. Skip the verdict only when the bot IS the
+    # PR author (GitHub 422s self-review) or the PR is closed/merged
+    # (state-gate above already caught --closed=false; if we're here on
+    # a closed PR via --closed, also skip — verdicts on closed PRs 422).
+    own_pr = bool(bot_login) and bot_login == meta["user"]["login"]
+    if own_pr:
+        print(f"  [info] bot is the PR author ({bot_login}) — skipping verdict (GitHub disallows self-review)")
+    elif pr_state == "closed":
+        print("  [info] PR is closed/merged — skipping verdict (GitHub 422s verdicts on those)")
+    else:
+        request_changes, reason = should_request_changes(review_body)
+        if request_changes:
+            submit_review_verdict(
+                args.repo, args.pr_number, bot_token,
+                event="REQUEST_CHANGES",
+                body=f"Changes requested — {reason}. See review comment above.",
+            )
+        else:
+            submit_review_verdict(
+                args.repo, args.pr_number, bot_token,
+                event="APPROVE",
+                body="Approved — 0 blockers found. See review comment for medium/low/nit findings.",
+            )
 
     # Epilogue: bump the shared wiki-backed counter and trigger /air:learn if
     # the threshold fires. All-best-effort — never fail the overall review if
