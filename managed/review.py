@@ -337,11 +337,14 @@ def count_blockers(review_body: str) -> int:
 def _count_gating_unfixed(review_body: str) -> int:
     """Count prior findings that should block re-review approval.
 
-    Walks the `### Previous Findings Status` entries, skips FIXED /
-    DISPUTED / DEFERRED (none of those should gate), and counts
-    NOT FIXED + PARTIALLY FIXED entries whose original severity is
-    blocker or medium. Low/nit entries left unfixed don't gate — a
-    developer who deferred a nit shouldn't be blocked from merge.
+    Walks the `### Previous Findings Status` entries:
+    - FIXED / DISPUTED: never gate.
+    - DEFERRED: gates if severity is blocker (defense-in-depth against
+      the verifier emitting `[blocker] — DEFERRED` despite the prompt's
+      instruction); otherwise non-gating.
+    - NOT FIXED / PARTIALLY FIXED: gates if severity is blocker or
+      medium. Low/nit unfixed entries don't gate — a developer who
+      deferred a nit shouldn't be blocked from merge.
 
     Severity defaults to `medium` (gating) when the verifier omits the
     `[severity]` tag — preserves the v1.10 conservative gating behavior
@@ -355,6 +358,12 @@ def _count_gating_unfixed(review_body: str) -> int:
         # any whitespace shape into the canonical form for set lookup.
         status = re.sub(r"\s+", " ", m.group(2).upper()).strip()
         if status in _GATING_STATUSES and severity in _GATING_SEVERITIES:
+            count += 1
+            continue
+        if status == _BLOCKER_DEFERRED_STATUS and severity == "blocker":
+            # Verifier prompt forbids DEFERRED for blockers; gate enforces
+            # independently. Catches prompt drift, edge-case dispute flows,
+            # or a verifier that misclassifies under model-tier swap.
             count += 1
     return count
 
@@ -490,6 +499,14 @@ _PRIOR_STATUS_RE = re.compile(
 )
 _GATING_SEVERITIES = {"blocker", "medium"}
 _GATING_STATUSES = {"NOT FIXED", "PARTIALLY FIXED"}
+# DEFERRED is non-gating for non-blocker findings, but the verifier prompt
+# forbids DEFERRED for blockers ("ONLY acceptable for non-blocker findings;
+# do NOT use this status for findings originally classified as `blocker`").
+# Defense in depth: the gate enforces the same rule independently — if the
+# verifier (or a future prompt drift) emits `[blocker] — DEFERRED`, treat
+# it as gating regardless. Prevents prompt-only enforcement of a rule that
+# can flip a CHANGES_REQUESTED to APPROVE on a deferred blocker.
+_BLOCKER_DEFERRED_STATUS = "DEFERRED"
 _REREVIEW_HEADER_RE = re.compile(r"^##\s+Code Review\s*\(Re-review\)", re.MULTILINE)
 # Cap the prior review body before inlining into specialist prompts. A noisy
 # 10K-token review would blow up re-review context ~5x across agents and
@@ -1059,10 +1076,17 @@ async def run_session(
     rest_fallback_used = False
 
     def _process_event(event) -> str | None:
-        """Apply event to local state. Returns "break" / "break-error" /
-        "continue" or None to keep looping. Mutates parts, open_threads,
-        and the `terminated_reason` closure via nonlocal-like writes
-        (Python returns sentinel; caller assigns terminated_reason).
+        """Apply one event to local state. Returns:
+          - "break"          terminal success — caller should break the loop
+          - "break-error"    terminal error — caller should break, terminated_reason set
+          - "continue"       event was a duplicate (already in seen_event_ids); skip
+          - None             event was processed successfully; caller continues
+
+        Reads/mutates closure state:
+          - `parts` (list)       — appended via `.append()`, no nonlocal needed
+          - `seen_event_ids`     — added via `.add()`, no nonlocal needed
+          - `open_threads` (int) — rebound, requires nonlocal
+          - `terminated_reason`  — rebound, requires nonlocal
         """
         nonlocal open_threads, terminated_reason
         eid = getattr(event, "id", None)
@@ -1151,13 +1175,11 @@ async def run_session(
         new_count = 0
         for ev in events:
             res = _process_event(ev)
-            if getattr(ev, "id", None) in seen_event_ids:
-                # _process_event also adds to seen; count post-add via
-                # whether we returned None (kept) vs "continue" (skipped).
-                # Approximate via len growth between iterations.
-                pass
             if res in ("break", "break-error"):
                 return res
+            # `_process_event` returns "continue" when it short-circuited
+            # via the seen_event_ids dedupe; only count newly-processed
+            # events (returning None) toward the drain telemetry.
             if res is None:
                 new_count += 1
         if new_count:
