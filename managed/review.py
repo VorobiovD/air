@@ -1046,75 +1046,184 @@ async def run_session(
 
     parts: list[str] = []
     terminated_reason: str | None = None
+    # SSE delivery latency: Anthropic's REST events feed sometimes commits
+    # session.status_idle and the trailing `agent.message` (carrying the
+    # final review) ~10 minutes before our SSE stream consumer receives
+    # them — observed on qai-be #635 (event committed 23:57:37, Python
+    # received 00:07:38). When the stream sits silent past `SSE_QUIET_S`
+    # without yielding an event, fall back to the REST events endpoint
+    # to recover any unseen events. Dedupe by event id so we don't
+    # double-count thread_created/thread_idle on cross-source replay.
+    SSE_QUIET_S = 90.0
+    seen_event_ids: set[str] = set()
+    rest_fallback_used = False
+
+    def _process_event(event) -> str | None:
+        """Apply event to local state. Returns "break" / "break-error" /
+        "continue" or None to keep looping. Mutates parts, open_threads,
+        and the `terminated_reason` closure via nonlocal-like writes
+        (Python returns sentinel; caller assigns terminated_reason).
+        """
+        nonlocal open_threads, terminated_reason
+        eid = getattr(event, "id", None)
+        if eid:
+            if eid in seen_event_ids:
+                return "continue"
+            seen_event_ids.add(eid)
+        t = getattr(event, "type", "")
+        if t == "agent.message":
+            for block in getattr(event, "content", None) or []:
+                text = getattr(block, "text", None)
+                # Multi-agent runtime emits agent.message events with the
+                # literal text "[empty message]" (15 chars) between tool-
+                # dispatch turns. Skip them.
+                if text and text.strip() != "[empty message]":
+                    parts.append(text)
+            return None
+        if t == "session.thread_created":
+            open_threads += 1
+            return None
+        if t == "session.thread_idle":
+            open_threads = max(0, open_threads - 1)
+            return None
+        if t == "session.status_idle":
+            stop_reason = getattr(event, "stop_reason", None)
+            stop_type = getattr(stop_reason, "type", None) if stop_reason else None
+            if stop_type == "requires_action":
+                # Transient idle waiting for client-side events; keep going.
+                return None
+            if stop_type in TERMINAL_SUCCESS:
+                if open_threads > 0:
+                    # Intermediate idle — sub-agents still running.
+                    return None
+                return "break"
+            terminated_reason = f"idle with stop_reason={stop_type!r}"
+            return "break-error"
+        if t == "session.status_terminated":
+            terminated_reason = "session terminated"
+            return "break-error"
+        if t == "session.error":
+            # `session.error` with retry_status='retrying' means Anthropic
+            # is recovering server-side; the session is still alive and
+            # breaking here would cancel its in-flight retry (PR #41
+            # incident). Only abort on truly terminal errors.
+            error = getattr(event, "error", None)
+            retry_status = getattr(error, "retry_status", None) if error else None
+            retry_type = getattr(retry_status, "type", None) if retry_status else None
+            if retry_type == "retrying":
+                print(
+                    f"  [warn] {label}: transient session error (Anthropic retrying): "
+                    f"{getattr(error, 'message', '?')}",
+                    file=sys.stderr,
+                )
+                return None
+            terminated_reason = f"session error: {error!r}"
+            return "break-error"
+        return None
+
+    async def _drain_via_rest() -> str | None:
+        """Pull session events via the REST endpoint, process any not yet
+        seen via SSE. Returns "break" / "break-error" / None.
+
+        Uses the same SDK client to keep auth / beta headers consistent.
+        Calls `events.list` if available; otherwise yields None and the
+        caller continues waiting on SSE.
+        """
+        try:
+            page = await client.beta.sessions.events.list(session.id, limit=200)
+        except AttributeError:
+            # Older SDK: no events.list. Fall back to letting SSE keep
+            # streaming; we'll just keep paying the latency.
+            print(
+                f"  [warn] {label}: SDK lacks beta.sessions.events.list; "
+                f"can't drain via REST",
+                file=sys.stderr,
+            )
+            return None
+        except Exception as e:
+            print(
+                f"  [warn] {label}: REST events drain failed ({e}); "
+                f"continuing with SSE",
+                file=sys.stderr,
+            )
+            return None
+        events = getattr(page, "data", None) or []
+        new_count = 0
+        for ev in events:
+            res = _process_event(ev)
+            if getattr(ev, "id", None) in seen_event_ids:
+                # _process_event also adds to seen; count post-add via
+                # whether we returned None (kept) vs "continue" (skipped).
+                # Approximate via len growth between iterations.
+                pass
+            if res in ("break", "break-error"):
+                return res
+            if res is None:
+                new_count += 1
+        if new_count:
+            print(
+                f"  [info] {label}: drained {new_count} unseen event(s) via REST",
+                file=sys.stderr,
+            )
+        return None
+
     # AsyncAnthropic's beta.sessions.events.stream is an `async def` that
     # returns an AsyncStream — must await it before using as a context
     # manager (it isn't itself the context manager).
     stream_cm = await client.beta.sessions.events.stream(session.id)
     async with stream_cm as stream:
-        async for event in stream:
-            t = getattr(event, "type", "")
-            if t == "agent.message":
-                for block in event.content:
-                    text = getattr(block, "text", None)
-                    # Multi-agent runtime emits agent.message events with
-                    # the literal text "[empty message]" (15 chars) between
-                    # tool-dispatch turns when the coordinator has no real
-                    # response, just tool_use blocks. Skip them — otherwise
-                    # they prepend onto the verifier's verbatim output and
-                    # break the `\n## Code Review` partition anchor (PR #41
-                    # second run posted `[empty message]## Code Review...`
-                    # because the placeholder ran flush against the header).
-                    if text and text.strip() != "[empty message]":
-                        parts.append(text)
-            elif t == "session.thread_created":
-                open_threads += 1
-            elif t == "session.thread_idle":
-                open_threads = max(0, open_threads - 1)
-            elif t == "session.status_idle":
-                stop_reason = getattr(event, "stop_reason", None)
-                stop_type = getattr(stop_reason, "type", None) if stop_reason else None
-                if stop_type == "requires_action":
-                    # Transient idle waiting for client-side events; we don't
-                    # send any here, so keep draining the stream.
-                    continue
-                if stop_type in TERMINAL_SUCCESS:
-                    if open_threads > 0:
-                        # Coordinator turn ended but sub-agent threads are
-                        # still running — keep streaming until they idle and
-                        # the coordinator's next turn (or final turn) fires.
-                        continue
-                    break
-                terminated_reason = f"idle with stop_reason={stop_type!r}"
-                break
-            elif t == "session.status_terminated":
-                terminated_reason = "session terminated"
-                break
-            elif t == "session.error":
-                # `session.error` events carry a `retry_status` field on the
-                # error object. When `retry_status.type == "retrying"`,
-                # Anthropic is recovering server-side and the session is
-                # still alive — breaking here would (a) abandon a session
-                # that may complete fine seconds later, and (b) trigger our
-                # atexit interrupt, which can actively cancel Anthropic's
-                # in-progress retry. Only abort on terminal errors.
-                #
-                # PR #41 final run failed this way: a transient
-                # `BetaManagedAgentsUnknownError(retry_status=retrying)`
-                # fired ~6 min in; we aborted, the cleanup interrupt landed
-                # right as Anthropic's retry was running, and the session
-                # idled 30s later — wasting the run. Let the stream
-                # continue when retry_status says retrying.
-                error = getattr(event, "error", None)
-                retry_status = getattr(error, "retry_status", None) if error else None
-                retry_type = getattr(retry_status, "type", None) if retry_status else None
-                if retry_type == "retrying":
+        stream_iter = stream.__aiter__()
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    stream_iter.__anext__(), timeout=SSE_QUIET_S,
+                )
+            except asyncio.TimeoutError:
+                # SSE silent past SSE_QUIET_S. Check session status; if
+                # idle, fall back to REST events list to recover any
+                # buffered events.
+                try:
+                    sess = await client.beta.sessions.retrieve(session.id)
+                except Exception as e:
                     print(
-                        f"  [warn] {label}: transient session error (Anthropic retrying): "
-                        f"{getattr(error, 'message', '?')}",
+                        f"  [warn] {label}: SSE quiet for {SSE_QUIET_S}s, "
+                        f"session retrieve failed ({e}); continuing",
                         file=sys.stderr,
                     )
                     continue
-                terminated_reason = f"session error: {error!r}"
+                sess_status = getattr(sess, "status", None)
+                if sess_status != "idle":
+                    # Still running; keep waiting on SSE.
+                    continue
+                if rest_fallback_used:
+                    # Already drained once on a prior timeout — runtime
+                    # has nothing more to deliver. Force-break with what
+                    # we have.
+                    print(
+                        f"  [warn] {label}: SSE quiet 2 polls + session "
+                        f"idle; force-breaking",
+                        file=sys.stderr,
+                    )
+                    break
+                rest_fallback_used = True
+                print(
+                    f"  [info] {label}: SSE quiet for {SSE_QUIET_S}s + "
+                    f"session idle, draining events via REST",
+                    file=sys.stderr,
+                )
+                drain_res = await _drain_via_rest()
+                if drain_res in ("break", "break-error"):
+                    break
+                # Drain didn't terminate; if open_threads is 0 we're
+                # done — break out.
+                if open_threads <= 0:
+                    break
+                # Else keep waiting on SSE (sub-agents still tracked).
+                continue
+            except StopAsyncIteration:
+                break
+            res = _process_event(event)
+            if res in ("break", "break-error"):
                 break
 
     # Only drop from LIVE_SESSIONS on clean success. Error events, unknown
@@ -1627,24 +1736,27 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     # SHA doesn't match are rejected.
     #
     # Tag-stripping flattens both `<agent-notification ...>` opening tags
-    # and `</agent-notification>` closing tags into newlines so the
-    # `(?m)^## Code Review` anchor works whether the header is at byte 0,
-    # right after a wrapper close, or after a `\n`. Mid-narration mentions
-    # like "the `## Code Review` header" (backtick-prefixed, not at line
-    # start) are rejected — preserves the v1.7 bare-substring fix.
+    # and `</agent-notification>` closing tags into newlines so the header
+    # anchor works whether the header is at byte 0, right after a wrapper
+    # close, or after a `\n`. Mid-narration mentions like
+    # "the `## Code Review` header" (backtick-prefixed, inline-code) are
+    # rejected by the negative lookbehind — preserves the v1.7 bare-
+    # substring fix without requiring start-of-line.
     _flattened = re.sub(r"</?agent-notification\b[^>]*>", "\n", coordinator_out)
-    # Walk every `^## Code Review[^\n]*` line in the flattened output.
-    # For each, look forward for a `Reviewed at: <40-hex>` footer that
-    # falls BEFORE the next `^## ` heading (any other H2). This bounds
-    # each candidate block so a specialist's `## Code Review Findings`
-    # header doesn't swallow content all the way through the verifier's
-    # output to the only `Reviewed at:` in the stream — without the
-    # next-heading bound, a single overlong match would pass the SHA
-    # check on the verifier's footer despite starting at a specialist's
-    # header. Walk candidates in reverse and pick the first whose
-    # `Reviewed at:` SHA matches the head we reviewed.
-    _header_re = re.compile(r"(?m)^## Code Review[^\n]*\n")
-    _next_h2_re = re.compile(r"(?m)^## ")
+    # Walk every `## Code Review[^\n]*` occurrence NOT preceded by a
+    # backtick (which would indicate inline-code narration). The header
+    # need NOT be at start-of-line — qai-be #635 had coordinator narration
+    # ("Now I have all 4 specialist reports. Delegating to the verifier.")
+    # concatenated to the header on the same line with no `\n` between.
+    # The strong protection here is the SHA validation: an attacker can
+    # echo `## Code Review\n### Blockers` content in a poisoned PR diff
+    # but can't predict the commit's own head_sha, so the `Reviewed at:`
+    # footer check rejects fake matches. The next-`## ` heading bound
+    # also prevents one candidate's body from swallowing downstream
+    # content all the way through the verifier's output. Walk candidates
+    # in reverse and pick the first whose `Reviewed at:` SHA matches.
+    _header_re = re.compile(r"(?<!`)## Code Review[^\n]*\n")
+    _next_h2_re = re.compile(r"(?<!`)(?:^|\n)## ")
     _footer_re = re.compile(r"\nReviewed at:\s+([0-9a-f]{40})\b[^\n]*")
     _candidates = []
     for _hm in _header_re.finditer(_flattened):
@@ -1808,14 +1920,33 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str) -> None:
             learn_script = air_root / "managed" / "learn.py"
             if learn_script.is_file():
                 print(f"  [learn] running synchronously: {learn_script} {repo}", file=sys.stderr)
+                # Capture stdout/stderr so the failure mode "learn.py exited 1"
+                # surfaces an actionable reason. Previous behavior streamed
+                # both to the parent's tty (capture_output=False), which let
+                # GHA log them but with buffering+ordering quirks that made
+                # debugging hard (see qai-be #635 — learn.py exited 1, no
+                # diagnostic visible until log archive). Buffer is small
+                # (typical learn.py output <100KB) and we already accept the
+                # learn epilogue running synchronously, so memory cost is a
+                # non-issue. Stream stdout through immediately so the live
+                # log shows progress; dump stderr only on failure so happy-
+                # path runs aren't noisier than before.
                 learn_result = subprocess.run(
                     [sys.executable, str(learn_script), repo, "--poll"],
-                    capture_output=False,
+                    capture_output=True, text=True,
                     # No check=True — we want to finish this review cleanly
                     # even if learn errors out.
                 )
+                sys.stdout.write(learn_result.stdout)
+                sys.stdout.flush()
                 if learn_result.returncode != 0:
-                    print(f"  [warn] learn.py exited {learn_result.returncode} — counter not reset", file=sys.stderr)
+                    sys.stderr.write(learn_result.stderr)
+                    sys.stderr.flush()
+                    print(
+                        f"  [warn] learn.py exited {learn_result.returncode} — "
+                        f"counter not reset (stderr above)",
+                        file=sys.stderr,
+                    )
             else:
                 print(f"  [warn] learn.py not found at {learn_script}", file=sys.stderr)
 
