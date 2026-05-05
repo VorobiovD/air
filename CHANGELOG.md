@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.3](https://github.com/VorobiovD/air/compare/v1.12.2...v1.12.3) (2026-05-05)
+
+
+### Bug Fixes
+
+* remove Bash tool from coordinator — closes regurgitation root cause ([#59](https://github.com/VorobiovD/air/issues/59)) ([1cbaae6](https://github.com/VorobiovD/air/commit/1cbaae6a37e1e6f1d1a65f7f3480fdca87cd67ba))
+* SSE/REST race in run_session — retry drain on eventually-consistent events ([#61](https://github.com/VorobiovD/air/issues/61)) ([f75eea3](https://github.com/VorobiovD/air/commit/f75eea3a09b46b654cf3b6e90d35aeda50ffb6a4))
+
 ## [1.12.2](https://github.com/VorobiovD/air/compare/v1.12.1...v1.12.2) (2026-05-05)
 
 
