@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.5](https://github.com/VorobiovD/air/compare/v1.12.4...v1.12.5) (2026-05-05)
+
+
+### Documentation
+
+* roadmap absorbs v1.12.1-v1.12.5 + deferred-finding section ([#65](https://github.com/VorobiovD/air/issues/65)) ([2613a55](https://github.com/VorobiovD/air/commit/2613a554b7a27cd219de8842a63c07d41afc9535))
+
 ## [1.12.4](https://github.com/VorobiovD/air/compare/v1.12.3...v1.12.4) (2026-05-05)
 
 
