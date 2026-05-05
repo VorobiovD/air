@@ -2028,6 +2028,29 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         break
 
     if not review_extracted:
+        # Diagnostic dump — log the actual coordinator output so we can
+        # see WHY the SHA-validation refused it. svc-transcribe #39 (the
+        # fresh-PR retry of #37) hit the same 92.4s failure on a fresh
+        # mode (no `prior_review_body`), refuting the regurgitation
+        # hypothesis. Without seeing what the coordinator actually
+        # emitted, we can't distinguish between (a) content-policy
+        # refusal, (b) Anthropic-side throttling/cached error response,
+        # (c) session-level swallowed error, (d) some other model
+        # behavior. Truncate to 2000 chars to keep CI logs readable;
+        # most refusal/error messages are <500 chars, real review
+        # bodies start with `## Code Review` and would be caught by the
+        # extractor above.
+        _coord_preview = coordinator_out[:2000].replace("\n", "\\n")
+        print(
+            f"  [debug] coordinator_out (first 2000 chars on SHA-mismatch): "
+            f"{_coord_preview!r}",
+            file=sys.stderr,
+        )
+        print(
+            f"  [debug] coordinator_out total length: {len(coordinator_out)} chars",
+            file=sys.stderr,
+        )
+
         # Fallback — no candidate had a head_sha-matching footer. The
         # coordinator either returned no `## Code Review` block at all,
         # or all blocks had wrong-SHA footers (likely causes: verifier
