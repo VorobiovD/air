@@ -39,7 +39,10 @@ import time
 from pathlib import Path
 
 import requests as req
-from anthropic import Anthropic, AsyncAnthropic
+from anthropic import (
+    Anthropic, AsyncAnthropic,
+    AuthenticationError, NotFoundError, PermissionDeniedError,
+)
 
 from api import list_agents, find_environment
 
@@ -1248,12 +1251,27 @@ async def run_session(
     # session reports terminal completion. Dedupe by event id so we
     # don't double-count thread_created/thread_idle on cross-source replay.
     SSE_QUIET_S = 90.0
-    # Backoff schedule when SSE goes quiet AND session reports idle. Events
-    # in the REST `events.list` backend are eventually consistent vs SSE —
-    # we may need to poll a few more times before the final coordinator
-    # `agent.message` lands. The 0.0 first delay = drain immediately, then
-    # 5/10/15s backoff. Total worst-case extra wait: ~30s + REST RTTs.
+    # Backoff schedule used inside `_poll_rest_until_done` once the
+    # session has reached any terminal state (idle / terminated / error)
+    # to give the eventually-consistent REST `events.list` backend time
+    # to surface the final `agent.message`. The 0.0 first delay = drain
+    # immediately, then 5/10/15s backoff. Total worst-case wait:
+    # sum(REST_RETRY_DELAYS) = 30s + REST RTTs.
     REST_RETRY_DELAYS = (0.0, 5.0, 10.0, 15.0)
+    # Polling cadence + total budget for the REST fallback when SSE is
+    # unavailable (quiet OR closed). The 0.9 multiplier leaves ~10%
+    # headroom for the outer asyncio.wait_for(..., COORDINATOR_TIMEOUT_SECS)
+    # to fire BEFORE the inner budget exhausts — otherwise we'd silently
+    # exit run_session before the wrapper could enforce the wall timeout.
+    POLL_INTERVAL_S = 30.0
+    POLL_BUDGET_S = COORDINATOR_TIMEOUT_SECS * 0.9
+    # Session.status values that indicate the session is finished (no more
+    # events will arrive). `idle` is the happy path; `terminated` and
+    # `error` cover the documented failure shapes from `_process_event`'s
+    # SSE-side handling (lines that handle `session.status_terminated`
+    # and `session.error` events). `requires_action` is intermediate and
+    # treated as still-running.
+    TERMINAL_SESSION_STATUSES = frozenset({"idle", "terminated", "error"})
     seen_event_ids: set[str] = set()
 
     def _process_event(event) -> str | None:
@@ -1370,6 +1388,143 @@ async def run_session(
             )
         return None
 
+    async def _poll_rest_until_done(reason: str) -> str:
+        """Fall back to REST polling when SSE is unavailable. Polls
+        session.status + drains REST events until the session reaches
+        any terminal state, then does an eventually-consistent retry
+        drain to pick up final agent.message events.
+
+        Two production failure modes converge here:
+        - SSE silent past `SSE_QUIET_S` (PR #61 era)
+        - SSE stream closes mid-session via `StopAsyncIteration` while
+          sub-agents are still running (PR #62 era — observed with
+          5 threads status=running when the stream ended at ~92s)
+
+        Returns one of two sentinels — never returns None:
+          - "break"        — session reached `idle` AND we captured
+                             agent.message text (happy path); caller
+                             continues normally with the captured `parts`.
+          - "break-error"  — any failure: poll budget exhausted, session
+                             reached non-idle terminal (terminated/error),
+                             session reached idle but no agent.message
+                             text was captured, or auth/permission/not-
+                             found error from the API. Caller must set
+                             terminated_reason so LIVE_SESSIONS tracking
+                             is correct and SpecialistSessionError is
+                             raised by the outer flow.
+
+        The "break-error" guarantee is load-bearing: any silent success
+        with empty `parts` would let the orchestrator discard a hung
+        session from LIVE_SESSIONS as if the review completed cleanly,
+        masking a real failure mode.
+        """
+        # Skip the initial sleep; check status immediately so a session
+        # that closed SSE just because it finished doesn't pay a 30s tax.
+        first_iter = True
+        print(
+            f"  [info] {label}: SSE {reason}; entering REST polling mode",
+            file=sys.stderr,
+        )
+        poll_t0 = time.monotonic()
+        while time.monotonic() - poll_t0 < POLL_BUDGET_S:
+            if not first_iter:
+                await asyncio.sleep(POLL_INTERVAL_S)
+            first_iter = False
+
+            # Status check FIRST: if session has reached terminal state we
+            # don't need a separate drain — the inner retry loop below
+            # picks up everything (including any final agent.message that
+            # only just landed). Status check is also the only signal
+            # that distinguishes "still running" from "finished".
+            try:
+                sess = await client.beta.sessions.retrieve(session.id)
+            except (AuthenticationError, PermissionDeniedError, NotFoundError) as e:
+                # Permanent failures — never recovers via retry. Use
+                # typed Anthropic SDK exceptions for precision (the
+                # exported hierarchy is stable since SDK v0.20+; matched
+                # against `requirements.txt`'s `anthropic>=0.93.0` pin).
+                msg = str(e)[:200]
+                cls = type(e).__name__
+                print(
+                    f"  [warn] {label}: REST poll permanent failure "
+                    f"({cls}: {msg}); aborting",
+                    file=sys.stderr,
+                )
+                return "break-error"
+            except Exception as e:
+                # Transient: network blips, 5xx, rate limits — retry
+                # after the standard POLL_INTERVAL_S sleep at the next
+                # iteration's top.
+                msg = str(e)[:200]
+                cls = type(e).__name__
+                print(
+                    f"  [warn] {label}: session retrieve in poll loop "
+                    f"failed ({cls}: {msg}); retrying after backoff",
+                    file=sys.stderr,
+                )
+                continue
+            sess_status = getattr(sess, "status", None)
+
+            if sess_status in TERMINAL_SESSION_STATUSES:
+                # Run the eventually-consistent retry drain to pick up
+                # any final agent.message events that haven't propagated
+                # to events.list yet.
+                drain_res = None
+                for _delay in REST_RETRY_DELAYS:
+                    if _delay > 0:
+                        await asyncio.sleep(_delay)
+                    parts_before = len(parts)
+                    drain_res = await _drain_via_rest()
+                    if drain_res in ("break", "break-error"):
+                        break
+                    if len(parts) > parts_before:
+                        break
+                if drain_res == "break-error":
+                    return "break-error"
+                if sess_status != "idle":
+                    # Non-idle terminal (terminated/error/failed/completed):
+                    # surface as error so caller raises. Even if we got
+                    # SOME agent.message text, the session didn't end
+                    # cleanly and the verdict path shouldn't run.
+                    print(
+                        f"  [warn] {label}: session reached "
+                        f"terminal status {sess_status!r}; treating as error",
+                        file=sys.stderr,
+                    )
+                    return "break-error"
+                if not parts:
+                    # Idle but no captured text — the session ended but
+                    # produced nothing usable. Also a failure — the
+                    # orchestrator's review-extractor will hit the
+                    # structured-fallback path AND we want
+                    # terminated_reason set so LIVE_SESSIONS tracking
+                    # is correct.
+                    print(
+                        f"  [warn] {label}: session idle with no "
+                        f"agent.message text; treating as error",
+                        file=sys.stderr,
+                    )
+                    return "break-error"
+                # Idle + content captured = happy path.
+                return "break"
+
+            # Still running. Log liveness, then sleep before next iter.
+            elapsed = time.monotonic() - poll_t0
+            print(
+                f"  [info] {label}: REST poll t={elapsed:.0f}s "
+                f"status={sess_status} agent_msgs={len(parts)}",
+                file=sys.stderr,
+            )
+
+        # Budget exhausted — session never reached terminal state. Surface
+        # as error so the caller sets terminated_reason.
+        print(
+            f"  [warn] {label}: REST polling budget exhausted "
+            f"({POLL_BUDGET_S:.0f}s) — session never reached terminal state",
+            file=sys.stderr,
+        )
+        return "break-error"
+
     # AsyncAnthropic's beta.sessions.events.stream is an `async def` that
     # returns an AsyncStream — must await it before using as a context
     # manager (it isn't itself the context manager).
@@ -1382,72 +1537,28 @@ async def run_session(
                     stream_iter.__anext__(), timeout=SSE_QUIET_S,
                 )
             except asyncio.TimeoutError:
-                # SSE silent past SSE_QUIET_S. Check session status; if
-                # idle, drain REST events with eventual-consistency
-                # retries — the events backend lags SSE, especially on
-                # heavily-cached coordinator sessions where the whole
-                # pipeline (4 specialists + verifier) completes in ~90s.
-                try:
-                    sess = await client.beta.sessions.retrieve(session.id)
-                except Exception as e:
-                    print(
-                        f"  [warn] {label}: SSE quiet for {SSE_QUIET_S}s, "
-                        f"session retrieve failed ({e}); continuing",
-                        file=sys.stderr,
-                    )
-                    continue
-                sess_status = getattr(sess, "status", None)
-                if sess_status != "idle":
-                    # Still running; keep waiting on SSE.
-                    continue
-                # Session is idle. Drain REST with retries — `events.list`
-                # is eventually consistent vs SSE, so the final coordinator
-                # `agent.message` may not be visible on the first drain.
-                # See PR #61 for the production sessions that motivated
-                # this (heavily-cached coordinator runs that complete in
-                # ~92s, right at SSE_QUIET_S). Each retry attempt processes
-                # only NEW events (deduped via seen_event_ids) and we exit
-                # as soon as a drain attempt produces fresh content OR the
-                # session reports terminal completion. Worst case ~30s
-                # extra wait + REST RTTs.
-                print(
-                    f"  [info] {label}: SSE quiet for {SSE_QUIET_S}s + "
-                    f"session idle, draining events via REST (with retries)",
-                    file=sys.stderr,
+                # SSE silent past SSE_QUIET_S. Hand off to the unified
+                # REST polling loop — handles both still-running AND
+                # already-idle cases. On "break-error" return, set
+                # terminated_reason so LIVE_SESSIONS tracking is
+                # correct and the orchestrator raises
+                # SpecialistSessionError instead of posting an empty
+                # body as if it were a clean review.
+                drain_res = await _poll_rest_until_done(
+                    f"quiet for {SSE_QUIET_S}s"
                 )
-                drain_res: str | None = None
-                for _delay in REST_RETRY_DELAYS:
-                    if _delay > 0:
-                        await asyncio.sleep(_delay)
-                    parts_before = len(parts)
-                    drain_res = await _drain_via_rest()
-                    # Terminal exits: clean session-end OR error. Either
-                    # way, no more events will arrive — stop polling.
-                    if drain_res in ("break", "break-error"):
-                        break
-                    # New content from THIS drain attempt (not pre-existing
-                    # `parts` from earlier SSE events). The events backend
-                    # caught up — exit before paying the next backoff.
-                    if len(parts) > parts_before:
-                        break
-                if drain_res == "break-error":
-                    break
-                if not parts:
-                    # If we ended retries without any captured
-                    # agent.message text at all, surface it. The
-                    # structured-fallback path (`## air review (run
-                    # failed)`) handles this case.
-                    print(
-                        f"  [warn] {label}: REST drain exhausted "
-                        f"(~30s of retries) with no agent.message text; "
-                        f"session events backend may be stuck. Forcing exit.",
-                        file=sys.stderr,
-                    )
-                # Exit the outer loop. Either we have content, the
-                # session terminated cleanly, or we don't and the
-                # structured-fallback path takes over.
+                if drain_res == "break-error" and terminated_reason is None:
+                    terminated_reason = "REST poll fallback failed (SSE quiet)"
                 break
             except StopAsyncIteration:
+                # SSE stream closed before session reported terminal
+                # state — observed on a production run where 5 threads
+                # were still status=running while our SSE iterator
+                # raised StopAsyncIteration at ~92s. Hand off to REST
+                # polling. Same break-error handling as above.
+                drain_res = await _poll_rest_until_done("stream closed")
+                if drain_res == "break-error" and terminated_reason is None:
+                    terminated_reason = "REST poll fallback failed (SSE closed)"
                 break
             res = _process_event(event)
             if res in ("break", "break-error"):
