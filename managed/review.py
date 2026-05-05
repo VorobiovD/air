@@ -1371,8 +1371,10 @@ async def run_session(
                 )
             except asyncio.TimeoutError:
                 # SSE silent past SSE_QUIET_S. Check session status; if
-                # idle, fall back to REST events list to recover any
-                # buffered events.
+                # idle, drain REST events with eventual-consistency
+                # retries — the events backend lags SSE, especially on
+                # heavily-cached coordinator sessions where the whole
+                # pipeline (4 specialists + verifier) completes in ~90s.
                 try:
                     sess = await client.beta.sessions.retrieve(session.id)
                 except Exception as e:
@@ -1386,31 +1388,52 @@ async def run_session(
                 if sess_status != "idle":
                     # Still running; keep waiting on SSE.
                     continue
-                if rest_fallback_used:
-                    # Already drained once on a prior timeout — runtime
-                    # has nothing more to deliver. Force-break with what
-                    # we have.
-                    print(
-                        f"  [warn] {label}: SSE quiet 2 polls + session "
-                        f"idle; force-breaking",
-                        file=sys.stderr,
-                    )
-                    break
-                rest_fallback_used = True
+                # Session is idle. Drain REST with retries. Production
+                # evidence (qai-be #666 session 011CajHXp..., svc-tx #39
+                # session 011CajEj7X..., 2026-05-05): the coordinator
+                # produced a 9215-char `agent.message` with the actual
+                # review body, but it landed in `events.list` SECONDS
+                # AFTER the orchestrator's first REST drain on the 90s
+                # SSE timeout. The prior single-shot drain returned
+                # empty `parts`, the orchestrator exited with no review,
+                # and the user got `## air review (run failed)` despite
+                # the session having done all the work. Retry the drain
+                # up to 4 times with 0/5/10/15s backoff (~30s total
+                # additional wait worst case) and exit early as soon as
+                # the first agent.message text lands.
                 print(
                     f"  [info] {label}: SSE quiet for {SSE_QUIET_S}s + "
-                    f"session idle, draining events via REST",
+                    f"session idle, draining events via REST (with retries)",
                     file=sys.stderr,
                 )
-                drain_res = await _drain_via_rest()
-                if drain_res in ("break", "break-error"):
+                rest_fallback_used = True
+                _REST_RETRY_DELAYS = (0.0, 5.0, 10.0, 15.0)
+                drain_res: str | None = None
+                for _delay in _REST_RETRY_DELAYS:
+                    if _delay > 0:
+                        await asyncio.sleep(_delay)
+                    drain_res = await _drain_via_rest()
+                    if drain_res == "break-error":
+                        break
+                    if parts:
+                        # Got real content — events.list caught up.
+                        break
+                if drain_res == "break-error":
                     break
-                # Drain didn't terminate; if open_threads is 0 we're
-                # done — break out.
-                if open_threads <= 0:
-                    break
-                # Else keep waiting on SSE (sub-agents still tracked).
-                continue
+                if not parts:
+                    # Exhausted retries with no review text. Session is
+                    # idle, no real content available. Force-break;
+                    # caller's fallback path (`## air review (run
+                    # failed)`) handles this case.
+                    print(
+                        f"  [warn] {label}: REST drain exhausted "
+                        f"(~30s of retries) with no agent.message text; "
+                        f"session events backend may be stuck. Forcing exit.",
+                        file=sys.stderr,
+                    )
+                # Exit the outer loop. Either we have content, or we
+                # don't and the structured-fallback path takes over.
+                break
             except StopAsyncIteration:
                 break
             res = _process_event(event)
