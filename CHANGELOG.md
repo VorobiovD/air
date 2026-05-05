@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.4](https://github.com/VorobiovD/air/compare/v1.12.3...v1.12.4) (2026-05-05)
+
+
+### Bug Fixes
+
+* poll REST when SSE stream closes mid-session ([#62](https://github.com/VorobiovD/air/issues/62)) ([03e43f2](https://github.com/VorobiovD/air/commit/03e43f2200305333abe153226e2e3882bf5f3fd9))
+
 ## [1.12.3](https://github.com/VorobiovD/air/compare/v1.12.2...v1.12.3) (2026-05-05)
 
 
