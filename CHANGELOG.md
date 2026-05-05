@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.6](https://github.com/VorobiovD/air/compare/v1.12.5...v1.12.6) (2026-05-05)
+
+
+### Bug Fixes
+
+* drop word-boundary in Reviewed-at footer regex ([#67](https://github.com/VorobiovD/air/issues/67)) ([97af181](https://github.com/VorobiovD/air/commit/97af1815452dbdaee391d459c66326dff18ccdc5))
+
 ## [1.12.5](https://github.com/VorobiovD/air/compare/v1.12.4...v1.12.5) (2026-05-05)
 
 
