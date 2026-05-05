@@ -39,7 +39,10 @@ import time
 from pathlib import Path
 
 import requests as req
-from anthropic import Anthropic, AsyncAnthropic
+from anthropic import (
+    Anthropic, AsyncAnthropic,
+    AuthenticationError, NotFoundError, PermissionDeniedError,
+)
 
 from api import list_agents, find_environment
 
@@ -1248,27 +1251,27 @@ async def run_session(
     # session reports terminal completion. Dedupe by event id so we
     # don't double-count thread_created/thread_idle on cross-source replay.
     SSE_QUIET_S = 90.0
-    # Backoff schedule when SSE goes quiet AND session reports idle. Events
-    # in the REST `events.list` backend are eventually consistent vs SSE —
-    # we may need to poll a few more times before the final coordinator
-    # `agent.message` lands. The 0.0 first delay = drain immediately, then
-    # 5/10/15s backoff. Total worst-case extra wait: sum() = 30s + REST RTTs.
+    # Backoff schedule used inside `_poll_rest_until_done` once the
+    # session has reached any terminal state (idle / terminated / error)
+    # to give the eventually-consistent REST `events.list` backend time
+    # to surface the final `agent.message`. The 0.0 first delay = drain
+    # immediately, then 5/10/15s backoff. Total worst-case wait:
+    # sum(REST_RETRY_DELAYS) = 30s + REST RTTs.
     REST_RETRY_DELAYS = (0.0, 5.0, 10.0, 15.0)
     # Polling cadence + total budget for the REST fallback when SSE is
-    # unavailable (quiet OR closed). Hoisted alongside SSE_QUIET_S so all
-    # timing knobs live in one place. The 0.9 multiplier leaves ~10%
+    # unavailable (quiet OR closed). The 0.9 multiplier leaves ~10%
     # headroom for the outer asyncio.wait_for(..., COORDINATOR_TIMEOUT_SECS)
     # to fire BEFORE the inner budget exhausts — otherwise we'd silently
     # exit run_session before the wrapper could enforce the wall timeout.
     POLL_INTERVAL_S = 30.0
     POLL_BUDGET_S = COORDINATOR_TIMEOUT_SECS * 0.9
     # Session.status values that indicate the session is finished (no more
-    # events will arrive). `idle` is the happy path; `terminated`, `error`,
-    # `failed`, `completed` cover the failure shapes the API may report.
-    # `requires_action` is intermediate and treated as still-running.
-    _TERMINAL_SESSION_STATUSES = frozenset(
-        {"idle", "terminated", "error", "failed", "completed"}
-    )
+    # events will arrive). `idle` is the happy path; `terminated` and
+    # `error` cover the documented failure shapes from `_process_event`'s
+    # SSE-side handling (lines that handle `session.status_terminated`
+    # and `session.error` events). `requires_action` is intermediate and
+    # treated as still-running.
+    TERMINAL_SESSION_STATUSES = frozenset({"idle", "terminated", "error"})
     seen_event_ids: set[str] = set()
 
     def _process_event(event) -> str | None:
@@ -1385,7 +1388,7 @@ async def run_session(
             )
         return None
 
-    async def _poll_rest_until_done(reason: str) -> str | None:
+    async def _poll_rest_until_done(reason: str) -> str:
         """Fall back to REST polling when SSE is unavailable. Polls
         session.status + drains REST events until the session reaches
         any terminal state, then does an eventually-consistent retry
@@ -1394,24 +1397,26 @@ async def run_session(
         Two production failure modes converge here:
         - SSE silent past `SSE_QUIET_S` (PR #61 era)
         - SSE stream closes mid-session via `StopAsyncIteration` while
-          sub-agents are still running (PR #62 era — qai-be #666 had
-          5 threads still status=running when the stream ended)
+          sub-agents are still running (PR #62 era — observed with
+          5 threads status=running when the stream ended at ~92s)
 
-        Returns:
-          - "break"        — session reached idle terminal cleanly
-          - "break-error"  — session reached non-idle terminal (terminated,
-                             error, etc.) OR poll budget exhausted; caller
-                             must set terminated_reason and treat as failure
-          - None           — session reached idle terminal AND we captured
-                             agent.message text (implies happy path)
+        Returns one of two sentinels — never returns None:
+          - "break"        — session reached `idle` AND we captured
+                             agent.message text (happy path); caller
+                             continues normally with the captured `parts`.
+          - "break-error"  — any failure: poll budget exhausted, session
+                             reached non-idle terminal (terminated/error),
+                             session reached idle but no agent.message
+                             text was captured, or auth/permission/not-
+                             found error from the API. Caller must set
+                             terminated_reason so LIVE_SESSIONS tracking
+                             is correct and SpecialistSessionError is
+                             raised by the outer flow.
 
-        The "break-error" return is load-bearing: previously this helper
-        could return None on poll-budget exhaustion, run_session would
-        exit cleanly with empty parts, and the orchestrator would post
-        the structured fallback BUT discard the session from
-        LIVE_SESSIONS — masking a hung session as a clean success.
-        Now budget exhaustion is treated as terminal-error so the outer
-        SpecialistSessionError is raised correctly.
+        The "break-error" guarantee is load-bearing: any silent success
+        with empty `parts` would let the orchestrator discard a hung
+        session from LIVE_SESSIONS as if the review completed cleanly,
+        masking a real failure mode.
         """
         # Skip the initial sleep; check status immediately so a session
         # that closed SSE just because it finished doesn't pay a 30s tax.
@@ -1433,20 +1438,25 @@ async def run_session(
             # that distinguishes "still running" from "finished".
             try:
                 sess = await client.beta.sessions.retrieve(session.id)
-            except Exception as e:
-                # Distinguish auth/permission/not-found from transient
-                # network errors. The former never recovers; the latter
-                # might. The string-match is conservative — Anthropic SDK
-                # exception classes vary across versions.
+            except (AuthenticationError, PermissionDeniedError, NotFoundError) as e:
+                # Permanent failures — never recovers via retry. Use
+                # typed Anthropic SDK exceptions for precision (the
+                # exported hierarchy is stable since SDK v0.20+; matched
+                # against `requirements.txt`'s `anthropic>=0.93.0` pin).
                 msg = str(e)[:200]
                 cls = type(e).__name__
-                if any(s in msg.lower() for s in ("authentication", "permission", "not_found", "401", "403", "404")):
-                    print(
-                        f"  [warn] {label}: REST poll auth/permission "
-                        f"failure ({cls}: {msg}); aborting",
-                        file=sys.stderr,
-                    )
-                    return "break-error"
+                print(
+                    f"  [warn] {label}: REST poll permanent failure "
+                    f"({cls}: {msg}); aborting",
+                    file=sys.stderr,
+                )
+                return "break-error"
+            except Exception as e:
+                # Transient: network blips, 5xx, rate limits — retry
+                # after the standard POLL_INTERVAL_S sleep at the next
+                # iteration's top.
+                msg = str(e)[:200]
+                cls = type(e).__name__
                 print(
                     f"  [warn] {label}: session retrieve in poll loop "
                     f"failed ({cls}: {msg}); retrying after backoff",
@@ -1455,7 +1465,7 @@ async def run_session(
                 continue
             sess_status = getattr(sess, "status", None)
 
-            if sess_status in _TERMINAL_SESSION_STATUSES:
+            if sess_status in TERMINAL_SESSION_STATUSES:
                 # Run the eventually-consistent retry drain to pick up
                 # any final agent.message events that haven't propagated
                 # to events.list yet.
