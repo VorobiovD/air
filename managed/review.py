@@ -334,6 +334,40 @@ def count_blockers(review_body: str) -> int:
     return len(_BLOCKER_ENTRY_RE.findall(section.group(1)))
 
 
+def _count_gating_unfixed(review_body: str) -> int:
+    """Count prior findings that should block re-review approval.
+
+    Walks the `### Previous Findings Status` entries:
+    - FIXED / DISPUTED: never gate.
+    - DEFERRED: gates if severity is blocker (defense-in-depth against
+      the verifier emitting `[blocker] — DEFERRED` despite the prompt's
+      instruction); otherwise non-gating.
+    - NOT FIXED / PARTIALLY FIXED: gates if severity is blocker or
+      medium. Low/nit unfixed entries don't gate — a developer who
+      deferred a nit shouldn't be blocked from merge.
+
+    Severity defaults to `medium` (gating) when the verifier omits the
+    `[severity]` tag — preserves the v1.10 conservative gating behavior
+    on re-reviews emitted before the severity tag was added to the
+    template.
+    """
+    count = 0
+    for m in _PRIOR_STATUS_RE.finditer(review_body):
+        severity = (m.group(1) or "medium").lower()
+        # `re.sub` to normalize "NOT  FIXED" / "PARTIALLY  FIXED" with
+        # any whitespace shape into the canonical form for set lookup.
+        status = re.sub(r"\s+", " ", m.group(2).upper()).strip()
+        if status in _GATING_STATUSES and severity in _GATING_SEVERITIES:
+            count += 1
+            continue
+        if status == _BLOCKER_DEFERRED_STATUS and severity == "blocker":
+            # Verifier prompt forbids DEFERRED for blockers; gate enforces
+            # independently. Catches prompt drift, edge-case dispute flows,
+            # or a verifier that misclassifies under model-tier swap.
+            count += 1
+    return count
+
+
 def should_request_changes(review_body: str) -> tuple[bool, str]:
     """Decide whether to submit REQUEST_CHANGES instead of APPROVE.
 
@@ -341,21 +375,23 @@ def should_request_changes(review_body: str) -> tuple[bool, str]:
     and branch-protection state.
 
     - Fresh review: REQUEST_CHANGES if any blockers exist.
-    - Re-review: REQUEST_CHANGES if any new blockers exist OR any prior
-      finding is still NOT FIXED / PARTIALLY FIXED. The latter is
-      conservative — a developer can clear the gate by either fixing the
-      finding or disputing it with a rationale (which the verifier
-      promotes to DISPUTED status, not NOT FIXED).
+    - Re-review: REQUEST_CHANGES if any NEW blockers exist OR any prior
+      finding originally classified as blocker/medium is still NOT FIXED
+      or PARTIALLY FIXED. Low/nit findings left unfixed don't gate; a
+      developer can clear the gate by either fixing, explicitly
+      disputing (verifier marks DISPUTED), or punting with a ticket
+      reference (verifier marks DEFERRED — only acceptable for non-
+      blocker findings).
     """
     blockers = count_blockers(review_body)
     if _REREVIEW_HEADER_RE.search(review_body):
-        unfixed = len(_UNFIXED_PRIOR_RE.findall(review_body))
+        unfixed = _count_gating_unfixed(review_body)
         if blockers > 0 and unfixed > 0:
-            return True, f"{blockers} new blocker(s), {unfixed} prior finding(s) still unfixed"
+            return True, f"{blockers} new blocker(s), {unfixed} prior blocker/medium still unfixed"
         if blockers > 0:
             return True, f"{blockers} new blocker(s)"
         if unfixed > 0:
-            return True, f"{unfixed} prior finding(s) still unfixed"
+            return True, f"{unfixed} prior blocker/medium still unfixed"
         return False, ""
     if blockers > 0:
         return True, f"{blockers} blocker(s)"
@@ -434,17 +470,43 @@ _BLOCKERS_SECTION_RE = re.compile(
 )
 _BLOCKER_ENTRY_RE = re.compile(r"^\*\*\d+\.", re.MULTILINE)
 # In re-review mode, the "Previous Findings Status" section lists each
-# prior finding as `- **#N** — FIXED / NOT FIXED / PARTIALLY FIXED /
-# DISPUTED — rationale`. Anything left as NOT FIXED or PARTIALLY FIXED
-# means the developer didn't address (or insufficiently addressed) work
-# we already flagged worth raising — should not auto-approve. DISPUTED
-# is excluded because it indicates the developer pushed back with a
-# rationale; the verifier weighs that into the kept-or-suppressed
-# decision before this point.
-_UNFIXED_PRIOR_RE = re.compile(
-    r"^-\s+\*\*#\d+\*\*\s+—\s+(?:NOT\s+FIXED|PARTIALLY\s+FIXED)\b",
-    re.MULTILINE,
+# prior finding as:
+#   - **#N** [severity] — STATUS — rationale
+# where severity ∈ {blocker, medium, low, nit} (carried from the prior
+# review) and STATUS ∈ {FIXED, NOT FIXED, PARTIALLY FIXED, DEFERRED,
+# DISPUTED}. The severity tag is optional for backward compatibility
+# with reviews emitted before v1.12 — when missing, default to `medium`
+# so legacy bodies retain the v1.10 conservative gating behavior.
+#
+# Verdict gating semantics:
+# - FIXED / DISPUTED / DEFERRED: never gate. DISPUTED means the
+#   developer pushed back with rationale the verifier accepted; DEFERRED
+#   means they explicitly punted with a ticket reference.
+# - NOT FIXED / PARTIALLY FIXED: gate only if severity ∈ {blocker,
+#   medium}. Low/nit issues left unfixed are noise, not approval gates.
+# - New blockers under `#### Blockers`: always gate (existing behavior).
+# Without severity-awareness, qai-fe #239 triggered REQUEST_CHANGES on a
+# re-review where all originally-flagged blockers were fixed, just
+# because 10 prior nits/lows were marked NOT FIXED (deferred) — that
+# was technically correct under v1.10 logic but didn't match operator
+# intent.
+_PRIOR_STATUS_RE = re.compile(
+    r"^-\s+\*\*#\d+\*\*"
+    r"(?:\s*\[(blocker|medium|low|nit)\])?"
+    r"\s+—\s+"
+    r"(FIXED|NOT\s+FIXED|PARTIALLY\s+FIXED|DEFERRED|DISPUTED)\b",
+    re.MULTILINE | re.IGNORECASE,
 )
+_GATING_SEVERITIES = {"blocker", "medium"}
+_GATING_STATUSES = {"NOT FIXED", "PARTIALLY FIXED"}
+# DEFERRED is non-gating for non-blocker findings, but the verifier prompt
+# forbids DEFERRED for blockers ("ONLY acceptable for non-blocker findings;
+# do NOT use this status for findings originally classified as `blocker`").
+# Defense in depth: the gate enforces the same rule independently — if the
+# verifier (or a future prompt drift) emits `[blocker] — DEFERRED`, treat
+# it as gating regardless. Prevents prompt-only enforcement of a rule that
+# can flip a CHANGES_REQUESTED to APPROVE on a deferred blocker.
+_BLOCKER_DEFERRED_STATUS = "DEFERRED"
 _REREVIEW_HEADER_RE = re.compile(r"^##\s+Code Review\s*\(Re-review\)", re.MULTILINE)
 # Cap the prior review body before inlining into specialist prompts. A noisy
 # 10K-token review would blow up re-review context ~5x across agents and
@@ -1001,75 +1063,189 @@ async def run_session(
 
     parts: list[str] = []
     terminated_reason: str | None = None
+    # SSE delivery latency: Anthropic's REST events feed sometimes commits
+    # session.status_idle and the trailing `agent.message` (carrying the
+    # final review) ~10 minutes before our SSE stream consumer receives
+    # them — observed on qai-be #635 (event committed 23:57:37, Python
+    # received 00:07:38). When the stream sits silent past `SSE_QUIET_S`
+    # without yielding an event, fall back to the REST events endpoint
+    # to recover any unseen events. Dedupe by event id so we don't
+    # double-count thread_created/thread_idle on cross-source replay.
+    SSE_QUIET_S = 90.0
+    seen_event_ids: set[str] = set()
+    rest_fallback_used = False
+
+    def _process_event(event) -> str | None:
+        """Apply one event to local state. Returns:
+          - "break"          terminal success — caller should break the loop
+          - "break-error"    terminal error — caller should break, terminated_reason set
+          - "continue"       event was a duplicate (already in seen_event_ids); skip
+          - None             event was processed successfully; caller continues
+
+        Reads/mutates closure state:
+          - `parts` (list)       — appended via `.append()`, no nonlocal needed
+          - `seen_event_ids`     — added via `.add()`, no nonlocal needed
+          - `open_threads` (int) — rebound, requires nonlocal
+          - `terminated_reason`  — rebound, requires nonlocal
+        """
+        nonlocal open_threads, terminated_reason
+        eid = getattr(event, "id", None)
+        if eid:
+            if eid in seen_event_ids:
+                return "continue"
+            seen_event_ids.add(eid)
+        t = getattr(event, "type", "")
+        if t == "agent.message":
+            for block in getattr(event, "content", None) or []:
+                text = getattr(block, "text", None)
+                # Multi-agent runtime emits agent.message events with the
+                # literal text "[empty message]" (15 chars) between tool-
+                # dispatch turns. Skip them.
+                if text and text.strip() != "[empty message]":
+                    parts.append(text)
+            return None
+        if t == "session.thread_created":
+            open_threads += 1
+            return None
+        if t == "session.thread_idle":
+            open_threads = max(0, open_threads - 1)
+            return None
+        if t == "session.status_idle":
+            stop_reason = getattr(event, "stop_reason", None)
+            stop_type = getattr(stop_reason, "type", None) if stop_reason else None
+            if stop_type == "requires_action":
+                # Transient idle waiting for client-side events; keep going.
+                return None
+            if stop_type in TERMINAL_SUCCESS:
+                if open_threads > 0:
+                    # Intermediate idle — sub-agents still running.
+                    return None
+                return "break"
+            terminated_reason = f"idle with stop_reason={stop_type!r}"
+            return "break-error"
+        if t == "session.status_terminated":
+            terminated_reason = "session terminated"
+            return "break-error"
+        if t == "session.error":
+            # `session.error` with retry_status='retrying' means Anthropic
+            # is recovering server-side; the session is still alive and
+            # breaking here would cancel its in-flight retry (PR #41
+            # incident). Only abort on truly terminal errors.
+            error = getattr(event, "error", None)
+            retry_status = getattr(error, "retry_status", None) if error else None
+            retry_type = getattr(retry_status, "type", None) if retry_status else None
+            if retry_type == "retrying":
+                print(
+                    f"  [warn] {label}: transient session error (Anthropic retrying): "
+                    f"{getattr(error, 'message', '?')}",
+                    file=sys.stderr,
+                )
+                return None
+            terminated_reason = f"session error: {error!r}"
+            return "break-error"
+        return None
+
+    async def _drain_via_rest() -> str | None:
+        """Pull session events via the REST endpoint, process any not yet
+        seen via SSE. Returns "break" / "break-error" / None.
+
+        Uses the same SDK client to keep auth / beta headers consistent.
+        Calls `events.list` if available; otherwise yields None and the
+        caller continues waiting on SSE.
+        """
+        try:
+            page = await client.beta.sessions.events.list(session.id, limit=200)
+        except AttributeError:
+            # Older SDK: no events.list. Fall back to letting SSE keep
+            # streaming; we'll just keep paying the latency.
+            print(
+                f"  [warn] {label}: SDK lacks beta.sessions.events.list; "
+                f"can't drain via REST",
+                file=sys.stderr,
+            )
+            return None
+        except Exception as e:
+            print(
+                f"  [warn] {label}: REST events drain failed ({e}); "
+                f"continuing with SSE",
+                file=sys.stderr,
+            )
+            return None
+        events = getattr(page, "data", None) or []
+        new_count = 0
+        for ev in events:
+            res = _process_event(ev)
+            if res in ("break", "break-error"):
+                return res
+            # `_process_event` returns "continue" when it short-circuited
+            # via the seen_event_ids dedupe; only count newly-processed
+            # events (returning None) toward the drain telemetry.
+            if res is None:
+                new_count += 1
+        if new_count:
+            print(
+                f"  [info] {label}: drained {new_count} unseen event(s) via REST",
+                file=sys.stderr,
+            )
+        return None
+
     # AsyncAnthropic's beta.sessions.events.stream is an `async def` that
     # returns an AsyncStream — must await it before using as a context
     # manager (it isn't itself the context manager).
     stream_cm = await client.beta.sessions.events.stream(session.id)
     async with stream_cm as stream:
-        async for event in stream:
-            t = getattr(event, "type", "")
-            if t == "agent.message":
-                for block in event.content:
-                    text = getattr(block, "text", None)
-                    # Multi-agent runtime emits agent.message events with
-                    # the literal text "[empty message]" (15 chars) between
-                    # tool-dispatch turns when the coordinator has no real
-                    # response, just tool_use blocks. Skip them — otherwise
-                    # they prepend onto the verifier's verbatim output and
-                    # break the `\n## Code Review` partition anchor (PR #41
-                    # second run posted `[empty message]## Code Review...`
-                    # because the placeholder ran flush against the header).
-                    if text and text.strip() != "[empty message]":
-                        parts.append(text)
-            elif t == "session.thread_created":
-                open_threads += 1
-            elif t == "session.thread_idle":
-                open_threads = max(0, open_threads - 1)
-            elif t == "session.status_idle":
-                stop_reason = getattr(event, "stop_reason", None)
-                stop_type = getattr(stop_reason, "type", None) if stop_reason else None
-                if stop_type == "requires_action":
-                    # Transient idle waiting for client-side events; we don't
-                    # send any here, so keep draining the stream.
-                    continue
-                if stop_type in TERMINAL_SUCCESS:
-                    if open_threads > 0:
-                        # Coordinator turn ended but sub-agent threads are
-                        # still running — keep streaming until they idle and
-                        # the coordinator's next turn (or final turn) fires.
-                        continue
-                    break
-                terminated_reason = f"idle with stop_reason={stop_type!r}"
-                break
-            elif t == "session.status_terminated":
-                terminated_reason = "session terminated"
-                break
-            elif t == "session.error":
-                # `session.error` events carry a `retry_status` field on the
-                # error object. When `retry_status.type == "retrying"`,
-                # Anthropic is recovering server-side and the session is
-                # still alive — breaking here would (a) abandon a session
-                # that may complete fine seconds later, and (b) trigger our
-                # atexit interrupt, which can actively cancel Anthropic's
-                # in-progress retry. Only abort on terminal errors.
-                #
-                # PR #41 final run failed this way: a transient
-                # `BetaManagedAgentsUnknownError(retry_status=retrying)`
-                # fired ~6 min in; we aborted, the cleanup interrupt landed
-                # right as Anthropic's retry was running, and the session
-                # idled 30s later — wasting the run. Let the stream
-                # continue when retry_status says retrying.
-                error = getattr(event, "error", None)
-                retry_status = getattr(error, "retry_status", None) if error else None
-                retry_type = getattr(retry_status, "type", None) if retry_status else None
-                if retry_type == "retrying":
+        stream_iter = stream.__aiter__()
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    stream_iter.__anext__(), timeout=SSE_QUIET_S,
+                )
+            except asyncio.TimeoutError:
+                # SSE silent past SSE_QUIET_S. Check session status; if
+                # idle, fall back to REST events list to recover any
+                # buffered events.
+                try:
+                    sess = await client.beta.sessions.retrieve(session.id)
+                except Exception as e:
                     print(
-                        f"  [warn] {label}: transient session error (Anthropic retrying): "
-                        f"{getattr(error, 'message', '?')}",
+                        f"  [warn] {label}: SSE quiet for {SSE_QUIET_S}s, "
+                        f"session retrieve failed ({e}); continuing",
                         file=sys.stderr,
                     )
                     continue
-                terminated_reason = f"session error: {error!r}"
+                sess_status = getattr(sess, "status", None)
+                if sess_status != "idle":
+                    # Still running; keep waiting on SSE.
+                    continue
+                if rest_fallback_used:
+                    # Already drained once on a prior timeout — runtime
+                    # has nothing more to deliver. Force-break with what
+                    # we have.
+                    print(
+                        f"  [warn] {label}: SSE quiet 2 polls + session "
+                        f"idle; force-breaking",
+                        file=sys.stderr,
+                    )
+                    break
+                rest_fallback_used = True
+                print(
+                    f"  [info] {label}: SSE quiet for {SSE_QUIET_S}s + "
+                    f"session idle, draining events via REST",
+                    file=sys.stderr,
+                )
+                drain_res = await _drain_via_rest()
+                if drain_res in ("break", "break-error"):
+                    break
+                # Drain didn't terminate; if open_threads is 0 we're
+                # done — break out.
+                if open_threads <= 0:
+                    break
+                # Else keep waiting on SSE (sub-agents still tracked).
+                continue
+            except StopAsyncIteration:
+                break
+            res = _process_event(event)
+            if res in ("break", "break-error"):
                 break
 
     # Only drop from LIVE_SESSIONS on clean success. Error events, unknown
@@ -1384,8 +1560,16 @@ async def run_review(args):
     if mode == "re-review":
         verifier_task = f"""You have raw findings from the specialist reviewers.
 They were run in RE-REVIEW MODE — each result contains both (a) a classification of
-each prior finding (FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED) and (b) any
-NEW findings in the inter-diff.
+each prior finding and (b) any NEW findings in the inter-diff.
+
+For each prior finding, choose ONE status:
+- FIXED — the flagged code changed and addresses the finding.
+- PARTIALLY FIXED — code changed but doesn't fully address.
+- NOT FIXED — code unchanged, finding still applies.
+- DEFERRED — author explicitly punted with a ticket reference (e.g.
+  "tracked as PRM-3686"). ONLY acceptable for non-blocker findings; do
+  NOT use this status for findings originally classified as `blocker`.
+- DISPUTED — author pushed back with rationale you accept.
 
 Verify each finding per your system prompt and drop FALSE POSITIVE /
 below-threshold entries. Consolidate classifications across specialists —
@@ -1405,8 +1589,20 @@ _Re-reviewed at `{head_sha[:8]}`, previous review at `{(prior_sha or '')[:8]}`._
 
 ### Previous Findings Status
 
-- **#1** — FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED — brief rationale
-- **#2** — ...
+For each prior finding, emit one line in this shape:
+  - **#N** [<severity>] — <STATUS> — brief rationale
+
+Where `<severity>` is the original severity from the prior review (one of
+`blocker`, `medium`, `low`, `nit`) — copy it from the prior review's
+section heading where finding #N originally appeared. The orchestrator
+parses these tags to gate APPROVE/REQUEST_CHANGES on un-addressed
+high-severity prior findings only; lower-severity unfixed entries no
+longer block merge.
+
+Examples:
+- **#1** [blocker] — FIXED — `narrow_env` dict at L236-242 now omits secrets.
+- **#5** [low] — DEFERRED — Pagination tracked as PRM-3686.
+- **#7** [medium] — PARTIALLY FIXED — Banner added; server-side search deferred.
 
 ### New Findings (introduced since last review)
 
@@ -1562,24 +1758,27 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     # SHA doesn't match are rejected.
     #
     # Tag-stripping flattens both `<agent-notification ...>` opening tags
-    # and `</agent-notification>` closing tags into newlines so the
-    # `(?m)^## Code Review` anchor works whether the header is at byte 0,
-    # right after a wrapper close, or after a `\n`. Mid-narration mentions
-    # like "the `## Code Review` header" (backtick-prefixed, not at line
-    # start) are rejected — preserves the v1.7 bare-substring fix.
+    # and `</agent-notification>` closing tags into newlines so the header
+    # anchor works whether the header is at byte 0, right after a wrapper
+    # close, or after a `\n`. Mid-narration mentions like
+    # "the `## Code Review` header" (backtick-prefixed, inline-code) are
+    # rejected by the negative lookbehind — preserves the v1.7 bare-
+    # substring fix without requiring start-of-line.
     _flattened = re.sub(r"</?agent-notification\b[^>]*>", "\n", coordinator_out)
-    # Walk every `^## Code Review[^\n]*` line in the flattened output.
-    # For each, look forward for a `Reviewed at: <40-hex>` footer that
-    # falls BEFORE the next `^## ` heading (any other H2). This bounds
-    # each candidate block so a specialist's `## Code Review Findings`
-    # header doesn't swallow content all the way through the verifier's
-    # output to the only `Reviewed at:` in the stream — without the
-    # next-heading bound, a single overlong match would pass the SHA
-    # check on the verifier's footer despite starting at a specialist's
-    # header. Walk candidates in reverse and pick the first whose
-    # `Reviewed at:` SHA matches the head we reviewed.
-    _header_re = re.compile(r"(?m)^## Code Review[^\n]*\n")
-    _next_h2_re = re.compile(r"(?m)^## ")
+    # Walk every `## Code Review[^\n]*` occurrence NOT preceded by a
+    # backtick (which would indicate inline-code narration). The header
+    # need NOT be at start-of-line — qai-be #635 had coordinator narration
+    # ("Now I have all 4 specialist reports. Delegating to the verifier.")
+    # concatenated to the header on the same line with no `\n` between.
+    # The strong protection here is the SHA validation: an attacker can
+    # echo `## Code Review\n### Blockers` content in a poisoned PR diff
+    # but can't predict the commit's own head_sha, so the `Reviewed at:`
+    # footer check rejects fake matches. The next-`## ` heading bound
+    # also prevents one candidate's body from swallowing downstream
+    # content all the way through the verifier's output. Walk candidates
+    # in reverse and pick the first whose `Reviewed at:` SHA matches.
+    _header_re = re.compile(r"(?<!`)## Code Review[^\n]*\n")
+    _next_h2_re = re.compile(r"(?<!`)(?:^|\n)## ")
     _footer_re = re.compile(r"\nReviewed at:\s+([0-9a-f]{40})\b[^\n]*")
     _candidates = []
     for _hm in _header_re.finditer(_flattened):
@@ -1743,14 +1942,33 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str) -> None:
             learn_script = air_root / "managed" / "learn.py"
             if learn_script.is_file():
                 print(f"  [learn] running synchronously: {learn_script} {repo}", file=sys.stderr)
+                # Capture stdout/stderr so the failure mode "learn.py exited 1"
+                # surfaces an actionable reason. Previous behavior streamed
+                # both to the parent's tty (capture_output=False), which let
+                # GHA log them but with buffering+ordering quirks that made
+                # debugging hard (see qai-be #635 — learn.py exited 1, no
+                # diagnostic visible until log archive). Buffer is small
+                # (typical learn.py output <100KB) and we already accept the
+                # learn epilogue running synchronously, so memory cost is a
+                # non-issue. Stream stdout through immediately so the live
+                # log shows progress; dump stderr only on failure so happy-
+                # path runs aren't noisier than before.
                 learn_result = subprocess.run(
                     [sys.executable, str(learn_script), repo, "--poll"],
-                    capture_output=False,
+                    capture_output=True, text=True,
                     # No check=True — we want to finish this review cleanly
                     # even if learn errors out.
                 )
+                sys.stdout.write(learn_result.stdout)
+                sys.stdout.flush()
                 if learn_result.returncode != 0:
-                    print(f"  [warn] learn.py exited {learn_result.returncode} — counter not reset", file=sys.stderr)
+                    sys.stderr.write(learn_result.stderr)
+                    sys.stderr.flush()
+                    print(
+                        f"  [warn] learn.py exited {learn_result.returncode} — "
+                        f"counter not reset (stderr above)",
+                        file=sys.stderr,
+                    )
             else:
                 print(f"  [warn] learn.py not found at {learn_script}", file=sys.stderr)
 
