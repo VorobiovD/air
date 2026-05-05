@@ -310,19 +310,32 @@ def _github_error_message(resp) -> str:
     return f"{resp.status_code} {msg}"
 
 
-def _gha_run_url() -> str:
+def _gha_run_url() -> str | None:
     """Best-effort GitHub Actions run URL from environment.
 
-    Returns a useful link when invoked from a managed-review workflow,
-    or a placeholder when invoked locally / outside Actions. Used by
-    the run-failed comment to point operators at the run logs.
+    Returns a useful link when invoked from a managed-review workflow.
+    Returns None when invoked locally / outside Actions so callers can
+    omit the `Run:` line entirely instead of rendering an awkward
+    placeholder inside angle brackets in posted markdown.
     """
     server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     run_id = os.environ.get("GITHUB_RUN_ID", "")
     if repo and run_id:
         return f"{server}/{repo}/actions/runs/{run_id}"
-    return "(local invocation — no GHA run URL available)"
+    return None
+
+
+# Heuristic strings that indicate GitHub's 422 was caused by near-
+# duplicate-comment detection (vs e.g. body-too-long or schema). On a
+# duplicate-detection 422, retrying with the SAME body is guaranteed to
+# 422 again — the retry would just be a 2s tax with no behavioral win.
+# Skip the retry and surface the diagnostic. Conservative match list —
+# expand only with real production cases.
+_GH_DUPLICATE_HINTS: tuple[str, ...] = (
+    "already exists",
+    "duplicate",
+)
 
 
 def _post_review_comment_with_retry(
@@ -330,11 +343,19 @@ def _post_review_comment_with_retry(
 ) -> "req.Response":
     """POST the review comment to the PR's issue-comments endpoint.
 
-    Retries once on 422 after a 2s backoff, capturing the response body
-    each time so the next 422 isn't a black box. svc-transcribe #37 hit
-    a 422 cascade (run 25368789413, 2026-05-05): the prior fallback path
-    posted near-duplicate content and GitHub rejected with 422; without
-    body capture, the operator had no idea why.
+    Retries once on 422 after a 2s backoff EXCEPT when the response
+    body indicates duplicate-comment detection — in that case, retry
+    can't change the outcome, so we log + return after the first POST.
+
+    Body diagnostics are scrubbed: only the GitHub-controlled `message`
+    field reaches stderr (matching `_github_error_message`'s shape) so
+    a happy-path 422 caused by, say, a too-long-body containing PR
+    code snippets doesn't leak that snippet to CI logs.
+
+    svc-transcribe #37 hit a 422 cascade (run 25368789413, 2026-05-05):
+    the prior fallback path posted near-duplicate content and GitHub
+    rejected with 422; without diagnostic capture, the operator had no
+    idea why.
     """
     url = (
         f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
@@ -344,30 +365,42 @@ def _post_review_comment_with_retry(
         "Accept": "application/vnd.github+json",
     }
     payload = {"body": body}
-    resp = req.post(url, headers=headers, json=payload)
+    resp = req.post(url, headers=headers, json=payload, timeout=30)
     if resp.status_code != 422:
         return resp
-    # Capture body for diagnostics — log truncated to keep CI logs sane.
-    try:
-        err_body = resp.text[:500]
-    except Exception:
-        err_body = "(unreadable response body)"
+    msg = _gh_error_message_only(resp)
     print(
-        f"  [warn] first POST returned 422 — body: {err_body!r}",
+        f"  [warn] first POST returned 422 — message: {msg!r}",
         file=sys.stderr,
     )
-    time.sleep(2.0)
-    resp2 = req.post(url, headers=headers, json=payload)
-    if resp2.status_code == 422:
-        try:
-            err_body2 = resp2.text[:500]
-        except Exception:
-            err_body2 = "(unreadable response body)"
+    if any(hint in msg.lower() for hint in _GH_DUPLICATE_HINTS):
         print(
-            f"  [warn] retry POST also returned 422 — body: {err_body2!r}",
+            "  [warn] message looks like duplicate-comment detection — "
+            "skipping retry (re-POST with identical body would 422 again)",
+            file=sys.stderr,
+        )
+        return resp
+    time.sleep(2.0)
+    resp2 = req.post(url, headers=headers, json=payload, timeout=30)
+    if resp2.status_code == 422:
+        msg2 = _gh_error_message_only(resp2)
+        print(
+            f"  [warn] retry POST also returned 422 — message: {msg2!r}",
             file=sys.stderr,
         )
     return resp2
+
+
+def _gh_error_message_only(resp) -> str:
+    """Pull the GitHub-controlled `message` field from a JSON error
+    response. Returns an empty string on non-JSON or missing-field —
+    callers that lower-case match against keyword hints handle "" safely.
+    Mirrors `_github_error_message` but without the status-code prefix.
+    """
+    try:
+        return resp.json().get("message") or ""
+    except ValueError:
+        return ""
 
 
 def fetch_pr_metadata(repo: str, pr_number: int, token: str) -> dict:
@@ -1997,39 +2030,48 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     if not review_extracted:
         # Fallback — no candidate had a head_sha-matching footer. The
         # coordinator either returned no `## Code Review` block at all,
-        # or all blocks had wrong-SHA footers (likely cause: verifier
-        # sub-agent emitted prior bot review's footer SHA, or coordinator
-        # session served a cached prior-thread response). svc-transcribe
-        # PR #37 reproduced this with a 92.5s coordinator (vs typical
-        # 1500-2400s), with output near-identical to the prior bot
-        # review — making the previous "post raw" path 422 against
-        # GitHub's near-duplicate detection.
+        # or all blocks had wrong-SHA footers (likely causes: verifier
+        # sub-agent emitting prior bot review's footer SHA, or some
+        # interaction with Anthropic's session caching layer). svc-
+        # transcribe PR #37 reproduced this with a 92.5s coordinator
+        # (vs typical 1500-2400s), with output near-identical to the
+        # prior bot review — making the previous "post raw" path 422
+        # against GitHub's near-duplicate detection.
         #
         # New behavior: post a STRUCTURED run-failed comment with the
         # diagnostic context, so the developer sees signal (not silence)
         # and can decide whether to push a small commit to bust the
         # cache or wait for the next push to retrigger. Skip verdict
         # because we have no findings list to gate on.
-        coord_secs_str = (
-            f"{coordinator_secs:.1f}s" if coordinator_secs is not None else "unknown"
-        )
+        #
+        # Heading INTENTIONALLY does NOT start with `## Code Review` —
+        # that prefix is matched by `startswith("## Code Review")`
+        # checks in plugins/air/lib/pr_conversation.py and several CLI
+        # bash flows (review.md smart-default, review-respond.md, learn
+        # .md). A failure notice with that prefix would be picked up as
+        # if it were a real review. Use `## air review (run failed)`
+        # so the failure body is unambiguously distinct downstream.
+        # Intentionally NO `Reviewed at:` footer either — prevents
+        # `find_prior_review` from anchoring on this diagnostic body
+        # (belt-and-suspenders; the prefix check already filters).
+        coord_secs_str = f"{coordinator_secs:.1f}s"
         run_url = _gha_run_url()
+        run_link_line = f"\nRun: <{run_url}>\n" if run_url else ""
         review_body = (
-            f"## Code Review (run failed)\n\n"
+            f"## air review (run failed)\n\n"
             f"The bot's coordinator session returned without a `## Code "
             f"Review` block whose `Reviewed at:` footer matched the "
             f"current HEAD SHA `{head_sha[:8]}`. No verdict will be "
             f"submitted for this run.\n\n"
             f"**Likely cause:** the coordinator session was unusually "
             f"short ({coord_secs_str}) — typical successful runs take "
-            f"1500-2400s. Short runs with unusable output usually mean "
-            f"a cached prior-thread response from Anthropic's session "
-            f"layer or a verifier sub-agent that emitted a stale footer "
-            f"SHA from a prior round.\n\n"
+            f"1500-2400s. Short runs with unusable output usually "
+            f"indicate a cached prior-thread response from Anthropic's "
+            f"session layer or a verifier sub-agent that emitted a "
+            f"stale footer SHA from a prior round.\n\n"
             f"**Workaround:** push any small commit (whitespace, "
             f"comment, etc.) to invalidate the prefix cache and "
-            f"retrigger the review.\n\n"
-            f"Run: <{run_url}>\n"
+            f"retrigger the review.{run_link_line}"
         )
         print(
             "  [warn] coordinator output had no `## Code Review` block whose "
@@ -2037,14 +2079,17 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
             "structured run-failed comment, verdict will be skipped",
             file=sys.stderr,
         )
-        if coordinator_secs is not None and coordinator_secs < 300:
+        if coordinator_secs < 300:
             # Soft-failure telemetry signal. <300s coordinator on a real
             # PR is impossibly fast (typical: 1500-2400s); paired with
-            # unusable output, it's almost certainly cached prior-thread
-            # response. Logged separately so dashboards can correlate.
+            # unusable output, this is likely a stale-cache signal —
+            # framed as "likely" not "almost certainly" because we have
+            # 2 production occurrences and no Anthropic-side telemetry
+            # to confirm cause. Logged separately so dashboards can
+            # correlate frequency over time.
             print(
                 f"  [warn] coordinator complete in {coord_secs_str} (typical "
-                f"1500-2400s) AND output unusable — stale-cache signal",
+                f"1500-2400s) AND output unusable — likely stale-cache signal",
                 file=sys.stderr,
             )
 
