@@ -348,17 +348,18 @@ def _count_gating_unfixed(review_body: str) -> int:
       recommendation kept a PR red across 13 consecutive re-reviews
       while the developer intentionally deferred it to a follow-up.
 
-    Severity defaults to `medium` (non-gating now) when the verifier
-    omits the `[severity]` tag — pre-v1.12 reviews emitted before the
-    tag was introduced will read as non-gating, which matches author
-    intent for legacy bodies.
+    Severity defaults to `blocker` (gating) when the verifier omits the
+    `[severity]` tag — preserves conservative gating on legacy v1.10
+    bodies emitted before severity tags existed. Without this default,
+    upgrading to v1.12 would silently un-gate any pre-v1.12 prior body
+    whose findings (real blockers among them) lack `[severity]` tags.
     """
     count = 0
     for m in _PRIOR_STATUS_RE.finditer(review_body):
-        severity = (m.group(1) or "medium").lower()
+        severity = (m.group(2) or "blocker").lower()
         # `re.sub` to normalize "NOT  FIXED" / "PARTIALLY  FIXED" with
         # any whitespace shape into the canonical form for set lookup.
-        status = re.sub(r"\s+", " ", m.group(2).upper()).strip()
+        status = re.sub(r"\s+", " ", m.group(3).upper()).strip()
         if status in _GATING_STATUSES and severity in _GATING_SEVERITIES:
             count += 1
             continue
@@ -387,23 +388,24 @@ def extract_prior_statuses(prior_body: str) -> list[tuple[int, str, str]]:
     svc-transcribe #37 finding #2: 13 consecutive `NOT FIXED` rounds on
     a medium-severity test-coverage recommendation that the developer
     intentionally deferred to a follow-up.
+
+    Severity defaults to `blocker` for missing tags, matching the gate
+    side (`_count_gating_unfixed`). This is the safer default in carry-
+    forward too: a missing-tag NOT FIXED entry won't be auto-promoted
+    to DEFERRED on the next round (carry-forward only fires for non-
+    blockers), so a real legacy blocker keeps reappearing as NOT FIXED
+    until explicitly addressed.
     """
+    # `_PRIOR_STATUS_RE` captures (num, severity, status) — share the same
+    # compiled pattern with `_count_gating_unfixed` so the gate counter and
+    # the carry-forward parser can't drift on shape (severity enum, status
+    # enum, anchor, dash). The finding-number capture is a no-op for the
+    # gate's count-only iteration.
     triples: list[tuple[int, str, str]] = []
-    # Re-use _PRIOR_STATUS_RE which is already validated by
-    # _count_gating_unfixed. Capture the finding number as well.
-    pat = re.compile(
-        r"^-\s+\*\*#(\d+)\*\*"
-        r"(?:\s*\[(blocker|medium|low|nit)\])?"
-        r"\s+—\s+"
-        r"(FIXED|NOT\s+FIXED|PARTIALLY\s+FIXED|DEFERRED|DISPUTED)\b",
-        re.MULTILINE | re.IGNORECASE,
-    )
-    for m in pat.finditer(prior_body or ""):
-        try:
-            num = int(m.group(1))
-        except (TypeError, ValueError):
-            continue
-        severity = (m.group(2) or "medium").lower()
+    for m in _PRIOR_STATUS_RE.finditer(prior_body or ""):
+        # `\d+` capture is always parseable — no try/except needed.
+        num = int(m.group(1))
+        severity = (m.group(2) or "blocker").lower()
         status = re.sub(r"\s+", " ", m.group(3).upper()).strip()
         triples.append((num, severity, status))
     return triples
@@ -533,8 +535,9 @@ _BLOCKER_ENTRY_RE = re.compile(r"^\*\*\d+\.", re.MULTILINE)
 # where severity ∈ {blocker, medium, low, nit} (carried from the prior
 # review) and STATUS ∈ {FIXED, NOT FIXED, PARTIALLY FIXED, DEFERRED,
 # DISPUTED}. The severity tag is optional for backward compatibility
-# with reviews emitted before v1.12 — when missing, default to `medium`
-# (now non-gating, see below).
+# with reviews emitted before v1.12 — when missing, the gate counter
+# and the carry-forward parser both default to `blocker` (conservative-
+# gating).
 #
 # Verdict gating semantics:
 # - FIXED / DISPUTED / DEFERRED on non-blocker: never gate.
@@ -552,8 +555,12 @@ _BLOCKER_ENTRY_RE = re.compile(r"^\*\*\d+\.", re.MULTILINE)
 # follow-up PR, but the medium-severity gate kept the PR red. Mediums
 # are now warnings in the body — humans can still request changes
 # manually if they disagree with a developer's deferral.
+#
+# Capture groups (1-indexed): 1=finding-number, 2=severity (or None),
+# 3=status. Both `_count_gating_unfixed` and `extract_prior_statuses`
+# read this regex — keep one pattern, both call sites in lockstep.
 _PRIOR_STATUS_RE = re.compile(
-    r"^-\s+\*\*#\d+\*\*"
+    r"^-\s+\*\*#(\d+)\*\*"
     r"(?:\s*\[(blocker|medium|low|nit)\])?"
     r"\s+—\s+"
     r"(FIXED|NOT\s+FIXED|PARTIALLY\s+FIXED|DEFERRED|DISPUTED)\b",
@@ -561,6 +568,13 @@ _PRIOR_STATUS_RE = re.compile(
 )
 _GATING_SEVERITIES = {"blocker"}
 _GATING_STATUSES = {"NOT FIXED", "PARTIALLY FIXED"}
+# Carry-forward suppression promotes a NOT FIXED finding to DEFERRED
+# once it's been NOT FIXED for at least this many consecutive rounds
+# (counting the current round). Set to 2: prior round + current round =
+# 2 consecutive misses → auto-defer. Update the verifier_task emit text
+# below (`{CARRY_FORWARD_THRESHOLD}+ consecutive rounds...`) if widening
+# this — the rule and the user-visible rationale must move together.
+CARRY_FORWARD_THRESHOLD = 2
 # DEFERRED is non-gating for non-blocker findings, but the verifier prompt
 # forbids DEFERRED for blockers ("ONLY acceptable for non-blocker findings;
 # do NOT use this status for findings originally classified as `blocker`").
@@ -1623,32 +1637,55 @@ async def run_review(args):
         prior_statuses_block = format_prior_statuses_block(
             (prior or {}).get("body", "")
         )
-        # Carry-forward rule renders only when we actually have prior
-        # statuses to anchor against (i.e. round 3+ of a PR). Round 2
-        # has no Previous Findings Status block to read from — round 1
-        # was a fresh review.
+        # Carry-forward rule renders only when the prior body actually
+        # contained a `Previous Findings Status` block — typically round
+        # 3+ on PRs that follow the standard review-then-re-review
+        # cadence (round 1 fresh, round 2 first re-review, round 3 first
+        # round able to anchor against round 2's classifications). Also
+        # renders when round 1 was a manually-forced re-review and
+        # round 2 inherits its statuses.
         if prior_statuses_block:
-            carry_forward_rule = f"""
-
-CARRY-FORWARD RULE (suppresses repetitive NOT FIXED on intentionally-deferred recommendations):
-
-The block below shows each prior finding's status from the IMMEDIATELY
-PRIOR re-review (one round ago). When you're about to emit a status of
-NOT FIXED for finding #N AND the prior round also reported NOT FIXED
-for the same #N AND the severity is NOT `blocker`, instead emit:
-
-  - **#N** [<severity>] — DEFERRED — carried forward 2+ consecutive rounds without a fix attempt; treating as deferred.
-
-Blockers NEVER auto-defer — always remain NOT FIXED.
-
-This rule only applies when the prior round also said NOT FIXED. If the
-prior round said PARTIALLY FIXED or FIXED, do not auto-defer — emit your
-honest classification.
-
-{prior_statuses_block}
-"""
+            carry_forward_rule = (
+                f"\nCARRY-FORWARD RULE (suppresses repetitive NOT FIXED "
+                f"on intentionally-deferred recommendations):\n\n"
+                f"The block below shows each prior finding's status from "
+                f"the IMMEDIATELY PRIOR re-review (one round ago). When "
+                f"you're about to emit a status of NOT FIXED for finding "
+                f"#N AND the prior round also reported NOT FIXED for the "
+                f"same #N AND the severity is NOT `blocker`, instead emit:\n\n"
+                f"  - **#N** [<severity>] — DEFERRED — carried forward "
+                f"{CARRY_FORWARD_THRESHOLD}+ consecutive rounds without a "
+                f"fix attempt; treating as deferred.\n\n"
+                f"Blockers NEVER auto-defer — always remain NOT FIXED.\n\n"
+                f"This rule only applies when the prior round also said "
+                f"NOT FIXED. If the prior round said PARTIALLY FIXED, "
+                f"FIXED, or DEFERRED, do not auto-defer — emit your "
+                f"honest classification (a previously-deferred finding "
+                f"that's still un-fixed should remain DEFERRED; one that "
+                f"was partially or fully fixed should reflect the "
+                f"current state).\n\n"
+                f"{prior_statuses_block}\n"
+            )
         else:
             carry_forward_rule = ""
+
+        # Build the DEFERRED bullet conditional on whether the carry-
+        # forward rule will render below. On round 2 (no prior statuses)
+        # the OR clause referenced a rule that wasn't there — that's the
+        # exact "aspirational comment" pattern that invites verifier
+        # hallucination. Only mention the rule when it's actually present.
+        deferred_bullet = (
+            "- DEFERRED — author explicitly punted with a ticket "
+            "reference (e.g. \"tracked as PRM-3686\")"
+            + (
+                ", OR the carry-forward rule below promotes a "
+                "repeated NOT FIXED to DEFERRED"
+                if carry_forward_rule
+                else ""
+            )
+            + ". ONLY acceptable for non-blocker findings; do NOT "
+            "use this status for findings originally classified as `blocker`."
+        )
 
         verifier_task = f"""You have raw findings from the specialist reviewers.
 They were run in RE-REVIEW MODE — each result contains both (a) a classification of
@@ -1658,11 +1695,7 @@ For each prior finding, choose ONE status:
 - FIXED — the flagged code changed and addresses the finding.
 - PARTIALLY FIXED — code changed but doesn't fully address.
 - NOT FIXED — code unchanged, finding still applies.
-- DEFERRED — author explicitly punted with a ticket reference (e.g.
-  "tracked as PRM-3686"), OR the carry-forward rule below promotes a
-  repeated NOT FIXED to DEFERRED. ONLY acceptable for non-blocker
-  findings; do NOT use this status for findings originally classified
-  as `blocker`.
+{deferred_bullet}
 - DISPUTED — author pushed back with rationale you accept.
 {carry_forward_rule}
 Verify each finding per your system prompt and drop FALSE POSITIVE /

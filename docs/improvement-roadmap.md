@@ -13,9 +13,9 @@ _Last updated 2026-05-04, reframed against telemetry from the last 20 production
 | 3 | SSE delivery latency mitigation — REST events fallback at 90s quiet timeout | PR #49 | Caps stuck-stream tail latency |
 | 3 | Extractor narration anchor (`(?<!\`)## Code Review`) | PR #49 | Fixes qai-be #635 narration leak |
 | 3 | learn.py stderr capture | PR #49 | qai-be #635 debugging gap |
-| 4 | Re-review gate narrowed to blocker-only (mediums = warnings) | next PR | svc-transcribe #37 — would have flipped 12/13 CHANGES_REQUESTED rounds to APPROVED |
-| 4 | Carry-forward suppression — auto-DEFER 2nd consecutive NOT FIXED on non-blockers | next PR | Eliminates the perpetual-loop pattern (svc-transcribe #37 finding #2: 13 NOT FIXED rounds in a row) |
-| 4 | Workflow concurrency — coalesce rapid-fire pushes per PR (`cancel-in-progress: true`) | next PR | Prevents overlapping reviews; the latest push runs to completion |
+| 4 | Re-review gate narrowed to blocker-only (mediums = warnings) | PR #51 | svc-transcribe #37 — would have flipped all 13 CHANGES_REQUESTED re-review rounds to APPROVED |
+| 4 | Carry-forward suppression — auto-DEFER 2nd consecutive NOT FIXED on non-blockers (managed mode only) | PR #51 | Eliminates the perpetual-loop pattern (svc-transcribe #37 finding #2: 13 NOT FIXED rounds in a row) |
+| 4 | Workflow concurrency — coalesce rapid-fire pushes per PR (`cancel-in-progress: true`) | PR #51 | Prevents overlapping reviews; the latest push runs to completion |
 
 The 5-session → 1-coordinator + Haiku/Sonnet tiering combination has bought us most of the **cost** win projected in `cost-optimization-plan.md`. Empirical numbers (next section) show the **latency and reliability** bottlenecks have moved.
 
@@ -66,11 +66,11 @@ PR #635 received **9 reviews over 2 days**. Comment sizes converged but not mono
 
 Sorted by **value × evidence × cost-to-ship**. Each has a concrete trigger.
 
-### Done in Phase 4 (this iteration)
+### Done in Phase 4 (PR #51)
 
-- **Re-review blocker-only gate.** `_GATING_SEVERITIES = {"blocker"}`. Mediums and below appear as recommendations in the review body but no longer flip APPROVE → CHANGES_REQUESTED. Direct response to svc-transcribe #37: 13 of 14 rounds posted CHANGES_REQUESTED solely because one medium-severity test-coverage recommendation kept being NOT FIXED. With this change, those rounds would all have been APPROVED.
-- **Carry-forward suppression.** New `<prior-round-statuses>` block in the verifier_task (re-review only, round 3+). When the verifier is about to emit `NOT FIXED` for finding #N AND the immediately prior re-review also said `NOT FIXED` for the same finding AND severity is non-blocker, it instead emits `DEFERRED — carried forward 2+ consecutive rounds without a fix attempt`. Eliminates the perpetual-NOT-FIXED loop while still surfacing repeated recommendations.
-- **Workflow concurrency.** `concurrency.cancel-in-progress: true` keyed on `(repository, pr_number)` in `managed-review.yml`. When a developer pushes 3 commits in 5 minutes, the first 2 reviews get cancelled and only the last push runs to completion. Saves compute on rapid-iteration sessions.
+- **Re-review blocker-only gate.** `_GATING_SEVERITIES = {"blocker"}`. Mediums and below appear as recommendations in the review body but no longer flip APPROVE → CHANGES_REQUESTED. Direct response to svc-transcribe #37: 13 of 14 rounds posted CHANGES_REQUESTED solely because one medium-severity test-coverage recommendation kept being NOT FIXED. With this change, all 13 of those re-review rounds would have been APPROVED. The legacy missing-severity default also flipped to `blocker` so pre-v1.12 prior bodies (no `[severity]` tags) keep gating conservatively.
+- **Carry-forward suppression (managed mode only).** New `<prior-round-statuses>` block in the verifier_task (re-review only, fires when prior body has a parseable `Previous Findings Status` block). When the verifier is about to emit `NOT FIXED` for finding #N AND the immediately prior re-review also said `NOT FIXED` for the same finding AND severity is non-blocker, it instead emits `DEFERRED — carried forward 2+ consecutive rounds without a fix attempt`. Eliminates the perpetual-NOT-FIXED loop while still surfacing repeated recommendations. The CLI plugin's `/air:review --re-review` flow does NOT have this suppression — local CLI users on long re-review chains can still see persistent NOT FIXED, intentionally; the gate change above already covers the verdict-flipping case.
+- **Workflow concurrency.** `concurrency.cancel-in-progress: true` keyed on `(repository, pr_number)` (with `github.run_id` fallback for the exotic empty-input case) in `managed-review.yml`. When a developer pushes 3 commits in 5 minutes, the first 2 reviews get cancelled and only the last push runs to completion. Documented inconsistency window: a coalesce that lands between issue-comment POST and verdict POST leaves the PR with a finding-list comment but no formal verdict — branch protection lags one round until the next push.
 
 ---
 
