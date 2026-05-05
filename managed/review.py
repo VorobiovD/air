@@ -1945,17 +1945,11 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     coordinator_secs = time.monotonic() - t0
     print(f"  Coordinator complete in {coordinator_secs:.1f}s")
 
-    # Surface wiki-push silent failures. The coordinator's TURN 3 bash
-    # has a one-shot rebase-retry on push (see coordinator.md); when both
-    # attempts fail, it echoes the AIR_WIKI_PUSH_FAILED token so this
-    # detection loop can warn the operator without aborting (the review
-    # comment was already posted before the wiki step ran).
-    if "AIR_WIKI_PUSH_FAILED" in coordinator_out:
-        print(
-            "  [warn] coordinator's wiki push failed after rebase retry — "
-            "pattern learning will catch up on the next review",
-            file=sys.stderr,
-        )
+    # (v1.12.3+) The coordinator no longer has a Bash tool — per-review
+    # wiki updates were removed because the model would shortcut TURN 1
+    # + 2 + 3-A entirely and just bump a counter, skipping the actual
+    # review (svc-transcribe #37/#39). Pattern maintenance now happens
+    # via /air:learn (every 5 reviews on the wiki-backed counter).
 
     # Extract review comment from coordinator output. The runtime
     # interleaves sub-agent forwards (`<agent-notification thread_id=
