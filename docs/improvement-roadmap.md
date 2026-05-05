@@ -1,6 +1,6 @@
 # air — Improvement Roadmap (post-shipped phases)
 
-_Last updated 2026-05-05 (post-v1.12.1, after the cache-bust workaround failed and the regurgitation hypothesis hardened). Phase 4 shipped in v1.12.0; v1.12.1 added the orchestrator-side defensive fallback. Reframed against telemetry from the last 20 production runs (qai-be PRs #41/#593/#595/#617/#635, qai-fe PRs #239/#246, svc-transcribe #37, plus dogfood runs)._
+_Last updated 2026-05-05 (post-v1.12.5). Phase 4 shipped in v1.12.0; v1.12.1-v1.12.5 closed the SSE/REST race + stream-close + billing-error cascade. Reframed against telemetry from production runs (qai-be PRs #41/#593/#595/#617/#635/#666, qai-fe PRs #239/#246, svc-transcribe #37/#39, plus dogfood runs)._
 
 ## What's already shipped
 
@@ -18,6 +18,11 @@ _Last updated 2026-05-05 (post-v1.12.1, after the cache-bust workaround failed a
 | 4 | Carry-forward suppression — auto-DEFER 2nd consecutive NOT FIXED on non-blockers (managed mode only) | v1.12.0 (PR #51) | Eliminates the perpetual-loop pattern (svc-transcribe #37 finding #2: 13 NOT FIXED rounds in a row) |
 | 4 | Workflow concurrency — coalesce rapid-fire pushes per PR (`cancel-in-progress: true`) | v1.12.0 (PR #51) | Prevents overlapping reviews; the latest push runs to completion |
 | 4 | Legacy missing-severity default flipped to `blocker` (conservative-gating) | v1.12.0 (PR #51) | Pre-v1.12 prior bodies (no `[severity]` tags) keep gating instead of silently un-gating |
+| 5 | Structured `## air review (run failed)` fallback comment + 422 retry on review post | v1.12.1 (PR #54) | Replaces 422 cascade with actionable signal; sanitizes response-body diagnostics |
+| 5 | Debug log of `coordinator_out[:2000]` on SHA-mismatch | v1.12.2 (PR #57) | Diagnostic instrumentation that confirmed the SSE/REST race hypothesis |
+| 5 | SSE/REST race fix: retry drain on eventually-consistent events (per-attempt delta tracking) | v1.12.3 (PR #61) | qai-be #635-style failures (cached coordinator finishes in ~92s, REST events lag) recover |
+| 5 | REST polling until session terminal — handles SSE stream-close mid-session | v1.12.4 (PR #62) | qai-be #666 went from 92s empty-output to 1432s + real review (validated in production) |
+| 5 | Billing-aware structured-fallback: detects `BetaManagedAgentsBillingError`, posts top-up snippet | v1.12.5 (PR #64) | svc-transcribe billing exhaustion now surfaces as actionable comment instead of stack trace |
 
 The 5-session → 1-coordinator + Haiku/Sonnet tiering combination has bought us most of the **cost** win projected in `cost-optimization-plan.md`. Empirical numbers (next section) show the **latency and reliability** bottlenecks have moved.
 
@@ -203,6 +208,24 @@ Three distinct failure paths now have production cases:
 **Status:** `air_ref` input parameter shipped in v1.11.0. The infrastructure exists; the recurring run does not. Set up a weekly cross-repo run on a known-good qai-be PR fixture and publish the results (cost, wall time, finding count parity) to a wiki page. **Builds the empirical loop we've been doing manually.**
 
 **Trigger:** when we propose Phase 5 work that touches the coordinator prompt, the verifier task template, or model tiers, the cross-repo benchmark is the first thing that fires to catch quality regressions.
+
+### P9 — Self-review deferrals from the v1.12.x stack
+
+Findings flagged by self-review on PRs #61–#64 that we deliberately deferred. Each is a "tighten on next pass" item — none block production today, but they're the next-in-line debt if any of the surrounding code changes again.
+
+**P9-a — `terminated_reason` format is the consumer-coupled contract for the billing matcher** (security-auditor self-review on PR #64). The billing-error fallback in `run_review` matches `_BILLING_REASON_HINTS` substrings against `coordinator_failure_reason`, which is `run_session`'s `terminated_reason` (built as `f"session error: {error!r}"` at the SSE event handler). If a future refactor changes that f-string format — e.g. to `f"session error type={type(error).__name__}, msg={error!s}"` — the substring match silently stops finding `"BetaManagedAgentsBillingError"` and the billing-aware comment regresses to the generic "other failure" branch. **Fix:** at `run_session`'s `terminated_reason` assignment site, add a comment pointing back to the consumer ("billing matcher in run_review reads this string"). Ideal long-term: surface `error.type + error.message` as a structured pair instead of a repr, so the matcher checks a stable schema instead of inferring from a repr. Cost: ~30 LOC + signature change to `SpecialistSessionError`. Trigger: any PR that changes how `run_session` formats `terminated_reason`.
+
+**P9-b — REST poll loop API-call amplification under universal failure** (security-auditor F1 on PR #62). `_poll_rest_until_done`'s `POLL_INTERVAL_S=30s` over `POLL_BUDGET_S=COORDINATOR_TIMEOUT_SECS*0.9 ≈ 2430s` produces up to ~80 outer-loop iterations × 2 API calls (`events.list` + `sessions.retrieve`) ≈ **~160 Anthropic API calls per stuck session** worst case. Fine when the failure mode is exceptional. Becomes a problem if a region-wide Anthropic incident or a class of cache-heavy coordinator runs causes every consumer's review to enter this loop simultaneously — could trip per-org rate limits. **Fix (when triggered):** circuit breaker on consecutive empty drains (5 in a row → abandon early) and/or exponential backoff (`30s → 60s → 120s → 240s`, capped). **Trigger:** instrument `_poll_rest_until_done` invocations per day; if it fires on >20% of reviews, this becomes the rule not the exception and the polling cadence needs revisiting.
+
+**P9-c — `_drain_via_rest` no-progress observability gap on stuck-running sessions** (code-reviewer on PR #62). The poll loop only drains REST events when the session has reached terminal state. A session that sits in `running` for the full 36-min budget produces ~72 liveness lines (`status=running agent_msgs=0`), all with the same `agent_msgs` count, with NO drain telemetry. Operators reading logs to diagnose "is the session making progress?" see only the iteration count. **Fix:** drain non-terminal events every Kth iteration (say K=5 ≈ 2.5 min) just to surface event-stream progress, OR include `getattr(sess, "open_threads", "?")` in the liveness line so operators see whether sub-agents are still being spawned. **Trigger:** the next time someone needs to debug a long-running session that never reaches terminal.
+
+**P9-d — `error!r` in `terminated_reason` may regress to leak fields** (security-auditor on PR #64). The Anthropic SDK 0.93.0 typed-error schemas for `BetaManagedAgents*Error` don't currently expose API keys, session UUIDs, or PR-diff content in declared fields. **But** the `terminated_reason` posts `error!r`, which trusts the SDK to never add an internal-correlation field, account ID, or session UUID to the error union schema. A future SDK release could add `request_id` or `account_id` and the repr would silently start posting that to public PR comments. **Fix:** post structured fields explicitly — `f"{error.type}: {error.message}"` — instead of `repr()`. Couples to P9-a (same site). **Trigger:** SDK version bump that touches the error schema.
+
+**P9-e — Stale `## Code Review` substring in the else-branch fallback prose** (security-auditor on PR #64, P9). The third (no-exception) fallback branch contains the literal `"## Code Review"` in narrative prose. Currently safe — `pr_conversation.py::BOT_REVIEW_PREFIXES` requires a trailing newline anchor that the prose mention lacks. **Risk:** if any future bash flow scans comments with un-anchored `grep '^## Code Review'`, this fallback body could be misclassified as a real review. **Fix:** rephrase to "without a recognised header" so the literal disappears from prose. **Trigger:** when next touching `pr_conversation.py` or any of `commands/*.md` flows that match on `## Code Review`.
+
+**P9-f — Self-referential "VorobiovD/air" link in dogfood reviews** (code-reviewer on PR #64). The non-billing failure branch posts "file an issue against [VorobiovD/air](https://github.com/VorobiovD/air)". On dogfood (`air-review.yml` running on this repo's PRs), the developer reading the comment IS in VorobiovD/air — the link is a self-reference. Minor cognitive friction. **Fix:** conditionally suppress the link when `args.repo == "VorobiovD/air"`, OR rephrase to "the air plugin repo" without the link. **Trigger:** if dogfood failures become noisy enough to be confusing.
+
+**P9-g — Duplicate `## air review (run failed)` header across three branches** (simplify on PR #64). Each branch in the structured-fallback opens with `"## air review (run failed)\n\n"` and ends with `{run_link_line}`. Today three call sites; if a fourth failure shape appears, a small `_run_failed_body(cause, fix, raw=None)` helper would consolidate. **Trigger:** adding a fourth branch.
 
 ---
 
