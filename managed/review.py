@@ -2079,15 +2079,33 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     # the one session — see managed/api.py for the research-preview header.
     print(f"\n[4] Running coordinator session ({len(SPECIALIST_AGENTS)} specialists in parallel + verifier)...")
     t0 = time.monotonic()
-    async with AsyncAnthropic() as client:
-        coordinator_out = await asyncio.wait_for(
-            run_session(
-                client,
-                agents[COORDINATOR_AGENT]["id"], agents[COORDINATOR_AGENT]["version"],
-                env_id, args.repo, checkout, bot_token,
-                coordinator_user_text, COORDINATOR_AGENT,
-            ),
-            timeout=COORDINATOR_TIMEOUT_SECS,
+    coordinator_failure_reason: str = ""
+    try:
+        async with AsyncAnthropic() as client:
+            coordinator_out = await asyncio.wait_for(
+                run_session(
+                    client,
+                    agents[COORDINATOR_AGENT]["id"], agents[COORDINATOR_AGENT]["version"],
+                    env_id, args.repo, checkout, bot_token,
+                    coordinator_user_text, COORDINATOR_AGENT,
+                ),
+                timeout=COORDINATOR_TIMEOUT_SECS,
+            )
+    except SpecialistSessionError as e:
+        # run_session raised because terminated_reason was set and no
+        # parts were captured — common cause: `session.error` event
+        # carrying BetaManagedAgentsBillingError when ANTHROPIC_API_KEY
+        # is out of credits, surfaced here as `e.reason`. Stash the
+        # reason so the structured-fallback block can branch on it
+        # (billing → actionable "top up the key" message; other → the
+        # generic stale-cache message). coordinator_out stays empty so
+        # the SHA-extractor falls through to that block normally.
+        coordinator_failure_reason = e.reason
+        coordinator_out = ""
+        print(
+            f"  [warn] coordinator session raised SpecialistSessionError: "
+            f"{e.reason}",
+            file=sys.stderr,
         )
     coordinator_secs = time.monotonic() - t0
     print(f"  Coordinator complete in {coordinator_secs:.1f}s")
@@ -2227,22 +2245,76 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         coord_secs_str = f"{coordinator_secs:.1f}s"
         run_url = _gha_run_url()
         run_link_line = f"\nRun: <{run_url}>\n" if run_url else ""
-        review_body = (
-            f"## air review (run failed)\n\n"
-            f"The bot's coordinator session returned without a `## Code "
-            f"Review` block whose `Reviewed at:` footer matched the "
-            f"current HEAD SHA `{head_sha[:8]}`. No verdict will be "
-            f"submitted for this run.\n\n"
-            f"**Likely cause:** the coordinator session was unusually "
-            f"short ({coord_secs_str}) — typical successful runs take "
-            f"1500-2400s. Short runs with unusable output usually "
-            f"indicate a cached prior-thread response from Anthropic's "
-            f"session layer or a verifier sub-agent that emitted a "
-            f"stale footer SHA from a prior round.\n\n"
-            f"**Workaround:** push any small commit (whitespace, "
-            f"comment, etc.) to invalidate the prefix cache and "
-            f"retrigger the review.{run_link_line}"
+        # Branch the structured-fallback body on the failure shape so the
+        # developer sees an actionable cause + workaround, not generic
+        # stale-cache prose:
+        #
+        # 1. Billing exhausted: `terminated_reason` from `run_session`
+        #    contains the Anthropic SDK's `BetaManagedAgentsBillingError`
+        #    repr — observed on a real svc-transcribe run when the repo's
+        #    `ANTHROPIC_API_KEY` ran out of credits. The error message also
+        #    embeds the literal phrase "credit balance is too low".
+        # 2. Other coordinator failures (run_session raised for non-billing
+        #    reasons): show the reason verbatim so the operator knows what
+        #    to look at.
+        # 3. Empty output without an exception (the original SSE/REST race
+        #    failure mode): generic stale-cache prose.
+        _failure_lower = (coordinator_failure_reason or "").lower()
+        _is_billing = (
+            "billing" in _failure_lower
+            or "credit balance" in _failure_lower
+            or "betamanagedagentsbillingerror" in _failure_lower
         )
+        if _is_billing:
+            review_body = (
+                f"## air review (run failed)\n\n"
+                f"The bot's coordinator session aborted with an "
+                f"**Anthropic billing error** — credits on the "
+                f"`ANTHROPIC_API_KEY` secret used by this repo are "
+                f"exhausted. No verdict will be submitted.\n\n"
+                f"**Fix:** top up the account at "
+                f"<https://console.anthropic.com/> OR rotate the "
+                f"`ANTHROPIC_API_KEY` secret to a key with available "
+                f"credits:\n"
+                f"```\n"
+                f"gh secret set ANTHROPIC_API_KEY --repo <owner>/<repo>\n"
+                f"```\n"
+                f"After topping up / rotating, retrigger this review with "
+                f"`gh workflow run air-review.yml --repo <owner>/<repo> "
+                f"-f pr_number=<n>` or push any commit.\n\n"
+                f"Raw error: `{coordinator_failure_reason[:400]}`"
+                f"{run_link_line}"
+            )
+        elif coordinator_failure_reason:
+            review_body = (
+                f"## air review (run failed)\n\n"
+                f"The bot's coordinator session aborted with an error. "
+                f"No verdict will be submitted.\n\n"
+                f"**Reason:** `{coordinator_failure_reason[:400]}`\n\n"
+                f"**Workaround:** check the GHA run log for the full "
+                f"context, then push any commit to retrigger. If the "
+                f"error recurs, file an issue against "
+                f"[VorobiovD/air](https://github.com/VorobiovD/air) "
+                f"with the run URL and the reason text above."
+                f"{run_link_line}"
+            )
+        else:
+            review_body = (
+                f"## air review (run failed)\n\n"
+                f"The bot's coordinator session returned without a `## Code "
+                f"Review` block whose `Reviewed at:` footer matched the "
+                f"current HEAD SHA `{head_sha[:8]}`. No verdict will be "
+                f"submitted for this run.\n\n"
+                f"**Likely cause:** the coordinator session was unusually "
+                f"short ({coord_secs_str}) — typical successful runs take "
+                f"1500-2400s. Short runs with unusable output usually "
+                f"indicate a cached prior-thread response from Anthropic's "
+                f"session layer or a verifier sub-agent that emitted a "
+                f"stale footer SHA from a prior round.\n\n"
+                f"**Workaround:** push any small commit (whitespace, "
+                f"comment, etc.) to invalidate the prefix cache and "
+                f"retrigger the review.{run_link_line}"
+            )
         print(
             "  [warn] coordinator output had no `## Code Review` block whose "
             f"`Reviewed at:` footer matched head_sha {head_sha[:8]} — posting "
