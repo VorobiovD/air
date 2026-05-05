@@ -2186,7 +2186,18 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     # in reverse and pick the first whose `Reviewed at:` SHA matches.
     _header_re = re.compile(r"(?<!`)## Code Review[^\n]*\n")
     _next_h2_re = re.compile(r"(?<!`)(?:^|\n)## ")
-    _footer_re = re.compile(r"\nReviewed at:\s+([0-9a-f]{40})\b[^\n]*")
+    # NOTE: do NOT add `\b` between the 40-char hex and `[^\n]*`. Word-
+    # boundary fails when the SHA is followed by another word char (no
+    # transition between `\w` and `\W`). qai-be #666 round 7 reproduced
+    # this: coordinator emitted the wiki-failure narration immediately
+    # after the verifier's `Reviewed at: <40-char-sha>` with NO newline
+    # separator, so the joined output was `...936Wiki push failed...`
+    # — the `\b` after the `6` digit and before the `W` letter both
+    # being `\w` had no boundary to match. The 40-char exact-length
+    # quantifier is the real anchor; the `_sha != head_sha` equality
+    # check is the real validator. `[^\n]*` greedily eats whatever is
+    # left on the line (or none) so the match end is well-defined.
+    _footer_re = re.compile(r"\nReviewed at:\s+([0-9a-f]{40})[^\n]*")
     _candidates = []
     for _hm in _header_re.finditer(_flattened):
         _body_start = _hm.end()
