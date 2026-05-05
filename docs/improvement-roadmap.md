@@ -1,6 +1,6 @@
 # air — Improvement Roadmap (post-shipped phases)
 
-_Last updated 2026-05-05. Phase 4 shipped in v1.12.0. Reframed against telemetry from the last 20 production runs (qai-be PRs #41/#593/#595/#617/#635, qai-fe PRs #239/#246, svc-transcribe #37, plus dogfood runs)._
+_Last updated 2026-05-05 (post-v1.12.0, after svc-transcribe #37 stale-coordinator-cascade evidence). Phase 4 shipped in v1.12.0. Reframed against telemetry from the last 20 production runs (qai-be PRs #41/#593/#595/#617/#635, qai-fe PRs #239/#246, svc-transcribe #37, plus dogfood runs)._
 
 ## What's already shipped
 
@@ -48,14 +48,15 @@ learn.py epilogue (5/PR)  ~3-10 min   only every 5 reviews
 
 PR #635 received **9 reviews over 2 days**. Comment sizes converged but not monotonically: 8.2KB → 6.7KB → 4.1KB → 6.0KB → 9.5KB → 5.7KB → 6.3KB → 4.6KB → 2.4KB. Specialists flag *different* things on similar diffs — variance, not just convergence.
 
-### Failure profile (last 50 runs)
+### Failure profile (last 50 runs, updated 2026-05-05)
 
 | Mode | Count | Status |
 |---|---|---|
 | Successful | 30+ | normal |
 | `Skipped` (own-PR, closed-PR, race-with-merge) | many | working as intended |
-| Cancelled (race-with-push) | ~5 | mitigated via `commit_id` pinning + supersede check |
-| **`422 Validation Failed` posting comment** | 1 | **no retry — single point of failure** |
+| Cancelled (race-with-push) | ~5 | mitigated via `commit_id` pinning + supersede check; v1.12.0 added `cancel-in-progress: true` so this is now expected (not a failure) |
+| **`422 Validation Failed` posting comment** | 2 | **no retry — single point of failure (see P1)** |
+| **Stale-coordinator-output cascade** (svc-transcribe #37 run 25367689850) | 1 | **NEW failure mode** — coordinator returned in 92.4s (vs typical 1500-2400s) with `Reviewed at:` footer pointing at the PRIOR head SHA (`73272866`) instead of current (`c1825198`). Orchestrator's SHA-validation correctly refused the verdict; raw-post fallback then hit 422 (likely body near-duplicate of the existing bot comment at that SHA). Two-failure cascade: stale output → defensive abort → fallback path 422'd. |
 | Pre-PR-#46 stuck runs (45+ min) | 0 in May | gone after pre-comp + tier swap |
 
 ### Hidden observability gap
@@ -80,13 +81,21 @@ Sorted by **value × evidence × cost-to-ship**. Each has a concrete trigger. Ph
 
 **Evidence:** every recent log we inspected has all phase markers timestamped within 1 second of each other, at the script-exit time.
 
-### P1 — `422 Validation Failed` retry on comment post (1-day fix)
+### P1 — Post-failure recovery (1-2 day fix, **bumped after 2026-05-05 evidence**)
 
-**Problem:** run `25264529652` (PR #635) failed terminally on `Error posting comment: 422 Validation Failed` after a successful 266s coordinator run. No retry, no body inspection, no fallback. **The review work was complete — only the post failed.** Subsequent run on the same SHA worked fine.
+Two distinct failure paths now have production cases:
 
-**Fix:** in `post_review_comment`, on 422 retry once after capturing the response body. If the response says "body too long" (>65KB), truncate intelligently. If it's a transient validation race (e.g. concurrent comment from other bot), retry with backoff. Log the response body in either case so the next 422 isn't a black box.
+**Path A — `422 Validation Failed` on the comment post** (qai-be PR #635 run `25264529652`, 2026-05-02): coordinator finished cleanly (266s), the body was extracted, but `gh pr comment` POST returned 422. No retry, no body inspection. Root cause unknown because we discard the response body. Subsequent same-SHA run worked fine.
 
-**Evidence:** 1 of last 50 production runs lost work to this. Root cause unknown because we discard the response body.
+**Path B — Stale-coordinator-output cascade** (svc-transcribe #37 run `25367689850`, 2026-05-05): coordinator returned in 92.4s with a `Reviewed at:` footer pointing at the PRIOR head SHA (`73272866`) instead of current (`c1825198`). Orchestrator's SHA-validation correctly refused to submit a verdict (good). But the raw-post fallback then hit 422 — likely because the body was a near-duplicate of the existing bot comment at the prior SHA (GitHub may reject identical-body comments). The fallback's "post raw, skip verdict" semantics did MORE harm than just aborting: it produced a 422 cascade and lost the option to retry from scratch.
+
+**Fix (composite):**
+
+1. **422 retry with body capture** — in `post_review_comment`, on 422 capture the response body, log it, retry once after a 2s backoff. If body indicates `"body too long"` (>65KB), truncate intelligently and retry. If it's a near-duplicate-detection error, abort cleanly with a structured warning (don't keep hammering).
+2. **Replace "post raw, skip verdict" with "abort with a status comment"** — when the SHA-validation extractor refuses the coordinator output, do NOT post the raw body. Post a short structured comment instead: `## Code Review (run failed)` with the run URL and a one-liner ("coordinator output didn't match head SHA — likely race-with-push during the coordinator session"). This gives the developer signal AND lets the next push trigger a clean run.
+3. **Detect impossibly-fast coordinator runs as a stale-cache signal** — if `coordinator complete in <300s` AND the orchestrator can't extract a head-SHA-matching block, treat it as a soft failure. Log a structured event so we can correlate stale-cache incidents with Anthropic-side caching behavior. (300s is well below the 90th percentile of any successful run we've measured.)
+
+**Evidence:** 2 of last 50 production runs lost work to one of these paths. Both failures left the developer with a stale CHANGES_REQUESTED verdict and no signal that the bot's mechanic was broken — they had to dismiss the bot review manually to merge (svc-transcribe #37 today).
 
 ### P2 — Re-review fast path (3-day fix, biggest user-perceived win)
 
@@ -172,10 +181,14 @@ Add a row to this doc with: trigger, evidence, fix, risk, expected impact. Ship 
 
 ## What svc-transcribe #37 taught us (Phase 4 retrospective)
 
-A single PR with 14 review rounds and 13 consecutive CHANGES_REQUESTED was the dominant data source for Phase 4. Three lessons that should bias the next phases:
+A single PR with 14 review rounds, 13 consecutive CHANGES_REQUESTED, and an eventual two-failure cascade became the dominant data source for Phase 4 AND Phase 5 priorities. Five lessons that should bias the next phases:
 
 1. **Asymmetric gates are a usability trap.** Fresh review and re-review used to gate on different severity sets (blocker vs blocker+medium). The asymmetry meant a PR could go from APPROVED → CHANGES_REQUESTED on a re-review with no new blockers — purely because medium prior findings now counted. Fix was structural, not parameter-tuning.
 
 2. **The verifier "knows" enough to break loops, but the prompt didn't ask.** The prior review body has been in context since the carry-forward feature shipped — we just didn't tell the verifier to do anything with the repetition signal. Cheap to add a rule; very effective.
 
 3. **Self-review with --dry-run on a PR catches structural bugs that synthetic test fixtures miss.** Codex caught the legacy-missing-severity regression that all four Claude reviewers missed because they read the new code from the perspective of new bodies, not legacy ones. Cross-model review at the self-review step is high-leverage when the change touches a default that's load-bearing for backward compatibility.
+
+4. **Defensive aborts must produce a signal, not silence.** The orchestrator's SHA-validation refused to submit a verdict on stale coordinator output (correct) but then fell back to raw-posting that same stale output (wrong). The 422 cascade left the developer with a frozen CHANGES_REQUESTED verdict and no in-PR signal that the bot's machinery had broken. Whenever we add a defensive check, we need to add a structured "this is what went wrong" comment in parallel — silence looks identical to "the bot is still working on it."
+
+5. **Coordinator wall-time is a stale-cache signal.** A 92s coordinator run on a real PR is impossibly fast (typical: 1500-2400s). When the run is short AND output is unusable, it's almost certainly a cached prior-thread response — not a hung session. Surface this as a soft-failure event so we can correlate with Anthropic-side caching and decide whether to retry-with-cache-bust.
