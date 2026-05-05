@@ -1,6 +1,6 @@
 # air — Improvement Roadmap (post-shipped phases)
 
-_Last updated 2026-05-05 (post-v1.12.0, after svc-transcribe #37 stale-coordinator-cascade evidence). Phase 4 shipped in v1.12.0. Reframed against telemetry from the last 20 production runs (qai-be PRs #41/#593/#595/#617/#635, qai-fe PRs #239/#246, svc-transcribe #37, plus dogfood runs)._
+_Last updated 2026-05-05 (post-v1.12.1, after the cache-bust workaround failed and the regurgitation hypothesis hardened). Phase 4 shipped in v1.12.0; v1.12.1 added the orchestrator-side defensive fallback. Reframed against telemetry from the last 20 production runs (qai-be PRs #41/#593/#595/#617/#635, qai-fe PRs #239/#246, svc-transcribe #37, plus dogfood runs)._
 
 ## What's already shipped
 
@@ -56,8 +56,23 @@ PR #635 received **9 reviews over 2 days**. Comment sizes converged but not mono
 | `Skipped` (own-PR, closed-PR, race-with-merge) | many | working as intended |
 | Cancelled (race-with-push) | ~5 | mitigated via `commit_id` pinning + supersede check; v1.12.0 added `cancel-in-progress: true` so this is now expected (not a failure) |
 | **`422 Validation Failed` posting comment** | 2 | **no retry — single point of failure (see P1)** |
-| **Stale-coordinator-output cascade** (svc-transcribe #37 run 25367689850) | 1 | **NEW failure mode** — coordinator returned in 92.4s (vs typical 1500-2400s) with `Reviewed at:` footer pointing at the PRIOR head SHA (`73272866`) instead of current (`c1825198`). Orchestrator's SHA-validation correctly refused the verdict; raw-post fallback then hit 422 (likely body near-duplicate of the existing bot comment at that SHA). Two-failure cascade: stale output → defensive abort → fallback path 422'd. |
+| **Stale-coordinator-output cascade** (svc-transcribe #37 runs 25367689850, 25368789413, 25369351035) | 3 | **REPRODUCIBLE on long re-review chains** — coordinator returns in 92.4-92.5s (vs typical 1500-2400s) with `Reviewed at:` footer pointing at the PRIOR head SHA. Orchestrator's SHA-validation refuses the verdict; pre-v1.12.1 raw-post fallback 422'd against GitHub's near-duplicate detection. v1.12.1 ships the structured `## air review (run failed)` fallback as the orchestrator-side defense; the underlying coordinator-side root cause is unaddressed (see "Coordinator regurgitation hypothesis" below). **Cache-bust workaround (whitespace commit on README) DID NOT recover** — disproves the prefix-cache theory. **PR-restart workaround DID recover** — closing the failing PR and reopening identical branch as a fresh PR avoids the re-review codepath entirely (no `prior_review_body` → coordinator must dispatch real specialist work). |
 | Pre-PR-#46 stuck runs (45+ min) | 0 in May | gone after pre-comp + tier swap |
+
+### Coordinator regurgitation hypothesis (root cause for stale-coordinator failure)
+
+After three reproductions on svc-transcribe #37 (15+ re-review rounds on the same PR) and a failed cache-bust attempt, the strongest remaining hypothesis for the stale-coordinator failure mode:
+
+**The coordinator model is regurgitating `prior_review_body` from its user-message context instead of dispatching specialists.** The 92.5s wall time is enough for ~one model turn — not the 3-turn protocol the coordinator is supposed to follow. For re-review mode, `build_pr_context` inlines the full prior bot review (with its `Reviewed at: <prior-sha>` footer) so specialists can do FIXED/NOT FIXED classification. On long re-review chains the prior body is heavily PR-specific; the coordinator likely "recognizes" it and short-circuits TURN 1's parallel dispatch, emitting a TURN 3 that copies the prior body — including the prior SHA in the footer.
+
+Evidence supporting the hypothesis:
+- Coordinator wall time on failures: 92.4s, 92.5s, 92.5s (highly consistent, ~one model turn)
+- Failures are PR-specific: only svc-transcribe #37 hit it; PRs with shorter re-review chains haven't reproduced
+- The `Reviewed at:` SHA in the broken outputs always matches the most recent prior bot review's SHA (pattern: most-recent prior body copied)
+- Cache-bust commits (whitespace changes to README) DID NOT recover — eliminates Anthropic prefix-cache as the primary cause
+- Closing the failing PR and reopening from the same branch (which removes the re-review codepath entirely) DID recover
+
+This is a **model behavior issue**, not a caching issue. The fix is on the prompt side and/or the orchestrator side. See P0 below.
 
 ### Hidden observability gap
 
@@ -69,11 +84,41 @@ PR #635 received **9 reviews over 2 days**. Comment sizes converged but not mono
 
 Sorted by **value × evidence × cost-to-ship**. Each has a concrete trigger. Phase 4 just shipped in v1.12.0; the remaining priorities are unchanged in shape but their relative ranking shifted now that the verdict-gate problem is closed.
 
-**Recommended next ship:** P0 + P1 + P7 as a single bundle (~3 days, all low-risk, transforms operator UX). P2 (re-review fast path) is the biggest user-perceived latency win but warrants its own PR with a backtest against PR #635 / svc-transcribe #37 history.
+**Recommended next ship:** P0-NEW (coordinator regurgitation diagnostic + retry) is now the highest priority — it's the only item with active production impact. P0 (progress flush), P1 (post-failure recovery — partially shipped in v1.12.1), and P7 (wiki epilogue dispatcher) form a 2-3 day bundle as a follow-up.
 
 ---
 
-### P0 — Live progress flush (1-day fix) ⟵ **next**
+### P0-NEW — Coordinator regurgitation diagnostic + retry ⟵ **next**
+
+**Problem:** confirmed reproducible on svc-transcribe #37 across three runs. Coordinator returns in ~92.5s (vs typical 1500-2400s) with output whose `Reviewed at:` footer matches the prior bot review's SHA, not the current head. v1.12.1 ships orchestrator-side defense (structured run-failed comment) but doesn't address the model behavior. The user's escape hatch is to close the failing PR and reopen the same branch as a fresh PR — which works but is a manual workaround, not a fix.
+
+**Two-step fix:**
+
+1. **Debug logging step (ship first, ~10 LOC).** When the SHA-mismatch fallback fires, log the first 1000 chars of `coordinator_out` to stderr so the next failure gives us the actual coordinator output. Confirms or refutes the regurgitation hypothesis before we spend effort on the larger fix:
+   ```python
+   if not review_extracted:
+       print(
+           f"  [debug] coordinator_out (first 1000 chars on SHA-mismatch): "
+           f"{coordinator_out[:1000]!r}",
+           file=sys.stderr,
+       )
+       # ...existing structured fallback...
+   ```
+   Trivial, zero-risk, ships as a hotfix in v1.12.2.
+
+2. **Detection + retry mechanic (ship after step 1 confirms).** If the first coordinator session returns in <300s AND the output's footer SHA matches `prior_sha` (i.e., regurgitation pattern confirmed), automatically retry the coordinator session WITHOUT `prior_review_body` in the user message — degrading to a fresh-review codepath for that retry. One retry, structured logging, costs ~1 extra coordinator session in the failure case (free in the happy path).
+
+   Tradeoff on retry path: the fresh-review fallback loses re-review's prior-finding classification (FIXED / NOT FIXED / PARTIALLY FIXED / DEFERRED). Acceptable — a fresh-review-style finding list with the current diff is strictly better than a stale-SHA copy of the prior round.
+
+**Alternative considered (and rejected):**
+
+- **Strengthen verifier_task prompt with imperative SHA instruction.** Adding "MUST end with `Reviewed at: <THIS-EXACT-SHA>`. Copy this SHA verbatim — do NOT use any SHA from the prior review body." Hypothesis: the coordinator's TURN 3 isn't reaching the verifier in regurgitation mode at all (92.5s isn't enough for the 4-specialist + verifier dispatch). Strengthening the verifier prompt won't help if the verifier never runs. Keep this on the list as a secondary mitigation paired with #2 above.
+
+**Evidence:** 3 production failures on svc-transcribe #37 (runs 25367689850, 25368789413, 25369351035), all at ~92.5s, all with prior-SHA footer. Cache-bust commit failed to recover. PR-restart workaround succeeded.
+
+---
+
+### P0 — Live progress flush (1-day fix)
 
 **Problem:** stdout is block-buffered; users can't tell if a 30-min run is making progress or hung. We added `sys.stdout.flush()` in only one place (after learn.py). All other phase markers are buffered. Today this gets confused with actual hangs (e.g. the false report on run 25237782482 looked stuck for 42 min).
 
@@ -81,21 +126,17 @@ Sorted by **value × evidence × cost-to-ship**. Each has a concrete trigger. Ph
 
 **Evidence:** every recent log we inspected has all phase markers timestamped within 1 second of each other, at the script-exit time.
 
-### P1 — Post-failure recovery (1-2 day fix, **bumped after 2026-05-05 evidence**)
+### P1 — Post-failure recovery (~partial; v1.12.1 shipped Path A+B, Path C deferred)
 
-Two distinct failure paths now have production cases:
+Three distinct failure paths now have production cases:
 
-**Path A — `422 Validation Failed` on the comment post** (qai-be PR #635 run `25264529652`, 2026-05-02): coordinator finished cleanly (266s), the body was extracted, but `gh pr comment` POST returned 422. No retry, no body inspection. Root cause unknown because we discard the response body. Subsequent same-SHA run worked fine.
+**Path A — `422 Validation Failed` on the comment post** ✅ **shipped in v1.12.1** (`_post_review_comment_with_retry`): on 422, parse the GitHub `message` field (scrubbed — avoids leaking PR snippets that GitHub may echo). If the message indicates near-duplicate detection, skip retry. Otherwise retry once after 2s. Both POSTs use `timeout=30`.
 
-**Path B — Stale-coordinator-output cascade** (svc-transcribe #37 run `25367689850`, 2026-05-05): coordinator returned in 92.4s with a `Reviewed at:` footer pointing at the PRIOR head SHA (`73272866`) instead of current (`c1825198`). Orchestrator's SHA-validation correctly refused to submit a verdict (good). But the raw-post fallback then hit 422 — likely because the body was a near-duplicate of the existing bot comment at the prior SHA (GitHub may reject identical-body comments). The fallback's "post raw, skip verdict" semantics did MORE harm than just aborting: it produced a 422 cascade and lost the option to retry from scratch.
+**Path B — Replace "post raw" fallback with structured comment** ✅ **shipped in v1.12.1**: when SHA-validation extractor refuses the coordinator output, post `## air review (run failed)` with the run URL, coordinator wall-time, the regurgitation/cache hypothesis, and a "push a small commit" workaround suggestion. Heading deliberately does NOT start with `## Code Review` to avoid colliding with `startswith("## Code Review")` checks in `pr_conversation.py` and the bash CLI flows.
 
-**Fix (composite):**
+**Path C — Coordinator regurgitation root cause** ⟶ **see P0-NEW above**. Production-confirmed on svc-transcribe #37 across 3 runs. Cache-bust workaround failed; PR-restart workaround succeeded. v1.12.1's defense is signal-without-fix; the root cause is on the model-behavior side and needs the diagnostic-then-retry approach in P0-NEW.
 
-1. **422 retry with body capture** — in `post_review_comment`, on 422 capture the response body, log it, retry once after a 2s backoff. If body indicates `"body too long"` (>65KB), truncate intelligently and retry. If it's a near-duplicate-detection error, abort cleanly with a structured warning (don't keep hammering).
-2. **Replace "post raw, skip verdict" with "abort with a status comment"** — when the SHA-validation extractor refuses the coordinator output, do NOT post the raw body. Post a short structured comment instead: `## Code Review (run failed)` with the run URL and a one-liner ("coordinator output didn't match head SHA — likely race-with-push during the coordinator session"). This gives the developer signal AND lets the next push trigger a clean run.
-3. **Detect impossibly-fast coordinator runs as a stale-cache signal** — if `coordinator complete in <300s` AND the orchestrator can't extract a head-SHA-matching block, treat it as a soft failure. Log a structured event so we can correlate stale-cache incidents with Anthropic-side caching behavior. (300s is well below the 90th percentile of any successful run we've measured.)
-
-**Evidence:** 2 of last 50 production runs lost work to one of these paths. Both failures left the developer with a stale CHANGES_REQUESTED verdict and no signal that the bot's mechanic was broken — they had to dismiss the bot review manually to merge (svc-transcribe #37 today).
+**Evidence (cumulative, 2026-05-05):** 4 of last 50 production runs hit one of these paths. v1.12.1's defense converts silence to signal; v1.12.2's diagnostic logging (P0-NEW step 1) gives us the data to confirm the regurgitation hypothesis; v1.13.0's retry mechanic (P0-NEW step 2) closes the loop.
 
 ### P2 — Re-review fast path (3-day fix, biggest user-perceived win)
 
@@ -192,3 +233,7 @@ A single PR with 14 review rounds, 13 consecutive CHANGES_REQUESTED, and an even
 4. **Defensive aborts must produce a signal, not silence.** The orchestrator's SHA-validation refused to submit a verdict on stale coordinator output (correct) but then fell back to raw-posting that same stale output (wrong). The 422 cascade left the developer with a frozen CHANGES_REQUESTED verdict and no in-PR signal that the bot's machinery had broken. Whenever we add a defensive check, we need to add a structured "this is what went wrong" comment in parallel — silence looks identical to "the bot is still working on it."
 
 5. **Coordinator wall-time is a stale-cache signal.** A 92s coordinator run on a real PR is impossibly fast (typical: 1500-2400s). When the run is short AND output is unusable, it's almost certainly a cached prior-thread response — not a hung session. Surface this as a soft-failure event so we can correlate with Anthropic-side caching and decide whether to retry-with-cache-bust.
+
+6. **"Cached output" was the wrong frame.** The cache-bust commit (whitespace change to README) DID NOT recover svc-transcribe #37. The coordinator returned the same 92.5s + prior-SHA output on the next run with a different prefix. This rules out Anthropic prefix-cache as the primary cause and points at a model-behavior issue: the coordinator is regurgitating `prior_review_body` from its user-message context. Future debugging should distinguish "framework caching" from "model self-recognition" early — the former is fixable by varying the prefix, the latter needs a prompt or codepath change.
+
+7. **PR-restart is a valid escape hatch.** On long re-review chains where the coordinator has degraded, closing the failing PR and reopening from the same branch as a fresh PR avoids the re-review codepath entirely. No `prior_review_body`, no `<prior-round-statuses>` block — coordinator must dispatch real specialist work. The workaround loses comment history but recovers the merge path. Worth documenting in the bot's run-failed comment so users have a path forward when the regurgitation pattern triggers.
