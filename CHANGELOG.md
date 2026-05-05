@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.1](https://github.com/VorobiovD/air/compare/v1.12.0...v1.12.1) (2026-05-05)
+
+
+### Bug Fixes
+
+* structured run-failed comment + 422 retry on review post ([#54](https://github.com/VorobiovD/air/issues/54)) ([a3d1208](https://github.com/VorobiovD/air/commit/a3d120816746d6ef7e30cbff6ed9cc9c0ad18d45))
+
 ## [1.12.0](https://github.com/VorobiovD/air/compare/v1.11.0...v1.12.0) (2026-05-05)
 
 
