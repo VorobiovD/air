@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.12.0](https://github.com/VorobiovD/air/compare/v1.11.0...v1.12.0) (2026-05-05)
+
+
+### Features
+
+* blocker-only re-review gate + carry-forward suppression + workflow concurrency ([#51](https://github.com/VorobiovD/air/issues/51)) ([59c73db](https://github.com/VorobiovD/air/commit/59c73dbf8587e5015495539c27a8d19850c51863))
+* severity-aware verdict gate + DEFERRED status for re-reviews ([#49](https://github.com/VorobiovD/air/issues/49)) ([2bcc5af](https://github.com/VorobiovD/air/commit/2bcc5af96ceac8b297eb17ac54cef7737454e9ef))
+
 ## [1.11.0](https://github.com/VorobiovD/air/compare/v1.10.0...v1.11.0) (2026-04-29)
 
 
