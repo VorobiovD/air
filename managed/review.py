@@ -340,6 +340,25 @@ _GH_DUPLICATE_HINTS: tuple[str, ...] = (
     "duplicate",
 )
 
+# Heuristic strings that indicate the coordinator's terminated_reason
+# describes an Anthropic billing exhaustion (BetaManagedAgentsBillingError
+# or equivalent). Anchored on the strong signals — the SDK class name and
+# the stable error-body phrase. The looser bare "billing" was dropped
+# during self-review (false-positives on unrelated SDK errors that mention
+# "billing system" in passing). Expand only with confirmed production
+# strings.
+_BILLING_REASON_HINTS: tuple[str, ...] = (
+    "betamanagedagentsbillingerror",
+    "credit balance is too low",
+)
+
+# Cap for raw-error text echoed into the run-failed PR comment. 800 chars
+# captures the meaningful prefix of typical Anthropic SDK exception
+# reprs (~600-1200 chars) without bloating the comment. Mirrored across
+# both the billing and other-failure branches via a single constant so
+# they can't drift.
+_RAW_REASON_MAX_CHARS = 800
+
 
 def _post_review_comment_with_retry(
     repo: str, pr_number: int, body: str, token: str,
@@ -2260,29 +2279,41 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         # 3. Empty output without an exception (the original SSE/REST race
         #    failure mode): generic stale-cache prose.
         _failure_lower = (coordinator_failure_reason or "").lower()
-        _is_billing = (
-            "billing" in _failure_lower
-            or "credit balance" in _failure_lower
-            or "betamanagedagentsbillingerror" in _failure_lower
+        _is_billing = any(
+            hint in _failure_lower for hint in _BILLING_REASON_HINTS
+        )
+        # Truncate the raw error consistently across branches with a
+        # truncation marker only when truncation actually occurred —
+        # otherwise readers can't tell whether they're seeing the full
+        # error or a tail-cut.
+        _raw = coordinator_failure_reason or ""
+        _raw_for_post = (
+            _raw[:_RAW_REASON_MAX_CHARS] + "…(truncated)"
+            if len(_raw) > _RAW_REASON_MAX_CHARS
+            else _raw
         )
         if _is_billing:
             review_body = (
                 f"## air review (run failed)\n\n"
                 f"The bot's coordinator session aborted with an "
-                f"**Anthropic billing error** — credits on the "
-                f"`ANTHROPIC_API_KEY` secret used by this repo are "
-                f"exhausted. No verdict will be submitted.\n\n"
+                f"**Anthropic billing-related error** — most likely "
+                f"cause: credits on the `ANTHROPIC_API_KEY` secret "
+                f"used by this repo are exhausted. No verdict will be "
+                f"submitted.\n\n"
                 f"**Fix:** top up the account at "
                 f"<https://console.anthropic.com/> OR rotate the "
                 f"`ANTHROPIC_API_KEY` secret to a key with available "
                 f"credits:\n"
                 f"```\n"
-                f"gh secret set ANTHROPIC_API_KEY --repo <owner>/<repo>\n"
+                f"gh secret set ANTHROPIC_API_KEY --repo {args.repo}\n"
                 f"```\n"
-                f"After topping up / rotating, retrigger this review with "
-                f"`gh workflow run air-review.yml --repo <owner>/<repo> "
-                f"-f pr_number=<n>` or push any commit.\n\n"
-                f"Raw error: `{coordinator_failure_reason[:400]}`"
+                f"After topping up / rotating, retrigger with:\n"
+                f"```\n"
+                f"gh workflow run air-review.yml --repo {args.repo} "
+                f"-f pr_number={args.pr_number}\n"
+                f"```\n\n"
+                f"**Raw error:**\n"
+                f"```\n{_raw_for_post}\n```"
                 f"{run_link_line}"
             )
         elif coordinator_failure_reason:
@@ -2290,7 +2321,8 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
                 f"## air review (run failed)\n\n"
                 f"The bot's coordinator session aborted with an error. "
                 f"No verdict will be submitted.\n\n"
-                f"**Reason:** `{coordinator_failure_reason[:400]}`\n\n"
+                f"**Reason:**\n"
+                f"```\n{_raw_for_post}\n```\n\n"
                 f"**Workaround:** check the GHA run log for the full "
                 f"context, then push any commit to retrigger. If the "
                 f"error recurs, file an issue against "
