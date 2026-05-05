@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.2](https://github.com/VorobiovD/air/compare/v1.12.1...v1.12.2) (2026-05-05)
+
+
+### Bug Fixes
+
+* dump coordinator_out on SHA-mismatch for diagnosis ([#57](https://github.com/VorobiovD/air/issues/57)) ([97df5e4](https://github.com/VorobiovD/air/commit/97df5e4dd8bd3c3713ca28264297e0ed30efe8e3))
+
 ## [1.12.1](https://github.com/VorobiovD/air/compare/v1.12.0...v1.12.1) (2026-05-05)
 
 
