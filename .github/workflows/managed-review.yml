@@ -100,6 +100,24 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
+    # Coalesce rapid-fire pushes on the same PR. When a developer pushes
+    # several commits in quick succession (typing nits, fixing CI), the
+    # earlier reviews get cancelled and only the most recent push runs
+    # to completion. Without this, every push fires a fresh ~30-min
+    # review even if the next push lands 2 minutes later — svc-transcribe
+    # #37 logged 14 sequential reviews on what could have been 5-6.
+    #
+    # Group keyed on (repository, PR number) so cross-repo callers and
+    # cross-PR concurrent runs don't collide. `inputs.pr_number ||
+    # github.event.pull_request.number` mirrors the same fallback the
+    # `PR_NUMBER_RESOLVED` env uses below — on workflow_dispatch with an
+    # explicit pr_number, falls back to the PR event payload otherwise.
+    # When neither exists (rare misconfig), the group becomes empty
+    # ("...repo-") and concurrency degrades to "no grouping" rather than
+    # silently colliding across runs.
+    concurrency:
+      group: air-review-${{ github.repository }}-${{ inputs.pr_number || github.event.pull_request.number }}
+      cancel-in-progress: true
     # Budget: codex (≤10 min, SESSION_TIMEOUT_SECS) + coordinator (≤45 min,
     # COORDINATOR_TIMEOUT_SECS = 2700s) + learn epilogue (~3-5 min when
     # the wiki-counter threshold fires) = 58-60 min worst case. 60 min
