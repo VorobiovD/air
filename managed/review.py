@@ -1232,17 +1232,29 @@ async def run_session(
 
     parts: list[str] = []
     terminated_reason: str | None = None
-    # SSE delivery latency: Anthropic's REST events feed sometimes commits
-    # session.status_idle and the trailing `agent.message` (carrying the
-    # final review) ~10 minutes before our SSE stream consumer receives
-    # them — observed on qai-be #635 (event committed 23:57:37, Python
-    # received 00:07:38). When the stream sits silent past `SSE_QUIET_S`
-    # without yielding an event, fall back to the REST events endpoint
-    # to recover any unseen events. Dedupe by event id so we don't
-    # double-count thread_created/thread_idle on cross-source replay.
+    # SSE / REST events backend can lag in EITHER direction relative to the
+    # other:
+    #
+    # 1. SSE delivery delay (qai-be #635, 2026-04 era): REST commits
+    #    `session.status_idle` and the trailing final `agent.message` minutes
+    #    before our SSE stream consumer receives them.
+    # 2. REST delivery delay (qai-be #666, svc-tx #39, 2026-05-05 era): SSE
+    #    goes quiet ahead of `events.list` having the final coordinator
+    #    `agent.message` on cache-heavy runs that complete in ~SSE_QUIET_S.
+    #
+    # Both directions converge on the same recovery: when SSE sits quiet
+    # past `SSE_QUIET_S`, retry the REST events endpoint with backoff,
+    # exiting as soon as a drain attempt produces fresh content or the
+    # session reports terminal completion. Dedupe by event id so we
+    # don't double-count thread_created/thread_idle on cross-source replay.
     SSE_QUIET_S = 90.0
+    # Backoff schedule when SSE goes quiet AND session reports idle. Events
+    # in the REST `events.list` backend are eventually consistent vs SSE —
+    # we may need to poll a few more times before the final coordinator
+    # `agent.message` lands. The 0.0 first delay = drain immediately, then
+    # 5/10/15s backoff. Total worst-case extra wait: ~30s + REST RTTs.
+    REST_RETRY_DELAYS = (0.0, 5.0, 10.0, 15.0)
     seen_event_ids: set[str] = set()
-    rest_fallback_used = False
 
     def _process_event(event) -> str | None:
         """Apply one event to local state. Returns:
@@ -1371,8 +1383,10 @@ async def run_session(
                 )
             except asyncio.TimeoutError:
                 # SSE silent past SSE_QUIET_S. Check session status; if
-                # idle, fall back to REST events list to recover any
-                # buffered events.
+                # idle, drain REST events with eventual-consistency
+                # retries — the events backend lags SSE, especially on
+                # heavily-cached coordinator sessions where the whole
+                # pipeline (4 specialists + verifier) completes in ~90s.
                 try:
                     sess = await client.beta.sessions.retrieve(session.id)
                 except Exception as e:
@@ -1386,31 +1400,53 @@ async def run_session(
                 if sess_status != "idle":
                     # Still running; keep waiting on SSE.
                     continue
-                if rest_fallback_used:
-                    # Already drained once on a prior timeout — runtime
-                    # has nothing more to deliver. Force-break with what
-                    # we have.
-                    print(
-                        f"  [warn] {label}: SSE quiet 2 polls + session "
-                        f"idle; force-breaking",
-                        file=sys.stderr,
-                    )
-                    break
-                rest_fallback_used = True
+                # Session is idle. Drain REST with retries — `events.list`
+                # is eventually consistent vs SSE, so the final coordinator
+                # `agent.message` may not be visible on the first drain.
+                # See PR #61 for the production sessions that motivated
+                # this (heavily-cached coordinator runs that complete in
+                # ~92s, right at SSE_QUIET_S). Each retry attempt processes
+                # only NEW events (deduped via seen_event_ids) and we exit
+                # as soon as a drain attempt produces fresh content OR the
+                # session reports terminal completion. Worst case ~30s
+                # extra wait + REST RTTs.
                 print(
                     f"  [info] {label}: SSE quiet for {SSE_QUIET_S}s + "
-                    f"session idle, draining events via REST",
+                    f"session idle, draining events via REST (with retries)",
                     file=sys.stderr,
                 )
-                drain_res = await _drain_via_rest()
-                if drain_res in ("break", "break-error"):
+                drain_res: str | None = None
+                for _delay in REST_RETRY_DELAYS:
+                    if _delay > 0:
+                        await asyncio.sleep(_delay)
+                    parts_before = len(parts)
+                    drain_res = await _drain_via_rest()
+                    # Terminal exits: clean session-end OR error. Either
+                    # way, no more events will arrive — stop polling.
+                    if drain_res in ("break", "break-error"):
+                        break
+                    # New content from THIS drain attempt (not pre-existing
+                    # `parts` from earlier SSE events). The events backend
+                    # caught up — exit before paying the next backoff.
+                    if len(parts) > parts_before:
+                        break
+                if drain_res == "break-error":
                     break
-                # Drain didn't terminate; if open_threads is 0 we're
-                # done — break out.
-                if open_threads <= 0:
-                    break
-                # Else keep waiting on SSE (sub-agents still tracked).
-                continue
+                if not parts:
+                    # If we ended retries without any captured
+                    # agent.message text at all, surface it. The
+                    # structured-fallback path (`## air review (run
+                    # failed)`) handles this case.
+                    print(
+                        f"  [warn] {label}: REST drain exhausted "
+                        f"(~30s of retries) with no agent.message text; "
+                        f"session events backend may be stuck. Forcing exit.",
+                        file=sys.stderr,
+                    )
+                # Exit the outer loop. Either we have content, the
+                # session terminated cleanly, or we don't and the
+                # structured-fallback path takes over.
+                break
             except StopAsyncIteration:
                 break
             res = _process_event(event)
@@ -1945,16 +1981,17 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     coordinator_secs = time.monotonic() - t0
     print(f"  Coordinator complete in {coordinator_secs:.1f}s")
 
-    # (v1.12.3+) Per-review wiki updates moved out of the coordinator
-    # and into Python-side `_apply_pattern_updates()` below — see
-    # svc-transcribe #37/#39: the coordinator with a Bash tool would
-    # shortcut TURN 1 + 2 + 3-A entirely and just bump a counter,
-    # skipping the actual review. Removing the Bash tool from the
-    # coordinator's frontmatter closed that failure mode; this Python
-    # path preserves the per-review pattern strengthening with
-    # deterministic regex matching that can't shortcut. /air:learn
-    # (every 5 reviews) still does the heavier lifecycle work
-    # (decline, archive, semantic dedup).
+    # Surface wiki-push silent failures. The coordinator's TURN 3 bash
+    # has a one-shot rebase-retry on push (see coordinator.md); when both
+    # attempts fail, it echoes the AIR_WIKI_PUSH_FAILED token so this
+    # detection loop can warn the operator without aborting (the review
+    # comment was already posted before the wiki step ran).
+    if "AIR_WIKI_PUSH_FAILED" in coordinator_out:
+        print(
+            "  [warn] coordinator's wiki push failed after rebase retry — "
+            "pattern learning will catch up on the next review",
+            file=sys.stderr,
+        )
 
     # Extract review comment from coordinator output. The runtime
     # interleaves sub-agent forwards (`<agent-notification thread_id=
@@ -2164,161 +2201,22 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
                 commit_id=head_sha,
             )
 
-    # Epilogue: bump the shared wiki-backed counter, apply pattern updates
-    # from the verifier's findings, and trigger /air:learn if the threshold
-    # fires. All-best-effort — never fail the overall review if any of this
-    # has a hiccup. Pass `review_body` through ONLY when the SHA-validated
-    # extractor returned a real review (review_extracted == True). When the
-    # fallback fired (`## air review (run failed)` body), there are no
-    # verifier findings to mine for pattern annotations.
-    pattern_input = review_body if review_extracted else ""
+    # Epilogue: bump the shared wiki-backed counter and trigger /air:learn if
+    # the threshold fires. All-best-effort — never fail the overall review if
+    # any of this has a hiccup.
     try:
-        _update_learn_counter(args.repo, args.pr_number, bot_token, pattern_input)
+        _update_learn_counter(args.repo, args.pr_number, bot_token)
     except Exception as e:
         print(f"  [warn] counter update failed: {e}", file=sys.stderr)
 
 
-# Matches the per-finding annotation emitted by all 4 specialist agents
-# (see plugins/air/agents/{code-reviewer,simplify,security-auditor,git-
-# history-reviewer}.md). The optional `(Nx)` suffix is stripped — we
-# only want the pattern name, since the count in the wiki is the source
-# of truth and we'll bump it. Non-greedy `+?` stops at the first `]` or
-# the optional ` (Nx)` tail. Active patterns only — declining and
-# archived matches are not strengthened (the model has already flagged
-# them as non-recurring).
-_AUTHOR_PATTERN_RE = re.compile(
-    r"\[matches author pattern: ([^\]\n]+?)(?:\s*\(\d+x\))?\]"
-)
-
-
-def _extract_pattern_annotations(review_body: str) -> set[str]:
-    """Return the set of unique pattern names referenced as
-    `[matches author pattern: <name>]` in the verifier-approved review.
-    Names are stripped of leading/trailing whitespace.
-    """
-    return {m.strip() for m in _AUTHOR_PATTERN_RE.findall(review_body or "")}
-
-
-# Matches a single pattern entry under an author section in REVIEW.md:
-#   - **<Pattern name>** (<Nx>: <PR refs> | last <K> PRs: <M> clean): <Description>
-# Captures (1) bold-wrapped name (re.escaped per call), (2) old count,
-# (3) old PR-refs string, (4) old last-K, (5) old clean. The trailing
-# `(declining)` suffix is preserved by re-emitting whatever followed
-# the closing `)` of the counter parens — see `_bump_pattern_counter`.
-def _build_pattern_line_re(pattern_name: str) -> re.Pattern:
-    return re.compile(
-        rf"(- \*\*{re.escape(pattern_name)}\*\*\s+)"
-        rf"\((\d+)x:\s+([^|]+?)\s+\|\s+last\s+\d+\s+PRs:\s+\d+\s+clean\)",
-    )
-
-
-def _bump_pattern_counter(content: str, pattern_name: str, pr_number: int) -> tuple[str, bool]:
-    """Bump the counter for `pattern_name` in the REVIEW.md `content`.
-
-    Returns `(new_content, did_change)`. When the pattern doesn't exist
-    in the wiki yet (likely the agents annotated a new author pattern
-    that /air:learn hasn't seeded), no change is made — /air:learn at
-    its next 5-review cycle will create the entry from accumulated
-    observations. We DON'T speculatively create entries here; pure-
-    Python lifecycle logic for new-pattern creation would replicate
-    /air:learn's heuristics imperfectly.
-
-    On match: increments the count, appends `, #<pr_number>` to the
-    refs, resets `last K PRs: M clean` to `last 0 PRs: 0 clean` (this
-    PR is a fresh strengthen). Existing `(declining)` suffix is
-    preserved — it'll be cleared by /air:learn if the pattern stays
-    above the threshold.
-    """
-    pat_re = _build_pattern_line_re(pattern_name)
-    m = pat_re.search(content)
-    if not m:
-        return content, False
-    prefix, old_count_s, old_refs = m.group(1), m.group(2), m.group(3)
-    new_count = int(old_count_s) + 1
-    new_refs = f"{old_refs.rstrip(',').rstrip()}, #{pr_number}"
-    new_segment = f"{prefix}({new_count}x: {new_refs} | last 0 PRs: 0 clean)"
-    return content[:m.start()] + new_segment + content[m.end():], True
-
-
-def _apply_pattern_updates(wiki_dir: "Path", review_body: str, pr_number: int) -> bool:
-    """Bump REVIEW.md counters for patterns referenced in the review.
-
-    Idempotency: if no annotations match wiki entries OR the file is
-    unchanged after edits, returns False without committing. On real
-    changes: writes REVIEW.md, commits, pushes (with single rebase
-    retry on non-fast-forward — same shape as `wiki_git.commit_meta`).
-    Returns True iff a commit landed.
-
-    Replaces the coordinator's TURN 3 Part B bash that was the
-    shortcut-attractor for the svc-transcribe #37/#39 failure mode.
-    Pure-Python regex matching can't shortcut TURN 1 + 2 + 3-A —
-    it has no notion of "skip the rest, just do this".
-    """
-    review_md = wiki_dir / "REVIEW.md"
-    if not review_md.is_file():
-        return False
-    annotations = _extract_pattern_annotations(review_body)
-    if not annotations:
-        return False
-    original = review_md.read_text()
-    content = original
-    bumped: list[str] = []
-    for name in sorted(annotations):
-        content, changed = _bump_pattern_counter(content, name, pr_number)
-        if changed:
-            bumped.append(name)
-    if not bumped or content == original:
-        return False
-    review_md.write_text(content)
-    try:
-        subprocess.run(["git", "add", "REVIEW.md"], cwd=wiki_dir, check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", f"review: patterns from PR #{pr_number}"],
-            cwd=wiki_dir, check=True, capture_output=True,
-        )
-    except subprocess.CalledProcessError as e:
-        print(
-            f"  [warn] pattern-update commit failed: "
-            f"{(e.stderr or b'').decode(errors='replace').strip()}",
-            file=sys.stderr,
-        )
-        return False
-    # Push with rebase-retry. Identical retry shape to
-    # `wiki_git.commit_meta` so concurrent reviewer runs don't drop
-    # one side's pattern bump.
-    try:
-        subprocess.run(["git", "push"], cwd=wiki_dir, check=True, capture_output=True)
-    except subprocess.CalledProcessError:
-        try:
-            subprocess.run(["git", "pull", "--rebase"], cwd=wiki_dir, check=True, capture_output=True)
-            subprocess.run(["git", "push"], cwd=wiki_dir, check=True, capture_output=True)
-        except subprocess.CalledProcessError as e:
-            print(
-                f"  [warn] pattern-update push retry failed: "
-                f"{(e.stderr or b'').decode(errors='replace').strip()} — "
-                f"learning will catch up on next review",
-                file=sys.stderr,
-            )
-            return False
-    print(
-        f"  [wiki] strengthened {len(bumped)} pattern(s): {', '.join(bumped)}",
-        file=sys.stderr,
-    )
-    return True
-
-
-def _update_learn_counter(repo: str, pr_number: int, bot_token: str, review_body: str = "") -> None:
-    """Clone wiki, apply pattern updates from the review body, bump
-    `.air-meta.json`, trigger learn subprocess on threshold, push the meta.
-    Isolated so callers can wrap with a broad try/except.
+def _update_learn_counter(repo: str, pr_number: int, bot_token: str) -> None:
+    """Clone wiki, bump `.air-meta.json`, trigger learn subprocess on threshold,
+    push the meta. Isolated so callers can wrap with a broad try/except.
 
     Uses subprocess invocations of `plugins/air/lib/meta.py` so CLI and
     managed share one implementation. `managed/review.py` runs alongside
     a checked-out air repo, so the lib path is relative.
-
-    `review_body` is the verifier-approved review body (empty when the
-    fallback `## air review (run failed)` comment was posted instead).
-    Pattern updates only fire when this is non-empty.
     """
     import tempfile
 
@@ -2337,21 +2235,6 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str, review_body
         if not wiki_git.clone_wiki(wiki_url, wiki_dir):
             return
         wiki_git.configure_identity(wiki_dir, "air-machine", "air-machine@users.noreply.github.com")
-
-        # Pattern strengthening from this review's findings. Runs first so
-        # the patterns commit lands BEFORE the meta-counter commit — keeps
-        # the per-PR commit history clean (`review: patterns from PR #N`
-        # then `meta: bump counter for PR #N`). Best-effort: if the wiki
-        # has no REVIEW.md or no annotations matched, the helper returns
-        # False without committing.
-        if review_body:
-            try:
-                _apply_pattern_updates(wiki_dir, review_body, pr_number)
-            except Exception as e:
-                print(
-                    f"  [warn] pattern-update helper raised: {type(e).__name__}: {e}",
-                    file=sys.stderr,
-                )
 
         # 1. Bump the counter.
         bump = subprocess.run(
