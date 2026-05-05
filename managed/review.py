@@ -338,25 +338,28 @@ def _count_gating_unfixed(review_body: str) -> int:
     """Count prior findings that should block re-review approval.
 
     Walks the `### Previous Findings Status` entries:
-    - FIXED / DISPUTED: never gate.
-    - DEFERRED: gates if severity is blocker (defense-in-depth against
-      the verifier emitting `[blocker] — DEFERRED` despite the prompt's
-      instruction); otherwise non-gating.
-    - NOT FIXED / PARTIALLY FIXED: gates if severity is blocker or
-      medium. Low/nit unfixed entries don't gate — a developer who
-      deferred a nit shouldn't be blocked from merge.
+    - FIXED / DISPUTED / DEFERRED (non-blocker): never gate.
+    - DEFERRED on a blocker: gates (defense-in-depth against the verifier
+      emitting `[blocker] — DEFERRED` despite the prompt's instruction).
+    - NOT FIXED / PARTIALLY FIXED: gates only if severity is `blocker`.
+      Medium/low/nit unfixed entries surface as warnings in the comment
+      body but no longer flip the verdict — see svc-transcribe #37 for
+      the production case where one medium-severity test-coverage
+      recommendation kept a PR red across 13 consecutive re-reviews
+      while the developer intentionally deferred it to a follow-up.
 
-    Severity defaults to `medium` (gating) when the verifier omits the
-    `[severity]` tag — preserves the v1.10 conservative gating behavior
-    on re-reviews emitted before the severity tag was added to the
-    template.
+    Severity defaults to `blocker` (gating) when the verifier omits the
+    `[severity]` tag — preserves conservative gating on legacy v1.10
+    bodies emitted before severity tags existed. Without this default,
+    upgrading to v1.12 would silently un-gate any pre-v1.12 prior body
+    whose findings (real blockers among them) lack `[severity]` tags.
     """
     count = 0
     for m in _PRIOR_STATUS_RE.finditer(review_body):
-        severity = (m.group(1) or "medium").lower()
+        severity = (m.group(2) or "blocker").lower()
         # `re.sub` to normalize "NOT  FIXED" / "PARTIALLY  FIXED" with
         # any whitespace shape into the canonical form for set lookup.
-        status = re.sub(r"\s+", " ", m.group(2).upper()).strip()
+        status = re.sub(r"\s+", " ", m.group(3).upper()).strip()
         if status in _GATING_STATUSES and severity in _GATING_SEVERITIES:
             count += 1
             continue
@@ -368,6 +371,63 @@ def _count_gating_unfixed(review_body: str) -> int:
     return count
 
 
+def extract_prior_statuses(prior_body: str) -> list[tuple[int, str, str]]:
+    """Parse a prior re-review's `Previous Findings Status` block.
+
+    Returns `(finding_num, severity, status)` triples in source order.
+    Severity is normalized lowercase, status uppercase + whitespace
+    collapsed. Returns an empty list if the prior body has no parseable
+    entries (e.g. the prior review was a fresh review with no prior-
+    statuses block, or a malformed re-review).
+
+    Used by the carry-forward suppression rule: when the verifier is
+    about to emit `NOT FIXED` for finding #N and the immediately prior
+    review already reported `NOT FIXED` for the same finding, the
+    verifier promotes it to `DEFERRED` (for non-blocker severities) so
+    a non-actionable recommendation doesn't keep gating the PR. See
+    svc-transcribe #37 finding #2: 13 consecutive `NOT FIXED` rounds on
+    a medium-severity test-coverage recommendation that the developer
+    intentionally deferred to a follow-up.
+
+    Severity defaults to `blocker` for missing tags, matching the gate
+    side (`_count_gating_unfixed`). This is the safer default in carry-
+    forward too: a missing-tag NOT FIXED entry won't be auto-promoted
+    to DEFERRED on the next round (carry-forward only fires for non-
+    blockers), so a real legacy blocker keeps reappearing as NOT FIXED
+    until explicitly addressed.
+    """
+    # `_PRIOR_STATUS_RE` captures (num, severity, status) — share the same
+    # compiled pattern with `_count_gating_unfixed` so the gate counter and
+    # the carry-forward parser can't drift on shape (severity enum, status
+    # enum, anchor, dash). The finding-number capture is a no-op for the
+    # gate's count-only iteration.
+    triples: list[tuple[int, str, str]] = []
+    for m in _PRIOR_STATUS_RE.finditer(prior_body or ""):
+        # `\d+` capture is always parseable — no try/except needed.
+        num = int(m.group(1))
+        severity = (m.group(2) or "blocker").lower()
+        status = re.sub(r"\s+", " ", m.group(3).upper()).strip()
+        triples.append((num, severity, status))
+    return triples
+
+
+def format_prior_statuses_block(prior_body: str) -> str:
+    """Render the `<prior-round-statuses>` block for the verifier_task.
+
+    Empty string when there's nothing to carry — the verifier_task then
+    omits the carry-forward rule entirely (round 2 of any PR, since the
+    round-1 fresh review has no Previous Findings Status block).
+    """
+    triples = extract_prior_statuses(prior_body)
+    if not triples:
+        return ""
+    lines = "\n".join(
+        f"  - #{num} [{sev}] — {status}"
+        for num, sev, status in triples
+    )
+    return f"<prior-round-statuses>\n{lines}\n</prior-round-statuses>"
+
+
 def should_request_changes(review_body: str) -> tuple[bool, str]:
     """Decide whether to submit REQUEST_CHANGES instead of APPROVE.
 
@@ -376,22 +436,22 @@ def should_request_changes(review_body: str) -> tuple[bool, str]:
 
     - Fresh review: REQUEST_CHANGES if any blockers exist.
     - Re-review: REQUEST_CHANGES if any NEW blockers exist OR any prior
-      finding originally classified as blocker/medium is still NOT FIXED
-      or PARTIALLY FIXED. Low/nit findings left unfixed don't gate; a
-      developer can clear the gate by either fixing, explicitly
-      disputing (verifier marks DISPUTED), or punting with a ticket
-      reference (verifier marks DEFERRED — only acceptable for non-
-      blocker findings).
+      finding originally classified as `blocker` is still NOT FIXED /
+      PARTIALLY FIXED / DEFERRED. Medium / low / nit prior findings left
+      unfixed do NOT gate — they appear in the body as recommendations.
+      A developer can clear a blocker gate by either fixing, explicitly
+      disputing (verifier marks DISPUTED), or — for prompt-edge cases —
+      escalating to a human reviewer.
     """
     blockers = count_blockers(review_body)
     if _REREVIEW_HEADER_RE.search(review_body):
         unfixed = _count_gating_unfixed(review_body)
         if blockers > 0 and unfixed > 0:
-            return True, f"{blockers} new blocker(s), {unfixed} prior blocker/medium still unfixed"
+            return True, f"{blockers} new blocker(s), {unfixed} prior blocker(s) still unfixed"
         if blockers > 0:
             return True, f"{blockers} new blocker(s)"
         if unfixed > 0:
-            return True, f"{unfixed} prior blocker/medium still unfixed"
+            return True, f"{unfixed} prior blocker(s) still unfixed"
         return False, ""
     if blockers > 0:
         return True, f"{blockers} blocker(s)"
@@ -475,30 +535,46 @@ _BLOCKER_ENTRY_RE = re.compile(r"^\*\*\d+\.", re.MULTILINE)
 # where severity ∈ {blocker, medium, low, nit} (carried from the prior
 # review) and STATUS ∈ {FIXED, NOT FIXED, PARTIALLY FIXED, DEFERRED,
 # DISPUTED}. The severity tag is optional for backward compatibility
-# with reviews emitted before v1.12 — when missing, default to `medium`
-# so legacy bodies retain the v1.10 conservative gating behavior.
+# with reviews emitted before v1.12 — when missing, the gate counter
+# and the carry-forward parser both default to `blocker` (conservative-
+# gating).
 #
 # Verdict gating semantics:
-# - FIXED / DISPUTED / DEFERRED: never gate. DISPUTED means the
-#   developer pushed back with rationale the verifier accepted; DEFERRED
-#   means they explicitly punted with a ticket reference.
-# - NOT FIXED / PARTIALLY FIXED: gate only if severity ∈ {blocker,
-#   medium}. Low/nit issues left unfixed are noise, not approval gates.
+# - FIXED / DISPUTED / DEFERRED on non-blocker: never gate.
+# - NOT FIXED / PARTIALLY FIXED: gate ONLY if severity == `blocker`.
+#   Medium/low/nit prior findings left unfixed surface as recommendations
+#   in the comment body but no longer block approval.
+# - DEFERRED on blocker: gates (defense in depth — verifier prompt
+#   forbids it but the gate enforces independently).
 # - New blockers under `#### Blockers`: always gate (existing behavior).
-# Without severity-awareness, qai-fe #239 triggered REQUEST_CHANGES on a
-# re-review where all originally-flagged blockers were fixed, just
-# because 10 prior nits/lows were marked NOT FIXED (deferred) — that
-# was technically correct under v1.10 logic but didn't match operator
-# intent.
+#
+# Why blocker-only: svc-transcribe #37 spent 13 consecutive re-review
+# rounds in CHANGES_REQUESTED state because one medium-severity test-
+# coverage recommendation was repeatedly NOT FIXED. The developer had
+# fixed every blocker and was intentionally deferring tests to a
+# follow-up PR, but the medium-severity gate kept the PR red. Mediums
+# are now warnings in the body — humans can still request changes
+# manually if they disagree with a developer's deferral.
+#
+# Capture groups (1-indexed): 1=finding-number, 2=severity (or None),
+# 3=status. Both `_count_gating_unfixed` and `extract_prior_statuses`
+# read this regex — keep one pattern, both call sites in lockstep.
 _PRIOR_STATUS_RE = re.compile(
-    r"^-\s+\*\*#\d+\*\*"
+    r"^-\s+\*\*#(\d+)\*\*"
     r"(?:\s*\[(blocker|medium|low|nit)\])?"
     r"\s+—\s+"
     r"(FIXED|NOT\s+FIXED|PARTIALLY\s+FIXED|DEFERRED|DISPUTED)\b",
     re.MULTILINE | re.IGNORECASE,
 )
-_GATING_SEVERITIES = {"blocker", "medium"}
+_GATING_SEVERITIES = {"blocker"}
 _GATING_STATUSES = {"NOT FIXED", "PARTIALLY FIXED"}
+# Carry-forward suppression promotes a NOT FIXED finding to DEFERRED
+# once it's been NOT FIXED for at least this many consecutive rounds
+# (counting the current round). Set to 2: prior round + current round =
+# 2 consecutive misses → auto-defer. Update the verifier_task emit text
+# below (`{CARRY_FORWARD_THRESHOLD}+ consecutive rounds...`) if widening
+# this — the rule and the user-visible rationale must move together.
+CARRY_FORWARD_THRESHOLD = 2
 # DEFERRED is non-gating for non-blocker findings, but the verifier prompt
 # forbids DEFERRED for blockers ("ONLY acceptable for non-blocker findings;
 # do NOT use this status for findings originally classified as `blocker`").
@@ -1558,6 +1634,59 @@ async def run_review(args):
     # format rules only; findings come from the coordinator's sub-agent
     # calls, not from us. (Old shape passed `{combined}` here — now stale.)
     if mode == "re-review":
+        prior_statuses_block = format_prior_statuses_block(
+            (prior or {}).get("body", "")
+        )
+        # Carry-forward rule renders only when the prior body actually
+        # contained a `Previous Findings Status` block — typically round
+        # 3+ on PRs that follow the standard review-then-re-review
+        # cadence (round 1 fresh, round 2 first re-review, round 3 first
+        # round able to anchor against round 2's classifications). Also
+        # renders when round 1 was a manually-forced re-review and
+        # round 2 inherits its statuses.
+        if prior_statuses_block:
+            carry_forward_rule = (
+                f"\nCARRY-FORWARD RULE (suppresses repetitive NOT FIXED "
+                f"on intentionally-deferred recommendations):\n\n"
+                f"The block below shows each prior finding's status from "
+                f"the IMMEDIATELY PRIOR re-review (one round ago). When "
+                f"you're about to emit a status of NOT FIXED for finding "
+                f"#N AND the prior round also reported NOT FIXED for the "
+                f"same #N AND the severity is NOT `blocker`, instead emit:\n\n"
+                f"  - **#N** [<severity>] — DEFERRED — carried forward "
+                f"{CARRY_FORWARD_THRESHOLD}+ consecutive rounds without a "
+                f"fix attempt; treating as deferred.\n\n"
+                f"Blockers NEVER auto-defer — always remain NOT FIXED.\n\n"
+                f"This rule only applies when the prior round also said "
+                f"NOT FIXED. If the prior round said PARTIALLY FIXED, "
+                f"FIXED, or DEFERRED, do not auto-defer — emit your "
+                f"honest classification (a previously-deferred finding "
+                f"that's still un-fixed should remain DEFERRED; one that "
+                f"was partially or fully fixed should reflect the "
+                f"current state).\n\n"
+                f"{prior_statuses_block}\n"
+            )
+        else:
+            carry_forward_rule = ""
+
+        # Build the DEFERRED bullet conditional on whether the carry-
+        # forward rule will render below. On round 2 (no prior statuses)
+        # the OR clause referenced a rule that wasn't there — that's the
+        # exact "aspirational comment" pattern that invites verifier
+        # hallucination. Only mention the rule when it's actually present.
+        deferred_bullet = (
+            "- DEFERRED — author explicitly punted with a ticket "
+            "reference (e.g. \"tracked as PRM-3686\")"
+            + (
+                ", OR the carry-forward rule below promotes a "
+                "repeated NOT FIXED to DEFERRED"
+                if carry_forward_rule
+                else ""
+            )
+            + ". ONLY acceptable for non-blocker findings; do NOT "
+            "use this status for findings originally classified as `blocker`."
+        )
+
         verifier_task = f"""You have raw findings from the specialist reviewers.
 They were run in RE-REVIEW MODE — each result contains both (a) a classification of
 each prior finding and (b) any NEW findings in the inter-diff.
@@ -1566,11 +1695,9 @@ For each prior finding, choose ONE status:
 - FIXED — the flagged code changed and addresses the finding.
 - PARTIALLY FIXED — code changed but doesn't fully address.
 - NOT FIXED — code unchanged, finding still applies.
-- DEFERRED — author explicitly punted with a ticket reference (e.g.
-  "tracked as PRM-3686"). ONLY acceptable for non-blocker findings; do
-  NOT use this status for findings originally classified as `blocker`.
+{deferred_bullet}
 - DISPUTED — author pushed back with rationale you accept.
-
+{carry_forward_rule}
 Verify each finding per your system prompt and drop FALSE POSITIVE /
 below-threshold entries. Consolidate classifications across specialists —
 if specialists disagree, prefer the one that cites evidence from the
@@ -1596,8 +1723,10 @@ Where `<severity>` is the original severity from the prior review (one of
 `blocker`, `medium`, `low`, `nit`) — copy it from the prior review's
 section heading where finding #N originally appeared. The orchestrator
 parses these tags to gate APPROVE/REQUEST_CHANGES on un-addressed
-high-severity prior findings only; lower-severity unfixed entries no
-longer block merge.
+`blocker` prior findings only. Medium / low / nit prior findings left
+NOT FIXED or PARTIALLY FIXED appear in the body as recommendations but
+do not block merge — the developer can fix later or punt with a follow-
+up ticket.
 
 Examples:
 - **#1** [blocker] — FIXED — `narrow_env` dict at L236-242 now omits secrets.

@@ -100,6 +100,34 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
+    # Coalesce rapid-fire pushes on the same PR. When a developer pushes
+    # several commits in quick succession (typing nits, fixing CI), the
+    # earlier reviews get cancelled and only the most recent push runs
+    # to completion. Without this, every push fires a fresh ~30-min
+    # review even if the next push lands 2 minutes later — svc-transcribe
+    # #37 logged 14 sequential reviews on what could have been 5-6.
+    #
+    # Group keyed on (repository, PR number) so cross-repo callers and
+    # cross-PR concurrent runs don't collide. The third segment falls
+    # back through pr_number → pull_request.number → run_id so the
+    # exotic case (workflow_dispatch with no pr_number AND no PR event
+    # payload) doesn't silently bucket every dispatched run together.
+    # PR_NUMBER_RESOLVED below uses the first two fallbacks for the
+    # actual review work; the run_id tail here is purely a defensive
+    # last-resort to keep concurrency groups unique.
+    #
+    # `cancel-in-progress: true` SIGKILLs the in-flight run when a
+    # newer one queues. There's a small inconsistency window where the
+    # in-flight job has POSTed the review comment but not yet POSTed
+    # the verdict (`submit_review_verdict`) — coalescing during that
+    # window leaves the PR with a finding-list comment but no formal
+    # APPROVE/REQUEST_CHANGES state. Branch protection lags one round
+    # until the next push triggers a fresh review. This is acceptable
+    # for the rapid-iteration pattern this concurrency rule targets;
+    # on slower cadences the verdict completes before the next push.
+    concurrency:
+      group: air-review-${{ github.repository }}-${{ inputs.pr_number || github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: true
     # Budget: codex (≤10 min, SESSION_TIMEOUT_SECS) + coordinator (≤45 min,
     # COORDINATOR_TIMEOUT_SECS = 2700s) + learn epilogue (~3-5 min when
     # the wiki-counter threshold fires) = 58-60 min worst case. 60 min
