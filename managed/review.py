@@ -310,6 +310,66 @@ def _github_error_message(resp) -> str:
     return f"{resp.status_code} {msg}"
 
 
+def _gha_run_url() -> str:
+    """Best-effort GitHub Actions run URL from environment.
+
+    Returns a useful link when invoked from a managed-review workflow,
+    or a placeholder when invoked locally / outside Actions. Used by
+    the run-failed comment to point operators at the run logs.
+    """
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    run_id = os.environ.get("GITHUB_RUN_ID", "")
+    if repo and run_id:
+        return f"{server}/{repo}/actions/runs/{run_id}"
+    return "(local invocation — no GHA run URL available)"
+
+
+def _post_review_comment_with_retry(
+    repo: str, pr_number: int, body: str, token: str,
+) -> "req.Response":
+    """POST the review comment to the PR's issue-comments endpoint.
+
+    Retries once on 422 after a 2s backoff, capturing the response body
+    each time so the next 422 isn't a black box. svc-transcribe #37 hit
+    a 422 cascade (run 25368789413, 2026-05-05): the prior fallback path
+    posted near-duplicate content and GitHub rejected with 422; without
+    body capture, the operator had no idea why.
+    """
+    url = (
+        f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
+    payload = {"body": body}
+    resp = req.post(url, headers=headers, json=payload)
+    if resp.status_code != 422:
+        return resp
+    # Capture body for diagnostics — log truncated to keep CI logs sane.
+    try:
+        err_body = resp.text[:500]
+    except Exception:
+        err_body = "(unreadable response body)"
+    print(
+        f"  [warn] first POST returned 422 — body: {err_body!r}",
+        file=sys.stderr,
+    )
+    time.sleep(2.0)
+    resp2 = req.post(url, headers=headers, json=payload)
+    if resp2.status_code == 422:
+        try:
+            err_body2 = resp2.text[:500]
+        except Exception:
+            err_body2 = "(unreadable response body)"
+        print(
+            f"  [warn] retry POST also returned 422 — body: {err_body2!r}",
+            file=sys.stderr,
+        )
+    return resp2
+
+
 def fetch_pr_metadata(repo: str, pr_number: int, token: str) -> dict:
     resp = req.get(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
@@ -1849,7 +1909,8 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
             ),
             timeout=COORDINATOR_TIMEOUT_SECS,
         )
-    print(f"  Coordinator complete in {time.monotonic() - t0:.1f}s")
+    coordinator_secs = time.monotonic() - t0
+    print(f"  Coordinator complete in {coordinator_secs:.1f}s")
 
     # Surface wiki-push silent failures. The coordinator's TURN 3 bash
     # has a one-shot rebase-retry on push (see coordinator.md); when both
@@ -1934,18 +1995,58 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         break
 
     if not review_extracted:
-        # Fallback — no candidate had a head_sha-matching footer. Post
-        # raw so the operator sees the malformed output; the verdict
-        # logic below MUST NOT run on this path (review_extracted=False)
-        # because a malformed body may still contain `### Blockers` /
-        # `**1.` template snippets that count_blockers would mis-parse.
-        review_body = coordinator_out
+        # Fallback — no candidate had a head_sha-matching footer. The
+        # coordinator either returned no `## Code Review` block at all,
+        # or all blocks had wrong-SHA footers (likely cause: verifier
+        # sub-agent emitted prior bot review's footer SHA, or coordinator
+        # session served a cached prior-thread response). svc-transcribe
+        # PR #37 reproduced this with a 92.5s coordinator (vs typical
+        # 1500-2400s), with output near-identical to the prior bot
+        # review — making the previous "post raw" path 422 against
+        # GitHub's near-duplicate detection.
+        #
+        # New behavior: post a STRUCTURED run-failed comment with the
+        # diagnostic context, so the developer sees signal (not silence)
+        # and can decide whether to push a small commit to bust the
+        # cache or wait for the next push to retrigger. Skip verdict
+        # because we have no findings list to gate on.
+        coord_secs_str = (
+            f"{coordinator_secs:.1f}s" if coordinator_secs is not None else "unknown"
+        )
+        run_url = _gha_run_url()
+        review_body = (
+            f"## Code Review (run failed)\n\n"
+            f"The bot's coordinator session returned without a `## Code "
+            f"Review` block whose `Reviewed at:` footer matched the "
+            f"current HEAD SHA `{head_sha[:8]}`. No verdict will be "
+            f"submitted for this run.\n\n"
+            f"**Likely cause:** the coordinator session was unusually "
+            f"short ({coord_secs_str}) — typical successful runs take "
+            f"1500-2400s. Short runs with unusable output usually mean "
+            f"a cached prior-thread response from Anthropic's session "
+            f"layer or a verifier sub-agent that emitted a stale footer "
+            f"SHA from a prior round.\n\n"
+            f"**Workaround:** push any small commit (whitespace, "
+            f"comment, etc.) to invalidate the prefix cache and "
+            f"retrigger the review.\n\n"
+            f"Run: <{run_url}>\n"
+        )
         print(
             "  [warn] coordinator output had no `## Code Review` block whose "
             f"`Reviewed at:` footer matched head_sha {head_sha[:8]} — posting "
-            "raw, verdict will be skipped",
+            "structured run-failed comment, verdict will be skipped",
             file=sys.stderr,
         )
+        if coordinator_secs is not None and coordinator_secs < 300:
+            # Soft-failure telemetry signal. <300s coordinator on a real
+            # PR is impossibly fast (typical: 1500-2400s); paired with
+            # unusable output, it's almost certainly cached prior-thread
+            # response. Logged separately so dashboards can correlate.
+            print(
+                f"  [warn] coordinator complete in {coord_secs_str} (typical "
+                f"1500-2400s) AND output unusable — stale-cache signal",
+                file=sys.stderr,
+            )
 
     if args.dry_run:
         print("\n" + "=" * 60)
@@ -1955,14 +2056,7 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         return
 
     print(f"\n[5] Posting review comment to PR #{args.pr_number}...")
-    resp = req.post(
-        f"https://api.github.com/repos/{args.repo}/issues/{args.pr_number}/comments",
-        headers={
-            "Authorization": f"Bearer {bot_token}",
-            "Accept": "application/vnd.github+json",
-        },
-        json={"body": review_body},
-    )
+    resp = _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
     if not resp.ok:
         print(f"Error posting comment: {_github_error_message(resp)}", file=sys.stderr)
         sys.exit(1)
