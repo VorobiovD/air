@@ -1,6 +1,6 @@
 # air — Improvement Roadmap (post-shipped phases)
 
-_Last updated 2026-05-05 (post-v1.12.5). Phase 4 shipped in v1.12.0; v1.12.1-v1.12.5 closed the SSE/REST race + stream-close + billing-error cascade. Reframed against telemetry from production runs (qai-be PRs #41/#593/#595/#617/#635/#666, qai-fe PRs #239/#246, svc-transcribe #37/#39, plus dogfood runs)._
+_Last updated 2026-05-11 (post-v1.12.6 + managed-agents platform survey). Phase 4 shipped in v1.12.0; v1.12.1-v1.12.6 closed the SSE/REST race + stream-close + billing-error cascade + footer-regex word-boundary trap. Phase 6 candidates added from the May 2026 managed-agents GA wave (webhooks, outcomes public-beta, multiagent shape change). Reframed against telemetry from production runs (qai-be PRs #41/#593/#595/#617/#635/#666, qai-fe PRs #239/#246, svc-transcribe #37/#39, plus dogfood runs)._
 
 ## What's already shipped
 
@@ -23,6 +23,7 @@ _Last updated 2026-05-05 (post-v1.12.5). Phase 4 shipped in v1.12.0; v1.12.1-v1.
 | 5 | SSE/REST race fix: retry drain on eventually-consistent events (per-attempt delta tracking) | v1.12.3 (PR #61) | qai-be #635-style failures (cached coordinator finishes in ~92s, REST events lag) recover |
 | 5 | REST polling until session terminal — handles SSE stream-close mid-session | v1.12.4 (PR #62) | qai-be #666 went from 92s empty-output to 1432s + real review (validated in production) |
 | 5 | Billing-aware structured-fallback: detects `BetaManagedAgentsBillingError`, posts top-up snippet | v1.12.5 (PR #64) | svc-transcribe billing exhaustion now surfaces as actionable comment instead of stack trace |
+| 5 | Footer-regex word-boundary trap fixed — orchestrator captures the review even when coordinator emits trailing narration without a newline | v1.12.6 (PR #67) | qai-be #666 round 7 verifier output recovered: `\b` requires word-boundary, fails when 40-hex SHA is followed by `Wiki` (both `\w`) |
 
 The 5-session → 1-coordinator + Haiku/Sonnet tiering combination has bought us most of the **cost** win projected in `cost-optimization-plan.md`. Empirical numbers (next section) show the **latency and reliability** bottlenecks have moved.
 
@@ -226,6 +227,73 @@ Findings flagged by self-review on PRs #61–#64 that we deliberately deferred. 
 **P9-f — Self-referential "VorobiovD/air" link in dogfood reviews** (code-reviewer on PR #64). The non-billing failure branch posts "file an issue against [VorobiovD/air](https://github.com/VorobiovD/air)". On dogfood (`air-review.yml` running on this repo's PRs), the developer reading the comment IS in VorobiovD/air — the link is a self-reference. Minor cognitive friction. **Fix:** conditionally suppress the link when `args.repo == "VorobiovD/air"`, OR rephrase to "the air plugin repo" without the link. **Trigger:** if dogfood failures become noisy enough to be confusing.
 
 **P9-g — Duplicate `## air review (run failed)` header across three branches** (simplify on PR #64). Each branch in the structured-fallback opens with `"## air review (run failed)\n\n"` and ends with `{run_link_line}`. Today three call sites; if a fourth failure shape appears, a small `_run_failed_body(cause, fix, raw=None)` helper would consolidate. **Trigger:** adding a fourth branch.
+
+---
+
+## Phase 6 candidates — Anthropic managed-agents platform features
+
+Survey of features Anthropic shipped to managed-agents between our v1.9.0 design (research-preview multiagent, 2026-04-25) and the public-beta wave (May 6-7, 2026). Most of these don't justify migration cost today, but they have clear triggers where the calculus would flip. Cross-references the latest docs at <https://platform.claude.com/docs/en/managed-agents>.
+
+### P10 — Webhooks for session lifecycle (would close the SSE/REST race class entirely)
+
+**What changed:** Anthropic shipped webhook delivery for managed-agents (May 7, 2026). Event types include `session.status_idled`, `session.status_terminated`, `session.thread_idled`, `session.outcome_evaluation_ended`. Push-based with HMAC-signed payloads (`X-Webhook-Signature` header, signing secret prefixed `whsec_`). Anthropic retries at least once on non-2xx; auto-disables after ~20 consecutive failures.
+
+**Why it matters for air:** the entire SSE/REST race we spent v1.12.3 → v1.12.6 fixing (~200 LOC of orchestration + the regex-trap fix in PR #67) goes away if the orchestrator just waits for a `session.status_idled` webhook + then issues one REST `events.list` call to drain. No SSE quiet timeouts, no REST polling loop, no terminal-state inference from `open_threads`, no per-attempt parts-delta tracking. The webhook IS the "session is done" signal we kept trying to derive.
+
+**Why we shouldn't ship it now:** requires a publicly-resolvable HTTPS endpoint. The orchestrator runs inside GHA (ephemeral, no inbound). Two viable architectures:
+
+1. **Thin webhook receiver** (Cloudflare Worker / Lambda / Vercel function) that writes the event payload to S3 / Cloudflare KV / Vercel KV / etc. The GHA job polls THAT store, not the Anthropic API. Adds one persistent piece of infrastructure to the air bot's runtime model.
+2. **Polling fallback retained alongside webhooks** — the GHA job both subscribes to webhooks AND polls Anthropic REST as a backup. More code, not less.
+
+Neither is a free lunch. v1.12.6's poll loop empirically works (qai-be #666 round 8 produced a 1432s real review). Webhooks become attractive when we need either (a) cheaper polling (we currently issue ~30 REST calls per 15-min session), or (b) the operator wants notification on stale sessions without keeping the GHA job alive.
+
+**Trigger:** next time we hit a 7th-category SSE/REST class bug, OR if Anthropic deprecates the SSE stream, OR if we ever want notifications outside the GHA job's lifetime.
+
+### P11 — Outcomes for verifier-output quality gates
+
+**What changed:** Outcomes (rubric-driven self-evaluation) moved from research preview to public beta on the standard `managed-agents-2026-04-01` header. Default 3 iterations, max 20. The grader uses a separate context window so it can't be biased by the main agent's choices. `user.define_outcome` event launches the iteration loop; `span.outcome_evaluation_end` reports `satisfied` / `needs_revision` / `max_iterations_reached` / `failed` / `interrupted`.
+
+**Why it matters for air:** v1.12.5's `\b` word-boundary regex bug (PR #67) shipped to production because we lacked an automated structural check on the verifier's output. A 5-criterion rubric like:
+
+- Body starts with `## Code Review` (no narration prefix)
+- Body ends with a line matching `^Reviewed at: <40-char-hex>$`
+- The hex SHA on that line equals the session's head_sha
+- Contains at least one of `### Blockers` / `### Medium` / `### Low` / `### Nits` / `### Pre-existing Issues` / `### Previous Findings Status`
+- No literal `[empty message]` or `## air review (run failed)` text in body
+
+…would have caught it AT SESSION END inside the same run, triggering an automatic revision instead of waiting for production to bite us. The bug stayed live for ~6 hours before round 7 surfaced it.
+
+**Trade-off:** every passing review eats ~1 grader iteration (cheap — small rubric, separate context, ~2K tokens). Failures eat 1-3 extra coordinator iterations (expensive — full re-review). Net cost depends on failure rate. If we hit >5% structural-mismatch rate on the verifier output, outcomes pays for itself; below that, it's a quality-floor tax with marginal benefit.
+
+**Trigger:** if v1.12.x sees another preventable verifier-output structural bug, OR if we want a quality-floor SLO ("99% of reviews have a SHA-matching footer in their first emission").
+
+### P12 — Drop `-research-preview` from the beta header
+
+**What changed:** Multiagent moved from research preview to public beta. The header simplified from `managed-agents-2026-04-01-research-preview` (what `managed/api.py` currently sends) to `managed-agents-2026-04-01`. Behavior may be subtly different — research-preview surfaces sometimes evolve before stabilizing.
+
+**Trade-off:** one-line change in `managed/api.py`. Risk is non-zero — if research-preview is more permissive than public beta on some surface we depend on, we'd see immediate failures. Validate against a dogfood PR before rolling out.
+
+**Trigger:** the next time we touch `managed/api.py` for any other reason. Bundle the swap with that change rather than ship it standalone.
+
+### P13 — New multiagent config shape (`multiagent: {type: "coordinator", agents: [...]}`)
+
+**What changed:** Anthropic introduced a new `multiagent` parameter shape on agent creation. Our current code uses the legacy `callable_agents: [...]` form on the coordinator. The new shape adds `{"type": "self"}` for self-call (a coordinator delegating to copies of itself), which we don't use.
+
+**Trade-off:** cosmetic refactor in `managed/setup.py::create_or_update_agent`. Useful only if the legacy `callable_agents` form gets deprecated.
+
+**Trigger:** Anthropic announces deprecation of the legacy shape, OR we want self-delegation (we don't).
+
+### Explicit non-fits (won't ship)
+
+- **Memory stores in place of GitHub wiki for `REVIEW.md`** — workspace-scoped persistent text storage mounted at `/mnt/memory/`. Tempting to swap our wiki for this, BUT we'd lose: GitHub commit history (audit trail), cross-platform CLI ↔ managed sharing, per-repo isolation via wiki branches, public visibility (devs read patterns). The wiki gives us all four; memory stores give us none.
+
+- **Dreaming** (research preview, scheduled memory-refinement that "reviews past sessions to find patterns") — direct conceptual match to our `/air:learn` flow, but coupled to memory stores. Until we swap to memory stores (we shouldn't), dreaming doesn't apply.
+
+- **Thread archival** (`POST /sessions/:id/threads/:thread_id/archive`) — relevant only at thread-count pressure. We use 6/25 threads (coordinator + 4 specialists + verifier). No-op.
+
+- **Vault credentials with `mcp_oauth` background refresh** — relevant for OAuth-rotating secrets. Our `ANTHROPIC_API_KEY` and `AIR_BOT_TOKEN` are static GitHub secrets. No-op.
+
+- **Finance agent templates** — domain-specific, not our use case.
 
 ---
 
