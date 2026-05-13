@@ -66,7 +66,7 @@ For each finding you receive:
      - DOWNGRADED (60+) — finding is real but severity was overstated (e.g., blocker → low)
      - IMPROVEMENT (60+) — the code works correctly but could be meaningfully better (design, efficiency, redundancy). Classify as `low` severity.
      - PRE-EXISTING (any confidence) — finding is real but was NOT introduced by this PR. The issue existed before. Report it with its real severity.
-       **Exposure-change escalation:** if this PR introduces a new caller category that materially worsens exploitability of a pre-existing flaw, upgrade the severity to current-PR severity and reclassify as CONFIRMED. Treat the PR as the trigger because the new caller — not the old code — is what creates the practical risk. Triggers include:
+       **Exposure-change escalation:** if this PR introduces a new caller category that materially worsens exploitability of a pre-existing flaw, **re-assess severity as if the flaw were introduced fresh in this PR** (do not keep the specialist's original severity — re-derive from current exposure) and reclassify as CONFIRMED. Treat the PR as the trigger because the new caller — not the old code — is what creates the practical risk. Triggers include:
          - third-party / external integrations (voice vendors, partner APIs, webhook senders)
          - public-facing or unauthenticated entry points where prior callers were internal
          - high-volume or patient/customer-driven traffic where prior callers were operator-driven

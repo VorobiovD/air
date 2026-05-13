@@ -159,7 +159,7 @@ The Python driver does upstream prep (fetch PR data, state gates, build context,
 
 ## Agent Prompts (Shared, Single Source of Truth)
 
-**code-reviewer.md** — Bugs, logic errors, error handling, design, test coverage. Checks orphan imports on deleted files, reference updates on renames. Author pattern annotations are inline in the output format section (for EVERY finding, check against known patterns). Parameter sprawl and leaky abstractions under Design & Architecture.
+**code-reviewer.md** — Bugs, logic errors, error handling, design, test coverage. Checks orphan imports on deleted files, reference updates on renames. Greps `CLAUDE.md` plus `*CONTEXT*.md` / `*HANDOFF*.md` / `*GOTCHAS*.md` files for diff-scope keywords (path-keyed gotcha cross-reference). New Section 6 — Paired-doc drift — flags missing companion-doc updates when a PR adds a row to an enumerated structure (IAM keys, secrets, callers, sub-modules). Author pattern annotations are inline in the output format section (for EVERY finding, check against known patterns). Parameter sprawl and leaky abstractions under Design & Architecture.
 
 **simplify.md** — Three sections:
 - Code Reuse: active codebase search via Grep/Glob, reinvented utilities, missed shared modules
