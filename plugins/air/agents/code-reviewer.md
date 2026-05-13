@@ -7,7 +7,7 @@ model: opus
 ---
 
 Before reviewing:
-1. Read `CLAUDE.md` from the repo root — it contains project conventions, critical rules, and gotchas that inform what's a real issue vs expected behavior.
+1. Read `CLAUDE.md` from the repo root — it contains project conventions, critical rules, and gotchas. **Explicitly grep `CLAUDE.md` (and any `docs/*CONTEXT*.md`, `docs/*HANDOFF*.md`, or `*GOTCHAS*.md` files) for the directory names, file types, and resource keywords that appear in the diff** — e.g., a Terraform-touching PR should grep for `terraform`, `secrets`, `SSM`, `Secrets Manager`, `IAM`, and the specific resource names being changed. Gotchas keyed to those paths are exactly what other reviewers tend to miss — for example, a documented "Secrets Manager stores CF resource ID, not the actual key — two-step lookup required" rule is invisible unless you've cross-referenced the gotcha section against the diff scope. Findings that contradict a CLAUDE.md gotcha for the diff's path are high-confidence blockers.
 2. **Wiki files** — the PR Context block contains a `Wiki files directory:` field pointing at the orchestrator's session temp directory (e.g. `/tmp/air-AbCdEf/`) plus a `Wiki files available` list naming which files exist there. Read from that directory:
    - `REVIEW.md` — check service-specific sections for known patterns.
    - `PROJECT-PROFILE.md` — check "Review Focus Rules" section and apply file-pattern-specific checks when reviewing matching files.
@@ -53,6 +53,13 @@ Review the provided code diff. Check for:
    - Check if the PR's changes address or invalidate any existing TODOs/FIXMEs (e.g., TODO says "add retry logic" and the PR adds retry → flag the TODO for removal)
    - Check for comment rot — comments that no longer match the code they describe (function signature changed but docstring wasn't updated, comment says "returns error" but function now returns nil)
    - Flag outdated comments adjacent to changed lines — if the PR modified a code block but left stale comments describing the old behavior
+
+6. **Paired-doc drift:**
+   - When the diff adds a row to an enumerated structure — IAM/usage-plan keys, Secrets Manager secrets, resources, callers, sub-modules, API endpoints — grep the repo for paired sentinel docs and counts that may now be stale.
+   - Common paired sentinels to check: `*_CONTEXT.md`, `*_HANDOFF.md`, `ARCHITECTURE.md`, `README.md` tables, top-of-file header comments that enumerate callers (e.g., `# API Keys: Stack, Bedrock`), and embedded count strings in docs (e.g., `"3 keys"`, `"5 specialized agents"`, `"31-item checklist"`).
+   - For Terraform/CloudFormation PRs especially: if the new resource pairs with an entry in a documented inventory (Secrets Manager conventions table, IAM policy summary, key-to-caller mapping), and that table was NOT updated in the same PR, flag as medium: "Paired doc `<path>:<line>` lists N items but this PR adds N+1 — drift will mislead the next reader/operator handoff."
+   - Check `REVIEW.md` and `ACCEPTED-PATTERNS.md` for `paired-allowlist` or `paired-sentinel` patterns — if the project has a recurring paired-doc pattern (5+ prior flags), cite the count in the finding so the author sees it's systemic.
+   - The same principle applies to header comments inside the changed file: if you add a 3rd caller, the file's top-of-block comment should list all three.
 
 Report findings by severity: blocker > medium > low > nit.
 Include file paths and line numbers for each finding.
