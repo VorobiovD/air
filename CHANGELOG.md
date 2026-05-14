@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.0](https://github.com/VorobiovD/air/compare/v1.12.6...v1.13.0) (2026-05-14)
+
+
+### Features
+
+* **prompts+respond:** exposure escalation + CLAUDE.md gotcha grep + paired-doc drift + gate-output symmetry + category-symmetric respond gate ([#70](https://github.com/VorobiovD/air/issues/70)) ([6945b02](https://github.com/VorobiovD/air/commit/6945b025537995c2aada2255bc993b189ffd4d69))
+
 ## [1.12.6](https://github.com/VorobiovD/air/compare/v1.12.5...v1.12.6) (2026-05-05)
 
 
