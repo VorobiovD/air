@@ -282,6 +282,29 @@ Launch review-verifier on all self-check findings. Same verdicts, same confidenc
 - **"Fixed" findings whose fix was flagged as incomplete by self-check**: Downgrade status from `fixed` to `partially fixed: <what the self-check found>`.
 - **Non-blocker new findings**: Include as self-check notes in the response comment.
 
+**5e. Category-symmetric grep for rule-class findings**
+
+When a finding describes a **rule or pattern category** (e.g. "remove inline PR citations", "no TODO comments in prod source", "version-mirror drift"), the fix must apply symmetrically — to the code being removed AND to the code being added in the same commit chain. The most common asymmetric-fix failure: stripping the literal token the reviewer cited while introducing new instances of the same category via the fix commits.
+
+For each finding classified `fixed` in Step 4 that is **rule-class** (not a single-locus bug), before formatting the response:
+
+1. **Derive a category-broad regex** from the rule, broader than the literal token cited. Example: finding cites "`@Carlos PR #726 L12`" → derive `(?:@\w+\s+)?(?:PR|MR)\s*#\s*\d+`, not the literal string.
+2. **Grep added lines in the respond diff**:
+   ```bash
+   grep -nE '^\+[^+]' $AIR_TMP/respond-diff.diff | grep -E "<category_regex>"
+   ```
+3. **If matches exist on `+` lines**: the rule was applied one-way. Downgrade from `fixed` to `partially fixed: <category> still introduced at <file:line> in the fix commits`. Surface the lines in the response so the next re-review sees the gap. Print to console: `Category-symmetric check: <N> new instances of <category> introduced. Fix or acknowledge before posting.`
+
+**Common rule-class shapes to check explicitly:**
+- Inline citations in prose / source: `PR #N`, `(#NNN)`, `@author PR #N`, `from MR !N` (durable form is rationale without ephemeral citation that loses meaning post-merge)
+- Drift markers: `TODO`, `FIXME`, `HACK`, `XXX`
+- Version mirror strings: `v1.2.3`, `Version: X.Y.Z`
+- Stale references to deleted / renamed symbols / files / paths
+- Hardcoded environment names outside config: `staging`, `dev`, `prod` in source
+- Trailing whitespace, debug prints, console.log, dump() calls
+
+**The principle:** rules I'm currently applying to the diff I'm reviewing should also apply to the diff I'm writing. The asymmetric-refactor pattern — changed one side, missed the sibling — is the most common form of fix failure in --respond cycles. A grep against the category, not the cited token, catches it before posting.
+
 ### Respond Step 6: Format response
 
 Write the formatted response to `$AIR_TMP/respond-comment.md`.
