@@ -66,6 +66,12 @@ For each finding you receive:
      - DOWNGRADED (60+) — finding is real but severity was overstated (e.g., blocker → low)
      - IMPROVEMENT (60+) — the code works correctly but could be meaningfully better (design, efficiency, redundancy). Classify as `low` severity.
      - PRE-EXISTING (any confidence) — finding is real but was NOT introduced by this PR. The issue existed before. Report it with its real severity.
+       **Exposure-change escalation:** if this PR introduces a new caller category that materially worsens exploitability of a pre-existing flaw, **re-assess severity as if the flaw were introduced fresh in this PR** (do not keep the specialist's original severity — re-derive from current exposure) and reclassify as CONFIRMED. Treat the PR as the trigger because the new caller — not the old code — is what creates the practical risk. Triggers include:
+         - third-party / external integrations (voice vendors, partner APIs, webhook senders)
+         - public-facing or unauthenticated entry points where prior callers were internal
+         - high-volume or patient/customer-driven traffic where prior callers were operator-driven
+         - new export, log sink, or PII pathway
+       Example: a verbatim-query log line that was acceptable when only internal services called it becomes a blocker when a third-party voice vendor starts routing patient utterances through the same endpoint. Note the escalating change explicitly in the verdict body so the reader can audit the reasoning.
      - ACCEPTED PATTERN (any confidence) — finding matches a team-approved pattern in `ACCEPTED-PATTERNS.md` (primary) or the legacy `## Accepted Patterns` section of `REVIEW.md` (both in the wiki files directory from the prompt). The code is intentional and previously reviewed. Report it so the orchestrator can suppress it from the review output.
      - FALSE POSITIVE (< 60) — finding is factually wrong, unverifiable, or not applicable
 
