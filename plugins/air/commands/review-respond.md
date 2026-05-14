@@ -286,13 +286,14 @@ Launch review-verifier on all self-check findings. Same verdicts, same confidenc
 
 When a finding describes a **rule or pattern category** (e.g. "remove inline PR citations", "no TODO comments in prod source", "version-mirror drift"), the fix must apply symmetrically — to the code being removed AND to the code being added in the same commit chain. The most common asymmetric-fix failure: stripping the literal token the reviewer cited while introducing new instances of the same category via the fix commits.
 
-For each finding classified `fixed` in Step 4 that is **rule-class** (not a single-locus bug), before formatting the response:
+For each finding **still classified `fixed` after Step 5d** (5d can downgrade to `partially fixed` — operate on post-5d status) that is **rule-class** (not a single-locus bug), before formatting the response:
 
-1. **Derive a category-broad regex** from the rule, broader than the literal token cited. Example: finding cites "`@Carlos PR #726 L12`" → derive `(?:@\w+\s+)?(?:PR|MR)\s*#\s*\d+`, not the literal string.
+1. **Derive a category-broad regex** from the rule, broader than the literal token cited. The regex must cover every shape the category can take, not just the cited form. Example: finding cites "`@Carlos PR #726 L12`" → derive `(?:\(#\d+\)|(?:@\w+\s+)?(?:PR|MR)\s*#\s*\d+)` so it matches `@Carlos PR #726`, bare `(#726)`, and `MR !726` — all in the same shape family. Don't grep for the literal string.
 2. **Grep added lines in the respond diff**:
    ```bash
-   grep -nE '^\+[^+]' $AIR_TMP/respond-diff.diff | grep -E "<category_regex>"
+   grep -nE '^\+[^+]' "$AIR_TMP/respond-diff.diff" | grep -E '<category_regex>'
    ```
+   (Quote `"$AIR_TMP"` for safety; single-quote the regex slot so shell expansion doesn't mangle `$(...)` or backticks if the derived regex contains them.)
 3. **If matches exist on `+` lines**: the rule was applied one-way. Downgrade from `fixed` to `partially fixed: <category> still introduced at <file:line> in the fix commits`. Surface the lines in the response so the next re-review sees the gap. Print to console: `Category-symmetric check: <N> new instances of <category> introduced. Fix or acknowledge before posting.`
 
 **Common rule-class shapes to check explicitly:**
