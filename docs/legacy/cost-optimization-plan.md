@@ -1,3 +1,7 @@
+> ⚠️ **Superseded — see [`docs/improvement-roadmap.md`](../improvement-roadmap.md).**
+>
+> This document has been folded into the master roadmap. Preserved here for historical reference (the 14-variant cost matrix and Phase 1/2/3 cost paths). New planning happens in the master file. Phase 1 from this doc shipped as v1.11.0 (Haiku on git-history-reviewer); Phase 2 (Haiku on specialists) and Phase 3 (drop multi-agent) are deferred — see master roadmap §Deferred for current status.
+
 # air Managed Agents — Cost Optimization Plan
 
 _Last updated 2026-04-27 with empirical results from 14 test variants run on real PRs (#38 and #40)._

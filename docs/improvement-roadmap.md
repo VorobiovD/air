@@ -1,33 +1,60 @@
-# air — Improvement Roadmap (post-shipped phases)
+# air — Improvement Roadmap (Master)
 
-_Last updated 2026-05-11 (post-v1.12.6 + managed-agents platform survey). Phase 4 shipped in v1.12.0; v1.12.1-v1.12.6 closed the SSE/REST race + stream-close + billing-error cascade + footer-regex word-boundary trap. Phase 6 candidates added from the May 2026 managed-agents GA wave (webhooks, outcomes public-beta, multiagent shape change). Reframed against telemetry from production runs (qai-be PRs #41/#593/#595/#617/#635/#666, qai-fe PRs #239/#246, svc-transcribe #37/#39, plus dogfood runs)._
+**Single source of truth for all air planning.** Previous planning docs have been folded into this file. Originals preserved with banners pointing here:
 
-## What's already shipped
+- `~/Documents/air-improvements-plan.md` — managed-agents capability uptake plan (Items A-Q)
+- `~/Documents/air-improvements-plan-review.md` — review notes + Phase 0 derivations
+- `~/Documents/air-improvements-inventory.md` — full source inventory (~50 items × 8 themes)
+- `docs/legacy/cost-optimization-plan.md` — 14-variant cost matrix (Phase 1 shipped v1.11.0; Phase 2/3 deferred)
+- `docs/legacy/air-expansion-plan.md` — three-phase team-rollout + Cowork plan
+- `docs/legacy/architecture-review.md` — early architecture concerns (most addressed in v1.7+)
 
-| Phase | Change | Where | Impact |
+**External commitments** (Cowork, etc.) tracked separately in `docs/external-commitments.md`.
+
+_Last updated: 2026-05-21 (post-v1.13.0 + plan consolidation + 2026-05-19/21 SSE-degraded incident data)._
+
+---
+
+## TL;DR
+
+**Current shipped:** v1.13.0 (2026-05-14) — 5 new prompt capabilities (exposure escalation, CLAUDE.md gotcha grep, paired-doc drift, gate-output symmetry, category-symmetric respond gate).
+
+**Next 3 ships** (cross-source agreement + empirical justification + low effort):
+1. **Phase 0** — Capture full `coordinator_out` on SHA-mismatch + SSE-quiet informational log + drop `-research-preview` header. `<1 day total.`
+2. **Phase 1** — Fast-mode Opus for code-reviewer/security-auditor + session metadata. `~1 day.`
+3. **P2 Re-review fast path** — inter-diff only, skip git-history-reviewer, target 5-10 min. `~3 days.`
+
+**Phase 5** carries the P0-P9 priorities (existing) with status updates.
+**Phase 6** integrates the managed-agents platform features (P10-P13 + new Items A-N from the May 2026 capability survey).
+
+---
+
+## Shipped (in version order)
+
+| Version | Change | PR | Impact |
 |---|---|---|---|
-| 1 | Multi-agent coordinator (`callable_agents` research-preview) replacing 5 separate sessions | v1.9.0 (PR #45) | -49% cost on large PRs |
-| 2 | Pre-computation of blame/churn/file-status/diff-check on the runner | v1.11.0 (PR #46) | -33% wall time on Laravel cross-repo bench |
-| 2 | Verifier on Sonnet (was Opus); git-history-reviewer on Haiku (was Sonnet) | v1.11.0 (PR #46) | **3× faster verifier** — qai-fe PR #239 dropped 39 min → 13 min on same diff |
-| 3 | Severity-aware verdict gate + DEFERRED status | v1.12.0 (PR #49) | Lows/nits don't block; defense-in-depth rejects `[blocker] — DEFERRED` |
-| 3 | SSE delivery latency mitigation — REST events fallback at 90s quiet timeout | v1.12.0 (PR #49) | Caps stuck-stream tail latency |
-| 3 | Extractor narration anchor (`(?<!\`)## Code Review`) | v1.12.0 (PR #49) | Fixes qai-be #635 narration leak |
-| 3 | learn.py stderr capture | v1.12.0 (PR #49) | qai-be #635 debugging gap |
-| 3 | `air_ref` input parameter for cross-repo benchmarking | v1.11.0 (PR #46) | Lets a feature branch run against real consumer PRs without touching their main config |
-| 4 | Re-review gate narrowed to blocker-only (mediums = warnings) | v1.12.0 (PR #51) | svc-transcribe #37 — would have flipped all 13 CHANGES_REQUESTED re-review rounds to APPROVED |
-| 4 | Carry-forward suppression — auto-DEFER 2nd consecutive NOT FIXED on non-blockers (managed mode only) | v1.12.0 (PR #51) | Eliminates the perpetual-loop pattern (svc-transcribe #37 finding #2: 13 NOT FIXED rounds in a row) |
-| 4 | Workflow concurrency — coalesce rapid-fire pushes per PR (`cancel-in-progress: true`) | v1.12.0 (PR #51) | Prevents overlapping reviews; the latest push runs to completion |
-| 4 | Legacy missing-severity default flipped to `blocker` (conservative-gating) | v1.12.0 (PR #51) | Pre-v1.12 prior bodies (no `[severity]` tags) keep gating instead of silently un-gating |
-| 5 | Structured `## air review (run failed)` fallback comment + 422 retry on review post | v1.12.1 (PR #54) | Replaces 422 cascade with actionable signal; sanitizes response-body diagnostics |
-| 5 | Debug log of `coordinator_out[:2000]` on SHA-mismatch | v1.12.2 (PR #57) | Diagnostic instrumentation that confirmed the SSE/REST race hypothesis |
-| 5 | SSE/REST race fix: retry drain on eventually-consistent events (per-attempt delta tracking) | v1.12.3 (PR #61) | qai-be #635-style failures (cached coordinator finishes in ~92s, REST events lag) recover |
-| 5 | REST polling until session terminal — handles SSE stream-close mid-session | v1.12.4 (PR #62) | qai-be #666 went from 92s empty-output to 1432s + real review (validated in production) |
-| 5 | Billing-aware structured-fallback: detects `BetaManagedAgentsBillingError`, posts top-up snippet | v1.12.5 (PR #64) | svc-transcribe billing exhaustion now surfaces as actionable comment instead of stack trace |
-| 5 | Footer-regex word-boundary trap fixed — orchestrator captures the review even when coordinator emits trailing narration without a newline | v1.12.6 (PR #67) | qai-be #666 round 7 verifier output recovered: `\b` requires word-boundary, fails when 40-hex SHA is followed by `Wiki` (both `\w`) |
+| v1.9.0 | Multi-agent coordinator (`callable_agents` research-preview) replacing 5 separate sessions | #45 | -49% cost on large PRs |
+| v1.11.0 | Pre-computation of blame/churn/file-status/diff-check on the runner | #46 | -33% wall time on Laravel cross-repo bench |
+| v1.11.0 | Verifier on Sonnet (was Opus); git-history-reviewer on Haiku (was Sonnet) | #46 | **3× faster verifier** — qai-fe PR #239 dropped 39 min → 13 min on same diff |
+| v1.11.0 | `air_ref` input parameter for cross-repo benchmarking | #46 | Feature branches run against real consumer PRs without touching their main config |
+| v1.12.0 | Severity-aware verdict gate + DEFERRED status | #49 | Lows/nits don't block; defense-in-depth rejects `[blocker] — DEFERRED` |
+| v1.12.0 | SSE delivery latency mitigation — REST events fallback at 90s quiet timeout | #49 | Caps stuck-stream tail latency |
+| v1.12.0 | Extractor narration anchor `(?<!\`)## Code Review` + learn.py stderr capture | #49 | Fixes qai-be #635 narration leak |
+| v1.12.0 | Re-review gate narrowed to blocker-only (mediums = warnings) | #51 | svc-transcribe #37 — would have flipped all 13 CHANGES_REQUESTED rounds to APPROVED |
+| v1.12.0 | Carry-forward suppression — auto-DEFER 2nd consecutive NOT FIXED on non-blockers | #51 | Eliminates perpetual-loop pattern (svc-tx #37 finding #2: 13 NOT FIXED rounds in a row) |
+| v1.12.0 | Workflow concurrency — `cancel-in-progress: true` | #51 | Prevents overlapping reviews; latest push runs to completion |
+| v1.12.0 | Legacy missing-severity default flipped to `blocker` | #51 | Pre-v1.12 prior bodies keep gating instead of silently un-gating |
+| v1.12.1 | Structured `## air review (run failed)` fallback comment + 422 retry on review post | #54 | Replaces 422 cascade with actionable signal |
+| v1.12.2 | Debug log of `coordinator_out[:2000]` on SHA-mismatch | #57 | Diagnostic instrumentation that confirmed the SSE/REST race hypothesis |
+| v1.12.3 | SSE/REST race fix: retry drain on eventually-consistent events (per-attempt delta tracking) | #61 | qai-be #635-style failures (~92s coordinator + REST lag) recover |
+| v1.12.4 | REST polling until session terminal — handles SSE stream-close mid-session | #62 | qai-be #666 went from 92s empty-output to 1432s + real review |
+| v1.12.5 | Billing-aware structured-fallback (`BetaManagedAgentsBillingError`) | #64 | svc-tx billing exhaustion → actionable comment instead of stack trace |
+| v1.12.6 | Footer-regex word-boundary trap fixed | #67 | qai-be #666 round 7 verifier output recovered: `\b` failed when 40-hex SHA followed by `Wiki` (both `\w`) |
+| **v1.13.0** | **5 prompt additions** — exposure escalation (verifier), CLAUDE.md gotcha grep + paired-doc drift + gate-output symmetry (code-reviewer), category-symmetric respond gate (review-respond) | #70 | Captures new failure classes from ai-relay #153 + qai-be HIPAA cross-patient leak + qai-be #732 respond cycle |
 
-The 5-session → 1-coordinator + Haiku/Sonnet tiering combination has bought us most of the **cost** win projected in `cost-optimization-plan.md`. Empirical numbers (next section) show the **latency and reliability** bottlenecks have moved.
+---
 
-## What recent runs actually show
+## Current production data
 
 ### Wall time (10 successful runs, May 1-2 2026)
 
@@ -52,258 +79,354 @@ learn.py epilogue (5/PR)  ~3-10 min   only every 5 reviews
 
 ### Re-review density is the new norm
 
-PR #635 received **9 reviews over 2 days**. Comment sizes converged but not monotonically: 8.2KB → 6.7KB → 4.1KB → 6.0KB → 9.5KB → 5.7KB → 6.3KB → 4.6KB → 2.4KB. Specialists flag *different* things on similar diffs — variance, not just convergence.
+PR #635 received 9 reviews over 2 days. Comment sizes converged but not monotonically: 8.2KB → 6.7KB → 4.1KB → 6.0KB → 9.5KB → 5.7KB → 6.3KB → 4.6KB → 2.4KB. Specialists flag *different* things on similar diffs — variance, not just convergence.
 
-### Failure profile (last 50 runs, updated 2026-05-05)
+### Failure profile (updated 2026-05-21)
 
-| Mode | Count | Status |
+| Mode | Recent count | Status |
 |---|---|---|
-| Successful | 30+ | normal |
+| Successful | 36+ in last 7d | normal |
 | `Skipped` (own-PR, closed-PR, race-with-merge) | many | working as intended |
-| Cancelled (race-with-push) | ~5 | mitigated via `commit_id` pinning + supersede check; v1.12.0 added `cancel-in-progress: true` so this is now expected (not a failure) |
-| **`422 Validation Failed` posting comment** | 2 | **no retry — single point of failure (see P1)** |
-| **Stale-coordinator-output cascade** (svc-transcribe #37 runs 25367689850, 25368789413, 25369351035) | 3 | **REPRODUCIBLE on long re-review chains** — coordinator returns in 92.4-92.5s (vs typical 1500-2400s) with `Reviewed at:` footer pointing at the PRIOR head SHA. Orchestrator's SHA-validation refuses the verdict; pre-v1.12.1 raw-post fallback 422'd against GitHub's near-duplicate detection. v1.12.1 ships the structured `## air review (run failed)` fallback as the orchestrator-side defense; the underlying coordinator-side root cause is unaddressed (see "Coordinator regurgitation hypothesis" below). **Cache-bust workaround (whitespace commit on README) DID NOT recover** — disproves the prefix-cache theory. **PR-restart workaround DID recover** — closing the failing PR and reopening identical branch as a fresh PR avoids the re-review codepath entirely (no `prior_review_body` → coordinator must dispatch real specialist work). |
-| Pre-PR-#46 stuck runs (45+ min) | 0 in May | gone after pre-comp + tier swap |
+| Cancelled (race-with-push, concurrency cancel) | 19 in last 7d | `cancel-in-progress: true` working as designed |
+| `422 Validation Failed` posting comment | 0 in last 7d | v1.12.1 retry path holding |
+| Stale-coordinator regurgitation | 0 in last 7d | v1.12.3/v1.12.4 mitigations holding |
+| Billing exhaustion | 0 in last 7d | v1.12.5 fallback dormant |
+| **SSE-quiet / coordinator dispatch latency** | 3+ in last 3d (2026-05-19→21) | **NEW PATTERN — see below** |
 
-### Coordinator regurgitation hypothesis (root cause for stale-coordinator failure)
+### 2026-05-19 → 21 incidents — coordinator dispatch latency
 
-After three reproductions on svc-transcribe #37 (15+ re-review rounds on the same PR) and a failed cache-bust attempt, the strongest remaining hypothesis for the stale-coordinator failure mode:
+A new failure mode emerged 2026-05-19 evening: coordinator sessions reach `status=running` but emit zero `agent.message` events for the entire poll budget. Events queue server-side and drain only on session termination. Reviews DO complete (real `## Code Review` posted), but at 30-45 min wall vs. typical 18-22.
 
-**The coordinator model is regurgitating `prior_review_body` from its user-message context instead of dispatching specialists.** The 92.5s wall time is enough for ~one model turn — not the 3-turn protocol the coordinator is supposed to follow. For re-review mode, `build_pr_context` inlines the full prior bot review (with its `Reviewed at: <prior-sha>` footer) so specialists can do FIXED/NOT FIXED classification. On long re-review chains the prior body is heavily PR-specific; the coordinator likely "recognizes" it and short-circuits TURN 1's parallel dispatch, emitting a TURN 3 that copies the prior body — including the prior SHA in the footer.
+Examples:
+- **qai-fe #319** (2026-05-20 10:41) — success after 2619s, `agent_msgs=0` through full REST poll, drained at session end
+- **ai-relay #184** (2026-05-21 17:25) — success after 1453s, `agent_msgs=0` for the entire 1246+s poll window
+- **qai-be #851** (2026-05-21 18:06) — still in-progress at 49 min as of audit
+- **ai-relay PR #184 lost ~30 min** to operator-driven cancellations (3 cancelled attempts before 4th left alone long enough to complete)
 
-Evidence supporting the hypothesis:
-- Coordinator wall time on failures: 92.4s, 92.5s, 92.5s (highly consistent, ~one model turn)
-- Failures are PR-specific: only svc-transcribe #37 hit it; PRs with shorter re-review chains haven't reproduced
-- The `Reviewed at:` SHA in the broken outputs always matches the most recent prior bot review's SHA (pattern: most-recent prior body copied)
-- Cache-bust commits (whitespace changes to README) DID NOT recover — eliminates Anthropic prefix-cache as the primary cause
-- Closing the failing PR and reopening from the same branch (which removes the re-review codepath entirely) DID recover
+**Likely root cause:** Anthropic-side SSE event delivery is degraded. Work proceeds server-side; live delivery to GHA-side workflow is broken. Reviews completing despite zero in-flight events points to server-side queueing.
 
-This is a **model behavior issue**, not a caching issue. The fix is on the prompt side and/or the orchestrator side. See P0 below.
+**Implications for Phase 0:**
+- The originally-drafted `agent_msgs=0` early-abort (review §D.2 in plan-review) would have **falsely aborted** these successful runs. Revised version: log an informational note ("SSE delivery degraded — reviews taking ~30-45 min today vs usual ~22 min. Do not cancel.") instead of aborting.
+- Operator visibility is the real problem to solve, not abort logic.
+
+### Coordinator regurgitation hypothesis (from svc-transcribe #37 — historical)
+
+After three reproductions on svc-tx #37 (15+ re-review rounds on same PR) and failed cache-bust:
+
+**Hypothesis:** The coordinator regurgitates `prior_review_body` from its user-message context instead of dispatching specialists. 92.5s wall is enough for ~one model turn — not the 3-turn protocol. Coordinator likely "recognizes" the heavy prior-PR-specific body and short-circuits TURN 1, emitting TURN 3 that copies the prior body including its prior-SHA footer.
+
+Supporting evidence:
+- Coordinator wall on failures: 92.4s, 92.5s, 92.5s (highly consistent, ~one model turn)
+- Failures PR-specific: only svc-tx #37 hit it
+- `Reviewed at:` SHA in broken outputs always matches most recent prior bot review's SHA
+- Cache-bust commits DID NOT recover — rules out Anthropic prefix-cache
+- PR-restart workaround (close + reopen identical branch as fresh PR, removing re-review codepath) DID recover
+
+This is a **model-behavior issue**, not caching. Fix is on prompt/orchestrator side. See P0-NEW below.
 
 ### Hidden observability gap
 
-`managed/review.py` prints phase markers (`[1] Syncing... [2] Fetching... [3] codex... [4] coordinator...`) to a buffered stdout that only flushes when the script exits. The GHA log shows all of these timestamped at **the same instant** — script-exit time, ~30 min after they printed. If a run hangs at minute 35, the live log shows nothing past `[1] Syncing...` until the watchdog kills it. This is currently working around itself by luck.
+`managed/review.py` prints phase markers to block-buffered stdout that only flushes when the script exits. GHA log timestamps all markers at **the same instant** — script-exit time. If a run hangs at minute 35, live log shows nothing past `[1] Syncing...` until the watchdog kills it. See P0.
 
 ---
 
-## Reframed improvement priorities (Phase 5 candidates)
+## Phase 0 — Audit-derived fixes (ship NEXT)
 
-Sorted by **value × evidence × cost-to-ship**. Each has a concrete trigger. Phase 4 just shipped in v1.12.0; the remaining priorities are unchanged in shape but their relative ranking shifted now that the verdict-gate problem is closed.
+Three small fixes derived from the 2026-05-19/20/21 audit. All client-side patches in `managed/review.py` + `managed/api.py`. No new managed-agents features. `<1 day total.`
 
-**Recommended next ship:** P0-NEW (coordinator regurgitation diagnostic + retry) is now the highest priority — it's the only item with active production impact. P0 (progress flush), P1 (post-failure recovery — partially shipped in v1.12.1), and P7 (wiki epilogue dispatcher) form a 2-3 day bundle as a follow-up.
+### A1 — Capture full `coordinator_out` on SHA-mismatch
+**Why:** Today only first 2000 chars dump on failure. qai-be #830 (2026-05-19) had a substantive 4715-char Re-review rejected by SHA-validator; without full dump we can't tell if footer was absent, stale, or regex-missed.
+**Fix:** ~5 LOC change to dump full `coordinator_out` to a debug artifact instead of truncating.
+**Source:** `air-improvements-plan-review.md §D.1`
+
+### A2 — SSE-degraded informational log (revised — NOT abort)
+**Why:** Original draft: `agent_msgs=0` early-abort at t≥300s. **Revised per 2026-05-21 audit:** that would have falsely killed every successful slow run today. Reviews DO complete via REST event drain at session termination.
+**Fix:** when SSE-quiet → REST-poll path triggers, log: `"SSE delivery degraded — REST polling. Reviews are taking ~30-45 min today vs. usual ~22 min. Do not cancel; events drain at session termination."` Solves the actual problem (operators cancelling because they assume hang) without false-aborting work.
+**Source:** `air-improvements-plan-review.md §D.2` (revised 2026-05-21)
+
+### C10 / P12 — Drop `-research-preview` from beta header
+**Why:** `managed/api.py` uses `managed-agents-2026-04-01-research-preview`. Public-beta header is `managed-agents-2026-04-01` (no suffix). Multiagent moved from research preview to public beta May 2026.
+**Fix:** one-line change in `managed/api.py`.
+**Risk:** non-zero — if research-preview is more permissive than public beta on some surface we depend on, immediate failures. Validate against dogfood PR before rollout.
+**Source:** `air-improvements-plan-review.md §C.1`, `legacy P12`
 
 ---
 
-### P0-NEW — Coordinator regurgitation diagnostic + retry ⟵ **next**
+## Phase 1 — Performance + safety (~1 day)
 
-**Problem:** confirmed reproducible on svc-transcribe #37 across three runs. Coordinator returns in ~92.5s (vs typical 1500-2400s) with output whose `Reviewed at:` footer matches the prior bot review's SHA, not the current head. v1.12.1 ships orchestrator-side defense (structured run-failed comment) but doesn't address the model behavior. The user's escape hatch is to close the failing PR and reopen the same branch as a fresh PR — which works but is a manual workaround, not a fix.
+### B1 / Item E — Fast mode for Opus 4.7
+**What:** `{"id":"claude-opus-4-7","speed":"fast"}` model override on `code-reviewer.md` and `security-auditor.md` frontmatter. Shortens median review time at zero prompt cost.
+**Verification needed:** local CLI router must honor the `model:` field's object form. If not, gate on managed-agent path only.
+**Source:** `air-improvements-plan.md §3.1 E + §3.4 O`
 
+### C8 / Item M — Session metadata
+**What:** Patch the managed entrypoint (`client.beta.sessions.create`) to set `metadata: {pr_number, repo_path, mode, plugin_version}`. Enables every future ops question — cost per repo/mode/version, failure rate per cohort.
+**Cost:** trivial.
+**Source:** `air-improvements-plan.md §3.3 M`
+
+**Dropped from Phase 1** (vs. original plan):
+- **Item D thread interruption** — deferred entirely; no specialist-level hangs observed in audit (only coordinator-level, which interruption doesn't help)
+- **Item L `always_ask` wiki bash** — re-scoped to medium under Safety (F1) because plumbing `--dry-run` from GHA → coordinator is harder than rated, and no production occurrence yet
+
+---
+
+## Phase 2 — Structured findings + outcomes (SEQUENTIAL, 6-10 weeks total)
+
+**Sequencing rule:** B + A + C all touch the same orchestrator surface (coordinator + verifier). Regressing any one affects every review. Ship each ALONE, observe ~5 production PRs, then ship next.
+
+### 2.a — Item B: Custom tool `record_finding` (3-4 weeks, ship FIRST)
+**Why:** Today's specialists return free-text markdown; verifier parses titles like `[matches author pattern: X (3x)]` via regex. A `record_finding` tool returns typed data, eliminates regex-parsing failure class, makes wiki updates mechanical.
+
+**Scope** (re-costed from plan's ••• to ••••):
+- 4 specialist prompts rewritten to emit tool calls instead of markdown
+- Verifier parsing logic rewrites
+- Wiki-update logic in `review.md` rewrites (currently parses markdown)
+- **Rendering layer added** — user-facing `## Code Review` markdown body still needs to be rendered FROM the structured data. `Strengths`, `Reviewed at: <sha>` footer, `[already raised by @<author>]` all flow through this.
+
+**Schema sketch** in `air-improvements-plan.md §5.2`.
+
+**Source:** `air-improvements-plan.md §3.1 B + §5.2`, `plan-review §B.2`, `§E.2`
+
+### 2.b — Item A: Outcomes + rubric (then, 2-3 weeks)
+**Why:** v1.12.6's `\b` word-boundary bug (PR #67) shipped because we lacked an automated structural check on verifier output. A 5-criterion rubric (`## Code Review` opener, `Reviewed at: <40hex>` footer + SHA match, has at least one severity section, no `[empty message]` text) catches the class AT SESSION END. Pattern 1 in 2026-05-19 audit (qai-be #830 silently discarded 4715-char review) is exactly the bug class.
+
+**Status:** research preview → public beta May 2026. Needs Outcomes access request first (`https://claude.com/form/claude-managed-agents`).
+
+**Rubric draft** + wiring sketch in `air-improvements-plan.md §5.1`.
+
+**Source:** `air-improvements-plan.md §3.1 A + §5.1`, `plan-review §E.1`, legacy P11
+
+### 2.c — Item C: Persistent worker threads (then, ~2 weeks)
+**Why** (revised motivation per `plan-review §B.5`): the original use case ("verifier asks specialist: are you sure this is pre-existing given new caller?") is already solved by v1.13.0's exposure-escalation clause. **New motivation:** verifier-driven evidence interrogation on borderline `[matches author pattern: X (Nx)]` annotations — "what evidence supports your blocker call here?" Specialist thread is already cache-warm; follow-up costs only new content tokens.
+
+**Protocol extension** sketched in `air-improvements-plan.md §5.3` (TURN 2.5 — conditional, 1 round cap).
+
+**Source:** `air-improvements-plan.md §3.1 C + §5.3`, `plan-review §B.5`
+
+---
+
+## Phase 3 — Wiki + MCP refactor (3-4 weeks)
+
+### Item G — Skills-based wiki loading (~3 weeks)
+**Why:** Every specialist eagerly loads every wiki file × 4 specialists = same content in 4 separate context windows per review. Skills API loads metadata in system prompt (~500 tokens once), then each agent `bash cat`s the specific section it needs. Cuts ~5-15k tokens per specialist invocation on chatty wikis.
+**Source:** `air-improvements-plan.md §3.2 G`
+
+### Item H — Codex as MCP server (large)
+**What:** Move codex from `--no-codex` bash shellout in `review.md` to an MCP server registered in the coordinator's agent config. Removes ~100 LOC of codex-shellout bash; codex becomes a structured tool call with results streamed into `agent.mcp_tool_use` events.
+**Needs:** MCP shim authored.
+**Source:** `air-improvements-plan.md §3.2 H`
+
+### Item I — Files API session-scoped artifacts (medium)
+**What:** Write verifier output, raw specialist findings, codex findings to `/mnt/session/outputs/` so they're retrievable post-hoc via `scope_id=session_id`. Use for the local cache in `~/Documents/reviews/<repo>/...` instead of pulling from PR comments.
+**Side benefit:** removes the wiki-push-failure recovery branch in `coordinator.md` — artifacts are durable independent of wiki push state.
+**Source:** `air-improvements-plan.md §3.2 I`
+
+---
+
+## Phase 4 — Versioning + scale-out (long horizon)
+
+### Item F — Agent versioning (medium-large)
+**Why:** Air's coordinator + specialist prompts evolve with every plugin release. Today an update affects all repos simultaneously (no canary). Pinning versions per repo via `.air-config` enables canary rollouts + rollback.
+**Open question** (`plan §6 Q3`): workspace-scoped agents (shared across all installs) vs per-user. Workspace is faster to ship; per-user lets users pin older versions.
+**Source:** `air-improvements-plan.md §3.1 F + §4 Phase 4`
+
+### Item J — Self-spawning coordinator for monorepo PRs (••••, large)
+**Why:** Biggest weakness today is huge PRs (50+ files spanning services). `{"type":"self"}` in roster lets coordinator fan out: one sub-coordinator per service, each running 4-specialist pipeline against its slice. Aggregate verifier consumes sub-results.
+**Trigger:** PR with `changedFiles > 50` OR distinct top-level directories `> 3`.
+**Source:** `air-improvements-plan.md §3.2 J + §4 Phase 4`
+
+### Item N — Self-hosted sandbox for PHI repos (••••, conditional)
+**Why:** If any LifeMD/qai repo carries PHI in diffs, running on self-hosted sandbox means diff never traverses Anthropic infra. Required for HIPAA-adjacent workloads.
+**Open question** (`plan §6 Q2`): does any LifeMD repo currently routed through air carry PHI in diffs?
+**Source:** `air-improvements-plan.md §3.3 N + §4 Phase 4`
+
+---
+
+## Phase 5 — Reframed P0-P9 priorities (from prior roadmap)
+
+Sorted by **value × evidence × cost-to-ship**. Each has a concrete trigger.
+
+### P0-NEW — Coordinator regurgitation diagnostic + retry
+**Status:** Partially shipped (v1.12.1 defense, v1.12.3-v1.12.6 mitigations). Root-cause retry-on-regurgitation not yet shipped.
 **Two-step fix:**
+1. Debug logging (v1.12.2 shipped) — first 1000 chars of `coordinator_out` on SHA-mismatch
+2. **Detection + retry mechanic** (NOT yet shipped) — if first coordinator returns in <300s AND output footer SHA matches `prior_sha`, retry the coordinator session WITHOUT `prior_review_body` (degrades to fresh-review codepath for retry). Tradeoff: loses FIXED/NOT-FIXED classification — acceptable.
+**Alternative rejected:** strengthening verifier_task prompt with imperative SHA instruction — won't help if coordinator isn't reaching verifier in regurgitation mode (92.5s isn't enough for 4-specialist + verifier dispatch).
+**Evidence:** 3 production failures on svc-tx #37 (runs 25367689850, 25368789413, 25369351035), all at ~92.5s, all with prior-SHA footer. Cache-bust failed; PR-restart succeeded.
 
-1. **Debug logging step (ship first, ~10 LOC).** When the SHA-mismatch fallback fires, log the first 1000 chars of `coordinator_out` to stderr so the next failure gives us the actual coordinator output. Confirms or refutes the regurgitation hypothesis before we spend effort on the larger fix:
-   ```python
-   if not review_extracted:
-       print(
-           f"  [debug] coordinator_out (first 1000 chars on SHA-mismatch): "
-           f"{coordinator_out[:1000]!r}",
-           file=sys.stderr,
-       )
-       # ...existing structured fallback...
-   ```
-   Trivial, zero-risk, ships as a hotfix in v1.12.2.
+### P0 — Live progress flush (~1 day)
+**Problem:** stdout is block-buffered; users can't tell if a 30-min run is making progress or hung. Today this gets confused with actual hangs.
+**Fix:** add `flush=True` to all `print()` calls in `managed/review.py` phase markers + run with `python -u` in `managed-review.yml`. Zero risk, zero cost.
+**Compounds with:** A2 (SSE-degraded info log) — both improve operator visibility.
 
-2. **Detection + retry mechanic (ship after step 1 confirms).** If the first coordinator session returns in <300s AND the output's footer SHA matches `prior_sha` (i.e., regurgitation pattern confirmed), automatically retry the coordinator session WITHOUT `prior_review_body` in the user message — degrading to a fresh-review codepath for that retry. One retry, structured logging, costs ~1 extra coordinator session in the failure case (free in the happy path).
+### P1 — Post-failure recovery
+**Status:** Path A + B shipped v1.12.1; Path C deferred to P0-NEW step 2.
 
-   Tradeoff on retry path: the fresh-review fallback loses re-review's prior-finding classification (FIXED / NOT FIXED / PARTIALLY FIXED / DEFERRED). Acceptable — a fresh-review-style finding list with the current diff is strictly better than a stale-SHA copy of the prior round.
+### P2 — Re-review fast path (~3 days, biggest user-perceived win)
+**Problem:** PR #635's 9 re-reviews each ran the full 4-specialist + verifier loop on entire diff. Re-reviews on a 50-line inter-diff don't need code-reviewer/simplify/security-auditor reasoning over the full PR Context — they need prior-finding classification + new findings on inter-diff only.
+**Fix:** introduce re-review-specific coordinator prompt:
+1. Fans out specialists on **inter-diff only** (not full PR)
+2. Skips git-history-reviewer (blame/churn didn't change)
+3. Runs verifier with prior-findings classification as primary task
+4. Targets 5-10 min total instead of 30
+**Backtest:** PR #635 has 9 reviews of ground truth.
+**Evidence:** PR #635's last review (2.4KB, all FIXED + 2 nits) took 23.6 min — same as first review. Work was 5× simpler; cost unchanged.
 
-**Alternative considered (and rejected):**
+### P3 — Cache stable context across re-reviews (~1 week, compounds with P2)
+**Problem:** every coordinator session re-loads PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, REVIEW.md, SEVERITY-CALIBRATION.md fresh.
+**Fix:** put wiki + PROJECT-PROFILE in stable prefix at start of user message; add `cache_control: ephemeral` breakpoints. Instrument `usage` per turn; report cache_read vs cache_create ratios.
 
-- **Strengthen verifier_task prompt with imperative SHA instruction.** Adding "MUST end with `Reviewed at: <THIS-EXACT-SHA>`. Copy this SHA verbatim — do NOT use any SHA from the prior review body." Hypothesis: the coordinator's TURN 3 isn't reaching the verifier in regurgitation mode at all (92.5s isn't enough for the 4-specialist + verifier dispatch). Strengthening the verifier prompt won't help if the verifier never runs. Keep this on the list as a secondary mitigation paired with #2 above.
+### P4 — Auth-handler / config-only PR fast path (~1 week, niche)
+**Fix:** if `additions + deletions < 50` AND no security-sensitive paths touched (from PROJECT-PROFILE), skip security-auditor + git-history-reviewer.
+**Risk:** missing a security issue in a tiny PR. Mitigation: conservatively define "security-sensitive paths".
 
-**Evidence:** 3 production failures on svc-transcribe #37 (runs 25367689850, 25368789413, 25369351035), all at ~92.5s, all with prior-SHA footer. Cache-bust commit failed to recover. PR-restart workaround succeeded.
+### P5 — Move codex into coordinator (eval-only) — **probably don't do**
+35-45s wall savings not worth 2.5× coordinator cost. Re-evaluate only if Anthropic ships parallel-tool support on Sonnet.
 
----
+### P6 — Codex prompt tightening (~1 day, modest)
+Measure citation rate over 20 runs. If <10%, evaluate dropping codex. If >30%, tighten prompt.
 
-### P0 — Live progress flush (1-day fix)
+### P7 — Wiki epilogue dispatcher (~1 day, latency-only win)
+**Fix:** dispatch `learn.py` as separate `workflow_dispatch` job (or `needs: [review]` sibling job) triggered after review posts. User-visible review latency stops at "Posted: ..." instead of dragging through learn.py.
+**Evidence:** 42-min run (`25237782482`) was 30 min coordinator + 10 min learn.py.
 
-**Problem:** stdout is block-buffered; users can't tell if a 30-min run is making progress or hung. We added `sys.stdout.flush()` in only one place (after learn.py). All other phase markers are buffered. Today this gets confused with actual hangs (e.g. the false report on run 25237782482 looked stuck for 42 min).
+### P8 — Cross-repo benchmark publication (~1 day)
+**Status:** `air_ref` shipped v1.11.0. Set up weekly cross-repo run on known-good qai-be PR fixture; publish cost / wall time / finding count parity to wiki page.
 
-**Fix:** add `flush=True` to all `print()` calls in `managed/review.py`'s phase markers, plus run with `python -u` in `managed-review.yml`. Zero risk, zero compute cost, transforms debuggability.
-
-**Evidence:** every recent log we inspected has all phase markers timestamped within 1 second of each other, at the script-exit time.
-
-### P1 — Post-failure recovery (~partial; v1.12.1 shipped Path A+B, Path C deferred)
-
-Three distinct failure paths now have production cases:
-
-**Path A — `422 Validation Failed` on the comment post** ✅ **shipped in v1.12.1** (`_post_review_comment_with_retry`): on 422, parse the GitHub `message` field (scrubbed — avoids leaking PR snippets that GitHub may echo). If the message indicates near-duplicate detection, skip retry. Otherwise retry once after 2s. Both POSTs use `timeout=30`.
-
-**Path B — Replace "post raw" fallback with structured comment** ✅ **shipped in v1.12.1**: when SHA-validation extractor refuses the coordinator output, post `## air review (run failed)` with the run URL, coordinator wall-time, the regurgitation/cache hypothesis, and a "push a small commit" workaround suggestion. Heading deliberately does NOT start with `## Code Review` to avoid colliding with `startswith("## Code Review")` checks in `pr_conversation.py` and the bash CLI flows.
-
-**Path C — Coordinator regurgitation root cause** ⟶ **see P0-NEW above**. Production-confirmed on svc-transcribe #37 across 3 runs. Cache-bust workaround failed; PR-restart workaround succeeded. v1.12.1's defense is signal-without-fix; the root cause is on the model-behavior side and needs the diagnostic-then-retry approach in P0-NEW.
-
-**Evidence (cumulative, 2026-05-05):** 4 of last 50 production runs hit one of these paths. v1.12.1's defense converts silence to signal; v1.12.2's diagnostic logging (P0-NEW step 1) gives us the data to confirm the regurgitation hypothesis; v1.13.0's retry mechanic (P0-NEW step 2) closes the loop.
-
-### P2 — Re-review fast path (3-day fix, biggest user-perceived win)
-
-**Problem:** PR #635's 9 re-reviews each ran the full 4-specialist + verifier loop on the entire diff. Re-reviews on a 50-line inter-diff don't need code-reviewer, simplify, and security-auditor all reasoning over the full PR Context — they need *prior-finding classification* (FIXED / NOT FIXED / PARTIALLY FIXED / DEFERRED) plus *new findings on the inter-diff only*. Current implementation reuses the standard coordinator path.
-
-**Fix:** introduce a re-review-specific coordinator prompt that:
-1. Fans out specialists on the **inter-diff only** (not the full PR)
-2. Skips git-history-reviewer (its blame/churn data didn't change since last review)
-3. Runs verifier with prior-findings classification as primary task, new findings as secondary
-4. Targets 5-10 min total instead of 30 min
-
-**Evidence:** PR #635's last review (2.4KB output, all FIXED + 2 nits) took 23.6 min — the same as its first review of the full diff. The work was 5× simpler; the cost was unchanged.
-
-**Risk:** quality drift if specialists miss something the inter-diff hides via context they had before. Mitigation: validate against PR #635 history (we have 9 reviews of ground truth to backtest against).
-
-### P3 — Cache stable context across re-reviews (1-week fix, compounds with P2)
-
-**Problem:** every coordinator session re-loads PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, REVIEW.md, and SEVERITY-CALIBRATION.md fresh. These files change slowly (often unchanged across 5+ consecutive reviews on the same repo).
-
-**Fix:** put the wiki content + PROJECT-PROFILE in a stable prefix at the start of the user message and add `cache_control: ephemeral` breakpoints. The 4 specialists' shared coordinator-context already benefits from cache via `callable_agents`, but we currently don't pin the breakpoints intentionally.
-
-**Evidence:** re-review on PR #635 with identical wiki content theoretically gets ~70% of its tokens from cache. Per Anthropic docs, prompt caching reduces input cost 10× and saves latency. We've never measured the actual cache hit rate on coordinator sessions.
-
-**Action:** instrument `usage` per turn (already accessible via `/sessions/<id>/threads`) and report cache_read vs cache_create ratios. If <50% on stable prefixes, restructure the user message.
-
-### P4 — Auth-handler / config-only PR fast path (1-week fix, niche but high signal)
-
-**Problem:** trivial PRs (a single config file edit, a typo fix, a 5-line dependency bump) get the full 30-min treatment. We have data: PR #41 was reviewed in <5 min by an early prototype because the diff was tiny.
-
-**Fix:** at `build_pr_context` time, if `additions + deletions < 50` AND no security-sensitive paths touched (extracted from PROJECT-PROFILE), skip security-auditor and git-history-reviewer. Run code-reviewer + simplify only. Verifier on Sonnet finishes quickly with 2 specialist outputs.
-
-**Evidence:** today the smallest PR we've reviewed in production took 13 min (qai-fe #239, fewer changes). Coordinator floor seems to be ~10 min regardless of input size.
-
-**Risk:** missing a security issue in a tiny PR. Mitigation: define "security-sensitive paths" conservatively in PROJECT-PROFILE — auth, env, deploy, secrets paths always trigger full panel.
-
-### P5 — Move codex into the coordinator (eval-only)
-
-**Problem:** codex runs sequentially before the coordinator session (Pattern B). It's bounded at 35-45s, but those seconds are pure latency. Pattern A (codex inside the coordinator as a sub-agent) would parallelize codex with the 4 specialists.
-
-**Fix:** evaluate Opus coordinator with codex as a 5th sub-agent. Earlier testing showed Sonnet coordinator with codex inside doesn't parallelize (serializes tool calls — 13 min wall, $5.63 vs current $4.14). Opus coordinator parallelizes but costs 2.5× the Sonnet equivalent.
-
-**Decision:** **probably don't do this.** 35-45s wall savings isn't worth 2.5× coordinator cost. Re-evaluate only if Anthropic ships parallel-tool support on Sonnet.
-
-### P6 — Codex prompt tightening (1-day fix, modest)
-
-**Problem:** codex runs in 35-45s but its output is rarely cited in the verifier's findings. We treat it as a low-weight third-party reviewer; the verifier dispatches to it only when it confirms a Claude finding.
-
-**Fix:** measure codex finding citation rate over 20 runs. If <10%, evaluate whether to drop codex (saves the 35s + the OpenAI API cost). If >30%, tighten codex prompt to reduce noise.
-
-**Evidence:** anecdotally, codex's findings overlap heavily with security-auditor's. Need quantitative data before deciding.
-
-### P7 — Wiki epilogue dispatcher (1-day fix, latency-only win)
-
-**Problem:** learn.py runs synchronously inside review.py's main job. On every 5th review it adds 3-10 min to wall time, blocking the GHA runner well past the time the review comment was posted.
-
-**Fix:** dispatch learn.py as a separate `workflow_dispatch` job triggered via `RemoteTrigger` after the review posts. The user-visible review latency stops at "Posted: ..." instead of dragging through learn.py.
-
-**Risk:** learn.py needs the same wiki credentials and target-repo checkout. Easier to ship the trigger as a sibling job in the same workflow file (`needs: [review]`) than as a separate dispatch — same outcome.
-
-**Evidence:** the 42-min run (`25237782482`) was 30 min coordinator + 10 min learn.py. Splitting them = users see "Posted!" at minute 31 instead of minute 42.
-
-### P8 — Cross-repo benchmark publication (~1-day fix, infrastructure now in place)
-
-**Status:** `air_ref` input parameter shipped in v1.11.0. The infrastructure exists; the recurring run does not. Set up a weekly cross-repo run on a known-good qai-be PR fixture and publish the results (cost, wall time, finding count parity) to a wiki page. **Builds the empirical loop we've been doing manually.**
-
-**Trigger:** when we propose Phase 5 work that touches the coordinator prompt, the verifier task template, or model tiers, the cross-repo benchmark is the first thing that fires to catch quality regressions.
-
-### P9 — Self-review deferrals from the v1.12.x stack
-
-Findings flagged by self-review on PRs #61–#64 that we deliberately deferred. Each is a "tighten on next pass" item — none block production today, but they're the next-in-line debt if any of the surrounding code changes again.
-
-**P9-a — `terminated_reason` format is the consumer-coupled contract for the billing matcher** (security-auditor self-review on PR #64). The billing-error fallback in `run_review` matches `_BILLING_REASON_HINTS` substrings against `coordinator_failure_reason`, which is `run_session`'s `terminated_reason` (built as `f"session error: {error!r}"` at the SSE event handler). If a future refactor changes that f-string format — e.g. to `f"session error type={type(error).__name__}, msg={error!s}"` — the substring match silently stops finding `"BetaManagedAgentsBillingError"` and the billing-aware comment regresses to the generic "other failure" branch. **Fix:** at `run_session`'s `terminated_reason` assignment site, add a comment pointing back to the consumer ("billing matcher in run_review reads this string"). Ideal long-term: surface `error.type + error.message` as a structured pair instead of a repr, so the matcher checks a stable schema instead of inferring from a repr. Cost: ~30 LOC + signature change to `SpecialistSessionError`. Trigger: any PR that changes how `run_session` formats `terminated_reason`.
-
-**P9-b — REST poll loop API-call amplification under universal failure** (security-auditor F1 on PR #62). `_poll_rest_until_done`'s `POLL_INTERVAL_S=30s` over `POLL_BUDGET_S=COORDINATOR_TIMEOUT_SECS*0.9 ≈ 2430s` produces up to ~80 outer-loop iterations × 2 API calls (`events.list` + `sessions.retrieve`) ≈ **~160 Anthropic API calls per stuck session** worst case. Fine when the failure mode is exceptional. Becomes a problem if a region-wide Anthropic incident or a class of cache-heavy coordinator runs causes every consumer's review to enter this loop simultaneously — could trip per-org rate limits. **Fix (when triggered):** circuit breaker on consecutive empty drains (5 in a row → abandon early) and/or exponential backoff (`30s → 60s → 120s → 240s`, capped). **Trigger:** instrument `_poll_rest_until_done` invocations per day; if it fires on >20% of reviews, this becomes the rule not the exception and the polling cadence needs revisiting.
-
-**P9-c — `_drain_via_rest` no-progress observability gap on stuck-running sessions** (code-reviewer on PR #62). The poll loop only drains REST events when the session has reached terminal state. A session that sits in `running` for the full 36-min budget produces ~72 liveness lines (`status=running agent_msgs=0`), all with the same `agent_msgs` count, with NO drain telemetry. Operators reading logs to diagnose "is the session making progress?" see only the iteration count. **Fix:** drain non-terminal events every Kth iteration (say K=5 ≈ 2.5 min) just to surface event-stream progress, OR include `getattr(sess, "open_threads", "?")` in the liveness line so operators see whether sub-agents are still being spawned. **Trigger:** the next time someone needs to debug a long-running session that never reaches terminal.
-
-**P9-d — `error!r` in `terminated_reason` may regress to leak fields** (security-auditor on PR #64). The Anthropic SDK 0.93.0 typed-error schemas for `BetaManagedAgents*Error` don't currently expose API keys, session UUIDs, or PR-diff content in declared fields. **But** the `terminated_reason` posts `error!r`, which trusts the SDK to never add an internal-correlation field, account ID, or session UUID to the error union schema. A future SDK release could add `request_id` or `account_id` and the repr would silently start posting that to public PR comments. **Fix:** post structured fields explicitly — `f"{error.type}: {error.message}"` — instead of `repr()`. Couples to P9-a (same site). **Trigger:** SDK version bump that touches the error schema.
-
-**P9-e — Stale `## Code Review` substring in the else-branch fallback prose** (security-auditor on PR #64, P9). The third (no-exception) fallback branch contains the literal `"## Code Review"` in narrative prose. Currently safe — `pr_conversation.py::BOT_REVIEW_PREFIXES` requires a trailing newline anchor that the prose mention lacks. **Risk:** if any future bash flow scans comments with un-anchored `grep '^## Code Review'`, this fallback body could be misclassified as a real review. **Fix:** rephrase to "without a recognised header" so the literal disappears from prose. **Trigger:** when next touching `pr_conversation.py` or any of `commands/*.md` flows that match on `## Code Review`.
-
-**P9-f — Self-referential "VorobiovD/air" link in dogfood reviews** (code-reviewer on PR #64). The non-billing failure branch posts "file an issue against [VorobiovD/air](https://github.com/VorobiovD/air)". On dogfood (`air-review.yml` running on this repo's PRs), the developer reading the comment IS in VorobiovD/air — the link is a self-reference. Minor cognitive friction. **Fix:** conditionally suppress the link when `args.repo == "VorobiovD/air"`, OR rephrase to "the air plugin repo" without the link. **Trigger:** if dogfood failures become noisy enough to be confusing.
-
-**P9-g — Duplicate `## air review (run failed)` header across three branches** (simplify on PR #64). Each branch in the structured-fallback opens with `"## air review (run failed)\n\n"` and ends with `{run_link_line}`. Today three call sites; if a fourth failure shape appears, a small `_run_failed_body(cause, fix, raw=None)` helper would consolidate. **Trigger:** adding a fourth branch.
+### P9 — Self-review deferrals from v1.12.x stack
+**P9-a** — `terminated_reason` consumer-coupled contract comment + structured error pair. Trigger: any PR changing `run_session` format.
+**P9-b** — REST poll API-call amplification (~160 calls/stuck session). Circuit breaker on consecutive empty drains + exp. backoff. Trigger: >20% reviews hit stuck-poll path.
+**P9-c** — `_drain_via_rest` no-progress observability (drain every Kth iter; surface `open_threads`). Trigger: next long-running session debug.
+**P9-d** — `error!r` repr may leak fields if SDK adds `request_id`/`account_id`. Post `f"{error.type}: {error.message}"` instead. Trigger: SDK schema bump.
+**P9-e** — Stale `## Code Review` substring in else-branch fallback prose. Rephrase to "without a recognised header". Trigger: next `pr_conversation.py` touch.
+**P9-f** — Self-referential `VorobiovD/air` link in dogfood failure comments. Conditional suppress when `args.repo == "VorobiovD/air"`. Trigger: dogfood failures become noisy.
+**P9-g** — `_run_failed_body` helper to dedupe three branches. Trigger: adding 4th failure branch.
 
 ---
 
-## Phase 6 candidates — Anthropic managed-agents platform features
+## Phase 6 — Managed-agents platform features (P10-P13 + capability uptake)
 
-Survey of features Anthropic shipped to managed-agents between our v1.9.0 design (research-preview multiagent, 2026-04-25) and the public-beta wave (May 6-7, 2026). Most of these don't justify migration cost today, but they have clear triggers where the calculus would flip. Cross-references the latest docs at <https://platform.claude.com/docs/en/managed-agents>.
+### P10 — Webhooks for session lifecycle
+**What:** Anthropic shipped webhook delivery for managed-agents (May 7, 2026). Events: `session.status_idled`, `session.status_terminated`, `session.thread_idled`, `session.outcome_evaluation_ended`. Push-based, HMAC-signed (`X-Webhook-Signature`).
+**Why it matters:** the entire SSE/REST race we fixed in v1.12.3→v1.12.6 goes away if orchestrator just waits for `session.status_idled` webhook + one REST `events.list` call.
+**Why not now:** requires publicly-resolvable HTTPS endpoint. GHA is ephemeral. Two viable architectures: thin webhook receiver (Worker/Lambda/Vercel) writing to S3/KV, or polling-fallback retained alongside webhooks.
+**Trigger:** 7th SSE/REST class bug, OR Anthropic deprecates SSE, OR notifications outside GHA job's lifetime needed.
 
-### P10 — Webhooks for session lifecycle (would close the SSE/REST race class entirely)
+### P11 — Outcomes for verifier-output quality gates (= Item A, see Phase 2.b)
+Folded into Phase 2.b above.
 
-**What changed:** Anthropic shipped webhook delivery for managed-agents (May 7, 2026). Event types include `session.status_idled`, `session.status_terminated`, `session.thread_idled`, `session.outcome_evaluation_ended`. Push-based with HMAC-signed payloads (`X-Webhook-Signature` header, signing secret prefixed `whsec_`). Anthropic retries at least once on non-2xx; auto-disables after ~20 consecutive failures.
+### P12 — Drop `-research-preview` from beta header (= Item C10, see Phase 0)
+Folded into Phase 0 above.
 
-**Why it matters for air:** the entire SSE/REST race we spent v1.12.3 → v1.12.6 fixing (~200 LOC of orchestration + the regex-trap fix in PR #67) goes away if the orchestrator just waits for a `session.status_idled` webhook + then issues one REST `events.list` call to drain. No SSE quiet timeouts, no REST polling loop, no terminal-state inference from `open_threads`, no per-attempt parts-delta tracking. The webhook IS the "session is done" signal we kept trying to derive.
+### P13 — New `multiagent` config shape
+**What:** Anthropic introduced `multiagent: {type: "coordinator", agents: [...]}` shape. Our code uses legacy `callable_agents: [...]`. New shape adds `{"type": "self"}` for self-call (relevant for Item J monorepo work).
+**Trade-off:** cosmetic refactor in `managed/setup.py::create_or_update_agent`.
+**Trigger:** Anthropic announces deprecation of legacy shape, OR Item J ships and needs self-call.
 
-**Why we shouldn't ship it now:** requires a publicly-resolvable HTTPS endpoint. The orchestrator runs inside GHA (ephemeral, no inbound). Two viable architectures:
+### Items K + L (small managed-agents items)
+- **Item K** — `agent.thinking` event surfacing to debug log. Today the dashboard sees only `agent.message` (final output). Streaming `agent.thinking` gives reviewers "why did this get flagged" without re-running. Small effort. **Open.**
+- **Item L** — `always_ask` tool permission policy on wiki push when `--dry-run` is set. **Re-scoped to medium** under Safety (F1) — needs `--dry-run` plumbing from GHA → coordinator. No production occurrence yet. **Deferred.**
 
-1. **Thin webhook receiver** (Cloudflare Worker / Lambda / Vercel function) that writes the event payload to S3 / Cloudflare KV / Vercel KV / etc. The GHA job polls THAT store, not the Anthropic API. Adds one persistent piece of infrastructure to the air bot's runtime model.
-2. **Polling fallback retained alongside webhooks** — the GHA job both subscribes to webhooks AND polls Anthropic REST as a backup. More code, not less.
+### Items P + Q (underused)
+- **Item P** — `tool_use_id` round-trips for `user.tool_confirmation`. Today coordinator's bash commits run unconfirmed; an `always_ask` policy on bash lets a human gate destructive pushes.
+- **Item Q** — `span.outcome_evaluation_end.usage` — free per-iteration token telemetry once outcomes are wired.
 
-Neither is a free lunch. v1.12.6's poll loop empirically works (qai-be #666 round 8 produced a 1432s real review). Webhooks become attractive when we need either (a) cheaper polling (we currently issue ~30 REST calls per 15-min session), or (b) the operator wants notification on stale sessions without keeping the GHA job alive.
+---
 
-**Trigger:** next time we hit a 7th-category SSE/REST class bug, OR if Anthropic deprecates the SSE stream, OR if we ever want notifications outside the GHA job's lifetime.
+## Phase 7 — Carlos-bot pattern migration
 
-### P11 — Outcomes for verifier-output quality gates
+The qai-be wiki memory captures **11 specific failure categories** the bot reliably catches. These are tribal knowledge today; not codified in plugin agents.
 
-**What changed:** Outcomes (rubric-driven self-evaluation) moved from research preview to public beta on the standard `managed-agents-2026-04-01` header. Default 3 iterations, max 20. The grader uses a separate context window so it can't be biased by the main agent's choices. `user.define_outcome` event launches the iteration loop; `span.outcome_evaluation_end` reports `satisfied` / `needs_revision` / `max_iterations_reached` / `failed` / `interrupted`.
+**Source:** `~/.claude/projects/.../qai-be/memory/feedback_carlos_bot_review_patterns.md`
 
-**Why it matters for air:** v1.12.5's `\b` word-boundary regex bug (PR #67) shipped to production because we lacked an automated structural check on the verifier's output. A 5-criterion rubric like:
+The 11 categories:
+1. EXISTS-gate downstream leak (now partially covered by v1.13.0 gate-output symmetry)
+2. Sibling gate asymmetry
+3. Citation rot (now partially covered by v1.13.0 category-symmetric respond gate)
+4. Stale-branch siblings
+5. AGENTS.md §6.2 contract violations
+6. Test-mock omissions
+7. Hardcoded line numbers
+8. Allowlist token-family expansion gaps
+9. Short-circuit asymmetry
+10. Fixture coverage gaps
+11. `isActive()` vs enum lists
 
-- Body starts with `## Code Review` (no narration prefix)
-- Body ends with a line matching `^Reviewed at: <40-char-hex>$`
-- The hex SHA on that line equals the session's head_sha
-- Contains at least one of `### Blockers` / `### Medium` / `### Low` / `### Nits` / `### Pre-existing Issues` / `### Previous Findings Status`
-- No literal `[empty message]` or `## air review (run failed)` text in body
+**Decision needed:** which become hardcoded in `code-reviewer.md` (universal across repos) vs which stay fully wiki-data-driven (per-repo `REVIEW.md` patterns)?
 
-…would have caught it AT SESSION END inside the same run, triggering an automatic revision instead of waiting for production to bite us. The bug stayed live for ~6 hours before round 7 surfaced it.
+**Effort:** small-medium per pattern.
 
-**Trade-off:** every passing review eats ~1 grader iteration (cheap — small rubric, separate context, ~2K tokens). Failures eat 1-3 extra coordinator iterations (expensive — full re-review). Net cost depends on failure rate. If we hit >5% structural-mismatch rate on the verifier output, outcomes pays for itself; below that, it's a quality-floor tax with marginal benefit.
+---
 
-**Trigger:** if v1.12.x sees another preventable verifier-output structural bug, OR if we want a quality-floor SLO ("99% of reviews have a SHA-matching footer in their first emission").
+## Conflicts requiring decisions
 
-### P12 — Drop `-research-preview` from the beta header
+Items where two sources describe the same thing under different names, or disagree on priority/approach. Resolved positions noted; the conflicts themselves are documented so future revisits have full context.
 
-**What changed:** Multiagent moved from research preview to public beta. The header simplified from `managed-agents-2026-04-01-research-preview` (what `managed/api.py` currently sends) to `managed-agents-2026-04-01`. Behavior may be subtly different — research-preview surfaces sometimes evolve before stabilizing.
+1. **Outcomes naming (P11 vs Item A vs cost-plan)** — three sources, three names. Cost-plan's "skipped because doesn't save money" superseded by audit (qai-be #830 footer drop is a quality miss outcomes would catch). **Resolved: quality gate, Phase 2.b.**
+2. **Fast-mode Opus (Item E vs Item O)** — same change duplicated. **Resolved: collapsed as B1.**
+3. **Wiki dry-run gate (Item L)** — plan says small/P0, review says medium/P1. **Resolved: review wins (deferred to F1).**
+4. **Thread interruption (Item D)** — plan lists P0 small; audit shows no specialist-level hangs (only coordinator-level). **Resolved: drop from Phase 1.**
+5. **`record_finding` (Item B)** — plan rates ••• (2-3w), review re-costs •••• (3-4w). **Resolved: trust higher estimate.**
+6. **Persistent threads (Item C)** — plan's motivation overlaps with v1.13.0. **Resolved: revised motivation, de-prioritize behind A and B.**
+7. **Two roadmap docs** — `air-improvements-plan.md` and prior `improvement-roadmap.md` covered overlapping items. **Resolved: this consolidated file is now the single source.**
+8. **Carlos-bot patterns hardcoded vs wiki-data-driven** — 11 categories live only in qai-be wiki. **OPEN — see Phase 7.**
+9. **Cost plan vs new plan on multi-agent** — cost-plan: multi-agent amortizing on Opus+Sonnet, net cost on Haiku-specialists. **Aligned (current arch is Opus+Sonnet).**
+10. **Cost plan Phase 2/3** (Haiku-on-specialists A/B) **never had the structured A/B set up.** Quality watchpoint stalled. **OPEN — see Deferred.**
 
-**Trade-off:** one-line change in `managed/api.py`. Risk is non-zero — if research-preview is more permissive than public beta on some surface we depend on, we'd see immediate failures. Validate against a dogfood PR before rolling out.
+---
 
-**Trigger:** the next time we touch `managed/api.py` for any other reason. Bundle the swap with that change rather than ship it standalone.
+## Inventory gaps (NOT yet tracked anywhere)
 
-### P13 — New multiagent config shape (`multiagent: {type: "coordinator", agents: [...]}`)
+Things that should be tracked but currently aren't captured in any doc/issue/task:
 
-**What changed:** Anthropic introduced a new `multiagent` parameter shape on agent creation. Our current code uses the legacy `callable_agents: [...]` form on the coordinator. The new shape adds `{"type": "self"}` for self-call (a coordinator delegating to copies of itself), which we don't use.
+1. **GHA workflow self-observability** — no metrics on `cancel-in-progress` cancellation rate, Codex install latency, PR-context fetch failures. Only signal today: "human notices bot didn't post".
+2. **Prompt regression test harness** — no fixture-based suite running each agent prompt against known PRs to diff findings. P8 is per-PR, not per-prompt.
+3. **Carlos-bot pattern → plugin migration matrix** — see Phase 7. No doc tracks which of the 11 patterns are (a) hardcoded in `code-reviewer.md`, (b) flowing through PROJECT-PROFILE, or (c) only emergent from REVIEW.md.
+4. **Wiki schema versioning** — `architecture-review.md` raised "no versioning contract between orchestrator and agents". Same concern for wiki files. No migration tool, no schema version field.
+5. **Pricing-change resilience** — cost plan anchored on 2026-04-27 Anthropic pricing. No quarterly re-run cadence to validate phase recommendations against current prices.
+6. **Org service-account migration trigger** — qai-be/qai-fe currently run under Carlos's PAT pending org service account. No tracking when DevOps delivers; no PAT-rotation runbook.
+7. **`--respond` Step 5e false-positive monitoring** — v1.13.0 added the category-symmetric grep gate. No tracking of FP rate on legitimate single-locus fixes.
+8. **External commitments tracking** — see `docs/external-commitments.md`.
 
-**Trade-off:** cosmetic refactor in `managed/setup.py::create_or_update_agent`. Useful only if the legacy `callable_agents` form gets deprecated.
+---
 
-**Trigger:** Anthropic announces deprecation of the legacy shape, OR we want self-delegation (we don't).
+## Explicit non-fits (won't ship)
 
-### Explicit non-fits (won't ship)
-
-- **Memory stores in place of GitHub wiki for `REVIEW.md`** — workspace-scoped persistent text storage mounted at `/mnt/memory/`. Tempting to swap our wiki for this, BUT we'd lose: GitHub commit history (audit trail), cross-platform CLI ↔ managed sharing, per-repo isolation via wiki branches, public visibility (devs read patterns). The wiki gives us all four; memory stores give us none.
-
-- **Dreaming** (research preview, scheduled memory-refinement that "reviews past sessions to find patterns") — direct conceptual match to our `/air:learn` flow, but coupled to memory stores. Until we swap to memory stores (we shouldn't), dreaming doesn't apply.
-
-- **Thread archival** (`POST /sessions/:id/threads/:thread_id/archive`) — relevant only at thread-count pressure. We use 6/25 threads (coordinator + 4 specialists + verifier). No-op.
-
+- **Memory stores in place of GitHub wiki for `REVIEW.md`** — would lose GitHub commit history (audit trail), cross-platform CLI ↔ managed sharing, per-repo isolation via wiki branches, public visibility.
+- **Dreaming** (research preview) — coupled to memory stores. No-op until memory stores ship (we shouldn't).
+- **Thread archival** — relevant only at thread-count pressure. We use 6/25 threads. No-op.
 - **Vault credentials with `mcp_oauth` background refresh** — relevant for OAuth-rotating secrets. Our `ANTHROPIC_API_KEY` and `AIR_BOT_TOKEN` are static GitHub secrets. No-op.
-
 - **Finance agent templates** — domain-specific, not our use case.
 
 ---
 
 ## Deferred / explicit non-goals
 
-- **Phase 3 from `cost-optimization-plan.md` (parallel_sessions_haiku, $0.63/round).** Skipping multi-agent saves $1.7K/year but loses architectural parity with the local CLI. Not worth the divergence.
-- **Memory stores.** Tested in Phase 0 experiments; net-zero on cost, adds complexity.
-- **Outcomes (self-eval loop).** Quality feature, not cost. Adds an entire grader iteration. No production case.
-- **GitLab managed agent.** CLI plugin already supports GitLab via `commands/platform-gitlab.md`. Managed agent stays GitHub-only until a GitLab consumer asks.
-- **Switching specialists to Haiku** (Phase 2 from cost plan, $4K/year). Quality watchpoint stalled — we never set up the structured A/B that compares Haiku-specialist findings to Opus-specialist findings on the same PRs. Until that A/B exists, the savings are speculative against documented quality risk.
+- **Phase 3 from cost-optimization-plan.md (parallel_sessions_haiku, $0.63/round).** Skipping multi-agent saves $1.7K/year but loses architectural parity with local CLI. Not worth the divergence.
+- **Phase 2 from cost-optimization-plan.md (Haiku on specialists, $4K/year).** Quality watchpoint stalled — never set up the A/B that compares Haiku-specialist findings to Opus-specialist findings. Until that A/B exists, savings are speculative against documented quality risk. (See Conflict #10.)
+- **GitLab managed agent.** CLI plugin supports GitLab via `platform-gitlab.md`. Managed agent stays GitHub-only until a GitLab consumer asks.
+- **Slack / Confluence integrations** (from expansion-plan §3.4) — Deferred. Christina's Cowork interest tracked in `docs/external-commitments.md`.
+- **Cowork plugin** — Deferred in air's scope; see external commitments doc.
+
+---
+
+## Phase 4 retrospective lessons (from svc-transcribe #37)
+
+A single PR with 14 review rounds, 13 consecutive CHANGES_REQUESTED, and an eventual two-failure cascade became the dominant data source for Phase 4 + Phase 5 priorities. Seven lessons that bias future phases:
+
+1. **Asymmetric gates are a usability trap.** Fresh review and re-review used to gate on different severity sets (blocker vs blocker+medium). The asymmetry meant a PR could go APPROVED → CHANGES_REQUESTED on a re-review with no new blockers. Fix was structural, not parameter-tuning.
+
+2. **The verifier "knows" enough to break loops, but the prompt didn't ask.** Prior review body has been in context since carry-forward shipped — we just didn't tell the verifier to do anything with the repetition signal. Cheap to add a rule; very effective.
+
+3. **Self-review with --dry-run catches structural bugs that synthetic fixtures miss.** Codex caught the legacy-missing-severity regression all four Claude reviewers missed. Cross-model review at self-review step is high-leverage when the change touches a load-bearing default.
+
+4. **Defensive aborts must produce signal, not silence.** Orchestrator's SHA-validation refused to submit a verdict on stale coordinator output (correct), then fell back to raw-posting the same stale output (wrong). 422 cascade left developer with frozen CHANGES_REQUESTED + no in-PR signal. Whenever we add a defensive check, add a structured "this is what went wrong" comment in parallel.
+
+5. **Coordinator wall-time is a stale-cache signal.** A 92s coordinator run on a real PR is impossibly fast (typical 1500-2400s). When run is short AND output unusable, almost certainly a cached prior-thread response.
+
+6. **"Cached output" was the wrong frame.** Cache-bust commit (whitespace change to README) DID NOT recover svc-tx #37. Coordinator returned same 92.5s + prior-SHA output on next run with different prefix. Rules out Anthropic prefix-cache; points at model-behavior issue (regurgitating `prior_review_body`).
+
+7. **PR-restart is a valid escape hatch.** On long re-review chains where coordinator has degraded, closing the failing PR and reopening from same branch as fresh PR avoids re-review codepath. Workaround loses comment history but recovers merge path. Worth documenting in bot's run-failed comment so users have a path forward.
 
 ---
 
@@ -311,20 +434,19 @@ Neither is a free lunch. v1.12.6's poll loop empirically works (qai-be #666 roun
 
 Add a row to this doc with: trigger, evidence, fix, risk, expected impact. Ship only when evidence is ≥3 production occurrences. Don't preemptively optimize against synthetic fixtures — the empirical learning loop is the comparative advantage we have over the cost-optimization-plan's experiment harness.
 
-## What svc-transcribe #37 taught us (Phase 4 retrospective)
+---
 
-A single PR with 14 review rounds, 13 consecutive CHANGES_REQUESTED, and an eventual two-failure cascade became the dominant data source for Phase 4 AND Phase 5 priorities. Five lessons that should bias the next phases:
+## Glossary of phases
 
-1. **Asymmetric gates are a usability trap.** Fresh review and re-review used to gate on different severity sets (blocker vs blocker+medium). The asymmetry meant a PR could go from APPROVED → CHANGES_REQUESTED on a re-review with no new blockers — purely because medium prior findings now counted. Fix was structural, not parameter-tuning.
+- **Phase 0** — Audit-derived fixes (2-3 small items, ship next, <1 day total)
+- **Phase 1** — Performance + safety (1 day)
+- **Phase 2** — Structured findings + outcomes + persistent threads (sequential, 6-10 weeks)
+- **Phase 3** — Wiki + MCP refactor (3-4 weeks)
+- **Phase 4** — Versioning + scale-out + self-hosted PHI (long horizon)
+- **Phase 5** — Reframed P0-P9 from prior roadmap (mixed status)
+- **Phase 6** — Managed-agents platform features (P10-P13 + small Items K/L/P/Q)
+- **Phase 7** — Carlos-bot pattern migration (decision needed)
 
-2. **The verifier "knows" enough to break loops, but the prompt didn't ask.** The prior review body has been in context since the carry-forward feature shipped — we just didn't tell the verifier to do anything with the repetition signal. Cheap to add a rule; very effective.
+---
 
-3. **Self-review with --dry-run on a PR catches structural bugs that synthetic test fixtures miss.** Codex caught the legacy-missing-severity regression that all four Claude reviewers missed because they read the new code from the perspective of new bodies, not legacy ones. Cross-model review at the self-review step is high-leverage when the change touches a default that's load-bearing for backward compatibility.
-
-4. **Defensive aborts must produce a signal, not silence.** The orchestrator's SHA-validation refused to submit a verdict on stale coordinator output (correct) but then fell back to raw-posting that same stale output (wrong). The 422 cascade left the developer with a frozen CHANGES_REQUESTED verdict and no in-PR signal that the bot's machinery had broken. Whenever we add a defensive check, we need to add a structured "this is what went wrong" comment in parallel — silence looks identical to "the bot is still working on it."
-
-5. **Coordinator wall-time is a stale-cache signal.** A 92s coordinator run on a real PR is impossibly fast (typical: 1500-2400s). When the run is short AND output is unusable, it's almost certainly a cached prior-thread response — not a hung session. Surface this as a soft-failure event so we can correlate with Anthropic-side caching and decide whether to retry-with-cache-bust.
-
-6. **"Cached output" was the wrong frame.** The cache-bust commit (whitespace change to README) DID NOT recover svc-transcribe #37. The coordinator returned the same 92.5s + prior-SHA output on the next run with a different prefix. This rules out Anthropic prefix-cache as the primary cause and points at a model-behavior issue: the coordinator is regurgitating `prior_review_body` from its user-message context. Future debugging should distinguish "framework caching" from "model self-recognition" early — the former is fixable by varying the prefix, the latter needs a prompt or codepath change.
-
-7. **PR-restart is a valid escape hatch.** On long re-review chains where the coordinator has degraded, closing the failing PR and reopening from the same branch as a fresh PR avoids the re-review codepath entirely. No `prior_review_body`, no `<prior-round-statuses>` block — coordinator must dispatch real specialist work. The workaround loses comment history but recovers the merge path. Worth documenting in the bot's run-failed comment so users have a path forward when the regurgitation pattern triggers.
+*End of master roadmap. All previous planning artifacts now redirect here.*
