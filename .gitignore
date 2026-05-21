@@ -13,5 +13,3 @@ managed/experiments/
 *.pyc
 __pycache__/
 .pytest_cache/
-air-expansion-plan.md
-architecture-review.md
