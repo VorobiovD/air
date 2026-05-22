@@ -88,17 +88,24 @@ def parse_agent_model(path: Path, default: str = DEFAULT_OPUS) -> str:
 
 
 def parse_agent_speed(path: Path) -> str | None:
-    """Read `speed:` from agent frontmatter (e.g. `fast` for Opus 4.6/4.7).
-
-    Returns None when unset — caller sends the model field as a scalar string
-    and the API stores it with default speed. Returns the speed value (e.g.
-    "fast") otherwise; caller sends the model field as `{"id": ..., "speed": ...}`.
-    Fast mode is currently Opus 4.6/4.7 only — Sonnet/Haiku ignore or reject it,
-    so only opt-in on those two agents' frontmatter.
-    """
+    """Return the `speed:` frontmatter value (e.g. "fast"), or None if absent."""
     fields, _ = _split_frontmatter(path)
-    value = fields.get("speed", "")
-    return value or None
+    return fields.get("speed", "") or None
+
+
+def _normalize_model_field(value) -> dict | None:
+    """Return the canonical object form of a model field for comparison.
+
+    The API accepts both scalar (`"claude-opus-4-7"`) and object form
+    (`{"id": ..., "speed": ...}`) on send, and historically returns either form
+    on read depending on how the agent was last synced. Normalize both shapes
+    to the object form so existing-vs-new diffs compare like-for-like.
+    """
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return value
+    return {"id": value, "speed": "standard"}
 
 
 def create_or_update_agent(
@@ -124,9 +131,8 @@ def create_or_update_agent(
     printing the diff.
     """
     model_field = {"id": model, "speed": speed} if speed else model
-    # Existing agent's model is always object form (API normalizes). Build the
-    # equivalent object representation of what we're sending for the diff print.
-    sent_normalized = model_field if isinstance(model_field, dict) else {"id": model, "speed": "standard"}
+    sent_normalized = _normalize_model_field(model_field)
+    existing_normalized = _normalize_model_field(existing.get("model") if existing else None)
 
     if existing:
         body = {"model": model_field, "system": system, "tools": tools, "version": existing["version"]}
@@ -139,7 +145,7 @@ def create_or_update_agent(
         )
         if resp.ok:
             data = resp.json()
-            if existing.get("model") and existing["model"] != sent_normalized:
+            if existing_normalized and existing_normalized != sent_normalized:
                 print(f"  {name}: synced → v{data['version']} (model {existing['model']} → {sent_normalized})")
             else:
                 print(f"  {name}: synced → v{data['version']}")
@@ -147,7 +153,7 @@ def create_or_update_agent(
         # Retry without model ONLY if the primary failure mentions model
         # (API disallows in-place model changes on some endpoints).
         primary_error = api_error_message(resp)
-        if existing.get("model") != sent_normalized and "model" in str(primary_error).lower():
+        if existing_normalized != sent_normalized and "model" in str(primary_error).lower():
             retry_body = {k: v for k, v in body.items() if k != "model"}
             retry = requests.post(
                 f"{API_BASE}/agents/{existing['id']}",
@@ -274,6 +280,9 @@ def main():
             system = read_prompt(coordinator_file)
             tools = parse_agent_tools(coordinator_file)
             model = parse_agent_model(coordinator_file, default=MODEL_ALIASES["sonnet"])
+            # Coordinator is Sonnet today (no fast-mode), but accept the
+            # `speed:` field for forward-compatibility if Anthropic adds fast
+            # mode to Sonnet or we re-tier the coordinator to Opus later.
             speed = parse_agent_speed(coordinator_file)
             tool_configs = [{"name": t, "enabled": True} for t in tools]
             callable_agents = [

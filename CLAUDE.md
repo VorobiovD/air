@@ -62,7 +62,7 @@ managed/                          # Managed Agent (CI automation)
 
 **Review pipeline** (`commands/review.md`): Parses args, detects platform (GitHub/GitLab) from git remote, fetches PR/MR data via `gh` or `glab` CLI, runs 5 agents + optional Codex in parallel, passes results through a verification agent that filters false positives (confidence < 60 = dropped), then posts a consolidated comment. GitLab-specific command mappings are in `commands/platform-gitlab.md`.
 
-**Agents** (`agents/*.md`): Stateless markdown prompt files. Each is a specialized reviewer personality that receives the same rich context block (PR diff, blame data, wiki patterns, project memory). Tiered models: code-reviewer, security-auditor, and review-verifier run on Opus; simplify and git-history-reviewer run on Sonnet. Each agent declares its model in frontmatter.
+**Agents** (`agents/*.md`): Stateless markdown prompt files. Each is a specialized reviewer personality that receives the same rich context block (PR diff, blame data, wiki patterns, project memory). Tiered models: code-reviewer and security-auditor run on Opus 4.7 with fast-mode speed (~2× faster generation, same cost, Opus 4.6/4.7 only); review-verifier and simplify run on Sonnet 4.6; git-history-reviewer runs on Haiku 4.5. Each agent declares its model (and optional `speed:`) in frontmatter.
 
 **Verification** (`agents/review-verifier.md`): Post-review quality gate. Reads actual source at flagged lines, classifies findings as CONFIRMED/DOWNGRADED/IMPROVEMENT/PRE-EXISTING/ACCEPTED PATTERN/FALSE POSITIVE using git blame decision tree.
 
