@@ -685,7 +685,7 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 **Agent 3: Security Auditor**
 - **Author pattern matching:** Same as Agent 1 — annotate security findings that match the author's known patterns. Security-relevant patterns (injection, data exposure, auth) are high-signal. See `security-auditor.md` for matching rules.
 - If PROJECT-PROFILE.md available: read "Applicable Security Checks" section and ONLY audit listed checks. Skip the rest.
-- PASS/FAIL table + findings for each FAIL. Tailored to changed files
+- One-line audit coverage summary + findings for each FAIL (see `security-auditor.md` §Section 1 — no PASS/FAIL row table; the table is pure clutter on healthy audits)
 - Silent failure detection (items 24-28): empty catch, ignored errors, fallback masking, retry exhaustion
 - Resource exhaustion detection (items 29-31): event listener leaks, connection pool exhaustion, unbounded growth
 - If `SECURITY_SCAN_FAILED`: "A CI security scan failed on this PR. Determine whether the PR introduced the failure or if it's pre-existing. Check the failing scanner's typical targets."
@@ -765,11 +765,7 @@ Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line
 
 <one-line summary>
 
-### Security Audit: <pass>/<total> PASS
-
-| Check | Result |
-|---|---|
-| <name> | PASS or FAIL - <evidence> |
+<one-line **Security Audit:** coverage summary — see `security-auditor.md` §Section 1 for exact wording (healthy: `N/N applicable checks PASS`; with failures: `N/M PASS — failures: <categories>`)>
 
 ### Blockers
 
