@@ -87,17 +87,55 @@ def parse_agent_model(path: Path, default: str = DEFAULT_OPUS) -> str:
     return MODEL_ALIASES.get(value, value)
 
 
-def create_or_update_agent(name: str, system: str, tools: list, existing: dict | None, callable_agents: list | None = None, model: str = DEFAULT_OPUS) -> dict:
+def parse_agent_speed(path: Path) -> str | None:
+    """Return the `speed:` frontmatter value (e.g. "fast"), or None if absent."""
+    fields, _ = _split_frontmatter(path)
+    return fields.get("speed", "") or None
+
+
+def _normalize_model_field(value) -> dict | None:
+    """Return the canonical object form of a model field for comparison.
+
+    The API accepts both scalar (`"claude-opus-4-7"`) and object form
+    (`{"id": ..., "speed": ...}`) on send, and historically returns either form
+    on read depending on how the agent was last synced. Normalize both shapes
+    to the object form so existing-vs-new diffs compare like-for-like.
+    """
+    if not value:
+        return None
+    if isinstance(value, dict):
+        return value
+    return {"id": value, "speed": "standard"}
+
+
+def create_or_update_agent(
+    name: str,
+    system: str,
+    tools: list,
+    existing: dict | None,
+    callable_agents: list | None = None,
+    model: str = DEFAULT_OPUS,
+    speed: str | None = None,
+) -> dict:
     """Update if exists, create if not. Takes pre-fetched existing agent.
 
     On update, the `model` field is sent so model changes (e.g. from frontmatter
     tiering) propagate to existing managed deployments. If the API rejects a
     model change in-place, we retry without `model` and print a warning so the
     operator knows the agent needs manual re-creation to pick up the new model.
+
+    When `speed` is set (e.g. "fast"), the model field is sent in object form
+    `{"id": model, "speed": speed}`; otherwise scalar string. The API stores
+    object form either way (with default `speed=standard` when omitted), so the
+    existing-vs-new comparison normalizes both sides to object form before
+    printing the diff.
     """
+    model_field = {"id": model, "speed": speed} if speed else model
+    sent_normalized = _normalize_model_field(model_field)
+    existing_normalized = _normalize_model_field(existing.get("model") if existing else None)
 
     if existing:
-        body = {"model": model, "system": system, "tools": tools, "version": existing["version"]}
+        body = {"model": model_field, "system": system, "tools": tools, "version": existing["version"]}
         if callable_agents:
             body["callable_agents"] = callable_agents
         resp = requests.post(
@@ -107,15 +145,15 @@ def create_or_update_agent(name: str, system: str, tools: list, existing: dict |
         )
         if resp.ok:
             data = resp.json()
-            if existing.get("model") and existing["model"] != model:
-                print(f"  {name}: synced → v{data['version']} (model {existing['model']} → {model})")
+            if existing_normalized and existing_normalized != sent_normalized:
+                print(f"  {name}: synced → v{data['version']} (model {existing['model']} → {sent_normalized})")
             else:
                 print(f"  {name}: synced → v{data['version']}")
             return data
         # Retry without model ONLY if the primary failure mentions model
         # (API disallows in-place model changes on some endpoints).
         primary_error = api_error_message(resp)
-        if existing.get("model") != model and "model" in str(primary_error).lower():
+        if existing_normalized != sent_normalized and "model" in str(primary_error).lower():
             retry_body = {k: v for k, v in body.items() if k != "model"}
             retry = requests.post(
                 f"{API_BASE}/agents/{existing['id']}",
@@ -127,7 +165,7 @@ def create_or_update_agent(name: str, system: str, tools: list, existing: dict |
                 print(
                     f"  {name}: synced prompt → v{data['version']} "
                     f"(model pinned to {existing.get('model', '?')} — delete the agent via the Anthropic console "
-                    f"or DELETE /agents/{existing['id']}, then re-run setup.py to re-tier to {model})"
+                    f"or DELETE /agents/{existing['id']}, then re-run setup.py to re-tier to {sent_normalized})"
                 )
                 return data
             # Double-failure: report both errors
@@ -140,7 +178,7 @@ def create_or_update_agent(name: str, system: str, tools: list, existing: dict |
         print(f"  {name}: sync failed ({resp.status_code}: {primary_error}), using v{existing['version']}")
         return existing
     else:
-        body = {"name": name, "model": model, "system": system, "tools": tools}
+        body = {"name": name, "model": model_field, "system": system, "tools": tools}
         if callable_agents:
             body["callable_agents"] = callable_agents
         resp = requests.post(f"{API_BASE}/agents", headers=get_headers(), json=body)
@@ -148,7 +186,7 @@ def create_or_update_agent(name: str, system: str, tools: list, existing: dict |
             print(f"  {name}: creation failed — {api_error_message(resp)}", file=sys.stderr)
             sys.exit(1)
         data = resp.json()
-        print(f"  {name}: created → {data['id']} (v{data['version']}, model={model})")
+        print(f"  {name}: created → {data['id']} (v{data['version']}, model={sent_normalized})")
         return data
 
 
@@ -207,6 +245,7 @@ def main():
         system = read_prompt(prompt_file)
         tools = parse_agent_tools(prompt_file)
         model = parse_agent_model(prompt_file)
+        speed = parse_agent_speed(prompt_file)
         tool_configs = [{"name": t, "enabled": True} for t in tools]
 
         agent = create_or_update_agent(
@@ -219,6 +258,7 @@ def main():
             }],
             existing=agents_by_name.get(f"air-{name}"),
             model=model,
+            speed=speed,
         )
         synced[name] = agent
 
@@ -240,6 +280,10 @@ def main():
             system = read_prompt(coordinator_file)
             tools = parse_agent_tools(coordinator_file)
             model = parse_agent_model(coordinator_file, default=MODEL_ALIASES["sonnet"])
+            # Coordinator is Sonnet today (no fast-mode), but accept the
+            # `speed:` field for forward-compatibility if Anthropic adds fast
+            # mode to Sonnet or we re-tier the coordinator to Opus later.
+            speed = parse_agent_speed(coordinator_file)
             tool_configs = [{"name": t, "enabled": True} for t in tools]
             callable_agents = [
                 {"type": "agent", "id": synced[n]["id"], "version": synced[n]["version"]}
@@ -256,6 +300,7 @@ def main():
                 existing=agents_by_name.get("air-coordinator"),
                 callable_agents=callable_agents,
                 model=model,
+                speed=speed,
             )
 
     coord_status = "+ coordinator" if coordinator else "(coordinator absent)"

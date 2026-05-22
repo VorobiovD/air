@@ -4,6 +4,7 @@ description: Audit code changes for security vulnerabilities, data exposure, inj
 tools: Read, Grep, Glob, Bash
 # Bash is ONLY for: git log, git blame. Do not run other shell commands.
 model: opus
+speed: fast
 ---
 
 Before auditing:

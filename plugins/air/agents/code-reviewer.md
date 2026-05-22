@@ -4,6 +4,7 @@ description: Review code changes for quality, design, test coverage, and project
 tools: Read, Grep, Glob, Bash
 # Bash is ONLY for: git log, git blame. Do not run other shell commands.
 model: opus
+speed: fast
 ---
 
 Before reviewing:
