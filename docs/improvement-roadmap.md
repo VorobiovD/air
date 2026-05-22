@@ -11,17 +11,19 @@
 
 **External commitments** (Cowork, etc.) tracked separately in `docs/external-commitments.md`.
 
-_Last updated: 2026-05-21 (post-v1.13.0 + plan consolidation + 2026-05-19/21 SSE-degraded incident data)._
+_Last updated: 2026-05-22 (Phase 1 partial-ship: fast-mode Opus + security-audit-summary cleanup; both bundled in pending v1.14.0 release PR #75)._
 
 ---
 
 ## TL;DR
 
-**Current shipped:** v1.13.0 (2026-05-14) — 5 new prompt capabilities (exposure escalation, CLAUDE.md gotcha grep, paired-doc drift, gate-output symmetry, category-symmetric respond gate).
+**Current shipped:** v1.13.0 (2026-05-14) + pending v1.14.0 (release PR #75 open):
+- **v1.13.0** — 5 new prompt capabilities (exposure escalation, CLAUDE.md gotcha grep, paired-doc drift, gate-output symmetry, category-symmetric respond gate)
+- **v1.14.0 (pending PR #75 merge)** — fast-mode Opus on code-reviewer + security-auditor (PR #74), security-audit-summary cleanup replacing the PASS/FAIL row table with a one-line coverage summary (PR #77)
 
 **Next 3 ships** (cross-source agreement + empirical justification + low effort):
-1. **Phase 0** — Capture full `coordinator_out` on SHA-mismatch + SSE-quiet informational log + drop `-research-preview` header. `<1 day total.`
-2. **Phase 1** — Fast-mode Opus for code-reviewer/security-auditor + session metadata. `~1 day.`
+1. **Phase 0** — Capture full `coordinator_out` on SHA-mismatch + SSE-quiet informational log + drop `-research-preview` header. `<1 day total.` Now most-empirical: 2026-05-19→22 SSE-degraded incidents make A2 (operator-visibility log) the most-cited pain point.
+2. **Phase 1 remainder** — Session metadata `{pr_number, repo, mode, plugin_version}` on `client.beta.sessions.create`. Fast-mode Opus shipped (B1 ✓ in PR #74). `<1 day.`
 3. **P2 Re-review fast path** — inter-diff only, skip git-history-reviewer, target 5-10 min. `~3 days.`
 
 **Phase 5** carries the P0-P9 priorities (existing) with status updates.
@@ -51,6 +53,8 @@ _Last updated: 2026-05-21 (post-v1.13.0 + plan consolidation + 2026-05-19/21 SSE
 | v1.12.5 | Billing-aware structured-fallback (`BetaManagedAgentsBillingError`) | #64 | svc-tx billing exhaustion → actionable comment instead of stack trace |
 | v1.12.6 | Footer-regex word-boundary trap fixed | #67 | qai-be #666 round 7 verifier output recovered: `\b` failed when 40-hex SHA followed by `Wiki` (both `\w`) |
 | **v1.13.0** | **5 prompt additions** — exposure escalation (verifier), CLAUDE.md gotcha grep + paired-doc drift + gate-output symmetry (code-reviewer), category-symmetric respond gate (review-respond) | #70 | Captures new failure classes from ai-relay #153 + qai-be HIPAA cross-patient leak + qai-be #732 respond cycle |
+| **v1.14.0** *(pending release PR #75 merge)* | **Fast-mode Opus** on code-reviewer + security-auditor — `model: {id: claude-opus-4-7, speed: fast}` via new `parse_agent_speed()` in setup.py | #74 | ~2× generation speedup on the two slowest specialists, zero cost change, zero quality risk per Anthropic positioning. Bottleneck often shifts Opus → Sonnet (simplify) for the parallel-phase floor. |
+| **v1.14.0** *(pending release PR #75 merge)* | **Security-audit-summary cleanup** — replaced ~14-row PASS/FAIL table with a one-line coverage summary (`N/N applicable checks PASS` or `N/M PASS — failures: <categories>`). Section 2 findings + category vocabulary unchanged. | #77 | Removes ~14 rows of clutter on healthy audits while preserving FAIL evidence + category cross-reference vocabulary in the per-finding section. |
 
 ---
 
@@ -154,10 +158,11 @@ Three small fixes derived from the 2026-05-19/20/21 audit. All client-side patch
 
 ## Phase 1 — Performance + safety (~1 day)
 
-### B1 / Item E — Fast mode for Opus 4.7
-**What:** `{"id":"claude-opus-4-7","speed":"fast"}` model override on `code-reviewer.md` and `security-auditor.md` frontmatter. Shortens median review time at zero prompt cost.
-**Verification needed:** local CLI router must honor the `model:` field's object form. If not, gate on managed-agent path only.
-**Source:** `air-improvements-plan.md §3.1 E + §3.4 O`
+### B1 / Item E — Fast mode for Opus 4.7 ✓ **shipped in PR #74 (pending v1.14.0)**
+**What:** `{"id":"claude-opus-4-7","speed":"fast"}` model override on `code-reviewer.md` and `security-auditor.md` frontmatter via new `parse_agent_speed()` helper in `managed/setup.py`. Sent as object form to API when `speed:` frontmatter field is present; scalar string otherwise (backwards-compatible for Sonnet/Haiku agents).
+**Verification:** Local CLI gated on managed-agent path only (Claude Code's frontmatter parser ignores the unknown `speed:` field gracefully). Managed-side confirmed via setup.py log lines on first post-merge run: `air-code-reviewer: synced → v365 (model {'speed': 'standard'} → {'speed': 'fast'})`.
+**Measured impact:** TBD — empirical confirmation confounded by ongoing SSE-degraded incidents (2026-05-19→22). Once SSE recovers, expect ~5-7 min off median wall + ~30-40% off re-reviews.
+**Source:** `air-improvements-plan.md §3.1 E + §3.4 O`, shipped PR #74
 
 ### C8 / Item M — Session metadata
 **What:** Patch the managed entrypoint (`client.beta.sessions.create`) to set `metadata: {pr_number, repo_path, mode, plugin_version}`. Enables every future ops question — cost per repo/mode/version, failure rate per cohort.
