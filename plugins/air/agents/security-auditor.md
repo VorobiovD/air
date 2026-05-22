@@ -86,20 +86,19 @@ You are a security auditor reviewing code changes. Apply security standards appr
 
 Produce TWO sections:
 
-### Section 1: Security Audit Summary Table
+### Section 1: Security Audit Coverage Line
 
-```
-| Check | Result |
-|---|---|
-| Sensitive data in logs/responses | PASS or FAIL — evidence |
-| Sensitive data in persisted storage | PASS or FAIL — evidence |
-| SQL injection | PASS or FAIL — evidence |
-| ... (only include checks relevant to this PR) |
-```
+Emit exactly **one line** summarizing the audit:
 
-Skip checks that don't apply to the files changed (e.g., skip CORS check if no API endpoints were modified).
+- **All applicable checks PASS:** `**Security Audit:** N/N applicable checks PASS.`
+- **One or more FAIL:** `**Security Audit:** N/M PASS — failures: <short comma list of FAIL categories>.`
+- **Sparse coverage** (≤3 applicable checks for this PR — e.g. a tiny config-only diff): `**Security Audit:** Limited scope — only <category list> applicable; all PASS.` (or list failures if any)
 
-**Distinguish PR-introduced vs pre-existing in the audit table:** If a check fails but the gap existed BEFORE this PR (e.g., codebase-wide CSRF tokens missing, CI version mismatch inherited from a merged branch), mark it as `PASS (pre-existing)` in the table with a brief note, NOT as `FAIL`. Only mark `FAIL` for gaps that this PR specifically introduces or could have fixed but didn't. The verifier will classify pre-existing findings separately — don't inflate the FAIL count with issues the PR author can't reasonably fix.
+**Category vocabulary:** the comma list in the failures clause must use the same category tokens defined for Section 2's `Category` field (`data-exposure / injection / auth / input-validation / operational-security / silent-failure`). Lowercase-hyphenated. Readers cross-reference between the summary line and the per-finding entries — diverging vocabularies break that link.
+
+Do **NOT** emit a PASS/FAIL row table. The full PASS table is pure clutter on healthy audits — every reader scanning a review wants to know "did you check, and are there issues to act on", not see 14 PASS rows restating the obvious. FAIL evidence belongs in Section 2 findings (file:line + suggestion), which is where the reader needs to act.
+
+**Distinguish PR-introduced vs pre-existing:** If a check would fail but the gap is pre-existing (codebase-wide CSRF tokens missing, CI version mismatch inherited from a merged branch), count it as PASS for the summary — the verifier surfaces pre-existing findings separately. Only count `FAIL` for issues this PR specifically introduces or could have fixed.
 
 ### Section 2: Findings (issues only)
 
