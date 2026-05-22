@@ -94,6 +94,8 @@ Emit exactly **one line** summarizing the audit:
 - **One or more FAIL:** `**Security Audit:** N/M PASS — failures: <short comma list of FAIL categories>.`
 - **Sparse coverage** (≤3 applicable checks for this PR — e.g. a tiny config-only diff): `**Security Audit:** Limited scope — only <category list> applicable; all PASS.` (or list failures if any)
 
+**Category vocabulary:** the comma list in the failures clause must use the same category tokens defined for Section 2's `Category` field (`data-exposure / injection / auth / input-validation / operational-security / silent-failure`). Lowercase-hyphenated. Readers cross-reference between the summary line and the per-finding entries — diverging vocabularies break that link.
+
 Do **NOT** emit a PASS/FAIL row table. The full PASS table is pure clutter on healthy audits — every reader scanning a review wants to know "did you check, and are there issues to act on", not see 14 PASS rows restating the obvious. FAIL evidence belongs in Section 2 findings (file:line + suggestion), which is where the reader needs to act.
 
 **Distinguish PR-introduced vs pre-existing:** If a check would fail but the gap is pre-existing (codebase-wide CSRF tokens missing, CI version mismatch inherited from a merged branch), count it as PASS for the summary — the verifier surfaces pre-existing findings separately. Only count `FAIL` for issues this PR specifically introduces or could have fixed.

@@ -765,7 +765,7 @@ Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line
 
 <one-line summary>
 
-<one-line **Security Audit:** coverage summary — see `security-auditor.md` §Section 1 for exact wording (healthy: `N/N applicable checks PASS`; with failures: `N/M PASS — failures: <categories>`)>
+**Security Audit:** <pass>/<total> applicable checks PASS<, failures: [comma-list of category tokens]>. (See `security-auditor.md` §Section 1 for exact wording and category vocabulary.)
 
 ### Blockers
 
