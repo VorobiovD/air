@@ -307,6 +307,9 @@ Measure citation rate over 20 runs. If <10%, evaluate dropping codex. If >30%, t
 ## Phase 6 — Managed-agents platform features (P10-P13 + capability uptake)
 
 ### P10 — Webhooks for session lifecycle
+
+**See [`docs/sse-alternatives.md`](sse-alternatives.md) for the full Option A/B/C analysis** (pure REST polling vs. webhooks vs. sleep-and-drain). This section summarizes the recommended path; the detail doc captures the tradeoffs and triggers.
+
 **What:** Anthropic shipped webhook delivery for managed-agents (May 7, 2026). Events: `session.status_idled`, `session.status_terminated`, `session.thread_idled`, `session.outcome_evaluation_ended`. Push-based, HMAC-signed (`X-Webhook-Signature`).
 **Why it matters:** the entire SSE/REST race we fixed in v1.12.3→v1.12.6 goes away if orchestrator just waits for `session.status_idled` webhook + one REST `events.list` call.
 **Why not now:** requires publicly-resolvable HTTPS endpoint. GHA is ephemeral. Two viable architectures: thin webhook receiver (Worker/Lambda/Vercel) writing to S3/KV, or polling-fallback retained alongside webhooks.
