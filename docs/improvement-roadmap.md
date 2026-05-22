@@ -195,11 +195,18 @@ Three small fixes derived from the 2026-05-19/20/21 audit. All client-side patch
 ### 2.b — Item A: Outcomes + rubric (then, 2-3 weeks)
 **Why:** v1.12.6's `\b` word-boundary bug (PR #67) shipped because we lacked an automated structural check on verifier output. A 5-criterion rubric (`## Code Review` opener, `Reviewed at: <40hex>` footer + SHA match, has at least one severity section, no `[empty message]` text) catches the class AT SESSION END. Pattern 1 in 2026-05-19 audit (qai-be #830 silently discarded 4715-char review) is exactly the bug class.
 
+**Concrete drift example — lifemd #16327 (2026-05-22):** Re-review on this PR (local `/air:review` run) produced semantically-correct content but deviated from the canonical template on **6 separate elements**: `## Code Review (re-review)` (lowercase `r` vs. canonical capital `R`); a custom `Inter-diff: <sha>..<sha> — N files, +A/-D.` line instead of the canonical italic `_Re-reviewed at \`<sha>\`, previous review at \`<sha>\`._`; `### Status of previous findings` instead of `### Previous Findings Status`; `### New findings from this iteration` instead of `### New Findings`; `### Strengths (this iteration)` instead of `### Strengths`; a non-template `### Author pattern updates (\`<author>\`)` section consolidating annotations that the prompt instructs as inline `[matches author pattern: X (Nx)]`. Functionally fine (the `Reviewed at:` footer is well-formed, so re-review detection still works), but illustrates that template strings in `commands/review.md` are treated as guides, not specs, by the LLM during final-output assembly. A rubric like:
+- Header matches `^## Code Review( \(Re-review\))?$` exactly
+- Re-review body has `_Re-reviewed at \`[0-9a-f]{40}\`, previous review at \`[0-9a-f]{40}\`._` on line 3
+- All `###` section headers belong to a fixed allow-list: `{Blockers, Medium, Low, Nits, Previous Findings Status, New Findings, Pre-existing Issues, Strengths}`
+
+…would catch all 6 of these drifts at session-end and trigger an automatic revision. Drift is more pronounced on re-review than fresh review (fresh-review template scaffolding in `review.md` is more explicit than re-review's, which leaves more latitude for word-choice variation).
+
 **Status:** research preview → public beta May 2026. Needs Outcomes access request first (`https://claude.com/form/claude-managed-agents`).
 
 **Rubric draft** + wiring sketch in `air-improvements-plan.md §5.1`.
 
-**Source:** `air-improvements-plan.md §3.1 A + §5.1`, `plan-review §E.1`, legacy P11
+**Source:** `air-improvements-plan.md §3.1 A + §5.1`, `plan-review §E.1`, legacy P11, lifemd #16327 (2026-05-22 drift artifact)
 
 ### 2.c — Item C: Persistent worker threads (then, ~2 weeks)
 **Why** (revised motivation per `plan-review §B.5`): the original use case ("verifier asks specialist: are you sure this is pre-existing given new caller?") is already solved by v1.13.0's exposure-escalation clause. **New motivation:** verifier-driven evidence interrogation on borderline `[matches author pattern: X (Nx)]` annotations — "what evidence supports your blocker call here?" Specialist thread is already cache-warm; follow-up costs only new content tokens.
