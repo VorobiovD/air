@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.14.0](https://github.com/VorobiovD/air/compare/v1.13.0...v1.14.0) (2026-05-23)
+
+
+### Features
+
+* **managed:** fast-mode Opus on code-reviewer + security-auditor ([#74](https://github.com/VorobiovD/air/issues/74)) ([671e2cc](https://github.com/VorobiovD/air/commit/671e2ccb8cefe81d8c53173d683bf3427ddd70b5))
+* **prompts:** drop the PASS/FAIL row table from security audits ([#77](https://github.com/VorobiovD/air/issues/77)) ([a167b38](https://github.com/VorobiovD/air/commit/a167b38377b81ad3bd3d19ea05bec7b310c28e4f))
+* **prompts:** security audit — FAIL-only 4-col table (Check|Category|Why|Result) ([#78](https://github.com/VorobiovD/air/issues/78)) ([8b1e447](https://github.com/VorobiovD/air/commit/8b1e44749edfcf70c8fbd480bea1eae8c987f820))
+
 ## [1.13.0](https://github.com/VorobiovD/air/compare/v1.12.6...v1.13.0) (2026-05-14)
 
 
