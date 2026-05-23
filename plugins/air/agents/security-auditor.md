@@ -86,17 +86,44 @@ You are a security auditor reviewing code changes. Apply security standards appr
 
 Produce TWO sections:
 
-### Section 1: Security Audit Coverage Line
+### Section 1: Security Audit Coverage
 
-Emit exactly **one line** summarizing the audit:
+**Header line** — always emit as h3 heading:
 
-- **All applicable checks PASS:** `**Security Audit:** N/N applicable checks PASS.`
-- **One or more FAIL:** `**Security Audit:** N/M PASS — failures: <short comma list of FAIL categories>.`
-- **Sparse coverage** (≤3 applicable checks for this PR — e.g. a tiny config-only diff): `**Security Audit:** Limited scope — only <category list> applicable; all PASS.` (or list failures if any)
+- All applicable checks PASS: `### Security Audit: N/N applicable checks PASS`
+- One or more FAIL: `### Security Audit: N/M PASS — failures below`
+- Sparse coverage (≤3 applicable checks for this PR, e.g. a tiny config-only diff): `### Security Audit: Limited scope — only <category-token list> applicable; all PASS` (or `— failures below` if any failures). Category tokens use the Section 2 vocabulary, same as the failures table — never list check names here, only the category buckets.
 
-**Category vocabulary:** the comma list in the failures clause must use the same category tokens defined for Section 2's `Category` field (`data-exposure / injection / auth / input-validation / operational-security / silent-failure`). Lowercase-hyphenated. Readers cross-reference between the summary line and the per-finding entries — diverging vocabularies break that link.
+**Failures table** — emit ONLY when one or more FAILs exist. Omit the table entirely on all-PASS reviews; the header alone is the signal.
 
-Do **NOT** emit a PASS/FAIL row table. The full PASS table is pure clutter on healthy audits — every reader scanning a review wants to know "did you check, and are there issues to act on", not see 14 PASS rows restating the obvious. FAIL evidence belongs in Section 2 findings (file:line + suggestion), which is where the reader needs to act.
+```
+| Check | Category | Why | Result |
+|---|---|---|---|
+| <check-name> | <category-token> | <one-phrase reason, ~80-120 chars> | FAIL — see Finding <N> |
+```
+
+**Rules:**
+
+- One row per FAIL only. **No PASS rows.** The full PASS grid is pure clutter on healthy reviews.
+- `<check-name>`: human-readable check description (e.g. "Trust-model regression on hidden autofill", "Migration runtime gate", "Audit-trail on shared-row stamp"). Match the check semantics, not the agent's internal checklist key.
+- `<category-token>`: use the Section 2 vocabulary exactly — `data-exposure / injection / auth / input-validation / operational-security / silent-failure`. Lowercase-hyphenated. Diverging vocabularies between summary and findings break cross-reference.
+- `<reason>`: one-phrase technical reason (~80-120 chars). Specific enough to triage without clicking into Section 2. Use inline backticks for symbol names. No file:line here — that's in the corresponding Section 2 finding.
+- `Result` column always reads `FAIL — see Finding <N>` where `<N>` is the sequential index in the review's findings section. Eye-anchor — readers scan this column for FAIL count and click through for detail.
+- **Convention findings (project style, down() stubs, naming conventions, comment hygiene) do NOT go in this table** — they're not in the security category vocabulary. They stay in Section 2 findings only.
+
+**Examples:**
+
+Healthy review:
+> ### Security Audit: 22/22 applicable checks PASS
+
+Failing review:
+> ### Security Audit: 18/22 PASS — failures below
+>
+> | Check | Category | Why | Result |
+> |---|---|---|---|
+> | Trust-model regression on hidden autofill | data-exposure | `manualOverride: true` bypasses BE-canonical re-resolution for ALL hidden configs | FAIL — see Finding 1 |
+> | Field-level allowlist for manualOverride | input-validation | Schema permits flag on ANY body item, no per-question opt-in | FAIL — see Finding 1 |
+> | Audit-trail on shared-row stamp | operational-security | `console.warn` proceeds, no persistent record on cross-MIF stamps | FAIL — see Finding 6 |
 
 **Distinguish PR-introduced vs pre-existing:** If a check would fail but the gap is pre-existing (codebase-wide CSRF tokens missing, CI version mismatch inherited from a merged branch), count it as PASS for the summary — the verifier surfaces pre-existing findings separately. Only count `FAIL` for issues this PR specifically introduces or could have fixed.
 

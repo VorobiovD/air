@@ -765,7 +765,9 @@ Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line
 
 <one-line summary>
 
-**Security Audit:** <pass>/<total> applicable checks PASS<, failures: [comma-list of category tokens]>. (See `security-auditor.md` §Section 1 for exact wording and category vocabulary.)
+### Security Audit: <pass>/<total> applicable checks PASS[ — failures below]
+
+[When failures exist, follow the header with a 4-col table — `Check | Category | Why | Result` — one row per FAIL. Omit the table entirely on all-PASS. See `security-auditor.md` §Section 1 for the exact spec + examples.]
 
 ### Blockers
 
