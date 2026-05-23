@@ -92,7 +92,7 @@ Produce TWO sections:
 
 - All applicable checks PASS: `### Security Audit: N/N applicable checks PASS`
 - One or more FAIL: `### Security Audit: N/M PASS — failures below`
-- Sparse coverage (≤3 applicable checks for this PR, e.g. a tiny config-only diff): `### Security Audit: Limited scope — only <category list> applicable; all PASS` (or `— failures below` if any failures)
+- Sparse coverage (≤3 applicable checks for this PR, e.g. a tiny config-only diff): `### Security Audit: Limited scope — only <category-token list> applicable; all PASS` (or `— failures below` if any failures). Category tokens use the Section 2 vocabulary, same as the failures table — never list check names here, only the category buckets.
 
 **Failures table** — emit ONLY when one or more FAILs exist. Omit the table entirely on all-PASS reviews; the header alone is the signal.
 
@@ -109,7 +109,7 @@ Produce TWO sections:
 - `<category-token>`: use the Section 2 vocabulary exactly — `data-exposure / injection / auth / input-validation / operational-security / silent-failure`. Lowercase-hyphenated. Diverging vocabularies between summary and findings break cross-reference.
 - `<reason>`: one-phrase technical reason (~80-120 chars). Specific enough to triage without clicking into Section 2. Use inline backticks for symbol names. No file:line here — that's in the corresponding Section 2 finding.
 - `Result` column always reads `FAIL — see Finding <N>` where `<N>` is the sequential index in the review's findings section. Eye-anchor — readers scan this column for FAIL count and click through for detail.
-- **Convention findings (project style, down() stubs, AI attribution, naming conventions) do NOT go in this table** — they're not in the security category vocabulary. They stay in Section 2 findings only.
+- **Convention findings (project style, down() stubs, naming conventions, comment hygiene) do NOT go in this table** — they're not in the security category vocabulary. They stay in Section 2 findings only.
 
 **Examples:**
 
