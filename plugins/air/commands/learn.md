@@ -422,7 +422,20 @@ cd "$WIKI_DIR" && git add REVIEW.md REVIEW-HISTORY.md PROJECT-PROFILE.md ACCEPTE
 
 ## Step 7: Update meta
 
-After successful push, reset the shared auto-trigger counter in the wiki (`.air-meta.json`) so the next review sees `reviews_since: 0` and the cadence restarts. Both CLI and managed read this same file — `meta.py reset` is the canonical API. Skip cleanly if `$AIR_PLUGIN_ROOT` couldn't be resolved (Step 0 prints a warning) — counter staying elevated just means the next review re-triggers learn, which is the safe failure mode.
+After successful push, reset the shared auto-trigger counter so the next review sees `reviews_since: 0` and the cadence restarts. **Store-backed repos** keep the counter in the per-repo pattern memory store — reset it there and skip the wiki commit below entirely:
+
+```bash
+if [ -n "$AIR_PLUGIN_ROOT" ] && [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  AIR_STORE_ID=$(python3 "$AIR_PLUGIN_ROOT/lib/meta.py" find-store --repo "$CURRENT_REPO")
+  if [ -n "$AIR_STORE_ID" ]; then
+    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" reset --store-id "$AIR_STORE_ID" --pr-number 0
+    # Counter lives in the store — no wiki .air-meta.json commit needed.
+    # RETURN from Step 7 here.
+  fi
+fi
+```
+
+Legacy repos reset the wiki copy (`.air-meta.json`) — both CLI and managed read this same file; `meta.py reset` is the canonical API. Skip cleanly if `$AIR_PLUGIN_ROOT` couldn't be resolved (Step 0 prints a warning) — counter staying elevated just means the next review re-triggers learn, which is the safe failure mode.
 
 ```bash
 WIKI_DIR="$AIR_TMP/review-wiki-learn"

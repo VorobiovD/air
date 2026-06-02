@@ -31,8 +31,9 @@ plugins/air/
 │   ├── pre-commit-drift.py    # Wrapper: narrows to `git commit`, routes custom/built-in
 │   └── builtin-checks.sh      # Zero-config auto-detection (version mirror + badge)
 ├── lib/                 # Shared Python helpers (stdlib-only, called by CLI + managed)
-│   ├── meta.py                # Wiki-backed /air:learn trigger counter
-│   ├── wiki_git.py            # Clone + commit-meta-with-retry
+│   ├── meta.py                # /air:learn trigger counter (wiki file or memory-store backend + find-store)
+│   ├── wiki_git.py            # Clone + commit-meta-with-retry (legacy wiki backend)
+│   ├── pattern_lifecycle.py   # Deterministic author-pattern strengthen/clean/decline/archive ops
 │   └── pr_conversation.py     # Merge GitHub PR comments/reviews into <pr-conversation> agent context
 └── .claude-plugin/
     └── plugin.json      # Plugin metadata (name, version, author)
@@ -46,6 +47,9 @@ managed/                          # Managed Agent (CI automation)
 ├── api.py                        # Shared API helpers
 ├── setup.py                      # Creates/updates agents + environment via API
 ├── review.py                     # Triggers review sessions
+├── memory_store.py               # Per-repo pattern memory store: discovery, reads, sha256-preconditioned writes
+├── pattern_writer.py             # Applies pattern_lifecycle ops to the store after each review
+├── migrate_wiki_to_store.py      # One-shot wiki → store migration (per-author split, --dry-run)
 ├── test-session.py               # Quick 9-test verification script
 ├── prompts/learn-orchestrator.md # System prompt for cloud learn agent
 │                                 # (review orchestrator.md deleted in v1.7.0 — review.py orchestrates client-side)
@@ -66,7 +70,7 @@ managed/                          # Managed Agent (CI automation)
 
 **Verification** (`agents/review-verifier.md`): Post-review quality gate. Reads actual source at flagged lines, classifies findings as CONFIRMED/DOWNGRADED/IMPROVEMENT/PRE-EXISTING/ACCEPTED PATTERN/FALSE POSITIVE using git blame decision tree.
 
-**Wiki storage**: Patterns learned from reviews are stored on the repo's wiki (GitHub or GitLab) (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md). Auto-cleanup every 15 reviews or 14 days (with ≥1 new PR) tracked in `.air-meta.json` at the wiki root — shared across CLI and managed runs via `plugins/air/lib/meta.py`.
+**Pattern storage**: Two backends. **Store-backed repos** (migrated via `managed/migrate_wiki_to_store.py`) keep patterns in a per-repo Anthropic memory store — per-author files under `/authors/<login>.md`, shared files at the root, counter at `/meta/air-meta.json`; review sessions mount it read-only (PR content is untrusted — writes happen deterministically in `managed/pattern_writer.py` post-review), learn sessions mount read-write and export a rendered mirror to the git wiki for humans + CLI reads. **Legacy repos** store everything on the repo's wiki (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md, REVIEW-ARCHIVE.md) with the counter in `.air-meta.json` at the wiki root. Auto-cleanup every 15 reviews or 14 days (with ≥1 new PR) — both backends via `plugins/air/lib/meta.py` (a repo's store presence, discovered by name `air-patterns <owner>/<repo>`, IS the rollout flag).
 
 **Pre-commit drift check** (`hooks/`): A `PreToolUse` hook on `Bash` fires before every Claude-driven `git commit`, runs either a repo-specific `.air-checks.sh` (if executable at repo root) or the plugin's built-in auto-detection (manifest version vs shields badge + `currently X.Y.Z` + `**Version:** X.Y.Z` across `CLAUDE.md`/`README.md`/`docs/**/*.md`). Non-zero exit blocks the commit. `/air:review` Step 3.5 and `/air:learn` Step 4.65 generate/augment `.air-checks.sh` from `PROJECT-PROFILE.md`. `git commit --no-verify` bypasses. See `plugins/air/README.md` for the three-level progression.
 
