@@ -899,7 +899,7 @@ fi
 
 **>>> AUTO-TRIGGER DECISION (do NOT skip this block) <<<**
 
-If `$META_RC == 1` (threshold hit — 5+ reviews OR 2+ days with new PRs):
+If `$META_RC == 1` (threshold hit — 15+ reviews OR 14+ days with new PRs):
 1. Print "Auto-trigger: running /air:learn"
 2. Run `/air:learn` (full cleanup + KAIROS history regeneration). This is the same slash-command the user can invoke manually — invoke it in the same session.
 3. `/air:learn` clones the wiki itself, does the full pass, and at the end calls `meta.py reset` + pushes `.air-meta.json`. That replaces the push this flow would do in sub-step 5.
@@ -910,9 +910,9 @@ If `$META_RC == 0` (threshold not met):
 - Fall through to sub-steps 2, 2.5, 3, 4, 5 below (existing per-review pattern extraction + author lifecycle + push).
 
 **Threshold rules** (enforced in `meta.py::should_trigger_learn`):
-- `reviews_since >= 5` → trigger
-- `days_since_cleanup >= 2` AND `reviews_since > 0` → trigger
-- `days_since_cleanup >= 2` AND `reviews_since == 0` → skip + bump `last_check` (prevents re-evaluating every review)
+- `reviews_since >= 15` → trigger
+- `days_since_cleanup >= 14` AND `reviews_since > 0` → trigger
+- `days_since_cleanup >= 14` AND `reviews_since == 0` → skip + bump `last_check` (prevents re-evaluating every review)
 - else → skip
 
 The counter bump and check are atomic from the caller's perspective; only the wiki push (sub-step 5) commits them to the remote.

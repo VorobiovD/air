@@ -165,7 +165,7 @@ fi
 
 **>>> AUTO-TRIGGER DECISION (do NOT skip this block) <<<**
 
-If `$META_RC == 1` (threshold hit — 5+ reviews OR 2+ days with new PRs):
+If `$META_RC == 1` (threshold hit — 15+ reviews OR 14+ days with new PRs):
 1. Print "Auto-trigger: running /air:learn"
 2. Run `/air:learn` now (full cleanup + KAIROS history regeneration). It clones the wiki itself, resets `.air-meta.json`, and pushes everything from its own clone.
 3. **RETURN from Self Step 7** — do NOT execute sub-step 4 below. `/air:learn` already pushed REVIEW.md + `.air-meta.json` from its own clone; running our push afterward would be a non-fast-forward race.
@@ -174,7 +174,7 @@ If `$META_RC == 0` (threshold not met):
 - Print "Auto-trigger: threshold not met — self-review done, push below"
 - Fall through to sub-step 4.
 
-Threshold rules (enforced in `meta.py`): `reviews_since >= 5`, or `days_since_cleanup >= 2` AND `reviews_since > 0`. A self-review counts as a review for counter purposes — no PR number needed (pass 0).
+Threshold rules (enforced in `meta.py`): `reviews_since >= 15`, or `days_since_cleanup >= 14` AND `reviews_since > 0`. A self-review counts as a review for counter purposes — no PR number needed (pass 0).
 
 4. Push to wiki (only reached when sub-step 3's auto-trigger said `META_RC == 0` — otherwise we returned from this Step).
 
