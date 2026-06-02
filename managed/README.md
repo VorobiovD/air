@@ -92,20 +92,27 @@ GitHub Action triggers `python review.py <repo> <pr>`
   │     concurrently — humans + other AI bots are surfaced to specialists as <pr-conversation>
   │     so findings can flag overlap with [already raised by @<author>]
   ├── Optional: runs `codex review --base <sha>` as a subprocess (Pattern B: GHA-side, sequential
-  │     before the coordinator) — output threaded into the coordinator's user message as
-  │     <codex-findings>...</codex-findings>, html-escaped and length-capped
+  │     before the coordinator) — output html-escaped, length-capped, and bundled into the
+  │     mounted verifier-task.md (inline fallback: coordinator user message)
+  ├── File-handoff (v1.18.0): uploads PR context, diff, and verifier task + codex findings via
+  │     the Files API; they mount read-only at /workspace/context/. The coordinator user message
+  │     is a short pointer note — upload failure falls back to the legacy inline shape.
   │
   ▼
 Single air-coordinator session (callable_agents multi-agent runtime)
   │
-  ├── TURN 1: dispatches specialists in parallel as sub-agents (one Anthropic session, one container):
+  ├── TURN 1: dispatches specialists in parallel as sub-agents (one Anthropic session, one container);
+  │     file-handoff: delegations are short pointers — specialists read /workspace/context/ and write
+  │     findings to /workspace/findings/<name>.md, returning a 1-line ack:
   │     ├── air-code-reviewer       — bugs, design, test coverage
   │     ├── air-simplify            — reuse, quality, efficiency
   │     ├── air-security-auditor    — 31-item checklist
   │     └── air-git-history-reviewer — blame, churn, recurring patterns
   │
-  ├── TURN 2: dispatches air-review-verifier with the 4 specialist findings + codex findings +
-  │           the verifier_task template (verifies each finding, drops false positives, emits markdown)
+  ├── TURN 2: dispatches air-review-verifier — file-handoff: a pointer at the context/diff/task
+  │           mounts + the findings directory (inline fallback: embeds the 4 specialist findings +
+  │           codex findings + the verifier_task template). Verifies each finding, drops false
+  │           positives, emits markdown
   │
   └── TURN 3: outputs verifier's response verbatim + bash tool call to update the wiki (REVIEW.md
               author-pattern entry on recurring findings, with one-shot rebase-retry on push)

@@ -6,6 +6,8 @@ tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
 
+**File-handoff mode (managed runtime):** when your task message points you at file paths instead of embedding the inputs, read ALL of them in full before verifying: `/workspace/context/pr-context.md` (PR context), `/workspace/context/pr.diff` (the diff — chunk the read if large), `/workspace/context/verifier-task.md` (your task, the output format template, and codex findings), and every specialist findings file under `/workspace/findings/` (a missing file means that specialist was unavailable — note it in your output). Every "PR Context block" reference below then means the contents of `pr-context.md`. Your final review comment is ALWAYS your reply text — never write it only to a file; the coordinator must re-emit it verbatim. Without those pointers (CLI mode), work from the embedded inputs as usual.
+
 Before verifying:
 1. Read `CLAUDE.md` from the repo root — it contains project rules, SSM conventions, deploy constraints, and known gotchas. A finding that contradicts CLAUDE.md guidance (e.g., "use sam package not sam build") is likely a false positive if the code follows the documented rule.
 2. **Wiki files** — the verifier invocation prompt from the orchestrator includes a `Wiki files directory:` reference pointing at the session temp directory plus a list of available files. Read from that directory:
