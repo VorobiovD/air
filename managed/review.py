@@ -45,6 +45,7 @@ from anthropic import (
 )
 
 from api import list_agents, find_environment
+from setup import MODEL_ALIASES
 
 # Make plugins/air/lib importable so we share stdlib helpers (the
 # conversation merger and the review-header constant) with the CLI path
@@ -2307,7 +2308,11 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         # (belt-and-suspenders; the prefix check already filters).
         coord_secs_str = f"{coordinator_secs:.1f}s"
         run_url = _gha_run_url()
-        run_link_line = f"\nRun: <{run_url}>\n" if run_url else ""
+        run_link_line = (
+            f"\nRun: <{run_url}> (the job is marked failed with an "
+            f"`::error::` annotation carrying this reason)\n"
+            if run_url else ""
+        )
         # Branch the structured-fallback body on the failure shape so the
         # developer sees an actionable cause + workaround, not generic
         # stale-cache prose:
@@ -2579,20 +2584,23 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str) -> None:
 
 
 def _billing_preflight() -> None:
-    """1-token ping (~$0.0001) before any session spawns.
+    """1-token ping (well under a cent) before any session spawns.
 
     A dry ANTHROPIC_API_KEY otherwise surfaces mid-coordinator-session
-    AFTER real spend — qai-be #969 burned ~$10 over 28 minutes before
-    dying to the 2026-06-02 exhaustion. With the canary, a billing-dead
-    key fails the job red in seconds at ~zero cost, and retries during
-    a dry spell stay free; after a top-up the canary passes and runs
-    proceed with no manual unblocking. Any NON-billing canary failure
-    (network blip, model rename) proceeds with a warning — the canary
-    must never block a review on its own flakiness.
+    AFTER real spend — qai-be #969 burned a full partial session over
+    28 minutes before dying to the 2026-06-02 exhaustion. With the
+    canary, a billing-dead key fails the job red at near-zero cost, and
+    retries during a dry spell stay free; after a top-up the canary
+    passes and runs proceed with no manual unblocking. Any NON-billing
+    canary failure (network blip, model rename, model-access
+    restriction) proceeds with a warning — the canary must never block
+    a review on its own flakiness. timeout/max_retries mirror
+    `_interrupt_live_sessions_sync`'s client so a slow API can't stall
+    the job toward the GHA SIGKILL.
     """
     try:
-        Anthropic().messages.create(
-            model="claude-haiku-4-5",
+        Anthropic(timeout=10.0, max_retries=0).messages.create(
+            model=MODEL_ALIASES["haiku"],
             max_tokens=1,
             messages=[{"role": "user", "content": "ping"}],
         )
@@ -2601,7 +2609,7 @@ def _billing_preflight() -> None:
         if any(hint in msg for hint in _BILLING_REASON_HINTS):
             print(
                 f"::error title=air review failed — billing exhausted (preflight)::"
-                f"{str(e)[:300]} | no session was started, ~$0 spent | "
+                f"{str(e)[:300]} | no session was started, nothing spent | "
                 f"top up at console.anthropic.com (or rotate ANTHROPIC_API_KEY), "
                 f"then re-request the review"
             )
@@ -2632,8 +2640,8 @@ def main():
         print("Error: ANTHROPIC_API_KEY not set.", file=sys.stderr)
         sys.exit(1)
 
-    _billing_preflight()
     _install_shutdown_handlers()
+    _billing_preflight()
     asyncio.run(run_review(args))
 
 

@@ -90,7 +90,7 @@ PR #635 received 9 reviews over 2 days. Comment sizes converged but not monotoni
 | Cancelled (race-with-push, concurrency cancel) | 19 in last 7d | `cancel-in-progress: true` working as designed |
 | `422 Validation Failed` posting comment | 0 in last 7d | v1.12.1 retry path holding |
 | Stale-coordinator regurgitation | 0 in last 7d | v1.12.3/v1.12.4 mitigations holding |
-| Billing exhaustion | 0 in last 7d | v1.12.5 fallback dormant |
+| Billing exhaustion | 2026-05-22 (air key, 11d invisible) + 2026-06-02 (org key, ~4h, 3 repos) | run-failed comment posts but job stayed green → fail-loud + billing canary preflight shipped post-1.16.0 |
 | **SSE-quiet / coordinator dispatch latency** | 3+ in last 3d (2026-05-19→21) | **NEW PATTERN — see below** |
 
 ### 2026-05-19 → 21 incidents — coordinator dispatch latency
