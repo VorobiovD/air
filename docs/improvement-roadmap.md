@@ -74,7 +74,7 @@ coordinator session       18-40 min   ⟵ dominant
   ├── verifier (sonnet)   ~3-8 min
   ├── wiki bash update    ~10-30s
 post review + verdict     ~2-5s
-learn.py epilogue (5/PR)  ~3-10 min   only every 5 reviews
+learn.py epilogue (15/PR) ~3-10 min   only every 15 reviews / 14 days
 ```
 
 ### Re-review density is the new norm

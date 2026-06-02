@@ -104,7 +104,7 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 10. **Consolidate** — deduplicate, assign severity, generate Strengths section
 11. **Format** — clickable links with full SHA, sequential numbering across all sections
 12. **Post** — new comment, or PATCH existing (--rewrite), or console-only (--dry-run)
-13. **Learn** — wiki push with graduated resistance + auto-trigger full cleanup every 5 reviews
+13. **Learn** — wiki push with graduated resistance + auto-trigger full cleanup every 15 reviews
 
 ### Five Specialized Agents
 
@@ -215,7 +215,7 @@ Two files:
 
 ### Auto-trigger Cleanup
 
-A wiki-backed counter (`.air-meta.json` at the wiki root) tracks reviews since last cleanup, shared across CLI and managed runs. Every 5 reviews or 2 days (with ≥1 new PR) — whichever comes first — the next `/air:review` or `managed/review.py` automatically triggers:
+A wiki-backed counter (`.air-meta.json` at the wiki root) tracks reviews since last cleanup, shared across CLI and managed runs. Every 15 reviews or 14 days (with ≥1 new PR) — whichever comes first — the next `/air:review` or `managed/review.py` automatically triggers:
 - Full REVIEW.md deduplication and reorganization
 - REVIEW-HISTORY.md regeneration from PR comment history
 - Counter resets — distributed across the team
@@ -320,7 +320,7 @@ This shifts detection of the wiki's `Stale documentation references` and `Flow r
 
 ### Evolution over time
 
-Each `/air:learn` run (periodic, every 5 reviews or 2 days):
+Each `/air:learn` run (periodic, every 15 reviews or 14 days):
 - If `.air-checks.sh` doesn't exist yet → generates one from the wiki's `PROJECT-PROFILE.md` (see point 2 above).
 - If it exists → inspects recurring Author Patterns in your wiki `REVIEW.md` and, if it sees codifiable drift (e.g., "Stale documentation references" flagged 3+ times with specific mirror-file shape), appends **commented-out** suggestions at the bottom for you to review-and-uncomment. Suggestions are capped at 3 per run and de-duplicated against existing content.
 

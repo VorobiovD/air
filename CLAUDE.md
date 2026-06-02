@@ -66,7 +66,7 @@ managed/                          # Managed Agent (CI automation)
 
 **Verification** (`agents/review-verifier.md`): Post-review quality gate. Reads actual source at flagged lines, classifies findings as CONFIRMED/DOWNGRADED/IMPROVEMENT/PRE-EXISTING/ACCEPTED PATTERN/FALSE POSITIVE using git blame decision tree.
 
-**Wiki storage**: Patterns learned from reviews are stored on the repo's wiki (GitHub or GitLab) (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md). Auto-cleanup every 5 reviews or 2 days (with ≥1 new PR) tracked in `.air-meta.json` at the wiki root — shared across CLI and managed runs via `plugins/air/lib/meta.py`.
+**Wiki storage**: Patterns learned from reviews are stored on the repo's wiki (GitHub or GitLab) (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, GLOSSARY.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md). Auto-cleanup every 15 reviews or 14 days (with ≥1 new PR) tracked in `.air-meta.json` at the wiki root — shared across CLI and managed runs via `plugins/air/lib/meta.py`.
 
 **Pre-commit drift check** (`hooks/`): A `PreToolUse` hook on `Bash` fires before every Claude-driven `git commit`, runs either a repo-specific `.air-checks.sh` (if executable at repo root) or the plugin's built-in auto-detection (manifest version vs shields badge + `currently X.Y.Z` + `**Version:** X.Y.Z` across `CLAUDE.md`/`README.md`/`docs/**/*.md`). Non-zero exit blocks the commit. `/air:review` Step 3.5 and `/air:learn` Step 4.65 generate/augment `.air-checks.sh` from `PROJECT-PROFILE.md`. `git commit --no-verify` bypasses. See `plugins/air/README.md` for the three-level progression.
 

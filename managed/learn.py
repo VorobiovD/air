@@ -22,7 +22,7 @@ from pathlib import Path
 import requests as req
 
 from api import API_BASE, get_headers, list_agents, find_environment, api_error_message
-from setup import DEFAULT_OPUS, create_or_update_agent
+from setup import MODEL_ALIASES, create_or_update_agent
 
 
 def sync_learn_agent():
@@ -39,7 +39,13 @@ def sync_learn_agent():
         system=prompt,
         tools=[{"type": "agent_toolset_20260401"}],
         existing=agents.get("air-learner"),
-        model=DEFAULT_OPUS,
+        # Sonnet, not Opus: wiki cleanup is structured dedup/reorg work, and
+        # the learner fires as a review epilogue — it ran on 4 of the 5
+        # runs preceding the 2026-05-22 credit exhaustion. If the API
+        # refuses the in-place model change, create_or_update_agent retries
+        # without `model` and prints the remediation (delete air-learner
+        # via console or DELETE /agents/{id}, then re-run to re-create).
+        model=MODEL_ALIASES["sonnet"],
     )
 
 

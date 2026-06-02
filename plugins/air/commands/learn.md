@@ -5,7 +5,7 @@ argument-hint: [--dry-run] [--history-only] [--refresh-profile]
 
 Fetch REVIEW.md from the wiki, clean it up using AI, generate REVIEW-HISTORY.md from PR comment history, and push both back.
 
-Note: `/air:review` auto-triggers this command every 5 reviews or every 2 days (whichever comes first). You can also run it manually for immediate cleanup.
+Note: `/air:review` auto-triggers this command every 15 reviews or every 14 days (whichever comes first). You can also run it manually for immediate cleanup.
 
 **Flags:**
 - `--dry-run` — preview changes without pushing to wiki

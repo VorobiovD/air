@@ -8,11 +8,11 @@ caller is responsible for invoking `/air:learn` (CLI) or
 `managed/learn.py` (managed) — this module only decides and mutates state.
 
 Threshold:
-    reviews_since >= 5
+    reviews_since >= 15
         → trigger
-    days_since_cleanup >= 2 AND reviews_since > 0
+    days_since_cleanup >= 14 AND reviews_since > 0
         → trigger
-    days_since_cleanup >= 2 AND reviews_since == 0
+    days_since_cleanup >= 14 AND reviews_since == 0
         → skip, bump last_check so we don't re-evaluate on every review
     else
         → skip
@@ -36,8 +36,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wiki_git import META_FILENAME  # single source for the file name
 
 # Threshold constants — mirror the CLI prose values in review.md Step 13.
-REVIEWS_THRESHOLD = 5
-DAYS_THRESHOLD = 2
+# Reviews-count leads; the days rule is only a slow-repo backstop. The old
+# 2-day rule fired a full Opus learn session on nearly every review in
+# repos reviewed less often than every 2 days — it fired on 4 of the 5
+# runs preceding the 2026-05-22 credit exhaustion.
+REVIEWS_THRESHOLD = 15
+DAYS_THRESHOLD = 14
 
 
 def _utc_now_iso() -> str:

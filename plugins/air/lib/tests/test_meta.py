@@ -86,36 +86,36 @@ def test_trigger_count_threshold(now):
     m = {
         "last_cleanup": _iso(now - timedelta(hours=1)),
         "last_check": _iso(now),
-        "reviews_since": 5,
+        "reviews_since": 15,
         "last_processed_pr": 30,
     }
     trigger, reason = meta.should_trigger_learn(m, now=now)
     assert trigger is True
-    assert "reviews_since=5" in reason
+    assert "reviews_since=15" in reason
 
 
 def test_trigger_count_threshold_exceeded(now):
-    m = {"last_cleanup": _iso(now), "last_check": _iso(now), "reviews_since": 12, "last_processed_pr": 30}
+    m = {"last_cleanup": _iso(now), "last_check": _iso(now), "reviews_since": 22, "last_processed_pr": 30}
     trigger, _ = meta.should_trigger_learn(m, now=now)
     assert trigger is True
 
 
 def test_trigger_date_with_reviews(now):
     m = {
-        "last_cleanup": _iso(now - timedelta(days=3)),
-        "last_check": _iso(now - timedelta(days=3)),
+        "last_cleanup": _iso(now - timedelta(days=15)),
+        "last_check": _iso(now - timedelta(days=15)),
         "reviews_since": 2,
         "last_processed_pr": 30,
     }
     trigger, reason = meta.should_trigger_learn(m, now=now)
     assert trigger is True
-    assert "days_since_cleanup=3" in reason
+    assert "days_since_cleanup=15" in reason
 
 
 def test_skip_date_without_reviews(now):
     m = {
-        "last_cleanup": _iso(now - timedelta(days=5)),
-        "last_check": _iso(now - timedelta(days=5)),
+        "last_cleanup": _iso(now - timedelta(days=20)),
+        "last_check": _iso(now - timedelta(days=20)),
         "reviews_since": 0,
         "last_processed_pr": 30,
     }
@@ -125,9 +125,11 @@ def test_skip_date_without_reviews(now):
 
 
 def test_skip_below_all_thresholds(now):
+    # 6 days would have fired the old 2-day rule — regression guard that the
+    # days backstop no longer triggers on every low-traffic review.
     m = {
-        "last_cleanup": _iso(now - timedelta(hours=6)),
-        "last_check": _iso(now - timedelta(hours=6)),
+        "last_cleanup": _iso(now - timedelta(days=6)),
+        "last_check": _iso(now - timedelta(days=6)),
         "reviews_since": 2,
         "last_processed_pr": 30,
     }
@@ -135,15 +137,26 @@ def test_skip_below_all_thresholds(now):
     assert trigger is False
 
 
-def test_trigger_at_exact_boundary_5_reviews(now):
-    m = {"last_cleanup": _iso(now), "last_check": _iso(now), "reviews_since": 5, "last_processed_pr": 30}
+def test_trigger_at_exact_boundary_15_reviews(now):
+    m = {"last_cleanup": _iso(now), "last_check": _iso(now), "reviews_since": 15, "last_processed_pr": 30}
     trigger, _ = meta.should_trigger_learn(m, now=now)
-    assert trigger is True  # >= 5, not > 5
+    assert trigger is True  # >= 15, not > 15
 
 
-def test_trigger_at_exact_boundary_2_days(now):
+def test_skip_just_below_reviews_boundary(now):
     m = {
-        "last_cleanup": _iso(now - timedelta(days=2, seconds=1)),
+        "last_cleanup": _iso(now - timedelta(days=1)),
+        "last_check": _iso(now),
+        "reviews_since": 14,
+        "last_processed_pr": 30,
+    }
+    trigger, _ = meta.should_trigger_learn(m, now=now)
+    assert trigger is False  # 14 < 15, and days below the backstop
+
+
+def test_trigger_at_exact_boundary_14_days(now):
+    m = {
+        "last_cleanup": _iso(now - timedelta(days=14, seconds=1)),
         "last_check": _iso(now),
         "reviews_since": 1,
         "last_processed_pr": 30,
@@ -191,7 +204,7 @@ def test_cmd_check_returns_1_on_trigger(wiki_dir):
     _write(wiki_dir, {
         "last_cleanup": "2026-04-01T00:00:00Z",
         "last_check": "2026-04-01T00:00:00Z",
-        "reviews_since": 5,
+        "reviews_since": 15,
         "last_processed_pr": 30,
     })
     rc = meta.main(["check", "--wiki-dir", str(wiki_dir)])

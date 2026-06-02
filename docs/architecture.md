@@ -252,9 +252,9 @@ Lifecycle:
 | air-code-reviewer | Opus | read, grep, glob, bash | Code quality review |
 | air-simplify | Sonnet | read, grep, glob | Reuse, quality, efficiency (no bash) |
 | air-security-auditor | Opus | read, grep, glob, bash | 31-item security audit |
-| air-git-history-reviewer | Sonnet | read, grep, glob, bash | Blame, churn, history |
+| air-git-history-reviewer | Haiku | read, grep, glob, bash | Blame, churn, history |
 | air-review-verifier | Opus | read, grep, glob, bash | False-positive filtering + emits the final review comment markdown (v1.7.0+) |
-| air-learner | Opus | all (agent_toolset) | Wiki maintenance |
+| air-learner | Sonnet | all (agent_toolset) | Wiki maintenance |
 | air-test | Sonnet | all (agent_toolset) | Quick 9-test verification |
 
 **Note:** `air-reviewer` (server-side orchestrator) was removed in v1.7.0 — `managed/review.py` is now the orchestrator (client-side). Existing deployments can safely archive or leave the old `air-reviewer` agent — it's orphaned but harmless.
