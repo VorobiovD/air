@@ -25,7 +25,9 @@ class FakeStoreAPI:
         if method == "GET" and "memories?" in path:
             if self.content is None:
                 return {"data": []}
-            return {"data": [{"type": "memory", "path": meta.STORE_META_PATH,
+            # live API shape: list entries carry type "memory_metadata"
+            return {"data": [{"type": "memory_metadata",
+                              "path": meta.STORE_META_PATH,
                               "id": self.mem_id}]}
         if method == "GET" and self.mem_id in path:
             return {"content": self.content, "content_sha256": self.sha,

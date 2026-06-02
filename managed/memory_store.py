@@ -122,7 +122,9 @@ def list_memories(store_id: str, path_prefix: str = "/") -> dict[str, dict]:
             store_id, path_prefix=path_prefix, order_by="path", depth=20, **kw
         )
     for item in _paginate(_list):
-        if item.get("type") == "memory":
+        # Live API uses type "memory_metadata" in list responses (docs
+        # examples show "memory") — accept both.
+        if item.get("type") in ("memory", "memory_metadata"):
             out[item["path"]] = {
                 "id": item["id"],
                 "content_sha256": item.get("content_sha256"),
