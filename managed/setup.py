@@ -164,8 +164,8 @@ def create_or_update_agent(
                 data = retry.json()
                 print(
                     f"  {name}: synced prompt → v{data['version']} "
-                    f"(model pinned to {existing.get('model', '?')} — delete the agent via the Anthropic console "
-                    f"or DELETE /agents/{existing['id']}, then re-run setup.py to re-tier to {sent_normalized})"
+                    f"(model pinned to {existing.get('model', '?')} — archive the agent via the Anthropic console "
+                    f"or POST /agents/{existing['id']}/archive, then re-run setup.py to re-tier to {sent_normalized})"
                 )
                 return data
             # Double-failure: report both errors
