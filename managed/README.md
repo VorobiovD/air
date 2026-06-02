@@ -120,6 +120,6 @@ When agent prompts change in the air repo, the workflow auto-updates deployed ag
 
 ## Cost
 
-Claude-only (default): ~$0.80–1 per review (model tiering at Opus 4.8 $5/$25 + Sonnet 4.6 $3/$15 + Haiku 4.5 $1/$5 per MTok, plus $0.08/session-hour runtime; the fast-mode premium is not billed on Managed Agents sessions). At 40 reviews/month: ~$35/month.
+Claude-only (default), **measured** from real session usage (~340 review sessions, May–June 2026): median **~$5–9 per review**, heavy PRs $15–30. Learn epilogue sessions: ~$8–11 each on Opus (pre-v1.15.0; ~40% less on Sonnet). The dominant driver is cache-read volume (~5M cached tokens read per median review session; 30M on large PRs) — output tokens and the $0.08/session-hour runtime are minor. The fast-mode premium is not billed on Managed Agents sessions. Real May 2026 total at ~300 reviews + 130 learns across repos: ~$2.5–4K — push-triggered re-review density is the biggest cost lever, followed by learn cadence (cut ~3× in v1.15.0).
 
 With Codex enabled (`OPENAI_API_KEY` set): +$1–2 per review depending on diff size and Codex's default model (gpt-5.4 at the time of writing). Opt-out with the `no_codex` workflow input or `--no-codex` on manual invocation.

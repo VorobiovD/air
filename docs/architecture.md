@@ -341,16 +341,15 @@ Responded at: <SHA>
 
 ## Cost
 
-| Component | Model | Per review | Monthly (40 reviews) |
-|---|---|---|---|
-| code-reviewer, security-auditor | Opus | ~$0.25 each | ~$20 combined |
-| simplify | Sonnet | ~$0.15 | ~$6 |
-| git-history-reviewer | Haiku | ~$0.05 | ~$2 |
-| review-verifier | Sonnet | ~$0.10 | ~$4 |
-| Managed Agent session overhead | — | ~$0.02 | ~$0.80 |
-| **Total** | — | **~$0.80** | **~$33** |
+Measured from real Managed Agents session usage (~340 review sessions, May–June 2026; token rates: Opus 4.8 $5/$25, Sonnet 4.6 $3/$15, Haiku 4.5 $1/$5 per MTok):
 
-Model tiering (git-history-reviewer → Haiku, simplify + verifier → Sonnet) removes ~$0.30/review relative to all-Opus at current Opus 4.8 pricing ($5/$25 per MTok — the "$15/$75" figure in earlier revisions of this table was wrong; Opus 4.5 through 4.8 all bill $5/$25). The fast-mode premium ($10/$50 on the Messages API) is not billed on Managed Agents sessions.
+| Session | Tokens (median) | Cost (median) | Cost (heavy PR) |
+|---|---|---|---|
+| Review — coordinator + 4 specialists + verifier | ~5M cache-read, ~0.5M cache-write, ~80K output | **~$5–9** | $15–30 (30M cache-read) |
+| Learn epilogue — full wiki cleanup | ~15M cache-read, ~0.3M cache-write, ~65K output | ~$8–11 on Opus (pre-v1.15.0); ~40% less on Sonnet | $20+ |
+| Session runtime ($0.08/h) | 10–45 min | ~$0.02–0.06 | — |
+
+Cost ranges span Sonnet-rate (floor) to Opus-rate (ceiling) bounds — sub-agent usage is lumped into the coordinator session, so the exact model mix isn't separable. The dominant driver is cache-read volume: the multi-agent loop re-reads the PR context + wiki block on every tool-use turn. Cost levers in order: review density (push-triggered re-reviews), learn cadence (cut ~3× in v1.15.0: 15-review/14-day, was 5/2), learner model (Opus → Sonnet in v1.15.0). The fast-mode premium ($10/$50 on the Messages API) is not billed on Managed Agents sessions. Earlier revisions of this table quoted "$15/$75" Opus rates (wrong — Opus 4.5→4.8 bill $5/$25) and per-agent one-shot estimates (~50× below real agentic-session reads).
 
 ---
 

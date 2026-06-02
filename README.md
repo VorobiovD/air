@@ -291,20 +291,16 @@ Gracefully skips data that requires a local checkout (blame, churn, file statuse
 
 ## Cost
 
-Per review, with model tiering (Opus 4.8 at $5/$25 per 1M, Sonnet 4.6 at $3/$15, Haiku 4.5 at $1/$5):
+CLI mode bills your Claude Code seat (subscription usage, not API dollars). Managed (CI) mode bills the Anthropic API key — **measured** from real session usage (~340 review sessions, May–June 2026; token rates: Opus 4.8 $5/$25, Sonnet 4.6 $3/$15, Haiku 4.5 $1/$5 per MTok):
 
-| Component | Model | Approx. cost |
+| Session | Median | Heavy PR |
 |---|---|---|
-| code-reviewer, security-auditor | Opus | ~$0.25 each |
-| simplify | Sonnet | ~$0.15 |
-| git-history-reviewer | Haiku | ~$0.05 |
-| review-verifier | Sonnet | ~$0.10 |
-| Codex | external | varies |
-| **Total** | — | **~$0.80** |
+| Review (coordinator + 4 specialists + verifier) | **~$5–9** | $15–30 |
+| Learn epilogue (full wiki cleanup) | ~$8–11 on Opus (pre-v1.15.0); ~40% less on Sonnet | $20+ |
 
-The structurally identical PR Context block across the 4 parallel agents is designed to hit Claude Code's automatic prompt cache within each model family (Claude's cache is per-model, so cross-tier hits don't apply). Actual cost varies with PR size; large PRs scale linearly.
+The dominant cost driver is **cache-read volume**, not output: a median review session reads ~5M cached tokens (the multi-agent loop re-reads the PR context + wiki block every tool-use turn); large PRs reach 30M reads. Output is a minor share (50–170K tokens/review). The structurally identical PR Context block across agents keeps those reads at the $0.10-per-$1 cache-hit rate — without it costs would be ~10× higher.
 
-An all-Opus review at current pricing would run ~$1.10; tiering the mechanical reviewers (git-history → Haiku, simplify + verifier → Sonnet) saves ~$0.30/review without touching judgment-heavy agents. (Earlier README versions quoted "$15/$75" for Opus 4.7 — the official rate for Opus 4.5 through 4.8 is $5/$25, so the old ~$2.30 total was overstated ~3×.)
+v1.15.0 cut learn frequency ~3× (15-review/14-day cadence, was 5/2) and moved the learner to Sonnet. The fast-mode premium is not billed on Managed Agents sessions. (Earlier revisions of this section estimated $0.15–0.75 per agent from one-shot-call assumptions and quoted a wrong "$15/$75" Opus rate — real agentic sessions read ~50× more tokens than a one-shot call; per-agent static estimates are obsolete.)
 
 **Timing:** 9-15 minutes per review. All agents run in parallel — the bottleneck is the slowest agent, not the sum.
 
