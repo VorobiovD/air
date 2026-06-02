@@ -951,7 +951,7 @@ else
 fi
 ```
 
-**Store-mode note for sub-step 5's wiki push:** on store-backed repos the local `$WIKI_DIR/.air-meta.json` was NOT bumped (the store holds the counter), so the `git add ... .air-meta.json` there stages nothing — harmless. The wiki on those repos is an exported mirror; pattern pushes from this flow still land there and are folded into the store on the next `/air:learn` export cycle.
+**Store-mode note (when `$AIR_STORE_ID` is non-empty): SKIP sub-steps 2–5 entirely** — print "store-backed repo — CLI pattern writes deferred to managed/learn (Phase 2)" and RETURN from Step 13 after the auto-trigger decision. The wiki on store-backed repos is an exported mirror that the next `/air:learn` export OVERWRITES; pattern edits pushed there from this flow would be silently lost, and writing the store from the CLI is Phase 2 scope. Reading patterns from the mirror (Step 3) remains correct.
 
 **>>> AUTO-TRIGGER DECISION (do NOT skip this block) <<<**
 

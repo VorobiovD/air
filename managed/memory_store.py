@@ -35,15 +35,21 @@ STORE_NAME_PREFIX = "air-patterns "
 
 AUTHOR_PREFIX = "/authors/"
 ARCHIVE_PREFIX = "/archive/"
-META_PATH = "/meta/air-meta.json"
+META_PATH = "/meta/air-meta.json"  # also defined in plugins/air/lib/meta.py (stdlib constraint) — update in sync
+COMMON_FINDINGS_PATH = "/common-findings.md"
+SERVICE_PATTERNS_PATH = "/service-patterns.md"
+ACCEPTED_PATTERNS_PATH = "/accepted-patterns.md"
+SEVERITY_CALIBRATION_PATH = "/severity-calibration.md"
+GLOSSARY_PATH = "/glossary.md"
+PROJECT_PROFILE_PATH = "/project-profile.md"
 
 _client: Anthropic | None = None
 
 
 def client() -> Anthropic:
-    """Lazy singleton — module import must stay side-effect free so
-    pattern_lifecycle's pure-logic consumers can import constants without
-    an API key in the environment."""
+    """Lazy singleton — module import stays side-effect free so test
+    runners and constant-only importers (e.g. migrate's WIKI_FILE_MAP)
+    never need an API key at import time."""
     global _client
     if _client is None:
         _client = Anthropic(default_headers={"anthropic-beta": BETA_HEADER})
@@ -54,23 +60,41 @@ def store_name(repo: str) -> str:
     return f"{STORE_NAME_PREFIX}{repo}"
 
 
-def find_store(repo: str) -> str | None:
-    """Return the store id for ``repo``, or None if the repo hasn't been
-    migrated. Pagination + newest-wins mirrors api.list_agents."""
-    found = None
-    page = client().beta.memory_stores.list()
+def _paginate(list_fn, **kwargs) -> list[dict]:
+    """Exhaust an SDK list endpoint (next_page cursor), return all items.
+    Mirrors api._paginate for the requests-based callers."""
+    items: list[dict] = []
+    page = list_fn(**kwargs)
     while True:
         data = page.model_dump()
-        for s in data.get("data", []):
-            if s.get("name") == store_name(repo) and not s.get("archived_at"):
-                # newest-first listing: first match wins, keep the first
-                if found is None:
-                    found = s["id"]
+        items.extend(data.get("data", []))
         next_page = data.get("next_page")
-        if not next_page or found:
+        if not next_page:
             break
-        page = client().beta.memory_stores.list(page=next_page)
-    return found
+        page = list_fn(page=next_page, **kwargs)
+    return items
+
+
+def find_store(repo: str) -> str | None:
+    """Return the store id for ``repo``, or None if the repo hasn't been
+    migrated. Exhausts ALL pages then keeps the first match (newest-first
+    listing) — mirrors api.list_agents's exhaust-then-pick contract rather
+    than stopping at the first page that happens to contain a match."""
+    for s in _paginate(client().beta.memory_stores.list):
+        if s.get("name") == store_name(repo) and not s.get("archived_at"):
+            return s["id"]
+    return None
+
+
+def get_store_id(repo: str, flow: str = "review") -> str | None:
+    """find_store with the standard graceful fallback — shared by
+    review.py and learn.py so the warn message can't drift."""
+    try:
+        return find_store(repo)
+    except Exception as e:
+        print(f"  [warn] pattern-store lookup failed ({e}) — "
+              f"{flow} falls back to the wiki", file=__import__("sys").stderr)
+        return None
 
 
 def create_store(repo: str) -> str:
@@ -93,24 +117,16 @@ def find_or_create_store(repo: str) -> str:
 def list_memories(store_id: str, path_prefix: str = "/") -> dict[str, dict]:
     """Flat {path: {"id", "content_sha256"}} map for the given prefix."""
     out: dict[str, dict] = {}
-    page = client().beta.memory_stores.memories.list(
-        store_id, path_prefix=path_prefix, order_by="path", depth=20
-    )
-    while True:
-        data = page.model_dump()
-        for item in data.get("data", []):
-            if item.get("type") == "memory":
-                out[item["path"]] = {
-                    "id": item["id"],
-                    "content_sha256": item.get("content_sha256"),
-                }
-        next_page = data.get("next_page")
-        if not next_page:
-            break
-        page = client().beta.memory_stores.memories.list(
-            store_id, path_prefix=path_prefix, order_by="path", depth=20,
-            page=next_page,
+    def _list(**kw):
+        return client().beta.memory_stores.memories.list(
+            store_id, path_prefix=path_prefix, order_by="path", depth=20, **kw
         )
+    for item in _paginate(_list):
+        if item.get("type") == "memory":
+            out[item["path"]] = {
+                "id": item["id"],
+                "content_sha256": item.get("content_sha256"),
+            }
     return out
 
 
@@ -126,8 +142,9 @@ def read_memory(store_id: str, path: str) -> tuple[str, str, str] | None:
 
 
 def write_memory(store_id: str, path: str, content: str) -> None:
-    """Create-or-overwrite without read-modify-write semantics. For
-    counter-style mutations use update_with()."""
+    """Create-or-overwrite without read-modify-write semantics. NOT safe
+    for concurrent writers (no precondition) — migration/seeding only.
+    For counter-style or concurrent mutations use update_with()."""
     existing = list_memories(store_id, path_prefix=path).get(path)
     if existing:
         client().beta.memory_stores.memories.update(
@@ -140,18 +157,22 @@ def write_memory(store_id: str, path: str, content: str) -> None:
 
 
 def update_with(store_id: str, path: str, fn, default: str = "",
-                max_retries: int = 3) -> str:
+                max_retries: int = 3, must_exist: bool = False) -> str | None:
     """Read-modify-write with content_sha256 optimistic concurrency.
 
     ``fn(old_content) -> new_content``. Replaces wiki_git.commit_meta's
     pull-rebase-retry: on precondition mismatch, re-read and re-apply.
-    Returns the content that was written.
+    Returns the content that was written, or None when ``must_exist`` is
+    set and the memory is absent (caller decides what absence means —
+    e.g. pattern_writer defers author-file creation to /air:learn).
     """
     from anthropic import APIStatusError  # local: keep module import light
 
     for attempt in range(max_retries):
         current = read_memory(store_id, path)
         if current is None:
+            if must_exist:
+                return None
             new = fn(default)
             try:
                 client().beta.memory_stores.memories.create(
@@ -178,4 +199,6 @@ def update_with(store_id: str, path: str, fn, default: str = "",
                 raise
             print(f"  [store] precondition raced on {path} "
                   f"(attempt {attempt + 1}): {e}; re-reading", file=sys.stderr)
+    # Unreachable: the loop returns on success or re-raises on the final
+    # attempt. Kept as a defensive guard against future loop edits.
     raise RuntimeError(f"update_with exhausted retries on {path}")

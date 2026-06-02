@@ -37,9 +37,17 @@ _ENTRY_RE = re.compile(
     r"^- \*\*(?P<name>.+?)\*\* "
     r"\((?P<count>\d+)x: (?P<refs>[^|()]*?) \| "
     r"(?:last (?P<seen>\d+) PRs: (?P<clean>\d+) clean|new)\)"
-    r"(?P<tag> \(declining\))?"
-    r"(?P<rest>.*)$"
+    r"(?P<tag>(?: \([a-z, -]+\))*)"
+    r"(?P<rest>:.*)$"
 )
+
+# Inline status tags that FREEZE an entry. Production wikis mark archived
+# patterns with a suffix on the entry line itself — e.g.
+# `... | last 29 PRs: 29 clean) (archived): ...` or
+# `... clean) (declining, archival-eligible): ...` — not only with an
+# "(archived)" section heading. Frozen entries are never strengthened and
+# never clean-counted: the lifecycle contract says archived stays archived.
+_FROZEN_TAG_RE = re.compile(r"\((?:archived|[a-z, ]*archival-eligible)\)")
 
 # Annotations agents attach to findings. Archived matches are reported
 # but never strengthen (lifecycle: archived stays archived).
@@ -49,6 +57,10 @@ ANNOTATION_RE = re.compile(
 )
 
 ARCHIVED_HEADING_RE = re.compile(r"^#{2,3} .*\(archived\)\s*$")
+
+# Finding-title line shape in posted reviews: `**3. <title> ...**` — the
+# only place the verifier emits author-pattern annotations.
+_TITLE_LINE_RE = re.compile(r"^\s*\*\*\d+\.\s")
 
 DECLINE_AT = 5
 ARCHIVE_AT = 10
@@ -60,11 +72,26 @@ def _norm(name: str) -> str:
 
 def extract_matched_patterns(review_body: str) -> set[str]:
     """Pattern names the review annotated as matched (author + declining;
-    archived annotations are intentionally excluded)."""
+    archived annotations are intentionally excluded).
+
+    Injection containment: the review body embeds PR-derived text (quoted
+    titles, code, finding prose) that an attacker can influence, so a bare
+    body-wide regex would let a crafted PR echo an annotation and spuriously
+    strengthen a real pattern. Two bounds: (1) only annotations on finding
+    TITLE lines count — the verifier emits them as `**N. <title> [matches
+    author pattern: X]**` — quoted attacker text inside finding prose or
+    code fences never starts a line with the bold-number prefix; (2) the
+    blast radius is inherently limited to strengthening EXISTING entries
+    (apply_review only matches names already in the trusted file; creation
+    is /air:learn's job). Callers should log each strengthen for audit.
+    """
     out = set()
-    for m in ANNOTATION_RE.finditer(review_body):
-        if m.group("kind") in ("author", "declining"):
-            out.add(_norm(m.group("name")))
+    for line in review_body.split("\n"):
+        if not _TITLE_LINE_RE.match(line):
+            continue
+        for m in ANNOTATION_RE.finditer(line):
+            if m.group("kind") in ("author", "declining"):
+                out.add(_norm(m.group("name")))
     return out
 
 
@@ -96,12 +123,20 @@ def apply_review(author_md: str, pr_number: int,
         if not m or in_archived:
             out_lines.append(line)
             continue
+        tags = m.group("tag") or ""
+        if _FROZEN_TAG_RE.search(tags):
+            # Inline-archived / archival-eligible entry — pass through
+            # untouched regardless of annotations (real-wiki shape; see
+            # _FROZEN_TAG_RE).
+            out_lines.append(line)
+            continue
 
         name = m.group("name")
         rest = m.group("rest")
         if _norm(name) in matched_norm:
             count = int(m.group("count")) + 1
             refs = f"{m.group('refs').strip()}, #{pr_number}"
+            # Strengthening drops status tags ((declining) etc.) by design.
             header = f"- **{name}** ({count}x: {refs} | last 0 PRs: 0 clean)"
             out_lines.append(header + rest)
             summary["strengthened"].append(name)
@@ -130,7 +165,6 @@ def apply_review(author_md: str, pr_number: int,
             summary["cleaned"].append(name)
 
     if to_archive:
-        text = "\n".join(out_lines)
         marker = None
         for i, line in enumerate(out_lines):
             if ARCHIVED_HEADING_RE.match(line):

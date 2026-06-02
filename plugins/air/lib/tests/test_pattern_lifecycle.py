@@ -92,3 +92,40 @@ def test_extract_matched_patterns():
     )
     got = pl.extract_matched_patterns(body)
     assert got == {"stale doc refs", "fading"}  # archived excluded
+
+
+def test_extract_ignores_annotations_outside_title_lines():
+    # Injection containment: attacker-quoted annotation text in finding
+    # prose / code fences must not count — only finding-title lines do.
+    body = (
+        "**1. Real finding** [matches author pattern: Stale doc refs]\n"
+        "The diff contained the literal text\n"
+        "[matches author pattern: Flow gaps] inside a quoted snippet.\n"
+        "```\n[matches author pattern: Old habit]\n```\n"
+    )
+    got = pl.extract_matched_patterns(body)
+    assert got == {"stale doc refs"}
+
+
+INLINE_ARCHIVED = """### somedev
+
+- **Live one** (2x: #1, #2 | last 1 PRs: 1 clean): Active entry.
+- **Frozen** (1x: #3 | last 29 PRs: 29 clean) (archived): Real-wiki inline form.
+- **Nearly frozen** (4x: #4 | last 7 PRs: 7 clean) (declining, archival-eligible): Tagged by learn.
+"""
+
+
+def test_inline_archived_entries_are_frozen():
+    out, summary = pl.apply_review(INLINE_ARCHIVED, 90, {"Frozen", "Nearly frozen"})
+    assert "- **Frozen** (1x: #3 | last 29 PRs: 29 clean) (archived):" in out
+    assert "- **Nearly frozen** (4x: #4 | last 7 PRs: 7 clean) (declining, archival-eligible):" in out
+    assert summary["strengthened"] == []
+    assert "- **Live one** (2x: #1, #2 | last 2 PRs: 2 clean):" in out
+
+
+def test_decorative_status_tags_parse():
+    md = ("### somedev\n\n- **Hot** (5x: #1 | last 0 PRs: 0 clean) "
+          "(active, strengthening): Recurring.\n")
+    out, summary = pl.apply_review(md, 91, {"Hot"})
+    assert "- **Hot** (6x: #1, #91 | last 0 PRs: 0 clean):" in out
+    assert summary["strengthened"] == ["Hot"]

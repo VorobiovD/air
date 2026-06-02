@@ -175,7 +175,7 @@ else
 fi
 ```
 
-**Store-mode note:** on store-backed repos, skip staging `.air-meta.json` in sub-step 4's push (the store holds the counter; the wiki is an exported mirror).
+**Store-mode note (when `$AIR_STORE_ID` is non-empty): SKIP sub-step 4's wiki push entirely** — the wiki is an exported mirror that the next `/air:learn` export OVERWRITES; pattern edits pushed there would be silently lost (CLI store writes are Phase 2). The counter already went through the store above.
 
 **>>> AUTO-TRIGGER DECISION (do NOT skip this block) <<<**
 

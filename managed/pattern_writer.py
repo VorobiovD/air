@@ -31,14 +31,6 @@ def apply_review_to_store(store_id: str, author_login: str, pr_number: int,
     """
     matched = pattern_lifecycle.extract_matched_patterns(review_body)
     path = f"{memory_store.AUTHOR_PREFIX}{author_login}.md"
-    existing = memory_store.read_memory(store_id, path)
-    if existing is None:
-        if matched:
-            print(f"  [patterns] {len(matched)} matched annotation(s) but no "
-                  f"author file at {path} — creation deferred to /air:learn",
-                  file=sys.stderr)
-        return None
-
     summary_holder: dict = {}
 
     def _update(content: str) -> str:
@@ -48,7 +40,20 @@ def apply_review_to_store(store_id: str, author_login: str, pr_number: int,
         summary_holder.update(summary)
         return updated
 
-    memory_store.update_with(store_id, path, _update)
+    # must_exist: author-file creation is /air:learn's job (semantic work);
+    # absence here is a normal no-op, not an error.
+    written = memory_store.update_with(store_id, path, _update, must_exist=True)
+    if written is None:
+        if matched:
+            print(f"  [patterns] {len(matched)} matched annotation(s) but no "
+                  f"author file at {path} — creation deferred to /air:learn",
+                  file=sys.stderr)
+        return None
+    # Audit line per strengthen — spurious strengthens (e.g. an injected
+    # annotation that slipped the title-line anchor) must be traceable.
+    for name in summary_holder.get("strengthened", []):
+        print(f"  [patterns] strengthened: {name!r} (PR #{pr_number})",
+              file=sys.stderr)
     parts = [f"{k}={len(v)}" for k, v in summary_holder.items() if v]
     print(f"  [patterns] {path}: " + (", ".join(parts) if parts else "no-op"),
           file=sys.stderr)

@@ -43,6 +43,8 @@ from wiki_git import META_FILENAME  # single source for the file name
 # CLI + managed mutate it through the API with content_sha256 preconditions
 # (replacing wiki_git.commit_meta's pull-rebase-retry). stdlib-only: urllib,
 # matching this package's no-dependency rule.
+# These three mirror managed/memory_store.py (META_PATH / BETA_HEADER) —
+# the stdlib-only rule here forbids importing it; update both in sync.
 STORE_META_PATH = "/meta/air-meta.json"
 _API_BASE = "https://api.anthropic.com/v1"
 _BETA = "managed-agents-2026-04-01-research-preview"

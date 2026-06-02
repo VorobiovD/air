@@ -30,6 +30,7 @@ the primary file).
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -41,11 +42,11 @@ import memory_store
 MEMORY_CAP = 95_000  # bytes; headroom under the 100KB API cap
 
 WIKI_FILE_MAP = {
-    "ACCEPTED-PATTERNS.md": "/accepted-patterns.md",
-    "SEVERITY-CALIBRATION.md": "/severity-calibration.md",
-    "GLOSSARY.md": "/glossary.md",
-    "PROJECT-PROFILE.md": "/project-profile.md",
-    "REVIEW-ARCHIVE.md": "/archive/legacy.md",
+    "ACCEPTED-PATTERNS.md": memory_store.ACCEPTED_PATTERNS_PATH,
+    "SEVERITY-CALIBRATION.md": memory_store.SEVERITY_CALIBRATION_PATH,
+    "GLOSSARY.md": memory_store.GLOSSARY_PATH,
+    "PROJECT-PROFILE.md": memory_store.PROJECT_PROFILE_PATH,
+    "REVIEW-ARCHIVE.md": f"{memory_store.ARCHIVE_PREFIX}legacy.md",
     ".air-meta.json": memory_store.META_PATH,
 }
 
@@ -104,7 +105,8 @@ def chunk_oversized(seed: dict[str, str]) -> dict[str, str]:
             size += len(line.encode()) + 1
             if size > MEMORY_CAP:
                 break
-            keep.insert(0, line)
+            keep.append(line)
+        keep.reverse()
         overflow = lines[: len(lines) - len(keep)]
         stem = Path(path).stem
         n = 1
@@ -131,12 +133,22 @@ def main() -> int:
     seed: dict[str, str] = {}
     with tempfile.TemporaryDirectory() as tmp:
         wiki = Path(tmp) / "wiki"
-        url = f"https://github.com/{args.repo}.wiki.git"
+        # Private wikis need a token — same x-access-token URL shape as
+        # every other wiki access in the codebase. Falls back to an
+        # unauthenticated clone (public wikis / ambient credential helper).
+        token = os.environ.get("AIR_BOT_TOKEN") or os.environ.get("GH_TOKEN", "")
+        host = (f"https://x-access-token:{token}@github.com"
+                if token else "https://github.com")
+        url = f"{host}/{args.repo}.wiki.git"
         r = subprocess.run(["git", "clone", "--depth", "1", url, str(wiki)],
                            capture_output=True, text=True)
         if r.returncode != 0:
-            print(f"Error: wiki clone failed for {args.repo}: "
-                  f"{r.stderr.strip()[:200]}", file=sys.stderr)
+            # Redact the token-bearing URL from anything we echo.
+            err = r.stderr.strip()[:300].replace(token, "***") if token \
+                else r.stderr.strip()[:300]
+            print(f"Error: wiki clone failed for {args.repo}: {err}\n"
+                  f"Private wiki? Set AIR_BOT_TOKEN or GH_TOKEN.",
+                  file=sys.stderr)
             return 1
 
         review = wiki / "REVIEW.md"

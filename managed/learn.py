@@ -89,13 +89,8 @@ def main():
     # It also exports a rendered snapshot back to the git wiki so humans
     # and the CLI keep a readable mirror. Non-migrated repos run the
     # legacy wiki-clone pipeline unchanged.
-    try:
-        import memory_store
-        store_id = memory_store.find_store(args.repo)
-    except Exception as e:
-        print(f"  [warn] pattern-store lookup failed ({e}) — wiki mode",
-              file=sys.stderr)
-        store_id = None
+    import memory_store
+    store_id = memory_store.get_store_id(args.repo, flow="learn")
 
     resources = [{
         "type": "github_repository",
@@ -179,6 +174,9 @@ def _reset_learn_counter(repo: str, bot_token: str,
             capture_output=True, text=True,
         )
         sys.stderr.write(result.stderr)
+        if result.returncode != 0:
+            print(f"  [warn] meta reset failed: {result.stderr.strip()[:200]}",
+                  file=sys.stderr)
         return
 
     sys.path.insert(0, str(lib_dir))

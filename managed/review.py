@@ -1946,12 +1946,7 @@ async def run_review(args):
     # store); a repo without one keeps the wiki path end-to-end. Lookup
     # failures fall back to the wiki — never block a review on store
     # plumbing.
-    try:
-        store_id = memory_store.find_store(args.repo)
-    except Exception as e:
-        print(f"  [warn] pattern-store lookup failed ({e}) — using wiki",
-              file=sys.stderr)
-        store_id = None
+    store_id = memory_store.get_store_id(args.repo, flow="review")
     if store_id:
         print(f"  pattern store: {store_id} (wiki mount skipped)")
 
