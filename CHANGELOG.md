@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.0](https://github.com/VorobiovD/air/compare/v1.14.0...v1.15.0) (2026-06-02)
+
+
+### Features
+
+* **learn:** auto-trigger every 15 reviews / 14 days, learner on Sonnet ([#81](https://github.com/VorobiovD/air/issues/81)) ([6dfd726](https://github.com/VorobiovD/air/commit/6dfd7264f0cdd1cc2b05bdea50ff448ae32496de))
+
 ## [1.14.0](https://github.com/VorobiovD/air/compare/v1.13.0...v1.14.0) (2026-05-23)
 
 
