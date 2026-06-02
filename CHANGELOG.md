@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.16.0](https://github.com/VorobiovD/air/compare/v1.15.0...v1.16.0) (2026-06-02)
+
+
+### Features
+
+* **managed:** bump Opus alias 4.7 → 4.8 + correct cost docs ([#84](https://github.com/VorobiovD/air/issues/84)) ([be7342a](https://github.com/VorobiovD/air/commit/be7342a61e070a07c2fe73222ebae15343e63d88))
+* **managed:** cooldown debounce + respond-driven re-request ([#86](https://github.com/VorobiovD/air/issues/86)) ([8b408f7](https://github.com/VorobiovD/air/commit/8b408f7ccd43b7e72f9f8fa6507d2af06bdda2d0))
+
+
+### Bug Fixes
+
+* **managed:** agent removal is archive, not DELETE ([#83](https://github.com/VorobiovD/air/issues/83)) ([be93b39](https://github.com/VorobiovD/air/commit/be93b39cd512d265aca93d93fb8069b6944b2060))
+
 ## [1.15.0](https://github.com/VorobiovD/air/compare/v1.14.0...v1.15.0) (2026-06-02)
 
 
