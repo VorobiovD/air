@@ -71,13 +71,19 @@ def _store_api(method: str, path: str, body: dict | None = None) -> dict:
 
 def _store_find_meta(store_id: str) -> tuple[dict, str, str] | None:
     """Return (meta, content_sha256, memory_id) or None when absent."""
+    # NOTE: no `depth` param — the API 400s with "depth requires
+    # order_by=path" (observed live on the svc-transcribe pilot run).
+    # A bare path_prefix returns the exact-path match we need.
     listing = _store_api(
         "GET",
         f"/memory_stores/{store_id}/memories"
-        f"?path_prefix={STORE_META_PATH}&depth=20",
+        f"?path_prefix={STORE_META_PATH}",
     )
     for item in listing.get("data", []):
-        if item.get("type") == "memory" and item.get("path") == STORE_META_PATH:
+        # Live API lists memories as type "memory_metadata" (docs examples
+        # show "memory") — accept both. Observed on the svc-transcribe pilot.
+        if item.get("type") in ("memory", "memory_metadata") \
+                and item.get("path") == STORE_META_PATH:
             mem = _store_api(
                 "GET", f"/memory_stores/{store_id}/memories/{item['id']}"
             )
