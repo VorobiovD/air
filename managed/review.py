@@ -2228,8 +2228,9 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     # separator, so the joined output was `...936Wiki push failed...`
     # — the `\b` after the `6` digit and before the `W` letter both
     # being `\w` had no boundary to match. The 40-char exact-length
-    # quantifier is the real anchor; the `_sha != head_sha` equality
-    # check is the real validator. `[^\n]*` greedily eats whatever is
+    # quantifier is the real anchor; the prefix comparison below is the
+    # real validator (12-char prefix, not full equality — see the
+    # anti-spoof validator comment). `[^\n]*` greedily eats whatever is
     # left on the line (or none) so the match end is well-defined.
     _footer_re = re.compile(r"\nReviewed at:\s+([0-9a-f]{40})[^\n]*")
     _candidates = []
@@ -2241,17 +2242,37 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         if _fm is None:
             continue
         _candidates.append((_hm.start(), _fm.end(), _fm.group(1)))
+    # Anti-spoof validator: a poisoned diff can echo `## Code Review` but
+    # can't predict the run's head SHA. Full 40-char equality proved too
+    # strict in production — models occasionally corrupt the TAIL of the
+    # 40-hex footer while getting every permalink in the body right
+    # (svc-transcribe #84, 2026-06-02: footer prefix d339e243 correct,
+    # tail wrong; a perfectly valid review was discarded as "stale-cache",
+    # and the 8-char-truncated warn printed two identical-looking SHAs,
+    # masking the mismatch — the team burned cache-bust retry runs on it).
+    # A 12-hex-char prefix (48 bits) is still unguessable for spoofing,
+    # so prefix equality keeps the security property while tolerating
+    # transcription slips past char 12.
+    _SHA_PREFIX_LEN = 12
     review_body = ""
     review_extracted = False
     for _start, _end, _sha in reversed(_candidates):
-        if _sha != head_sha:
+        if _sha[:_SHA_PREFIX_LEN] != head_sha[:_SHA_PREFIX_LEN]:
             print(
                 f"  [warn] discarding `## Code Review` block at offset "
-                f"{_start} — `Reviewed at:` SHA {_sha[:8]} doesn't match "
-                f"head_sha {head_sha[:8]}",
+                f"{_start} — `Reviewed at:` SHA {_sha} doesn't match "
+                f"head_sha {head_sha} (first {_SHA_PREFIX_LEN} chars "
+                f"compared)",
                 file=sys.stderr,
             )
             continue
+        if _sha != head_sha:
+            print(
+                f"  [info] footer SHA tail-corrupted by the model "
+                f"({_sha} vs {head_sha}) — accepted on "
+                f"{_SHA_PREFIX_LEN}-char prefix match",
+                file=sys.stderr,
+            )
         review_body = _flattened[_start:_end].rstrip()
         review_extracted = True
         break
