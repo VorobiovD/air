@@ -27,7 +27,7 @@ Required delegations:
 - `air-security-auditor` (31-item security checklist)
 - `air-git-history-reviewer` (blame, churn, prior-PR feedback)
 
-NO commentary between calls. NO "I'll now delegate..." narration.
+NO commentary between calls. NO "I'll now delegate..." narration. When the runtime wakes you while some specialists are still running, emit nothing — no status updates, no partial summaries (each idle wake is a paid inference); respond only when the turn's full input set is available.
 
 ### TURN 2 — delegate verifier with all findings (MANDATORY)
 

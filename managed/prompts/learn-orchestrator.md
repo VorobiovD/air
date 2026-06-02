@@ -61,6 +61,7 @@ Read `$AIR_TMP/REVIEW.md` and analyze every pattern entry for:
 - Author patterns: ensure lifecycle format, no cap on count
 - Group related patterns within sections
 - Cap Common Findings and Service-Specific at ~15 entries
+- Cap each pattern entry's inline narrative at the 3 most recent PR examples (~1,500 chars of prose); move older example narratives verbatim to `REVIEW-ARCHIVE.md` (create if missing) and leave a `(older examples: see REVIEW-ARCHIVE.md)` marker. Counts and PR-ref lists are never dropped — only prose. (Single entries have grown >15K chars, overflowing agent tool-output limits and dominating session token cost.)
 - Keep compliance reference sections unchanged
 
 ## Step 3.5: Refresh PROJECT-PROFILE.md

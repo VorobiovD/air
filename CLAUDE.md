@@ -81,7 +81,7 @@ managed/                          # Managed Agent (CI automation)
 ## Key Design Decisions
 
 - **All agents run in parallel** — bottleneck is the slowest agent, not the sum
-- **Batched API calls** — Step 4 uses 3 `gh` calls total (metadata, diff, commits), not one per field
+- **Batched API calls** — Step 4 uses 3 batched `gh` calls (metadata, diff, commits), not one per field, plus a bounded sibling-PR overlap scan (≤50 scanned / 10 reported)
 - **Graduated dispute resistance** — security findings require compensating controls, style nits are readily accepted
 - **Cross-repo reviews** skip local git data (blame, churn, wiki patterns) gracefully
 - **Self-review mode** (`--self`) outputs a fix plan grouped by file; `--self --fix` auto-applies

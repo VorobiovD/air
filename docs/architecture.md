@@ -302,6 +302,8 @@ Both CLI and managed produce identical format:
 ### Pre-existing Issues
 (not introduced by PR, don't block merge)
 
+### Related PRs   <!-- only when concurrent open PRs touch the same files -->
+
 ### Strengths
 - <1-3 specific observations>
 

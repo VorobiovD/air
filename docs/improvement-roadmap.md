@@ -93,6 +93,20 @@ PR #635 received 9 reviews over 2 days. Comment sizes converged but not monotoni
 | Billing exhaustion | 2026-05-22 (air key, 11d invisible) + 2026-06-02 (org key, ~4h, 3 repos) | run-failed comment posts but job stayed green → fail-loud + billing canary preflight shipped post-1.16.0 |
 | **SSE-quiet / coordinator dispatch latency** | 3+ in last 3d (2026-05-19→21) | **NEW PATTERN — see below** |
 
+### 2026-06-02 session-efficiency analysis (ai-relay #216 re-review)
+
+A managed-session self-analysis + raw event audit of one re-review session (~3.7M input / 86K output tokens) produced a triaged efficiency backlog:
+
+**Shipped (this PR — combined with cross-PR awareness):** scoped-search + timeout-retry + note-the-gap discipline in code-reviewer/security-auditor (a single unscoped search timeout cost ~10 min wall AND expired the 5-min prompt cache for every later turn); verifier treats declared gaps as unverified; coordinator idle-wake hygiene (measured: 4 wakes × ~40K cache-reads — pennies, but free to fix); per-pattern narrative caps in both learn flows.
+
+**Top backlog item — wiki split + structured appends (est. 40-60% of session input tokens):** REVIEW.md (132K chars on ai-relay) is loaded by the coordinator + 2-3 specialists + the verifier every session; the verifier already fails to read it (110K tool-output cap), silently degrading the accepted-patterns whitelist. Split per-author (`REVIEW-<author>.md`, coordinator knows the PR author) + per-category; replace whole-line exact-string wiki edits with structured appends. Touches review.md Steps 3/13, both learn flows, coordinator TURN 3, managed wiki mount.
+
+**Benchmark before adopting — Opus→Sonnet on code-reviewer/security-auditor (est. 50-60% of model cost):** counter-evidence from the same session: Haiku git-history misclassified prior finding #6 as FIXED/"ready for merge" while the Opus code-reviewer produced the complete new blocker (missing `requirements.txt` install, cross-file import-chain reasoning); the verifier caught the disagreement. Rerun `managed/experiments/cost_test.py` (psh variant; local-only — the experiments dir is gitignored, rebuild per docs/legacy/cost-optimization-plan.md) on 2-3 real PRs and diff finding sets before any tier change.
+
+**Declined (caching math):** file-handoff for dispatch payloads/findings — content enters the reader's context either way; only saves coordinator replay at 0.1× cache-read rates (pennies). System-prompt trimming / shared-skill extraction — cache-written once per thread, marginal. Checklist-from-file — the read tool loads the same tokens. Skip-specialists-on-small-diffs — declined on policy ("a 1-line PR can have a blocker" is a core design rule), and the cited session's own shell+docs PR is where the security auditor had found the supply-chain gap one round earlier.
+
+**Verify after thecvlb/ai-relay#220 (pin bump):** Codex was silently absent in the session (`bwrap: loopback` sandbox error on the runner) — ai-relay reviews run 4-reviewer until the pin lands on v1.16.0; if the error persists, open a bug.
+
 ### 2026-05-19 → 21 incidents — coordinator dispatch latency
 
 A new failure mode emerged 2026-05-19 evening: coordinator sessions reach `status=running` but emit zero `agent.message` events for the entire poll budget. Events queue server-side and drain only on session termination. Reviews DO complete (real `## Code Review` posted), but at 30-45 min wall vs. typical 18-22.
