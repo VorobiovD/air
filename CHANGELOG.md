@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.17.0](https://github.com/VorobiovD/air/compare/v1.16.0...v1.17.0) (2026-06-02)
+
+
+### Features
+
+* **managed:** fail loud on run-failed outcomes + billing canary preflight ([#87](https://github.com/VorobiovD/air/issues/87)) ([4a54613](https://github.com/VorobiovD/air/commit/4a546133e272722a1d2905a6bb0a9052616ef384))
+* **managed:** per-repo memory-store pattern backend — svc-transcribe pilot ([#90](https://github.com/VorobiovD/air/issues/90)) ([e729dca](https://github.com/VorobiovD/air/commit/e729dca039f2cef9ef99b2baa3844761283ccc34))
+* **review:** cross-PR awareness + session-efficiency guidance ([#80](https://github.com/VorobiovD/air/issues/80)) ([108089d](https://github.com/VorobiovD/air/commit/108089d5c69333d4120c9ae5bf7f3b5a5886f3bf))
+
+
+### Bug Fixes
+
+* **managed:** accept Reviewed-at footer on 12-char SHA prefix match ([#89](https://github.com/VorobiovD/air/issues/89)) ([145078b](https://github.com/VorobiovD/air/commit/145078b77436a23794abf12748fb0a3e05fa32c8))
+* **store:** live API list shapes — drop depth param, accept memory_metadata type ([#91](https://github.com/VorobiovD/air/issues/91)) ([540fd14](https://github.com/VorobiovD/air/commit/540fd1491f7ab53173408b8c1ffdac57be52fb06))
+
 ## [1.16.0](https://github.com/VorobiovD/air/compare/v1.15.0...v1.16.0) (2026-06-02)
 
 
