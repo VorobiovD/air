@@ -332,24 +332,26 @@ In your GitHub org: Settings → Secrets and variables → Actions → New organ
 
 **5. Enable on a repo**
 
-Add this file to any repo:
+Add this file to any repo (request-driven variant — re-reviews fire when the bot is requested as reviewer, which `/air:review --respond` does automatically; see `managed/README.md` for the push-driven variant with the `cooldown_minutes` debounce):
 
 ```yaml
 # .github/workflows/air-review.yml
 name: air review
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, ready_for_review, review_requested]
 
 jobs:
   review:
+    # Replace `air-machine` with your bot's login.
+    if: ${{ github.event.action != 'review_requested' || github.event.requested_reviewer.login == 'air-machine' }}
     uses: VorobiovD/air/.github/workflows/managed-review.yml@main
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
 ```
 
-The first PR auto-creates the review agents. Every subsequent PR is reviewed automatically. Agent prompts update automatically when the air repo is updated.
+The first PR auto-creates the review agents. Re-reviews fire on reviewer re-request (automatic via `--respond`) instead of every push — measured at ~$5–9 per review session, the trigger model is the biggest cost lever. This is the minimal form: add the `workflow_dispatch` block from `managed/README.md` Variant A for on-demand runs from the Actions tab. Agent prompts update automatically when the air repo is updated.
 
 ### What happens on each PR
 

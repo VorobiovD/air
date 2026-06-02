@@ -15,14 +15,16 @@ Automated code review on every PR — zero human trigger needed.
 
 ## Enable on a repo
 
-Add this file:
+Add one file — pick a trigger variant by cost/latency preference. Measured cost is ~$5–9 per review session (heavy PRs $15–30), so the trigger model is the single biggest cost decision.
+
+**Variant A — request-driven (recommended):** first review fires when the PR opens or leaves draft; re-reviews fire only when the bot is requested as a reviewer. `/air:review --respond` re-requests the bot automatically after pushing fixes, so re-reviews arrive when the developer declares fixes done — not on every push. Zero added latency, no wasted burst reviews.
 
 ```yaml
 # .github/workflows/air-review.yml
 name: air review
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, ready_for_review, review_requested]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -37,10 +39,34 @@ on:
 
 jobs:
   review:
+    # On review_requested, fire only for the bot account — requesting a
+    # human reviewer must not burn a paid review. Replace `air-machine`
+    # with your bot's login.
+    if: ${{ github.event.action != 'review_requested' || github.event.requested_reviewer.login == 'air-machine' }}
     uses: VorobiovD/air/.github/workflows/managed-review.yml@main
     with:
       pr_number: ${{ inputs.pr_number }}
       closed: ${{ inputs.closed }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
+```
+
+**Variant B — push-driven:** every push to an open PR re-reviews. Burst pushes are coalesced by the `cooldown_minutes` debounce (default 20): a push landing inside the window sleeps out the remainder at $0 before any session starts, and a newer push cancels the sleeper. First reviews and manual dispatches are never delayed; a *solo* push inside the window waits out the remainder.
+
+```yaml
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  # Paste the workflow_dispatch block from Variant A here for on-demand runs.
+
+jobs:
+  review:
+    uses: VorobiovD/air/.github/workflows/managed-review.yml@main
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      closed: ${{ inputs.closed }}
+      # cooldown_minutes: '20'   # default; '0' disables the debounce
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
