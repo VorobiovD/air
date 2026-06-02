@@ -45,6 +45,7 @@ from anthropic import (
 )
 
 from api import list_agents, find_environment
+from setup import MODEL_ALIASES
 
 # Make plugins/air/lib importable so we share stdlib helpers (the
 # conversation merger and the review-header constant) with the CLI path
@@ -358,6 +359,39 @@ _BILLING_REASON_HINTS: tuple[str, ...] = (
 # both the billing and other-failure branches via a single constant so
 # they can't drift.
 _RAW_REASON_MAX_CHARS = 800
+
+
+def _exit_nonzero_on_failed_run(
+    pr_number: int, coordinator_failure_reason: str, posted: bool
+) -> None:
+    """Fail the job loudly when the run produced no usable review.
+
+    Historically these outcomes exited 0 (green checkmark) with only a
+    run-failed PR comment — the 2026-05-22 billing exhaustion sat
+    invisible for 11 days, and 2026-06-02's sat ~4 hours across three
+    repos. A red X + `::error::` annotation surfaces the cause in the
+    Actions UI, in `gh run view`, and to anything investigating the
+    failure programmatically. The annotation is single-line by GHA
+    contract — newlines in the reason are flattened.
+    """
+    _lower = coordinator_failure_reason.lower()
+    if any(h in _lower for h in _BILLING_REASON_HINTS):
+        kind = "billing exhausted"
+        hint = ("top up at console.anthropic.com (or rotate "
+                "ANTHROPIC_API_KEY), then re-request the review")
+    elif coordinator_failure_reason:
+        kind = "coordinator session failed"
+        hint = "see the [warn] lines above"
+    else:
+        kind = "unusable coordinator output"
+        hint = "likely stale-cache/SHA-mismatch — see the [debug] dump above"
+    reason = (coordinator_failure_reason
+              or "no usable `## Code Review` block in coordinator output")
+    reason = reason[:300].replace("\n", " ")
+    comment_note = (f"run-failed comment posted to PR #{pr_number}"
+                    if posted else "dry run — no comment posted")
+    print(f"::error title=air review failed — {kind}::{reason} | {comment_note} | {hint}")
+    sys.exit(1)
 
 
 def _post_review_comment_with_retry(
@@ -2274,7 +2308,11 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         # (belt-and-suspenders; the prefix check already filters).
         coord_secs_str = f"{coordinator_secs:.1f}s"
         run_url = _gha_run_url()
-        run_link_line = f"\nRun: <{run_url}>\n" if run_url else ""
+        run_link_line = (
+            f"\nRun: <{run_url}> (the job is marked failed with an "
+            f"`::error::` annotation carrying this reason)\n"
+            if run_url else ""
+        )
         # Branch the structured-fallback body on the failure shape so the
         # developer sees an actionable cause + workaround, not generic
         # stale-cache prose:
@@ -2383,6 +2421,8 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         print("DRY RUN — not posting. Review comment below:")
         print("=" * 60 + "\n")
         print(review_body)
+        if not review_extracted:
+            _exit_nonzero_on_failed_run(args.pr_number, coordinator_failure_reason, posted=False)
         return
 
     print(f"\n[5] Posting review comment to PR #{args.pr_number}...")
@@ -2429,11 +2469,24 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
 
     # Epilogue: bump the shared wiki-backed counter and trigger /air:learn if
     # the threshold fires. All-best-effort — never fail the overall review if
-    # any of this has a hiccup.
-    try:
-        _update_learn_counter(args.repo, args.pr_number, bot_token)
-    except Exception as e:
-        print(f"  [warn] counter update failed: {e}", file=sys.stderr)
+    # any of this has a hiccup. Skipped entirely when the run produced no
+    # usable review: there's nothing to learn from, the bump would count a
+    # phantom review toward the cadence, and on a billing-dead key the learn
+    # session would just spawn into the same wall (2026-05-22 did exactly
+    # that — bumped the counter and launched learn after the coordinator
+    # died to BetaManagedAgentsBillingError).
+    if review_extracted:
+        try:
+            _update_learn_counter(args.repo, args.pr_number, bot_token)
+        except Exception as e:
+            print(f"  [warn] counter update failed: {e}", file=sys.stderr)
+    else:
+        print(
+            "  [skip] learn epilogue + wiki counter skipped — run failed, "
+            "nothing to learn from",
+            file=sys.stderr,
+        )
+        _exit_nonzero_on_failed_run(args.pr_number, coordinator_failure_reason, posted=True)
 
 
 def _update_learn_counter(repo: str, pr_number: int, bot_token: str) -> None:
@@ -2530,6 +2583,43 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str) -> None:
         wiki_git.commit_meta(wiki_dir, f"meta: bump counter for PR #{pr_number}")
 
 
+def _billing_preflight() -> None:
+    """1-token ping (well under a cent) before any session spawns.
+
+    A dry ANTHROPIC_API_KEY otherwise surfaces mid-coordinator-session
+    AFTER real spend — qai-be #969 burned a full partial session over
+    28 minutes before dying to the 2026-06-02 exhaustion. With the
+    canary, a billing-dead key fails the job red at near-zero cost, and
+    retries during a dry spell stay free; after a top-up the canary
+    passes and runs proceed with no manual unblocking. Any NON-billing
+    canary failure (network blip, model rename, model-access
+    restriction) proceeds with a warning — the canary must never block
+    a review on its own flakiness. timeout/max_retries mirror
+    `_interrupt_live_sessions_sync`'s client so a slow API can't stall
+    the job toward the GHA SIGKILL.
+    """
+    try:
+        Anthropic(timeout=10.0, max_retries=0).messages.create(
+            model=MODEL_ALIASES["haiku"],
+            max_tokens=1,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+    except Exception as e:
+        msg = str(e).lower()
+        if any(hint in msg for hint in _BILLING_REASON_HINTS):
+            print(
+                f"::error title=air review failed — billing exhausted (preflight)::"
+                f"{str(e)[:300]} | no session was started, nothing spent | "
+                f"top up at console.anthropic.com (or rotate ANTHROPIC_API_KEY), "
+                f"then re-request the review"
+            )
+            sys.exit(1)
+        print(
+            f"  [warn] billing preflight inconclusive ({str(e)[:200]}) — proceeding",
+            file=sys.stderr,
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Trigger an air review for a PR (single multi-agent coordinator)")
     parser.add_argument("repo", help="owner/repo (e.g., myorg/myrepo)")
@@ -2551,6 +2641,7 @@ def main():
         sys.exit(1)
 
     _install_shutdown_handlers()
+    _billing_preflight()
     asyncio.run(run_review(args))
 
 
