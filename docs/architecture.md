@@ -9,7 +9,7 @@
 **air** is an automated code review system with two distribution paths:
 
 1. **CLI Plugin** — runs locally in Claude Code, triggered manually with `/air:review`
-2. **Managed Agent** — runs in Anthropic's cloud, triggered automatically by GitHub Actions on every PR
+2. **Managed Agent** — runs in Anthropic's cloud, triggered by GitHub Actions: request-driven (review on bot reviewer-request; recommended) or push-driven with a cooldown debounce — see `managed/README.md` "Enable on a repo"
 
 Both paths use the same 5 agent prompts, same wiki patterns, same review format, and learn from each other.
 

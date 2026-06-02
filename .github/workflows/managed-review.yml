@@ -6,6 +6,11 @@
 #   on:
 #     pull_request:
 #       types: [opened, synchronize, reopened]
+#       # ^ push-driven: every push re-reviews; bursts coalesce via the
+#       #   cooldown_minutes input (default 20). For the cheaper
+#       #   request-driven variant (review only when the bot is requested
+#       #   as reviewer; /air:review --respond re-requests automatically),
+#       #   see managed/README.md "Enable on a repo".
 #     workflow_dispatch:
 #       inputs:
 #         pr_number:
@@ -88,6 +93,22 @@ on:
         required: false
         type: string
         default: 'main'
+      cooldown_minutes:
+        description: |
+          Minimum minutes between reviews of the same PR on push
+          (`synchronize`) triggers. A push landing inside the window
+          sleeps out the remainder first; a newer push during the sleep
+          cancels the run via the concurrency group at zero session
+          cost, so fix-commit bursts coalesce into one review of the
+          final state. First reviews (opened/ready_for_review), explicit
+          review_requested, and workflow_dispatch are never delayed.
+          '0' disables. Default 20 — in the May 2026 sample (301 review
+          sessions at ~$5-9 each), roughly a third were burst re-reviews.
+          Values above 20 eat into the review headroom inside the job's
+          95-minute cap (75 review budget + 20 cooldown).
+        required: false
+        type: string
+        default: '20'
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -125,6 +146,11 @@ jobs:
     # until the next push triggers a fresh review. This is acceptable
     # for the rapid-iteration pattern this concurrency rule targets;
     # on slower cadences the verdict completes before the next push.
+    #
+    # The "Cooldown debounce" first step below extends this coalescing
+    # to pushes that land AFTER a review finished: the new run sleeps
+    # out the cooldown remainder before spending anything, so a
+    # follow-up push cancels it here at $0 instead of mid-session.
     concurrency:
       group: air-review-${{ github.repository }}-${{ inputs.pr_number || github.event.pull_request.number || github.run_id }}
       cancel-in-progress: true
@@ -133,9 +159,15 @@ jobs:
     # the wiki-counter threshold fires) = 58-60 min worst case. 60 min
     # was tight after qai-be #593 hit 28m13s on a re-review (~3.5K lines)
     # and the coordinator gradient with 1680s left no margin. 75 min
-    # gives ~15 min of headroom for slow wiki clones, rebase-retry on
-    # the wiki push, and learn-side specialist sessions.
-    timeout-minutes: 75
+    # gave ~15 min of headroom for slow wiki clones, rebase-retry on
+    # the wiki push, and learn-side specialist sessions. The cooldown
+    # debounce step can additionally sleep up to cooldown_minutes
+    # (default 20) BEFORE the paid work on the same job clock — without
+    # widening the cap, a solo push inside the window would sleep 20m
+    # and then get SIGKILLed mid-session on a worst-case review (full-
+    # cost loss). 95 = 75 review budget + 20 default cooldown; callers
+    # raising cooldown_minutes above 20 eat into review headroom.
+    timeout-minutes: 95
 
     # Job-level env so step-level `if:` can check `env.OPENAI_API_KEY != ''`.
     # Step-level `if: secrets.X != ''` works in some contexts but is less
@@ -146,6 +178,50 @@ jobs:
       PR_NUMBER_RESOLVED: ${{ inputs.pr_number || github.event.pull_request.number }}
 
     steps:
+      # Runs FIRST, before any paid work: a run superseded during this
+      # sleep dies having spent $0. Gated on `synchronize` only — a push
+      # to an already-open PR is the one wasteful trigger; first reviews,
+      # explicit review_requested, and workflow_dispatch start
+      # immediately. The comment detector uses the anchored
+      # `startswith("## Code Review\n")` form (BOT_REVIEW_PREFIXES in
+      # lib/pr_conversation.py — the trailing \n rejects "## Code
+      # Reviewers Guide" lookalikes) and the desc/first fetch shape from
+      # review-respond.md Step 1.5 (newest comment is on page 1, no
+      # pagination). It also excludes the structured "## air review
+      # (run failed)" comment, so a failed run never holds the cooldown.
+      # The selector is any-author by design (the workflow can't know
+      # the bot login) — worst case a spoofed comment delays a push-
+      # triggered review by one window; fail direction is always
+      # "review runs", never "review suppressed".
+      - name: Cooldown debounce
+        if: ${{ github.event.action == 'synchronize' && inputs.cooldown_minutes != '0' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COOLDOWN_MIN: ${{ inputs.cooldown_minutes }}
+        run: |
+          case "$COOLDOWN_MIN" in
+            (*[!0-9]*|'') echo "cooldown: non-numeric cooldown_minutes '$COOLDOWN_MIN' — skipping debounce"; exit 0;;
+          esac
+          LAST=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER_RESOLVED}/comments?sort=created&direction=desc&per_page=100" \
+                 --jq '[.[] | select(.body | startswith("## Code Review\n"))] | first | .created_at // empty' 2>/dev/null || true)
+          if [ -z "$LAST" ]; then
+            echo "cooldown: no prior review comment — starting immediately"
+            exit 0
+          fi
+          NOW=$(date -u +%s)
+          THEN=$(date -u -d "$LAST" +%s 2>/dev/null) || { echo "cooldown: unparseable timestamp '$LAST' — starting immediately"; exit 0; }
+          COOLDOWN_S=$(( COOLDOWN_MIN * 60 ))
+          ELAPSED=$(( NOW - THEN ))
+          WAIT=$(( COOLDOWN_S - ELAPSED ))
+          if [ "$WAIT" -le 0 ]; then
+            echo "cooldown: last review $((ELAPSED/60))m ago (>= ${COOLDOWN_MIN}m) — starting immediately"
+            exit 0
+          fi
+          # Clamp guards future-dated created_at (clock skew) — never sleep past one window.
+          [ "$WAIT" -gt "$COOLDOWN_S" ] && WAIT=$COOLDOWN_S
+          echo "cooldown: last review $((ELAPSED/60))m ago — sleeping $((WAIT/60))m$((WAIT%60))s (a newer push supersedes this run at \$0)"
+          sleep "$WAIT"
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:

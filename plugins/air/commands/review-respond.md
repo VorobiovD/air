@@ -389,15 +389,30 @@ git push 2>&1
 ```
 If push fails (no upstream, permissions): print the error and suggest `git push --set-upstream origin <branch>`. Do NOT force-push.
 
-3. Print summary:
+3. **Re-request the bot reviewer** (GitHub only). **If `PLATFORM` is `gitlab`: skip this sub-step entirely** — managed CI is GitHub-only and `gh` would fail silently here; the summary line prints `n/a (GitLab)`. Callers on the request-driven trigger model (`pull_request: types: [..., review_requested]` — see `managed/README.md` "Enable on a repo") get their re-review fired exactly when this response lands, instead of on every push. **Reuse `$BOT_LOGIN` from Respond Step 1.5** — it was already resolved there from `conv-issues.json` with the anchored `startswith("## Code Review\n")` form; do NOT re-paginate the comments endpoint. Guard against requesting yourself (Step 1.5's `gh api user` fallback path makes `BOT_LOGIN` equal your own login — the guard catches it; GitHub also 422s on requesting the PR author):
+```bash
+if [ "$PLATFORM" = "github" ] && [ -n "$BOT_LOGIN" ]; then
+  SELF_LOGIN=$(gh api user --jq '.login' 2>/dev/null)
+  if [ "$BOT_LOGIN" != "$SELF_LOGIN" ]; then
+    gh api -X POST "repos/<owner>/<repo>/pulls/$PR_NUMBER/requested_reviewers" \
+      -f "reviewers[]=$BOT_LOGIN" >/dev/null 2>&1 \
+      && echo "Re-requested review from $BOT_LOGIN" \
+      || echo "  [warn] reviewer re-request failed (non-fatal — push-triggered callers re-review on the push itself)"
+  fi
+fi
+```
+On callers whose `types` include both `synchronize` and `review_requested`, the push from sub-step 2 and this request converge to one review: the `synchronize` run parks in the reusable workflow's cooldown-debounce sleep (it costs nothing there), and whichever run is older gets cancelled by the concurrency group — the surviving run is typically the `review_requested` one, which skips the cooldown and starts immediately.
+
+4. Print summary:
 ```
 Response posted to PR #<PR_NUMBER>:
 - <N_FIXED> fixed, <N_DISPUTED> disputed, <N_ACKNOWLEDGED> acknowledged, <N_WONTFIX> won't-fix, <N_PARTIAL> partially fixed
 - Additional changes: <N items or "none">
 - Self-check: <clean / N non-blocking notes>
 - Branch pushed.
+- Re-review requested from <BOT_LOGIN, or "n/a (GitLab)" / "n/a">.
 
-The reviewer can now run /air:review to re-review.
+The reviewer can now run /air:review to re-review (request-driven CI callers re-review automatically).
 ```
 
 **No wiki learning:** The Respond Flow intentionally does NOT push patterns to the wiki or increment the review counter. Self-check findings are included in the response comment for the reviewer to see, but learning happens on the reviewer's re-review (Step 13), not during the developer's response.
