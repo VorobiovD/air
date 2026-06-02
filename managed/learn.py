@@ -84,17 +84,46 @@ def main():
     from anthropic import Anthropic
     client = Anthropic()
 
+    # Store-backed repos: learn is the ONE flow that mounts the pattern
+    # store read_write (cleanup/merge/cap/archive need semantic edits).
+    # It also exports a rendered snapshot back to the git wiki so humans
+    # and the CLI keep a readable mirror. Non-migrated repos run the
+    # legacy wiki-clone pipeline unchanged.
+    try:
+        import memory_store
+        store_id = memory_store.find_store(args.repo)
+    except Exception as e:
+        print(f"  [warn] pattern-store lookup failed ({e}) — wiki mode",
+              file=sys.stderr)
+        store_id = None
+
+    resources = [{
+        "type": "github_repository",
+        "url": f"https://github.com/{args.repo}",
+        "authorization_token": bot_token,
+        "checkout": {"type": "branch", "name": "main"},
+        "mount_path": "/workspace/repo",
+    }]
+    if store_id:
+        print(f"  pattern store: {store_id} (read_write)")
+        resources.append({
+            "type": "memory_store",
+            "memory_store_id": store_id,
+            "access": "read_write",
+            "instructions": (
+                "air review patterns — SOURCE OF TRUTH. Per-author files "
+                "under authors/<login>.md; shared files at the root; older "
+                "narratives under archive/. Apply the cleanup pipeline to "
+                "these files, then export a rendered snapshot to the git "
+                "wiki (mirror)."
+            ),
+        })
+
     session = client.beta.sessions.create(
         agent=agent["id"],
         environment_id=env_id,
         title=f"Learn — {args.repo}",
-        resources=[{
-            "type": "github_repository",
-            "url": f"https://github.com/{args.repo}",
-            "authorization_token": bot_token,
-            "checkout": {"type": "branch", "name": "main"},
-            "mount_path": "/workspace/repo",
-        }],
+        resources=resources,
     )
     print(f"  Session: {session.id}")
 
@@ -103,7 +132,8 @@ def main():
         f"Run wiki cleanup for {args.repo}.\n"
         f"REPO={args.repo}\n"
         f"GH_TOKEN={bot_token}\n"
-        f"MODE={mode}\n\n"
+        f"MODE={mode}\n"
+        f"PATTERN_STORE={'mounted (see /mnt/memory — operate on the store, then export the wiki mirror)' if store_id else 'none (legacy wiki pipeline)'}\n\n"
         f"The repo is at /workspace/repo. Set GH_TOKEN as env var.\n"
         f"Execute the full learn pipeline."
     )
@@ -119,17 +149,20 @@ def main():
     else:
         stream(client, session.id)
 
-    # Reset the shared `/air:learn` trigger counter on the wiki so the next
-    # review sees a clean `reviews_since: 0` and the cadence restarts.
+    # Reset the shared `/air:learn` trigger counter so the next review sees
+    # a clean `reviews_since: 0` and the cadence restarts. Store-backed
+    # repos mutate the store memory; legacy repos push to the wiki.
     # Best-effort — never fails the overall learn run.
     try:
-        _reset_learn_counter(args.repo, bot_token)
+        _reset_learn_counter(args.repo, bot_token, store_id=store_id)
     except Exception as e:
         print(f"  [warn] counter reset failed: {e}", file=sys.stderr)
 
 
-def _reset_learn_counter(repo: str, bot_token: str) -> None:
-    """Clone the wiki, call `meta.py reset`, push. Mirrors the update path
+def _reset_learn_counter(repo: str, bot_token: str,
+                         store_id: str | None = None) -> None:
+    """Reset the shared counter via `meta.py reset` — store-backed when the
+    repo has migrated, wiki clone+push otherwise. Mirrors the update path
     in managed/review.py::_update_learn_counter but calls `reset` instead
     of `bump`+`check`."""
     air_root = Path(__file__).resolve().parent.parent
@@ -138,6 +171,16 @@ def _reset_learn_counter(repo: str, bot_token: str) -> None:
     if not meta_script.is_file():
         print(f"  [warn] meta.py not found at {meta_script}", file=sys.stderr)
         return
+
+    if store_id:
+        result = subprocess.run(
+            [sys.executable, str(meta_script), "reset", "--store-id", store_id,
+             "--pr-number", "0"],
+            capture_output=True, text=True,
+        )
+        sys.stderr.write(result.stderr)
+        return
+
     sys.path.insert(0, str(lib_dir))
     import wiki_git  # type: ignore
 

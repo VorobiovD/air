@@ -12,6 +12,25 @@ You receive:
 - `REPO` — owner/repo
 - `GH_TOKEN` — GitHub token
 - `MODE` — `full` (default), `history-only`, `refresh-profile`
+- `PATTERN_STORE` — `mounted` (store-backed repo) or `none` (legacy wiki pipeline)
+
+## Store mode (PATTERN_STORE=mounted)
+
+The pattern SOURCE OF TRUTH is the memory store mounted read-write under
+`/mnt/memory/` (exact path in your system prompt's mount note):
+
+- `authors/<login>.md` — per-author pattern files (one per author; these
+  replace REVIEW.md's "### <login>" sections)
+- `common-findings.md`, `service-patterns.md`, `accepted-patterns.md`,
+  `severity-calibration.md`, `glossary.md`, `project-profile.md`
+- `archive/` — older pattern narratives
+- `meta/air-meta.json` — DO NOT touch (the orchestrator owns the counter)
+
+Adapt the steps below: wherever a step reads or writes `$AIR_TMP/<FILE>.md`,
+operate on the corresponding store path instead. Per-file size cap is 100KB —
+the narrative caps in Step 3 keep files under it; spill older content to
+`archive/` when needed. The git wiki still gets written in Step 6, but as an
+EXPORTED MIRROR rendered from the store (see the Step 6 store-mode variant).
 
 ## Step 1: Clone Wiki
 
@@ -116,6 +135,8 @@ REVIEW-HISTORY.md: N PRs analyzed, N with reviews
 
 ## Step 6: Push to Wiki
 
+**Legacy mode (PATTERN_STORE=none):**
+
 ```bash
 cd /workspace/wiki
 git remote set-url origin "https://x-access-token:$GH_TOKEN@github.com/$REPO.wiki.git"
@@ -125,10 +146,33 @@ cp "$AIR_TMP/PROJECT-PROFILE.md" PROJECT-PROFILE.md 2>/dev/null
 cp "$AIR_TMP/ACCEPTED-PATTERNS.md" ACCEPTED-PATTERNS.md 2>/dev/null
 cp "$AIR_TMP/SEVERITY-CALIBRATION.md" SEVERITY-CALIBRATION.md 2>/dev/null
 cp "$AIR_TMP/GLOSSARY.md" GLOSSARY.md 2>/dev/null
+cp "$AIR_TMP/REVIEW-ARCHIVE.md" REVIEW-ARCHIVE.md 2>/dev/null
 git add -A
 git diff --quiet --cached || git -c user.name="air-machine" -c user.email="air@bot" -c commit.gpgsign=false commit -m "review-learn: cleanup + calibration $(date +%Y-%m-%d)"
 git push
 ```
+
+**Store mode (PATTERN_STORE=mounted) — export the mirror:**
+
+Render the store back into the wiki's legacy file shapes so humans (GitHub
+wiki UI) and the CLI plugin (clone-based reads) keep working:
+
+1. Rebuild `REVIEW.md` from the store: a banner first —
+   `> **Mirror** — source of truth is the air pattern memory store; edits here are overwritten. Update via /air:learn.`
+   — then `## Common Findings` (from `common-findings.md`),
+   `## Service-Specific Patterns` (from `service-patterns.md`),
+   `## Author Patterns` with one `### <login>` section per
+   `authors/<login>.md` file (alphabetized), then any misc/reference content.
+2. Copy `accepted-patterns.md` → ACCEPTED-PATTERNS.md,
+   `severity-calibration.md` → SEVERITY-CALIBRATION.md,
+   `glossary.md` → GLOSSARY.md, `project-profile.md` → PROJECT-PROFILE.md,
+   concatenated `archive/*.md` → REVIEW-ARCHIVE.md, plus the regenerated
+   REVIEW-HISTORY.md from Step 4.
+3. Commit + push as in legacy mode, message:
+   `review-learn: store export $(date +%Y-%m-%d)`.
+
+Do NOT write `.air-meta.json` to the wiki in store mode — the counter lives
+only in the store.
 
 ## Cleanup
 
