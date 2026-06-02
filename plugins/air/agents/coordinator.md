@@ -47,6 +47,8 @@ This is your final response. Two parts in one message:
 
 **Part B (conditional)** — immediately after Part A, run a single Bash tool call to update the wiki.
 
+**Store-mode skip:** if the PR Context's `Wiki files directory:` points at `/mnt/memory/` (the pattern store, mounted read-only), SKIP Part B entirely — emit Part A and stop. The orchestrator applies pattern updates deterministically after the session (`managed/pattern_writer.py`); the read-only mount would reject your writes anyway, and `/workspace/wiki` is not mounted on store-backed repos.
+
 Decide what to write FIRST (before the bash call):
 1. Read REVIEW.md and look for a section keyed on the PR's author (provided in the user message's PR Context block).
 2. Check the verifier's findings: if 2+ findings of the same category exist for this author across this and prior reviews, that's a recurring pattern worth recording.

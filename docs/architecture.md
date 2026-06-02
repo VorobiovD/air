@@ -11,7 +11,7 @@
 1. **CLI Plugin** — runs locally in Claude Code, triggered manually with `/air:review`
 2. **Managed Agent** — runs in Anthropic's cloud, triggered by GitHub Actions: request-driven (review on bot reviewer-request; recommended) or push-driven with a cooldown debounce — see `managed/README.md` "Enable on a repo"
 
-Both paths use the same 5 agent prompts, same wiki patterns, same review format, and learn from each other.
+Both paths use the same 5 agent prompts, same pattern source, same review format, and learn from each other. Pattern source is per-repo: a memory store (migrated repos — review sessions mount read-only, writes via `managed/pattern_writer.py`, git wiki kept as an exported mirror) or the legacy git wiki.
 
 ---
 
@@ -40,7 +40,8 @@ VorobiovD/air/
 │   ├── lib/                        ← Shared Python helpers (stdlib-only)
 │   │   ├── meta.py                   `.air-meta.json` read/write + /air:learn trigger threshold
 │   │   ├── wiki_git.py               clone + commit-meta-with-retry helpers
-│   │   └── pr_conversation.py        merge GitHub PR comments/reviews into `<pr-conversation>` agent context
+│   │   ├── pattern_lifecycle.py   # Deterministic author-pattern lifecycle ops
+│   └── pr_conversation.py        merge GitHub PR comments/reviews into `<pr-conversation>` agent context
 │   └── .claude-plugin/
 │       └── plugin.json             Plugin manifest (version source of truth)
 │

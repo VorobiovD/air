@@ -151,17 +151,31 @@ if [ ! -d "$WIKI_DIR/.git" ]; then
   cd "$AIR_TMP" && git clone --depth 1 "$WIKI_URL" review-wiki-self 2>/dev/null
 fi
 if [ -n "$AIR_PLUGIN_ROOT" ]; then
-  # Bump the counter (creates .air-meta.json with defaults on fresh wiki).
-  python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number 0
-  # Threshold check: exit 1 triggers /air:learn.
-  python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"
-  META_RC=$?
+  # Store-backed repo? (per-repo pattern memory store — counter lives at
+  # /meta/air-meta.json there). Empty when legacy or no ANTHROPIC_API_KEY.
+  AIR_STORE_ID=""
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    AIR_STORE_ID=$(python3 "$AIR_PLUGIN_ROOT/lib/meta.py" find-store --repo "$CURRENT_REPO")
+  fi
+  if [ -n "$AIR_STORE_ID" ]; then
+    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --store-id "$AIR_STORE_ID" --pr-number 0
+    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --store-id "$AIR_STORE_ID"
+    META_RC=$?
+  else
+    # Bump the counter (creates .air-meta.json with defaults on fresh wiki).
+    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number 0
+    # Threshold check: exit 1 triggers /air:learn.
+    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"
+    META_RC=$?
+  fi
 else
   # Self Step 0 already warned and cleared AIR_PLUGIN_ROOT.
   echo "warning: AIR_PLUGIN_ROOT unresolved — counter not bumped this run" >&2
   META_RC=0
 fi
 ```
+
+**Store-mode note (when `$AIR_STORE_ID` is non-empty): SKIP sub-step 4's wiki push entirely** — the wiki is an exported mirror that the next `/air:learn` export OVERWRITES; pattern edits pushed there would be silently lost (CLI store writes are Phase 2). The counter already went through the store above.
 
 **>>> AUTO-TRIGGER DECISION (do NOT skip this block) <<<**
 

@@ -144,6 +144,10 @@ When agent prompts change in the air repo, the workflow auto-updates deployed ag
 - **Permissions**: `repo` scope on bot account (needed for wiki push — fine-grained PATs don't support wiki)
 - **Agent access**: each org's agents are isolated under their own Anthropic API key
 
+## Pattern memory store (pilot)
+
+Migrated repos store review patterns in a per-repo Anthropic memory store instead of the git wiki (`migrate_wiki_to_store.py owner/repo [--dry-run]` to migrate; store discovered by name `air-patterns <owner>/<repo>` — its presence is the rollout flag). Review sessions mount it **read-only** (PR content is untrusted; deterministic post-review writes happen in `pattern_writer.py`), learn sessions mount read-write and export a rendered mirror back to the git wiki for humans + CLI reads. The `/air:learn` counter lives at `/meta/air-meta.json` with sha256-preconditioned updates — no more wiki push races. Rollback: archive the store; the next run falls back to the wiki mount.
+
 ## Cost
 
 Claude-only (default), **measured** from real session usage (~340 review sessions, May–June 2026): median **~$5–9 per review**, heavy PRs $15–30. Learn epilogue sessions: ~$8–11 each on Opus (pre-v1.15.0; ~40% less on Sonnet). The dominant driver is cache-read volume (~5M cached tokens read per median review session; 30M on large PRs) — output tokens and the $0.08/session-hour runtime are minor. The fast-mode premium is not billed on Managed Agents sessions. Real May 2026 total at ~300 reviews + 130 learns across repos: ~$2.5–4K — push-triggered re-review density is the biggest cost lever, followed by learn cadence (cut ~3× in v1.15.0).

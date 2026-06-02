@@ -923,13 +923,25 @@ The issue comment contains the full review body (searchable by Step 2 for re-rev
 
 **Auto-trigger check:** Before learning, decide whether a full cleanup is due.
 
-Counter state lives in `.air-meta.json` at the wiki root (cloned into `$WIKI_DIR` by Step 3), so CLI and managed runs share the same counter — both contribute to the cadence. `plugins/air/lib/meta.py` owns the threshold logic; delegate to it:
+Counter state is shared between CLI and managed runs — both contribute to the cadence. **Store-backed repos** (migrated to the per-repo pattern memory store — see `managed/memory_store.py` for the layout contract) keep the counter in the store at `/meta/air-meta.json`; legacy repos keep it in `.air-meta.json` at the wiki root (cloned into `$WIKI_DIR` by Step 3). `plugins/air/lib/meta.py` owns both backends and the threshold logic; delegate to it:
 
 ```bash
 if [ -n "$AIR_PLUGIN_ROOT" ]; then
-  python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number "<number>"
-  python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"
-  META_RC=$?
+  # Store-backed repo? find-store prints the id, or empty for legacy repos
+  # (also empty when ANTHROPIC_API_KEY is unset — falls back to the wiki).
+  AIR_STORE_ID=""
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    AIR_STORE_ID=$(python3 "$AIR_PLUGIN_ROOT/lib/meta.py" find-store --repo "$CURRENT_REPO")
+  fi
+  if [ -n "$AIR_STORE_ID" ]; then
+    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --store-id "$AIR_STORE_ID" --pr-number "<number>"
+    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --store-id "$AIR_STORE_ID"
+    META_RC=$?
+  else
+    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number "<number>"
+    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"
+    META_RC=$?
+  fi
 else
   # Step 0 already warned and cleared AIR_PLUGIN_ROOT — counter stays
   # untouched, treat as "below threshold" so the flow proceeds to the
@@ -938,6 +950,8 @@ else
   META_RC=0
 fi
 ```
+
+**Store-mode note (when `$AIR_STORE_ID` is non-empty): SKIP sub-steps 2–5 entirely** — print "store-backed repo — CLI pattern writes deferred to managed/learn (Phase 2)" and RETURN from Step 13 after the auto-trigger decision. The wiki on store-backed repos is an exported mirror that the next `/air:learn` export OVERWRITES; pattern edits pushed there from this flow would be silently lost, and writing the store from the CLI is Phase 2 scope. Reading patterns from the mirror (Step 3) remains correct.
 
 **>>> AUTO-TRIGGER DECISION (do NOT skip this block) <<<**
 

@@ -208,7 +208,7 @@ Posted as a single PR comment. Here's a real example from [PR #1](https://github
 
 ### Wiki-Backed Storage
 
-Patterns are stored on the repo's wiki (GitHub or GitLab):
+Patterns are stored on the repo's wiki (GitHub or GitLab) for legacy repos. **Store-backed repos** (migrated to a per-repo Anthropic memory store — see CLAUDE.md "Pattern storage") treat the wiki as an exported read-only mirror; the store is the source of truth. Wiki/mirror pages:
 - **No PRs needed** to update patterns — anyone can push directly
 - **No merge conflicts** on pattern files
 - **Every team member's reviews contribute** automatically
