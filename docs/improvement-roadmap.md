@@ -154,8 +154,8 @@ Three small fixes derived from the 2026-05-19/20/21 audit. All client-side patch
 
 ## Phase 1 — Performance + safety (~1 day)
 
-### B1 / Item E — Fast mode for Opus 4.7
-**What:** `{"id":"claude-opus-4-7","speed":"fast"}` model override on `code-reviewer.md` and `security-auditor.md` frontmatter. Shortens median review time at zero prompt cost.
+### B1 / Item E — Fast mode for Opus (shipped v1.14.0; alias bumped to 4.8 post-1.15.0)
+**What:** `{"id":"claude-opus-4-8","speed":"fast"}` model override on `code-reviewer.md` and `security-auditor.md` frontmatter (alias resolved via `MODEL_ALIASES`). Shortens median review time at zero prompt cost — the fast-mode premium is not billed on Managed Agents sessions.
 **Verification needed:** local CLI router must honor the `model:` field's object form. If not, gate on managed-agent path only.
 **Source:** `air-improvements-plan.md §3.1 E + §3.4 O`
 

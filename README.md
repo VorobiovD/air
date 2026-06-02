@@ -291,19 +291,20 @@ Gracefully skips data that requires a local checkout (blame, churn, file statuse
 
 ## Cost
 
-Per review, with v1.5.0 model tiering (Opus 4.7 at $15/$75 per 1M, Sonnet 4.6 at $3/$15 per 1M):
+Per review, with model tiering (Opus 4.8 at $5/$25 per 1M, Sonnet 4.6 at $3/$15, Haiku 4.5 at $1/$5):
 
 | Component | Model | Approx. cost |
 |---|---|---|
-| code-reviewer, security-auditor | Opus | ~$0.75 each |
-| simplify, git-history-reviewer | Sonnet | ~$0.15 each |
-| review-verifier | Opus | ~$0.50 |
+| code-reviewer, security-auditor | Opus | ~$0.25 each |
+| simplify | Sonnet | ~$0.15 |
+| git-history-reviewer | Haiku | ~$0.05 |
+| review-verifier | Sonnet | ~$0.10 |
 | Codex | external | varies |
-| **Total** | — | **~$2.30** |
+| **Total** | — | **~$0.80** |
 
 The structurally identical PR Context block across the 4 parallel agents is designed to hit Claude Code's automatic prompt cache within each model family (Claude's cache is per-model, so cross-tier hits don't apply). Actual cost varies with PR size; large PRs scale linearly.
 
-At current Opus 4.7 pricing, an all-Opus v1.5.0 review would run ~$3.30. Tiering the two mechanical reviewers (git-history, simplify) to Sonnet saves ~$1/review without touching judgment-heavy agents. (v1.4.0 shipped at Opus 4.6 pricing and was cheaper in absolute terms — the `~$1.66` figure from earlier versions reflected Opus 4.6's `$5/$25` rates, not the current 4.7 rates.)
+An all-Opus review at current pricing would run ~$1.10; tiering the mechanical reviewers (git-history → Haiku, simplify + verifier → Sonnet) saves ~$0.30/review without touching judgment-heavy agents. (Earlier README versions quoted "$15/$75" for Opus 4.7 — the official rate for Opus 4.5 through 4.8 is $5/$25, so the old ~$2.30 total was overstated ~3×.)
 
 **Timing:** 9-15 minutes per review. All agents run in parallel — the bottleneck is the slowest agent, not the sum.
 

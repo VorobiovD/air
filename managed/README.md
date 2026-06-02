@@ -120,6 +120,6 @@ When agent prompts change in the air repo, the workflow auto-updates deployed ag
 
 ## Cost
 
-Claude-only (default): ~$2.30 per review (model tiering at Opus 4.7 + Sonnet 4.6 pricing). At 40 reviews/month: ~$90/month.
+Claude-only (default): ~$0.80–1 per review (model tiering at Opus 4.8 $5/$25 + Sonnet 4.6 $3/$15 + Haiku 4.5 $1/$5 per MTok, plus $0.08/session-hour runtime; the fast-mode premium is not billed on Managed Agents sessions). At 40 reviews/month: ~$35/month.
 
 With Codex enabled (`OPENAI_API_KEY` set): +$1–2 per review depending on diff size and Codex's default model (gpt-5.4 at the time of writing). Opt-out with the `no_codex` workflow input or `--no-codex` on manual invocation.

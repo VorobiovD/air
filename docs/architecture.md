@@ -343,13 +343,14 @@ Responded at: <SHA>
 
 | Component | Model | Per review | Monthly (40 reviews) |
 |---|---|---|---|
-| code-reviewer, security-auditor | Opus | ~$0.75 each | ~$60 combined |
-| simplify, git-history-reviewer | Sonnet | ~$0.15 each | ~$12 combined |
-| review-verifier | Opus | ~$0.50 | ~$20 |
+| code-reviewer, security-auditor | Opus | ~$0.25 each | ~$20 combined |
+| simplify | Sonnet | ~$0.15 | ~$6 |
+| git-history-reviewer | Haiku | ~$0.05 | ~$2 |
+| review-verifier | Sonnet | ~$0.10 | ~$4 |
 | Managed Agent session overhead | — | ~$0.02 | ~$0.80 |
-| **Total** | — | **~$2.30** | **~$90** |
+| **Total** | — | **~$0.80** | **~$33** |
 
-v1.5.0 model tiering (simplify + git-history-reviewer → Sonnet) removes ~$1/review relative to all-Opus at current Opus 4.7 pricing.
+Model tiering (git-history-reviewer → Haiku, simplify + verifier → Sonnet) removes ~$0.30/review relative to all-Opus at current Opus 4.8 pricing ($5/$25 per MTok — the "$15/$75" figure in earlier revisions of this table was wrong; Opus 4.5 through 4.8 all bill $5/$25). The fast-mode premium ($10/$50 on the Messages API) is not billed on Managed Agents sessions.
 
 ---
 

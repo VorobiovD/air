@@ -270,17 +270,18 @@ Gracefully skips data that requires a local checkout (blame, churn, file statuse
 
 ## Cost
 
-Per review, with v1.5.0 model tiering (Opus 4.7 at $15/$75 per 1M, Sonnet 4.6 at $3/$15 per 1M):
+Per review, with model tiering (Opus 4.8 at $5/$25 per 1M, Sonnet 4.6 at $3/$15, Haiku 4.5 at $1/$5):
 
 | Component | Model | Approx. cost |
 |---|---|---|
-| code-reviewer, security-auditor | Opus | ~$0.75 each |
-| simplify, git-history-reviewer | Sonnet | ~$0.15 each |
-| review-verifier | Opus | ~$0.50 |
+| code-reviewer, security-auditor | Opus | ~$0.25 each |
+| simplify | Sonnet | ~$0.15 |
+| git-history-reviewer | Haiku | ~$0.05 |
+| review-verifier | Sonnet | ~$0.10 |
 | Codex | external | varies |
-| **Total** | — | **~$2.30** |
+| **Total** | — | **~$0.80** |
 
-At 40 reviews/month: ~$90/month. Model tiering (v1.5.0) removes ~$1/review relative to all-Opus at current 4.7 pricing.
+At 40 reviews/month: ~$33/month. Model tiering removes ~$0.30/review relative to all-Opus at current Opus 4.8 pricing ($5/$25 — the "$15/$75" quoted in earlier revisions was wrong; Opus 4.5 through 4.8 all bill $5/$25).
 
 **Timing:** 9-15 minutes per review. All agents run in parallel — the bottleneck is the slowest agent, not the sum.
 

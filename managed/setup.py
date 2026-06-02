@@ -26,7 +26,7 @@ SUB_AGENTS = ["code-reviewer", "simplify", "security-auditor", "git-history-revi
 
 
 MODEL_ALIASES = {
-    "opus": "claude-opus-4-7",
+    "opus": "claude-opus-4-8",
     "sonnet": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5",
 }
@@ -96,7 +96,7 @@ def parse_agent_speed(path: Path) -> str | None:
 def _normalize_model_field(value) -> dict | None:
     """Return the canonical object form of a model field for comparison.
 
-    The API accepts both scalar (`"claude-opus-4-7"`) and object form
+    The API accepts both scalar (`"claude-opus-4-8"`) and object form
     (`{"id": ..., "speed": ...}`) on send, and historically returns either form
     on read depending on how the agent was last synced. Normalize both shapes
     to the object form so existing-vs-new diffs compare like-for-like.
