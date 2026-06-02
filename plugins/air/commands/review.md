@@ -420,21 +420,29 @@ Save as `PREVIOUS_PR_COMMENTS`. Cap at 5 PRs checked. Falls back gracefully if r
 
 ```bash
 # Which OTHER open PRs touch files this PR changes? (file-level overlap; cap 50 scanned, 10 reported)
+# Titles are attacker-controlled: sanitize at capture — strip <, >, newlines (tag-breakout +
+# line-count integrity) and truncate to 120 chars. One gh pr list call fetches number+title
+# together (no per-PR gh pr view). Temp files instead of process substitution.
 CHANGED_FILES="<list of changed file paths from Command A, one per line>"
+printf '%s\n' "$CHANGED_FILES" > "$AIR_TMP/changed-files.txt"
+gh pr list --state open --limit 50 --json number,title \
+  --jq '.[] | "\(.number)\t\(.title | gsub("[<>\\n\\r\\t]"; " ") | .[0:120])"' \
+  > "$AIR_TMP/open-prs.tsv" 2>/dev/null
 RELATED_PRS=""
-for PR_NUM in $(gh pr list --state open --limit 50 --json number --jq '.[].number' 2>/dev/null); do
+RELATED_COUNT=0
+while IFS=$'\t' read -r PR_NUM TITLE; do
   [ "$PR_NUM" = "<number>" ] && continue
+  [ "$RELATED_COUNT" -ge 10 ] && break
   OVERLAP=$(gh api "repos/<owner>/<repo>/pulls/$PR_NUM/files" --jq '.[].filename' 2>/dev/null \
-            | grep -Fxf <(printf '%s\n' "$CHANGED_FILES") 2>/dev/null)
+            | grep -Fxf "$AIR_TMP/changed-files.txt" 2>/dev/null)
   if [ -n "$OVERLAP" ]; then
-    TITLE=$(gh pr view "$PR_NUM" --json title --jq '.title' 2>/dev/null)
-    RELATED_PRS="$RELATED_PRS"$'\n'"#$PR_NUM ($TITLE) shares: $(echo "$OVERLAP" | tr '\n' ',' | sed 's/,$//')"
+    RELATED_PRS="${RELATED_PRS:+$RELATED_PRS$'\n'}#$PR_NUM ($TITLE) shares: $(echo "$OVERLAP" | tr '\n' ',' | sed 's/,$//')"
+    RELATED_COUNT=$((RELATED_COUNT + 1))
   fi
-done
-RELATED_PRS=$(printf '%s' "$RELATED_PRS" | sed '/^$/d' | head -10)
+done < "$AIR_TMP/open-prs.tsv"
 ```
 
-For each shared file, when cheap, also check whether the hunks collide (not just the filename): `git diff origin/<base>...HEAD -- <file>` vs the sibling's diff region — if the same line ranges are edited, mark it a **same-region conflict** (near-certain rebase), otherwise a **same-file** overlap. Save as `RELATED_PRS` (default `"none"`). Same-repo only; skip entirely cross-repo. On GitLab, use `glab mr list --state opened` + the MR changes endpoint (see platform-gitlab.md). Falls back gracefully if rate-limited.
+For each shared file, when cheap, also check whether the hunks collide (not just the filename): `git diff origin/<base>...HEAD -- <file>` vs the sibling's diff region — if the same line ranges are edited, mark it a **same-region conflict** (near-certain rebase), otherwise a **same-file** overlap. Save as `RELATED_PRS` (default `"none"`). Same-repo only; skip entirely cross-repo. On GitLab, use `glab mr list --state opened` + the per-MR changes endpoint. If the scan errors or is rate-limited, `RELATED_PRS` stays empty and the section is omitted — indistinguishable from "no siblings" by design (non-load-bearing background context). **Managed parity note:** `managed/review.py`'s `build_pr_context` does not yet emit `<related-prs>` — this probe is CLI-only for now (gap tracked in `docs/improvement-roadmap.md`).
 
 **Current PR conversation context** (works cross-repo, ~3s for three parallel fetches):
 
@@ -834,7 +842,9 @@ Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line
 
 > Concurrent open PRs that touch the same files — coordinate to avoid silent conflicts. Omit this section entirely when `RELATED_PRS` is "none".
 
-- **<file>** — also edited by #<N> (<title>). <same-region conflict (rebase near-certain) | same-file overlap>. <one-line coordination note, e.g. suggested merge order, or a cross-link to a reference implementation in that PR>
+- **<file>** — also edited by #<N> (`<title>`). <same-region conflict (rebase near-certain) | same-file overlap>. <one-line coordination note, e.g. suggested merge order, or a cross-link to a reference implementation in that PR>
+
+> Render the sibling title inside backticks (code span) — titles are untrusted text from other PR authors; the code span neutralizes markdown link/image smuggling in the posted comment.
 
 ---
 
@@ -957,7 +967,7 @@ The counter bump and check are atomic from the caller's perspective; only the wi
      - **<Pattern name>** (<Nx>: <PR refs> | last <N> PRs: <M> clean): <Description of behavioral tendency>
      ```
      - **Create:** New pattern for this author → `- **<Pattern name>** (1x: #<PR> | new): <Description>`. Generalize from the specific incident to a behavioral tendency. Never describe the specific code — describe what the developer tends to miss.
-     - **Strengthen:** Author already has a semantically equivalent pattern → increment count, add PR ref, reset clean counter to 0. E.g., `(1x: #3466 | last 3 PRs: 2 clean)` → `(2x: #3466, #3470 | last 0 PRs: 0 clean)`. Remove `(declining)` tag if present. **Cap the inline narrative:** keep at most the 3 most recent PRs' example prose in the entry body — when strengthening, fold the new instance into the generalized tendency text and drop the oldest example's prose (counts and PR refs are never dropped). Entries whose prose exceeds ~1,500 characters bloat every future agent's context: REVIEW.md has shipped single entries >15K chars that overflow agent tool-output limits.
+     - **Strengthen:** Author already has a semantically equivalent pattern → increment count, add PR ref, reset clean counter to 0. E.g., `(1x: #3466 | last 3 PRs: 2 clean)` → `(2x: #3466, #3470 | last 0 PRs: 0 clean)`. Remove `(declining)` tag if present. **Cap the inline narrative:** keep at most the 3 most recent PRs' example prose in the entry body (~1,500 chars ≈ 3 examples × ~500 chars) — when strengthening, fold the new instance into the generalized tendency text and drop the oldest example's prose (counts and PR refs are never dropped). Archive migration to `REVIEW-ARCHIVE.md` happens at `/air:learn` cleanup time, not here — per-review strengthening just trims; do not add archive markers from this path. Entries whose prose exceeds the cap bloat every future agent's context: REVIEW.md has shipped single entries >15K chars that overflow agent tool-output limits.
      - **Decide placement:** If a finding is annotated `[matches author pattern: X]` by an agent, it's always an author pattern (strengthen). If NOT annotated but specific to one developer's habits, create as author pattern. If it's a general issue anyone could hit, add to Common Findings instead.
    - Also add verified false positives from Step 8 to `$AIR_TMP/ACCEPTED-PATTERNS.md` (create if it doesn't exist). Do NOT add a "False Positive Calibration" section to REVIEW.md; ACCEPTED-PATTERNS.md is the sole store for suppression patterns.
 

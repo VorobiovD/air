@@ -416,7 +416,8 @@ cp "$AIR_TMP/PROJECT-PROFILE.md" "$WIKI_DIR/PROJECT-PROFILE.md" 2>/dev/null
 cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
 cp "$AIR_TMP/SEVERITY-CALIBRATION.md" "$WIKI_DIR/SEVERITY-CALIBRATION.md" 2>/dev/null
 cp "$AIR_TMP/GLOSSARY.md" "$WIKI_DIR/GLOSSARY.md" 2>/dev/null
-cd "$WIKI_DIR" && git add REVIEW.md REVIEW-HISTORY.md PROJECT-PROFILE.md ACCEPTED-PATTERNS.md SEVERITY-CALIBRATION.md GLOSSARY.md && { git diff --quiet --cached || git commit -m "review-learn: cleanup + calibration $(date +%Y-%m-%d)"; } && git push
+cp "$AIR_TMP/REVIEW-ARCHIVE.md" "$WIKI_DIR/REVIEW-ARCHIVE.md" 2>/dev/null
+cd "$WIKI_DIR" && git add REVIEW.md REVIEW-HISTORY.md PROJECT-PROFILE.md ACCEPTED-PATTERNS.md SEVERITY-CALIBRATION.md GLOSSARY.md REVIEW-ARCHIVE.md && { git diff --quiet --cached || git commit -m "review-learn: cleanup + calibration $(date +%Y-%m-%d)"; } && git push
 ```
 
 ## Step 7: Update meta

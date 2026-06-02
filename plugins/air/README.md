@@ -102,7 +102,7 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 8. **Verify** — dedicated verification agent filters false positives with git blame decision tree
 9. **Attribution** — console-only table showing which agent found what (never posted)
 10. **Consolidate** — deduplicate, assign severity, generate Strengths section
-11. **Format** — clickable links with full SHA, sequential numbering across all sections
+11. **Format** — clickable links with full SHA, sequential numbering across all sections, trailing unnumbered Related PRs section when concurrent open PRs overlap
 12. **Post** — new comment, or PATCH existing (--rewrite), or console-only (--dry-run)
 13. **Learn** — wiki push with graduated resistance + auto-trigger full cleanup every 15 reviews
 
