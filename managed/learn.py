@@ -43,8 +43,9 @@ def sync_learn_agent():
         # the learner fires as a review epilogue — it ran on 4 of the 5
         # runs preceding the 2026-05-22 credit exhaustion. If the API
         # refuses the in-place model change, create_or_update_agent retries
-        # without `model` and prints the remediation (delete air-learner
-        # via console or DELETE /agents/{id}, then re-run to re-create).
+        # without `model` and prints the remediation (archive air-learner
+        # via console or POST /agents/{id}/archive — the API has no DELETE
+        # route for agents, verified 2026-06-02 — then re-run to re-create).
         model=MODEL_ALIASES["sonnet"],
     )
 

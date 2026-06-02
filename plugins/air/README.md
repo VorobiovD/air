@@ -270,17 +270,7 @@ Gracefully skips data that requires a local checkout (blame, churn, file statuse
 
 ## Cost
 
-Per review, with v1.5.0 model tiering (Opus 4.7 at $15/$75 per 1M, Sonnet 4.6 at $3/$15 per 1M):
-
-| Component | Model | Approx. cost |
-|---|---|---|
-| code-reviewer, security-auditor | Opus | ~$0.75 each |
-| simplify, git-history-reviewer | Sonnet | ~$0.15 each |
-| review-verifier | Opus | ~$0.50 |
-| Codex | external | varies |
-| **Total** | — | **~$2.30** |
-
-At 40 reviews/month: ~$90/month. Model tiering (v1.5.0) removes ~$1/review relative to all-Opus at current 4.7 pricing.
+CLI mode bills your Claude Code seat (subscription usage, not API dollars). Managed (CI) mode bills the Anthropic API key — **measured** from real session usage (~340 review sessions, May–June 2026): median **~$5–9 per review**, heavy PRs $15–30; learn epilogue ~$8–11 (Opus, pre-v1.15.0; ~40% less on Sonnet). The driver is cache-read volume (~5M cached tokens read per median review session, 30M on large PRs), not output. Token rates: Opus 4.8 $5/$25, Sonnet 4.6 $3/$15, Haiku 4.5 $1/$5 per MTok — the "$15/$75" Opus rate quoted in earlier revisions was wrong, and the old per-agent estimates assumed one-shot calls (~50× below real agentic-session reads).
 
 **Timing:** 9-15 minutes per review. All agents run in parallel — the bottleneck is the slowest agent, not the sum.
 
