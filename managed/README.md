@@ -109,9 +109,11 @@ GitHub Action triggers `python review.py <repo> <pr>`
   ├── Optional: runs `codex review --base <sha>` as a subprocess (Pattern B: GHA-side, sequential
   │     before the coordinator) — output html-escaped, length-capped, and bundled into the
   │     mounted verifier-task.md (inline fallback: coordinator user message)
-  ├── File-handoff (v1.18.0): uploads PR context, diff, and verifier task + codex findings via
-  │     the Files API; they mount read-only at /workspace/context/. The coordinator user message
-  │     is a short pointer note — upload failure falls back to the legacy inline shape.
+  ├── File-handoff (v1.18.0, EXPERIMENTAL — AIR_FILE_HANDOFF=1, off by default): uploads PR
+  │     context, diff, and verifier task via the Files API, mounted at /workspace/context/ with
+  │     a short pointer note as the user message. Blocked on the research-preview runtime:
+  │     sub-agent threads run in isolated containers (file mounts + cross-thread writes don't
+  │     propagate) — inline is the production shape until that lands.
   │
   ▼
 Single air-coordinator session (callable_agents multi-agent runtime)
