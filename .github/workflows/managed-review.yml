@@ -78,6 +78,16 @@ on:
         required: false
         type: string
         default: 'false'
+      fresh:
+        description: |
+          Force a full review even when the PR is already reviewed at its
+          current HEAD — set to "true" to pass --fresh to review.py.
+          Needed for manual replays on closed/merged PRs (verification
+          runs, benchmarks): those are normally skipped by the
+          "already reviewed, no changes since" gate.
+        required: false
+        type: string
+        default: 'false'
       air_ref:
         description: |
           air repo ref for the setup.py + agent prompts checkout. Defaults
@@ -297,6 +307,7 @@ jobs:
           PR_NUMBER: ${{ env.PR_NUMBER_RESOLVED }}
           CLOSED: ${{ inputs.closed }}
           NO_CODEX: ${{ inputs.no_codex }}
+          FRESH: ${{ inputs.fresh }}
           # Absolute path to the local checkout. review.py uses it for
           # both `codex review` (when enabled) and client-side
           # pre-computation (blame/churn/file-status/diff-check
@@ -316,5 +327,8 @@ jobs:
           fi
           if [ "$NO_CODEX" = "true" ]; then
             FLAGS+=(--no-codex)
+          fi
+          if [ "$FRESH" = "true" ]; then
+            FLAGS+=(--fresh)
           fi
           python managed/review.py "$REPO" "$PR_NUMBER" "${FLAGS[@]}"
