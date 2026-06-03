@@ -329,7 +329,12 @@ jobs:
           # Safe here: the runner is an ephemeral isolated VM and review.py
           # already passes Codex a narrow env (no AIR_BOT_TOKEN / ANTHROPIC key).
           mkdir -p ~/.codex
-          printf 'sandbox_mode = "danger-full-access"\napproval_policy = "never"\n' >> ~/.codex/config.toml
+          # Overwrite (not append) — this step owns the file; the keys are
+          # static. Appending could leave a duplicate `sandbox_mode` if a
+          # future codex/warm runner pre-creates config.toml, and TOML
+          # duplicate-key handling is parser-dependent (could silently
+          # re-enable bwrap). Overwrite is deterministic.
+          printf 'sandbox_mode = "danger-full-access"\napproval_policy = "never"\n' > ~/.codex/config.toml
           # Non-fatal runtime/config/auth diagnostic — surfaces sandbox + auth
           # health in the job log if Codex still misbehaves.
           codex doctor || true
