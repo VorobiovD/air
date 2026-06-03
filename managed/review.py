@@ -2289,15 +2289,24 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     else:
         codex_block = "<codex-findings>(codex unavailable or disabled)</codex-findings>"
 
-    # File-handoff (primary): the three input docs ride into the session as
-    # mounted Files-API resources, and the coordinator user message shrinks
-    # to a pointer note. Without this, the coordinator re-emits the full
-    # context+diff in each of its 4 TURN-1 delegations and again in TURN 2 —
-    # ~16K output tokens / ~240s measured on the ai-relay #216 session audit
-    # (output is the expensive token class, and Sonnet generating 16K tokens
-    # is also the single largest wall-clock block of the coordinator turn).
-    # The inline shape below is kept verbatim as the fallback when the
-    # Files API upload fails — coordinator.md handles both shapes.
+    # File-handoff (EXPERIMENTAL — opt-in via AIR_FILE_HANDOFF=1): the three
+    # input docs ride into the session as mounted Files-API resources, and
+    # the coordinator user message shrinks to a pointer note. Targets the
+    # ~16K output tokens / ~240s the coordinator spends re-emitting the
+    # context+diff in TURN 1/2 (ai-relay #216 session audit).
+    #
+    # OFF BY DEFAULT: verified 2026-06-03 (air run 26855698173, session
+    # sesn_01BmuyMmoVUP6xeaWWNXW9pM) that callable-agent threads run in
+    # ISOLATED containers on the research-preview runtime — `file` session
+    # resources do not appear in sub-agent thread containers (the verifier
+    # found /workspace/context/ absent while /workspace/repo, a
+    # github_repository resource, was present), and one thread's writes to
+    # /workspace/findings/ are invisible to siblings. Specialists improvise
+    # when their input paths don't exist (simplify hallucinated a fantasy
+    # PR). Re-enable only after the runtime propagates file mounts +
+    # workspace writes to threads — re-verify with a closed-PR dispatch
+    # before flipping any caller.
+    handoff_enabled = os.environ.get("AIR_FILE_HANDOFF", "") in ("1", "true")
     handoff_docs = {
         "pr-context.md": pr_context,
         "pr.diff": diff,
@@ -2338,22 +2347,24 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
         async with AsyncAnthropic() as client:
             file_resources: list[dict] = []
             handoff_ids: list[str] = []
-            try:
-                file_resources, handoff_ids = await _upload_handoff_files(
-                    client, handoff_docs
-                )
-                coordinator_user_text = handoff_user_text
-                print(f"  file-handoff: {len(handoff_ids)} input files mounted under /workspace/context/")
-            except Exception as e:
-                # Never block a review on handoff plumbing — fall back to
-                # the legacy inline message shape (coordinator.md handles
-                # both). Built here, not upfront: the happy path never
-                # needs this concatenation.
-                print(
-                    f"  [warn] file-handoff upload failed "
-                    f"({type(e).__name__}: {e}) — falling back to inline context",
-                    file=sys.stderr,
-                )
+            coordinator_user_text = ""
+            if handoff_enabled:
+                try:
+                    file_resources, handoff_ids = await _upload_handoff_files(
+                        client, handoff_docs
+                    )
+                    coordinator_user_text = handoff_user_text
+                    print(f"  file-handoff: {len(handoff_ids)} input files mounted under /workspace/context/ (EXPERIMENTAL)")
+                except Exception as e:
+                    # Never block a review on handoff plumbing — fall back to
+                    # the legacy inline message shape (coordinator.md handles
+                    # both).
+                    print(
+                        f"  [warn] file-handoff upload failed "
+                        f"({type(e).__name__}: {e}) — falling back to inline context",
+                        file=sys.stderr,
+                    )
+            if not coordinator_user_text:
                 coordinator_user_text = (
                     f"{pr_context}\n\n"
                     f"<diff>\n{diff}\n</diff>\n\n"

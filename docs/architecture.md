@@ -142,10 +142,12 @@ PR opened (or air-machine requested as reviewer) → GitHub Action → managed/r
   │       output html-escaped + length-capped (prompt-injection blast radius), bundled into
   │       verifier-task.md (file-handoff) or the coordinator user message (inline fallback)
   │
-  ├── [4.5] File-handoff upload (v1.18.0): PR context, diff, and verifier task + codex findings
-  │       upload via the Files API and mount read-only at /workspace/context/{pr-context.md,
-  │       pr.diff, verifier-task.md}; the coordinator user message shrinks to a pointer note.
-  │       Upload failure falls back to the legacy inline message shape.
+  ├── [4.5] File-handoff upload (v1.18.0, EXPERIMENTAL — AIR_FILE_HANDOFF=1, off by default):
+  │       PR context, diff, and verifier task + codex findings upload via the Files API and
+  │       mount at /workspace/context/; coordinator user message shrinks to a pointer note.
+  │       BLOCKED on runtime: callable-agent threads run in isolated containers — file
+  │       resources + cross-thread writes don't propagate (verified 2026-06-03). Inline is
+  │       the production shape; upload failure also falls back to inline.
   │
   ├── [5] One air-coordinator session (callable_agents multi-agent runtime, beta header
   │       `managed-agents-2026-04-01-research-preview`):
