@@ -228,10 +228,10 @@ PRs analyzed: <count>
 
 "Clean PRs" = consecutive merged PRs by this author where no findings matched their REVIEW.md author patterns. "PRs reviewed" = total merged PRs by this author in the analyzed set.
 
-**Reconciliation:** After generating REVIEW-HISTORY.md, cross-check its Author Trends against REVIEW.md author pattern counters. For each author with patterns in REVIEW.md:
-1. Compare the `Clean PRs (consecutive)` value from REVIEW-HISTORY.md against `last <N> PRs: <M> clean` in REVIEW.md.
-2. If REVIEW-HISTORY.md shows MORE clean PRs than REVIEW.md records (counters were missed during incremental learns), update REVIEW.md's counters to match REVIEW-HISTORY.md. Apply lifecycle transitions if thresholds are now met (5 → declining, 10 → archive).
-3. If REVIEW-HISTORY.md shows FEWER clean PRs, only reset DOWN when the gap is explained by a triggered pattern inside the window — NEVER lower a counter merely because older clean PRs fell outside the 30-PR window (the history is windowed; REVIEW.md counters are cumulative). When in doubt, keep the higher REVIEW.md value.
+**Reconciliation (windowed-safe — keep identical to managed `learn-orchestrator.md` Step 4):** REVIEW.md author-pattern counters are authoritative and CUMULATIVE; the windowed Author Trends clean-PR count is corroboration only, never the source of truth. For each author with patterns in REVIEW.md, compare `Clean PRs (consecutive)` from REVIEW-HISTORY.md against `last <N> PRs: <M> clean` in REVIEW.md, then:
+1. If the window shows MORE clean PRs than REVIEW.md records (counters missed during incremental learns), bump REVIEW.md up to the window value and apply lifecycle transitions if thresholds are now met (5 → declining, 10 → archive).
+2. If the window shows FEWER clean PRs, reset DOWN only when a triggered pattern inside the window explains the gap; NEVER lower a counter merely because older clean PRs fell outside the fetched window.
+3. When in doubt, keep the higher REVIEW.md value.
 4. Print any reconciliation adjustments in the Step 5 report.
 
 ## Timeline

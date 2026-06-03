@@ -276,7 +276,7 @@ Deep-scan this repository and generate three outputs. Go beyond listing files �
    - Extract domain terms from CLAUDE.md, README.md, and actual source code
    - Read the top 5 most-changed source files (use `git log --oneline --all -- <file> | wc -l` to rank)
    - Extract proper nouns (service names, tool names), abbreviated terms, and business domain terms from those files
-   - Format as a table: Term | Definition | Context
+   - Format as a table: Term | Definition | Context. Keep each row TERSE: the definition is a one-liner (≤200 chars) describing what the term IS — no PR-by-PR history, no finding annotations, no cross-references (those live in REVIEW-HISTORY.md / REVIEW.md). The glossary is loaded into 3-5 agent contexts every review, so size is direct cost; this is the same terse contract the learn flow's GLOSSARY.md maintenance enforces (`/air:learn` Step 4.7 / `learn-orchestrator.md` Step 4.7). Header is a single `Last updated: <date>` line — no per-pass narrative.
 
 3. .air-checks.sh — Pre-commit drift checks tailored to this project:
    - Starts with `#!/bin/bash`, `set -u`, `status=0`, and a `fail()` helper that writes `  [FAIL] <msg>` to stderr and sets `status=1`

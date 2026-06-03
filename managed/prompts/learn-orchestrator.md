@@ -83,7 +83,7 @@ Read `$AIR_TMP/REVIEW.md` and analyze every pattern entry for:
 - Cap each pattern entry's inline narrative at the 3 most recent PR examples (~1,500 chars of prose); move older example narratives verbatim to `REVIEW-ARCHIVE.md` (create if missing) and leave a `(older examples: see REVIEW-ARCHIVE.md)` marker. Counts and PR-ref lists are never dropped — only prose. (Single entries have grown >15K chars, overflowing agent tool-output limits and dominating session token cost.)
 - Keep compliance reference sections unchanged
 
-**GLOBAL anti-bloat rule (applies to EVERY generated file — REVIEW.md, GLOSSARY.md, PROJECT-PROFILE.md, REVIEW-HISTORY.md):** NO accumulating per-pass changelog narrative. Never write "Nth cleanup pass", "since the previous pass", "new terms this pass", or a growing "Last updated:" essay. Each file reflects the CURRENT state; the pass-by-pass story lives in git history. A header is at most a single line: `Last updated: <date>, HEAD <sha>` — REPLACED each pass, never appended to. Unbounded header/entry narrative is the #1 bloat source (qai-be's glossary reached 261KB and project-profile 173KB this way; every review session loads these into 3-5 agent contexts, so size is direct cost). When you open a file that already carries accumulated narrative or oversized entries, REMEDIATE it (rewrite to the bounded form below) — don't preserve the bloat.
+**GLOBAL anti-bloat rule (applies to EVERY generated file — REVIEW.md, GLOSSARY.md, PROJECT-PROFILE.md, REVIEW-HISTORY.md):** NO accumulating per-pass changelog narrative. Never write "Nth cleanup pass", "since the previous pass", "new terms this pass", or a growing "Last updated:" essay. Each file reflects the CURRENT state; the pass-by-pass story lives in git history. Use a single-line header (a date, optionally `HEAD <sha>`; exact label varies per file) — REPLACED each pass, never appended to. Unbounded header/entry narrative is the #1 bloat source (qai-be's glossary reached 261KB and project-profile 173KB this way; every review session loads these into 3-5 agent contexts, so size is direct cost). When you open a file that already carries accumulated narrative or oversized entries, REMEDIATE it (rewrite to the bounded form below) — don't preserve the bloat. (`REVIEW-ARCHIVE.md` is the one intentional spillover target — Step 3 moves older example prose there verbatim — so it is exempt from the no-narrative rule, but still drop archived prose for patterns that have since aged out so it doesn't grow without bound.)
 
 ## Step 3.5: Refresh PROJECT-PROFILE.md
 
@@ -112,7 +112,11 @@ For each PR with review comments (`## Code Review`), extract findings. Generate 
 - Author Trends table (with Clean PRs columns)
 - Timeline table (windowed to the fetched PRs only — NOT an ever-growing all-PR log)
 
-**Reconciliation:** Compare Author Trends clean-PR counts against REVIEW.md author pattern counters. Adjust on drift. (Because the history is windowed, the Author Trends clean-PR counts reflect only the window — when REVIEW.md's counter is higher, keep the higher REVIEW.md value; never lower a counter just because it fell outside the window.)
+**Reconciliation (windowed-safe — keep identical to CLI `learn.md` Step 4):** REVIEW.md author-pattern counters are authoritative and CUMULATIVE; the windowed Author Trends clean-PR count is corroboration only, never the source of truth.
+- If the window shows MORE clean PRs than REVIEW.md records for an author, the counter missed increments — bump REVIEW.md up to the window value and apply lifecycle transitions if thresholds are now met (5 → declining, 10 → archive).
+- If the window shows FEWER clean PRs, reset DOWN only when a triggered pattern inside the window explains the gap; NEVER lower a counter merely because older clean PRs fell outside the fetched window.
+- When in doubt, keep the higher REVIEW.md value.
+Print any adjustments in the Step 5 report.
 
 ## Step 4.5: Recalculate SEVERITY-CALIBRATION.md
 
