@@ -2,8 +2,10 @@
 """
 Bootstrap and sync: creates/updates air review agents + environment.
 
-Fetches the agent list once, then creates or updates each agent.
-Called by review.py on every run to keep prompts in sync.
+Fetches the agent list once, then creates or updates each agent — except
+agents pinned via AIR_AGENT_VERSIONS, which skip prompt sync entirely and
+resolve to their pinned {id, version} (see parse_agent_pins).
+Called by review.py on every run.
 
 Usage:
     export ANTHROPIC_API_KEY=sk-ant-...
@@ -11,6 +13,7 @@ Usage:
 """
 
 import functools
+import json
 import os
 import sys
 from pathlib import Path
@@ -23,6 +26,69 @@ AGENTS_DIR = Path(__file__).parent.parent / "plugins" / "air" / "agents"
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 SUB_AGENTS = ["code-reviewer", "simplify", "security-auditor", "git-history-reviewer", "review-verifier"]
+
+# Agent names accepted in AIR_AGENT_VERSIONS pins (the review roster).
+# air-learner is deliberately NOT pinnable — learn is wiki maintenance,
+# low regression risk, and always tracks the latest prompt.
+PINNABLE_AGENTS = [f"air-{n}" for n in SUB_AGENTS] + ["air-coordinator"]
+
+
+def parse_agent_pins() -> dict[str, int]:
+    """Parse the AIR_AGENT_VERSIONS env var (JSON map agent-name → version).
+
+    Empty/unset → {} (everything floats — the air repo's own posture).
+    Work repos pass a blessed set, e.g.
+    `{"air-code-reviewer": 12, ..., "air-coordinator": 9}`, published in
+    the release notes; they bump deliberately instead of riding main.
+
+    Malformed input fails LOUDLY (exit 1): a typo'd pin silently floating
+    would defeat the entire point of pinning, so unparseable JSON, unknown
+    agent names, and non-integer versions all abort the run before any
+    sync or session spend happens.
+    """
+    raw = os.environ.get("AIR_AGENT_VERSIONS", "").strip()
+    if not raw:
+        return {}
+    try:
+        pins = json.loads(raw)
+    except ValueError as e:
+        print(f"Error: AIR_AGENT_VERSIONS is not valid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not isinstance(pins, dict):
+        print("Error: AIR_AGENT_VERSIONS must be a JSON object (agent name → version).", file=sys.stderr)
+        sys.exit(1)
+    bad_keys = [k for k in pins if k not in PINNABLE_AGENTS]
+    if bad_keys:
+        print(
+            f"Error: AIR_AGENT_VERSIONS has unknown agent name(s): {bad_keys}. "
+            f"Pinnable: {PINNABLE_AGENTS}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    bad_vals = {k: v for k, v in pins.items() if not isinstance(v, int) or isinstance(v, bool) or v < 1}
+    if bad_vals:
+        print(
+            f"Error: AIR_AGENT_VERSIONS versions must be positive integers, got: {bad_vals}.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # A pinned coordinator dispatches whatever sub-agent versions its pinned
+    # revision recorded — pinning it without pinning every specialist gives a
+    # roster the caller can't see or control. Specialists-without-coordinator
+    # is fine (the floating coordinator's roster is rebuilt from the pinned
+    # specialist versions each sync).
+    if "air-coordinator" in pins:
+        unpinned = [f"air-{n}" for n in SUB_AGENTS if f"air-{n}" not in pins]
+        if unpinned:
+            print(
+                f"Error: air-coordinator is pinned but {unpinned} are not — "
+                f"pin the whole blessed set from one release (a pinned "
+                f"coordinator's sub-agent roster is fixed at its pinned "
+                f"version; partial pins skew it silently).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    return pins
 
 
 MODEL_ALIASES = {
@@ -219,8 +285,32 @@ def find_or_create_environment() -> str:
     return data["id"]
 
 
+def _pinned_entry(full_name: str, pin: int, agents_by_name: dict) -> dict:
+    """Resolve a pinned agent to a slim {id, version} roster entry.
+
+    Pinning skips prompt sync entirely — the existing agent's current
+    config stays untouched and sessions/rosters reference the pinned
+    version. A pin on an agent that doesn't exist yet is an error (there
+    is nothing to pin; float once to create it, then pin).
+    """
+    existing = agents_by_name.get(full_name)
+    if not existing:
+        print(
+            f"Error: {full_name} is pinned to v{pin} but no such agent exists "
+            f"in this workspace — remove the pin (float once to create), then re-pin.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    print(f"  {full_name}: pinned → v{pin} (prompt sync skipped)")
+    return {"id": existing["id"], "version": pin}
+
+
 def main():
     print("Syncing air agents...\n")
+
+    pins = parse_agent_pins()
+    if pins:
+        print(f"Version pins active for {len(pins)} agent(s): {sorted(pins)}\n")
 
     # 1. Environment
     print("[1] Environment")
@@ -237,6 +327,11 @@ def main():
     print("[3] Specialist agents")
     synced: dict[str, dict] = {}
     for name in SUB_AGENTS:
+        full_name = f"air-{name}"
+        if full_name in pins:
+            synced[name] = _pinned_entry(full_name, pins[full_name], agents_by_name)
+            continue
+
         prompt_file = AGENTS_DIR / f"{name}.md"
         if not prompt_file.exists():
             print(f"  air-{name}: SKIPPED — {prompt_file} not found")
@@ -268,7 +363,14 @@ def main():
     # without erroring).
     coordinator_file = AGENTS_DIR / "coordinator.md"
     coordinator: dict | None = None
-    if coordinator_file.exists():
+    if "air-coordinator" in pins:
+        # Pinned coordinator: its callable_agents roster is whatever that
+        # version recorded at sync time — pin a coordinator version whose
+        # roster matches the pinned specialists (i.e. pin the whole blessed
+        # set from one release, not a mix).
+        print("[4] Coordinator agent (multi-agent dispatcher)")
+        coordinator = _pinned_entry("air-coordinator", pins["air-coordinator"], agents_by_name)
+    elif coordinator_file.exists():
         print("[4] Coordinator agent (multi-agent dispatcher)")
         if len(synced) < len(SUB_AGENTS):
             print(

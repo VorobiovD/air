@@ -47,7 +47,7 @@ from anthropic import (
 )
 
 from api import list_agents, find_environment
-from setup import MODEL_ALIASES
+from setup import MODEL_ALIASES, parse_agent_pins
 import memory_store
 import pattern_writer
 
@@ -292,13 +292,17 @@ async def run_codex_session(target_repo: str, base_sha: str) -> str:
 
 
 def sync_agents():
-    """Run setup.py to create/update agents with latest prompts."""
+    """Run setup.py to create/update agents (pinned agents skip sync)."""
     print("[1] Syncing agents with latest prompts...")
     # Narrow env to only what setup.py needs, avoiding accidental exposure of
     # unrelated secrets if the parent process has a richer environment.
     narrow_env = {
         "ANTHROPIC_API_KEY": os.environ["ANTHROPIC_API_KEY"],
         "PATH": os.environ.get("PATH", ""),
+        # Version pins (JSON map agent-name → version) — setup.py skips
+        # prompt sync for pinned agents; run_review applies the same pins
+        # to the session roster.
+        "AIR_AGENT_VERSIONS": os.environ.get("AIR_AGENT_VERSIONS", ""),
     }
     result = subprocess.run(
         [sys.executable, str(Path(__file__).parent / "setup.py")],
@@ -1775,6 +1779,29 @@ async def run_review(args):
     if missing or not env_id:
         print(f"Missing agents: {missing}, env={env_id}. Run setup.py first.", file=sys.stderr)
         sys.exit(1)
+
+    # Apply version pins to the session roster. list_agents() returns the
+    # LATEST version of each agent; pinned callers (work repos passing
+    # agent_versions through managed-review.yml) want sessions created
+    # against the blessed version instead. The re-parse here is for the
+    # VALUE only — setup.py (run as a subprocess above) already validated
+    # the same env var and exited non-zero on malformed input. NOTE:
+    # specialist pins are enforced solely by setup.py baking them into the
+    # coordinator's callable_agents roster at sync time; only the
+    # coordinator entry below is consumed at session-create time
+    # (run_session). The loop still pins every named agent so a future
+    # direct-session consumer can't silently float.
+    for pin_name, pin_ver in parse_agent_pins().items():
+        if pin_name not in agents:
+            # The `missing` gate above guarantees the required roster, and
+            # PINNABLE_AGENTS ⊆ required — reaching this means an archived
+            # agent or truncated listing. Floating silently here would be
+            # exactly what pinning exists to prevent.
+            print(f"Error: pinned agent {pin_name} not in workspace roster.", file=sys.stderr)
+            sys.exit(1)
+        if agents[pin_name].get("version") != pin_ver:
+            print(f"  [pin] {pin_name}: v{agents[pin_name].get('version')} → v{pin_ver}")
+            agents[pin_name] = {**agents[pin_name], "version": pin_ver}
 
     print(f"[2] Fetching PR #{args.pr_number} on {args.repo}...")
     meta = fetch_pr_metadata(args.repo, args.pr_number, bot_token)
