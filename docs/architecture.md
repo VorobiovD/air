@@ -87,7 +87,7 @@ VorobiovD/air/
 | Modes | --self, --respond (+ --dry-run), --full, --re-review, --fresh, --rewrite, --closed, --dry-run | auto, fresh, re-review, closed | CLI has more |
 | Respond self-check | Scales by diff size: < 50 lines = code-reviewer + verifier only | Same (in orchestrator) | YES — same logic |
 | Cross-repo wiki | Reads TARGET repo's wiki (skip write only) | N/A | Changed in v1.4.0 |
-| Codex (GPT-5.4) | Optional 5th reviewer (CLI subprocess) | Optional 5th source — GHA subprocess, output threaded into coordinator user message | YES — both gated on OPENAI_API_KEY |
+| Codex (GPT-5.4) | Optional 5th reviewer (CLI subprocess) | Optional 5th source — GHA subprocess, output bundled into the mounted verifier-task.md (inline fallback: coordinator user message) | YES — both gated on OPENAI_API_KEY |
 | GitLab | Supported via platform-gitlab.md | Not yet | CLI only |
 
 ---
@@ -139,15 +139,24 @@ PR opened (or air-machine requested as reviewer) → GitHub Action → managed/r
   ├── [2] Fetch PR metadata + diff from GitHub API (via AIR_BOT_TOKEN on the runner)
   ├── [3] Build PR Context block (Python)
   ├── [4] Optional codex pass (Pattern B, GHA-side sequential): `codex review --base <sha>`
-  │       output threaded into the coordinator user message as <codex-findings>...</codex-findings>
-  │       (html-escaped + length-capped to bound prompt-injection blast radius)
+  │       output html-escaped + length-capped (prompt-injection blast radius), bundled into
+  │       verifier-task.md (file-handoff) or the coordinator user message (inline fallback)
+  │
+  ├── [4.5] File-handoff upload (v1.18.0): PR context, diff, and verifier task + codex findings
+  │       upload via the Files API and mount read-only at /workspace/context/{pr-context.md,
+  │       pr.diff, verifier-task.md}; the coordinator user message shrinks to a pointer note.
+  │       Upload failure falls back to the legacy inline message shape.
   │
   ├── [5] One air-coordinator session (callable_agents multi-agent runtime, beta header
   │       `managed-agents-2026-04-01-research-preview`):
   │     ├── TURN 1: dispatches the 4 Claude specialists in parallel as sub-agents
   │     │     (air-code-reviewer, air-simplify, air-security-auditor, air-git-history-reviewer)
-  │     ├── TURN 2: dispatches air-review-verifier with all specialist findings + codex findings
-  │     │     + the verifier_task template
+  │     │     — file-handoff: each delegation is a short pointer; specialists read the mounted
+  │     │     context/diff and write findings to /workspace/findings/<name>.md (1-line ack back;
+  │     │     simplify replies inline — no write tool)
+  │     ├── TURN 2: dispatches air-review-verifier — file-handoff: pointer at the context/diff/
+  │     │     task mounts + the findings directory; inline fallback: embeds all findings
+  │     │     + codex findings + the verifier_task template
   │     └── TURN 3: outputs verifier verdict verbatim + bash to update wiki REVIEW.md
   │
   └── [6] Python posts the review comment via GitHub API + runs the /air:learn epilogue when
@@ -362,7 +371,7 @@ Cost ranges span Sonnet-rate (floor) to Opus-rate (ceiling) bounds — sub-agent
 - Parallel execution via server-side `callable_agents` (v1.9.0+, multi-agent coordinator). Specialists fan out concurrently as sub-agents within one Anthropic session; wall-clock ≈ slowest specialist + verifier (~10-25 min depending on PR size). Beta header `managed-agents-2026-04-01-research-preview`.
 - GH_TOKEN visible in Anthropic session logs (mitigated by bot account minimal permissions, rotatable).
 - Wiki push can timeout in sandbox (5-min command limit). The coordinator's TURN 3 bash has a one-shot rebase-retry to recover from concurrent reviewer pushes; failures are logged, not fatal (the review comment is already posted).
-- Codex (GPT-5.4) runs as a GHA-side subprocess sequentially before the coordinator (Pattern B); output is html-escaped and length-capped before being threaded into the coordinator's user message. Gated on `OPENAI_API_KEY` GHA secret.
+- Codex (GPT-5.4) runs as a GHA-side subprocess sequentially before the coordinator (Pattern B); output is html-escaped and length-capped before being bundled into the mounted verifier-task.md (or the coordinator's user message on inline fallback). Gated on `OPENAI_API_KEY` GHA secret.
 - GitHub-only — no GitLab support yet.
 - `github_repository` resource only clones the PR branch — base branch must be fetched separately (`git fetch origin main`).
 

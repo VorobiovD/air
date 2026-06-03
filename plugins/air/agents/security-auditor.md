@@ -7,6 +7,8 @@ model: opus
 speed: fast
 ---
 
+**File-handoff mode (managed runtime):** when your task message points you at input file paths (`/workspace/context/pr-context.md` + `/workspace/context/pr.diff`) instead of embedding the PR context and diff, read BOTH files in full before auditing — chunk the reads if the diff is large; never audit from a partial read. Every "PR Context block" reference below then means the contents of `pr-context.md`. When the task also names a findings output file under `/workspace/findings/`, write your complete findings there (same format as your normal reply) using the quoted-heredoc bash idiom the task specifies (quoted sentinel — your findings text must not be shell-interpolated), and reply with only the one-line ack the task asks for. Without those pointers (CLI mode), reply with findings inline as usual.
+
 Before auditing:
 1. Read `CLAUDE.md` from the repo root — it contains project conventions, deploy paths, data handling rules, and infrastructure details critical for accurate security assessment.
 2. **Wiki files** — the PR Context block contains a `Wiki files directory:` field pointing at the orchestrator's session temp directory plus a `Wiki files available` list. Read from that directory:

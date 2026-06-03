@@ -92,6 +92,7 @@ managed/                          # Managed Agent (CI automation)
 - **Re-review mode** generates inter-diff from `REVIEWED_AT_SHA`, tracks FIXED/NOT FIXED per finding
 - **Respond mode** (`--respond`) automates the developer side — classifies findings, verifies fixes match suggestions, self-checks for regressions, posts parseable response
 - **Pre-commit drift check** (v1.6.0) — plugin-wide `PreToolUse` hook blocks Claude-driven commits on detectable doc/version drift. Zero-config built-ins cover version mirror; opt-in `.air-checks.sh` adds repo-specific greps. Supply-chain note: the custom script executes with user privileges, so treat `.air-checks.sh` edits in incoming PRs as security-sensitive.
+- **File-handoff in the managed coordinator** (v1.18.0) — PR context, diff, and verifier task + codex findings upload via the Files API and mount read-only at `/workspace/context/`; coordinator delegations become short pointers and specialists write findings to `/workspace/findings/<name>.md` (1-line ack back; simplify replies inline — it has no write tool). Cuts the ~16K-output-token / ~4-min TURN-1 re-emission measured pre-change. The legacy inline message shape remains as the upload-failure fallback — `coordinator.md` + agent prompts handle both shapes (CLI delegations stay inline).
 
 ## Conventions
 

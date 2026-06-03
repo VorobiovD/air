@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import atexit
 import html
+import io
 import os
 import re
 import shutil
@@ -1238,6 +1239,46 @@ classification (mark DISPUTED with their rationale)."""
     return header + rereview
 
 
+async def _upload_handoff_files(client, docs: dict[str, str]) -> tuple[list[dict], list[str]]:
+    """Upload review-input docs via the Files API for file-handoff mode.
+
+    `docs` maps filename → content; each becomes a read-only `file`
+    resource mounted at /workspace/context/<filename>. Returns
+    (resources, file_ids) — the caller appends the resources to the
+    session create call and deletes the file_ids after the session ends
+    (Files API storage is org-shared; these are per-run scratch).
+
+    On partial failure, already-uploaded files are deleted best-effort
+    before re-raising so the caller's inline fallback doesn't leak
+    orphans.
+    """
+    resources: list[dict] = []
+    file_ids: list[str] = []
+    try:
+        for name, content in docs.items():
+            f = await client.beta.files.upload(
+                file=(name, io.BytesIO(content.encode("utf-8")), "text/plain"),
+            )
+            file_ids.append(f.id)
+            resources.append({
+                "type": "file",
+                "file_id": f.id,
+                "mount_path": f"/workspace/context/{name}",
+            })
+    except Exception:
+        for fid in file_ids:
+            try:
+                await client.beta.files.delete(fid)
+            except Exception as cleanup_err:
+                print(
+                    f"  [warn] file-handoff cleanup failed for {fid}: "
+                    f"{type(cleanup_err).__name__}",
+                    file=sys.stderr,
+                )
+        raise
+    return resources, file_ids
+
+
 async def run_session(
     client,
     agent_id: str,
@@ -1249,6 +1290,7 @@ async def run_session(
     user_text: str,
     label: str,
     store_id: str | None = None,
+    file_resources: list[dict] | None = None,
 ) -> str:
     """Create a session, send the user prompt, stream events, return collected agent text.
 
@@ -1256,10 +1298,12 @@ async def run_session(
     dict — branch name for open PRs, commit SHA for closed/merged PRs) plus
     the pattern source: the repo's memory store (read-only, /mnt/memory/)
     when `store_id` is set, otherwise the legacy wiki git mount at
-    /workspace/wiki. Auth tokens go in the resource config (API request
-    body), never in the session transcript or agent message text. The wiki
-    resource mounts empty if the repo has no wiki (Managed Agents treats a
-    404 on push-only wikis as an empty mount).
+    /workspace/wiki. `file_resources` carries the file-handoff mounts
+    (PR context / diff / verifier task under /workspace/context/) built
+    by _upload_handoff_files. Auth tokens go in the resource config (API
+    request body), never in the session transcript or agent message text.
+    The wiki resource mounts empty if the repo has no wiki (Managed Agents
+    treats a 404 on push-only wikis as an empty mount).
     """
     # try/finally narrows the race window between sessions.create() returning
     # and LIVE_SESSIONS.add() running: if SystemExit (from SIGTERM) fires
@@ -1303,6 +1347,8 @@ async def run_session(
             "authorization_token": bot_token,
             "mount_path": "/workspace/wiki",
         })
+    if file_resources:
+        resources.extend(file_resources)
 
     session = None
     try:
@@ -2074,7 +2120,9 @@ async def run_review(args):
             "use this status for findings originally classified as `blocker`."
         )
 
-        verifier_task = f"""You have raw findings from the specialist reviewers.
+        verifier_task = f"""You have raw findings from the specialist reviewers
+(embedded in your task message, or read from /workspace/findings/ plus the labeled
+inline blocks in file-handoff mode).
 They were run in RE-REVIEW MODE — each result contains both (a) a classification of
 each prior finding and (b) any NEW findings in the inter-diff.
 
@@ -2138,7 +2186,9 @@ new-findings block (prior findings keep their #N from the last review).
 Reviewed at: {head_sha}
 """
     else:
-        verifier_task = f"""You have raw findings from the specialist reviewers.
+        verifier_task = f"""You have raw findings from the specialist reviewers
+(embedded in your task message, or read from /workspace/findings/ plus the labeled
+inline blocks in file-handoff mode).
 Verify each one per your system prompt (CONFIRMED / DOWNGRADED / IMPROVEMENT /
 PRE-EXISTING / ACCEPTED PATTERN / FALSE POSITIVE with a confidence score). Drop
 FALSE POSITIVE / below-threshold findings.
@@ -2192,10 +2242,10 @@ Rules: sequential numbering across all sections, empty sections omitted,
 Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
 """
 
-    # Coordinator user message: PR Context + diff + codex findings + verifier task.
+    # Coordinator inputs: PR Context + diff + codex findings + verifier task.
     # The coordinator dispatches the specialists in parallel via callable_agents
-    # in TURN 1, forwards their findings + codex findings + this verifier_task
-    # to the verifier sub-agent in TURN 2, then outputs the verifier's response
+    # in TURN 1, points the verifier at the specialist findings + codex findings
+    # + this verifier_task in TURN 2, then outputs the verifier's response
     # verbatim in TURN 3 (see plugins/air/agents/coordinator.md).
     #
     # Codex output is UNTRUSTED — codex's review prompt processes the raw
@@ -2211,12 +2261,42 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         codex_block = f"<codex-findings>\n{safe_codex}\n</codex-findings>"
     else:
         codex_block = "<codex-findings>(codex unavailable or disabled)</codex-findings>"
-    coordinator_user_text = (
-        f"{pr_context}\n\n"
-        f"<diff>\n{diff}\n</diff>\n\n"
-        f"{codex_block}\n\n"
-        f"<verifier-task>\n{verifier_task}\n</verifier-task>"
+
+    # File-handoff (primary): the three input docs ride into the session as
+    # mounted Files-API resources, and the coordinator user message shrinks
+    # to a pointer note. Without this, the coordinator re-emits the full
+    # context+diff in each of its 4 TURN-1 delegations and again in TURN 2 —
+    # ~16K output tokens / ~240s measured on the ai-relay #216 session audit
+    # (output is the expensive token class, and Sonnet generating 16K tokens
+    # is also the single largest wall-clock block of the coordinator turn).
+    # The inline shape below is kept verbatim as the fallback when the
+    # Files API upload fails — coordinator.md handles both shapes.
+    handoff_docs = {
+        "pr-context.md": pr_context,
+        "pr.diff": diff,
+        "verifier-task.md": (
+            f"{codex_block}\n\n<verifier-task>\n{verifier_task}\n</verifier-task>"
+        ),
+    }
+    # Dispatch note for file-handoff mode. Scalars only — PR title/body and
+    # everything else attacker-influenced stays inside pr-context.md where
+    # build_pr_context already escaped and wrapped it. The author login is
+    # GitHub-validated ([A-Za-z0-9-]) and safe to interpolate.
+    pattern_note = (
+        "memory store (read-only at /mnt/memory/ — TURN 3 Part B is SKIPPED)"
+        if store_id
+        else "legacy wiki at /workspace/wiki"
     )
+    handoff_user_text = f"""File-handoff mode — review inputs are mounted as files, not embedded here.
+
+- PR: #{meta['number']} by {meta['user']['login']} | repo: {args.repo} | review mode: {mode} | HEAD: {head_sha}
+- PR context: /workspace/context/pr-context.md
+- Diff under review: /workspace/context/pr.diff
+- Verifier task + codex findings: /workspace/context/verifier-task.md
+- Specialist findings directory: /workspace/findings/
+- Pattern source: {pattern_note}
+
+Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do not paste file contents into delegations — pass the paths."""
 
     # Single coordinator session replaces v1.7's 4-specialist asyncio.gather +
     # sequential verifier session (5 sessions → 1). Empirical -49% cost vs the
@@ -2229,16 +2309,58 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     coordinator_failure_reason: str = ""
     try:
         async with AsyncAnthropic() as client:
-            coordinator_out = await asyncio.wait_for(
-                run_session(
-                    client,
-                    agents[COORDINATOR_AGENT]["id"], agents[COORDINATOR_AGENT]["version"],
-                    env_id, args.repo, checkout, bot_token,
-                    coordinator_user_text, COORDINATOR_AGENT,
-                    store_id=store_id,
-                ),
-                timeout=COORDINATOR_TIMEOUT_SECS,
-            )
+            file_resources: list[dict] = []
+            handoff_ids: list[str] = []
+            try:
+                file_resources, handoff_ids = await _upload_handoff_files(
+                    client, handoff_docs
+                )
+                coordinator_user_text = handoff_user_text
+                print(f"  file-handoff: {len(handoff_ids)} input files mounted under /workspace/context/")
+            except Exception as e:
+                # Never block a review on handoff plumbing — fall back to
+                # the legacy inline message shape (coordinator.md handles
+                # both). Built here, not upfront: the happy path never
+                # needs this concatenation.
+                print(
+                    f"  [warn] file-handoff upload failed "
+                    f"({type(e).__name__}: {e}) — falling back to inline context",
+                    file=sys.stderr,
+                )
+                coordinator_user_text = (
+                    f"{pr_context}\n\n"
+                    f"<diff>\n{diff}\n</diff>\n\n"
+                    f"{codex_block}\n\n"
+                    f"<verifier-task>\n{verifier_task}\n</verifier-task>"
+                )
+            try:
+                coordinator_out = await asyncio.wait_for(
+                    run_session(
+                        client,
+                        agents[COORDINATOR_AGENT]["id"], agents[COORDINATOR_AGENT]["version"],
+                        env_id, args.repo, checkout, bot_token,
+                        coordinator_user_text, COORDINATOR_AGENT,
+                        store_id=store_id,
+                        file_resources=file_resources,
+                    ),
+                    timeout=COORDINATOR_TIMEOUT_SECS,
+                )
+            finally:
+                # Per-run scratch — delete after the session ends (any exit
+                # path) to keep org Files storage clean. Never before: the
+                # mounts belong to the session for its whole lifetime.
+                for fid in handoff_ids:
+                    try:
+                        await client.beta.files.delete(fid)
+                    except Exception as cleanup_err:
+                        # Best-effort but never silent — a persistent delete
+                        # failure means scratch files accumulate in shared
+                        # org storage with no other signal.
+                        print(
+                            f"  [warn] file-handoff cleanup failed for {fid}: "
+                            f"{type(cleanup_err).__name__}",
+                            file=sys.stderr,
+                        )
     except SpecialistSessionError as e:
         # run_session raised because terminated_reason was set and no
         # parts were captured — common cause: `session.error` event
