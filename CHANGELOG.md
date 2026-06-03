@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.18.0](https://github.com/VorobiovD/air/compare/v1.17.0...v1.18.0) (2026-06-03)
+
+
+### Features
+
+* **ci:** fresh input on managed-review + dogfood caller ([#94](https://github.com/VorobiovD/air/issues/94)) ([fc21dcd](https://github.com/VorobiovD/air/commit/fc21dcd6c6b407d60cae5cb40b6ddbf6a16c9413))
+* **managed:** agent version pinning via agent_versions workflow input ([#95](https://github.com/VorobiovD/air/issues/95)) ([1e2c57c](https://github.com/VorobiovD/air/commit/1e2c57c8481aece7f075942dfc2241a9d26e13d4))
+* **managed:** file-handoff for coordinator inputs via Files-API mounts ([#92](https://github.com/VorobiovD/air/issues/92)) ([344eaaa](https://github.com/VorobiovD/air/commit/344eaaa7a55411b18888fed887c657b826ce05ca))
+
+
+### Bug Fixes
+
+* **managed:** gate file-handoff behind AIR_FILE_HANDOFF — threads are isolated containers ([#96](https://github.com/VorobiovD/air/issues/96)) ([43f5cdc](https://github.com/VorobiovD/air/commit/43f5cdc592cf0cd50b1ed8f771e32d48800b2d1e))
+
 ## [1.17.0](https://github.com/VorobiovD/air/compare/v1.16.0...v1.17.0) (2026-06-02)
 
 
