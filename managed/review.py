@@ -2372,7 +2372,7 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         if store_id
         else "legacy wiki at /workspace/wiki"
     )
-    handoff_user_text = f"""File-handoff mode — review inputs are mounted as files, not embedded here.
+    handoff_user_text = f"""MODE: FILE-HANDOFF — review inputs are mounted as files, not embedded here.
 
 - PR: #{meta['number']} by {meta['user']['login']} | repo: {args.repo} | review mode: {mode} | HEAD: {head_sha}
 - PR context: /workspace/context/pr-context.md
@@ -2414,7 +2414,21 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
                         file=sys.stderr,
                     )
             if not coordinator_user_text:
+                # The MODE header is load-bearing: without it the coordinator
+                # defaults to file-handoff delegation (coordinator.md's former
+                # "primary" framing) even on inline runs — instructing
+                # specialists to read /workspace/context/ + write
+                # /workspace/findings/, which aren't mounted / don't propagate
+                # across threads here. It then re-delegates inline to recover,
+                # burning the very output the dance was meant to save (10 of 12
+                # sessions on 2026-06-03 leaked this way).
                 coordinator_user_text = (
+                    "MODE: INLINE — the full PR context, diff, and verifier "
+                    "task are embedded below. Delegate to specialists with this "
+                    "inline content; they reply with findings INLINE. Do NOT "
+                    "tell any specialist to read /workspace/context/ or write "
+                    "/workspace/findings/ — those paths are not mounted on this "
+                    "run.\n\n"
                     f"{pr_context}\n\n"
                     f"<diff>\n{diff}\n</diff>\n\n"
                     f"{codex_block}\n\n"
