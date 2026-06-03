@@ -313,9 +313,31 @@ jobs:
           # Pin version — global install executes unknown code as the
           # runner user, which has all secrets (including the repo-scope
           # bot PAT) in env. Bump deliberately after reviewing releases.
-          npm install -g @openai/codex@0.124.0
+          npm install -g @openai/codex@0.135.0
           # Headless login — reads key from stdin, stores in ~/.codex/auth.json.
           printenv OPENAI_API_KEY | codex login --with-api-key
+          # Disable Codex's bubblewrap sandbox via CONFIG (read by every
+          # subcommand, incl. `review`). The CLI's
+          # `--dangerously-bypass-approvals-and-sandbox` is a GLOBAL flag that
+          # does NOT propagate to the `review` subcommand's command-execution
+          # sandbox, so `codex review` still tries bwrap — which fails on GHA
+          # runners (nested user/net namespaces blocked: bwrap can't bring up
+          # loopback, `RTM_NEWADDR: Operation not permitted`), making every
+          # git/shell command error and Codex emit a "could not inspect the
+          # diff" apology instead of findings. The config keys ARE honored by
+          # `review`. Equivalent to `-s danger-full-access` + `-a never`.
+          # Safe here: the runner is an ephemeral isolated VM and review.py
+          # already passes Codex a narrow env (no AIR_BOT_TOKEN / ANTHROPIC key).
+          mkdir -p ~/.codex
+          # Overwrite (not append) — this step owns the file; the keys are
+          # static. Appending could leave a duplicate `sandbox_mode` if a
+          # future codex/warm runner pre-creates config.toml, and TOML
+          # duplicate-key handling is parser-dependent (could silently
+          # re-enable bwrap). Overwrite is deterministic.
+          printf 'sandbox_mode = "danger-full-access"\napproval_policy = "never"\n' > ~/.codex/config.toml
+          # Non-fatal runtime/config/auth diagnostic — surfaces sandbox + auth
+          # health in the job log if Codex still misbehaves.
+          codex doctor || true
 
       - name: Run review
         env:

@@ -229,8 +229,16 @@ async def run_codex_session(target_repo: str, base_sha: str) -> str:
     # first run: 24.9s, output `I could not inspect the diff because every
     # shell command... failed in the provided sandbox`).
     #
-    # `--dangerously-bypass-approvals-and-sandbox` tells codex to skip its
-    # internal sandbox AND approval prompts. The runner IS sandboxed at
+    # `--dangerously-bypass-approvals-and-sandbox` asks codex to skip its
+    # internal bwrap sandbox AND approval prompts. NOTE: this GLOBAL flag does
+    # NOT propagate to the `review` subcommand's command-execution sandbox on
+    # the pinned codex — `codex review` still tries bwrap and fails on GHA
+    # runners (blocked user/net namespaces → loopback `RTM_NEWADDR` error →
+    # "could not inspect the diff" apology). The ACTUAL fix lives in
+    # managed-review.yml's Codex-setup step, which writes
+    # `~/.codex/config.toml` with `sandbox_mode = "danger-full-access"` +
+    # `approval_policy = "never"` (config IS honored by `review`). We keep the
+    # flag here as belt-and-suspenders. The runner IS sandboxed at
     # the OS level (ephemeral VM, destroyed after the job), but it does
     # carry secrets — AIR_BOT_TOKEN (repo write), ANTHROPIC_API_KEY (cost
     # exposure), OPENAI_API_KEY (cost exposure). Without sandbox/approval
