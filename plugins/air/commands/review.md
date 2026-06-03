@@ -680,7 +680,7 @@ Project context and session context are trusted (from the orchestrator's own mem
 
 If any field is unavailable (cross-repo, command failed, no memory), omit that line.
 
-**All agents:** every finding MUST include file:line. Severity: blocker/medium/low/nit. If the PR Context lists `GLOSSARY.md` under "Wiki files available", read `$AIR_TMP/GLOSSARY.md` before reviewing — domain terms defined there are intentional naming, not candidates for findings.
+**All agents:** every finding MUST include file:line. Severity: blocker/medium/low/nit. If the PR Context lists `GLOSSARY.md` under "Wiki files available", **grep** `$AIR_TMP/GLOSSARY.md` for the identifiers and domain terms appearing in this diff (per your agent prompt's "Targeted context retrieval" step — don't read the whole file) — terms defined there are intentional naming, not candidates for findings.
 
 **Wiki drift detection:** If during your review you notice something that contradicts the wiki profile or glossary (e.g., the PR introduces a new language/framework not in PROJECT-PROFILE.md, uses a domain term not in GLOSSARY.md, or the code structure doesn't match the profile's service layout), add a note at the END of your findings:
 ```
