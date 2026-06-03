@@ -88,6 +88,23 @@ on:
         required: false
         type: string
         default: 'false'
+      agent_versions:
+        description: |
+          Optional JSON map pinning agent versions, e.g.
+          '{"air-code-reviewer": 12, "air-simplify": 9, "air-security-auditor": 12,
+            "air-git-history-reviewer": 9, "air-review-verifier": 9, "air-coordinator": 7}'.
+          Pinned agents skip prompt sync entirely and sessions reference the
+          pinned version — work repos pin the blessed set published in each
+          air release's notes and bump deliberately; leave empty to float on
+          latest (the air repo's own posture). Pin the WHOLE set from one
+          release: a pinned coordinator's sub-agent roster is whatever its
+          pinned version recorded, so mixing pinned and floating agents
+          across releases skews the roster. Malformed JSON, unknown agent
+          names, or non-integer versions fail the run loudly before any
+          session spend.
+        required: false
+        type: string
+        default: ''
       air_ref:
         description: |
           air repo ref for the setup.py + agent prompts checkout. Defaults
@@ -308,6 +325,7 @@ jobs:
           CLOSED: ${{ inputs.closed }}
           NO_CODEX: ${{ inputs.no_codex }}
           FRESH: ${{ inputs.fresh }}
+          AIR_AGENT_VERSIONS: ${{ inputs.agent_versions }}
           # Absolute path to the local checkout. review.py uses it for
           # both `codex review` (when enabled) and client-side
           # pre-computation (blame/churn/file-status/diff-check

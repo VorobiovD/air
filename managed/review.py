@@ -47,7 +47,7 @@ from anthropic import (
 )
 
 from api import list_agents, find_environment
-from setup import MODEL_ALIASES
+from setup import MODEL_ALIASES, parse_agent_pins
 import memory_store
 import pattern_writer
 
@@ -299,6 +299,10 @@ def sync_agents():
     narrow_env = {
         "ANTHROPIC_API_KEY": os.environ["ANTHROPIC_API_KEY"],
         "PATH": os.environ.get("PATH", ""),
+        # Version pins (JSON map agent-name → version) — setup.py skips
+        # prompt sync for pinned agents; run_review applies the same pins
+        # to the session roster.
+        "AIR_AGENT_VERSIONS": os.environ.get("AIR_AGENT_VERSIONS", ""),
     }
     result = subprocess.run(
         [sys.executable, str(Path(__file__).parent / "setup.py")],
@@ -1775,6 +1779,20 @@ async def run_review(args):
     if missing or not env_id:
         print(f"Missing agents: {missing}, env={env_id}. Run setup.py first.", file=sys.stderr)
         sys.exit(1)
+
+    # Apply version pins to the session roster. list_agents() returns the
+    # LATEST version of each agent; pinned callers (work repos passing
+    # agent_versions through managed-review.yml) want sessions created
+    # against the blessed version instead. setup.py already validated the
+    # pin map (parse_agent_pins exits loudly on malformed input) and
+    # skipped prompt sync for these agents; only the coordinator version is
+    # consumed here today (specialists run as the coordinator's
+    # callable_agents, whose versions live in the coordinator's roster),
+    # but pin every named agent for forward-compat.
+    for pin_name, pin_ver in parse_agent_pins().items():
+        if pin_name in agents and agents[pin_name].get("version") != pin_ver:
+            print(f"  [pin] {pin_name}: v{agents[pin_name].get('version')} → v{pin_ver}")
+            agents[pin_name] = {**agents[pin_name], "version": pin_ver}
 
     print(f"[2] Fetching PR #{args.pr_number} on {args.repo}...")
     meta = fetch_pr_metadata(args.repo, args.pr_number, bot_token)

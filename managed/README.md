@@ -47,6 +47,10 @@ jobs:
     with:
       pr_number: ${{ inputs.pr_number }}
       closed: ${{ inputs.closed }}
+      # Pin the blessed agent set from an air release's notes (recommended
+      # for work repos — bump deliberately instead of riding main; omit to
+      # float on latest). Pin the WHOLE set from one release.
+      # agent_versions: '{"air-code-reviewer": 12, "air-simplify": 9, "air-security-auditor": 12, "air-git-history-reviewer": 9, "air-review-verifier": 9, "air-coordinator": 7}'
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
@@ -73,6 +77,17 @@ jobs:
 ```
 
 First PR auto-bootstraps the agents. Subsequent PRs reuse them.
+
+**Blessed agent sets:** to capture the set for a release, list the current versions after a green run on that release and paste the JSON into the GitHub Release notes:
+
+```bash
+curl -s https://api.anthropic.com/v1/agents?limit=100 \
+  -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
+  -H "anthropic-beta: managed-agents-2026-04-01-research-preview" |
+  jq -c '[.data[] | select(.archived_at == null and (.name | startswith("air-")) and .name != "air-learner")] | map({(.name): .version}) | add'
+```
+
+`air-learner` is not pinnable (learn always tracks the latest prompt).
 
 The `workflow_dispatch` trigger lets you review any PR on-demand from the Actions tab — including closed or merged PRs (post-merge audits, wiki-pattern backfills from history). For `pull_request` triggers, `pr_number` / `closed` defaults apply (current PR, state gate enforced).
 

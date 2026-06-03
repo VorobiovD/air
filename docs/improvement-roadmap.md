@@ -245,9 +245,10 @@ Three small fixes derived from the 2026-05-19/20/21 audit. All client-side patch
 
 ## Phase 4 — Versioning + scale-out (long horizon)
 
-### Item F — Agent versioning (medium-large)
-**Why:** Air's coordinator + specialist prompts evolve with every plugin release. Today an update affects all repos simultaneously (no canary). Pinning versions per repo via `.air-config` enables canary rollouts + rollback.
-**Open question** (`plan §6 Q3`): workspace-scoped agents (shared across all installs) vs per-user. Workspace is faster to ship; per-user lets users pin older versions.
+### Item F — Agent versioning (medium-large) — SHIPPED (v1.18.0, simplified shape)
+**Why:** Air's coordinator + specialist prompts evolve with every plugin release. Today an update affects all repos simultaneously (no canary). Pinning enables canary rollouts + rollback.
+**Shipped as:** `agent_versions` JSON input on `managed-review.yml` (not `.air-config`) → `AIR_AGENT_VERSIONS` env → `setup.py` skips prompt sync for pinned agents (`parse_agent_pins` fails loudly on malformed input) + `review.py` overrides roster versions. Work repos pin the blessed set from release notes (capture snippet in `managed/README.md`); air floats. `air-learner` not pinnable. Pin the whole set from one release — a pinned coordinator's sub-agent roster is whatever its pinned version recorded.
+**Still open:** per-repo `.air-config` discovery (callers currently pass the pin in their `with:` block) and the workspace-vs-per-user question (`plan §6 Q3`) — revisit if multiple orgs adopt.
 **Source:** `air-improvements-plan.md §3.1 F + §4 Phase 4`
 
 ### Item J — Self-spawning coordinator for monorepo PRs (••••, large)
