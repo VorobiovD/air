@@ -105,12 +105,13 @@ Fetch review comments from recent merged PRs:
 RECENT_PRS=$(gh api "repos/$REPO/pulls?state=closed&per_page=30&sort=updated&direction=desc" --jq '.[] | select(.merged_at != null) | .number' 2>/dev/null)
 ```
 
-For each PR with review comments (`## Code Review`), extract findings. Generate REVIEW-HISTORY.md **FRESH from the fetched window above — REPLACE the file, do not append to or merge the prior version**. All four tables cover ONLY the fetched PRs; older rows are dropped (git history retains them). This file is read by the git-history-reviewer every review, so an all-time accumulation is direct cost (REVIEW-HISTORY.md has grown past 550KB by accumulating every PR ever). Tables:
+For each PR with review comments (`## Code Review`), extract findings. The bloat that pushed REVIEW-HISTORY.md past 550KB is the **per-PR narrative** (≈30 lines/PR accumulated for every PR ever) — that is what gets windowed. The aggregate tables are bounded by pattern/author/file count, not PR count, so they stay CUMULATIVE:
 
-- Finding Frequency table
-- File Hot Spots table
-- Author Trends table (with Clean PRs columns)
-- Timeline table (windowed to the fetched PRs only — NOT an ever-growing all-PR log)
+- **Timeline table — WINDOWED to the fetched ~30 PRs only.** Drop older per-PR rows and all per-PR narrative prose (git history retains them). This is the big size win.
+- **Finding Frequency table — CUMULATIVE lifetime aggregate.** Carry forward the prior file's lifetime counts and ADD the new window's findings; do NOT reset counts to the 30-PR window (losing "Asymmetric refactor: 169x across 85 PRs" would destroy the load-bearing signal). One row per pattern — bounded, so it does not bloat.
+- **Author Trends table — CUMULATIVE** (lifetime totals + clean-PR counters), same carry-forward; one row per author.
+- **File Hot Spots table** — cumulative, one row per hot file.
+- Preserve any **Observations** narrative that explains cross-PR reasoning (which window shifts mattered and why) — that judgment is not regenerable.
 
 **Reconciliation (windowed-safe — keep identical to CLI `learn.md` Step 4):** REVIEW.md author-pattern counters are authoritative and CUMULATIVE; the windowed Author Trends clean-PR count is corroboration only, never the source of truth.
 - If the window shows MORE clean PRs than REVIEW.md records for an author, the counter missed increments — bump REVIEW.md up to the window value and apply lifecycle transitions if thresholds are now met (5 → declining, 10 → archive).
@@ -124,17 +125,16 @@ From REVIEW-HISTORY.md + ACCEPTED-PATTERNS.md, compute per-agent dispute rates. 
 
 ## Step 4.7: Refresh GLOSSARY.md (bounded — terse rows, no narrative)
 
-The glossary is a TERSE domain-term reference read into 3-5 agent contexts every review, so size is direct cost. It is NOT a changelog. Each term is ONE table row:
-
-`| `Term` | One-line definition — what it IS, ≤200 chars. No PR-by-PR history, no deferred-finding notes, no cross-references (those live in REVIEW-HISTORY.md / REVIEW.md). | source file or introducing PR |`
+The glossary is a domain-term reference read into 3-5 agent contexts every review, so size is direct cost. It is NOT a changelog. Each term is ONE table row: `| `Term` | Definition | source file or introducing PR |`.
 
 If GLOSSARY.md exists, do a bounded refresh (NOT an append):
-- Scan REVIEW.md, ACCEPTED-PATTERNS.md, CLAUDE.md, README.md for terms. ADD genuinely new terms as terse rows.
-- REMEDIATE existing bloat: rewrite any entry whose definition exceeds ~200 chars down to the terse one-liner (keep the term and its source ref — only the prose is trimmed). PRESERVE the full term set; do not drop real domain terms.
+- Scan REVIEW.md, ACCEPTED-PATTERNS.md, CLAUDE.md, README.md for terms. ADD genuinely new terms.
+- **Definitions are terse by DEFAULT (~200 chars: what the term IS).** BUT a definition that encodes a non-obvious **governance rule, gotcha, or safety property** is KEPT IN FULL even past 200 chars — that knowledge lives nowhere in the code and is the glossary's whole value. Examples that must survive: "Octane workers hold stale Mongo/IAM clients across credential rotations — bind via `bind()` or run `octane:reload`"; "`->visibleTo($user)` is mandated on every user-facing list/detail query per AGENTS.md §14.5"; "Pennant caches the resolved closure — env flips need `pennant:purge`"; per-env security-gate defaults and their failure modes.
+- **What to trim is per-PR CHANGELOG prose** restating a term's review history ("introduced in PR #959, then PR #961 deferred L3 flagged…", deferred-finding annotations, round-by-round notes) — strip that down to a single source/PR ref. The test: *is this prose a rule/gotcha that lives only here (KEEP), or is it PR-history a reviewer would re-derive from the next PR (TRIM)?*
 - Strip the accumulating header narrative entirely. The header is the title line + a single `Last updated: <date>, HEAD <sha>` line. Delete any "Nth cleanup pass / since the previous pass / new terms this pass" preamble (see the global anti-bloat rule).
-- Drop terms no longer referenced anywhere in the repo or wiki.
+- PRESERVE the full term set + each term's source ref; drop only terms no longer referenced anywhere.
 
-Target: the whole file well under 60KB. qai-be's glossary reached 261KB (300 entries averaging 810 bytes + an 18KB header essay) purely from append-without-cap — terse rows for the same 300 terms fit in ~50KB.
+This is surgical, not a blanket truncation: qai-be's glossary reached 261KB mostly from an 18KB header essay + entries padded with PR-by-PR history — strip those and the governance-bearing terse rows for the same ~300 terms fit comfortably, without losing a single rule or gotcha.
 
 ## Step 5: Report
 
