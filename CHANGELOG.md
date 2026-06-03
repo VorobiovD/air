@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.2](https://github.com/VorobiovD/air/compare/v1.19.1...v1.19.2) (2026-06-03)
+
+
+### Bug Fixes
+
+* **managed:** default coordinator to inline mode via explicit MODE header ([#112](https://github.com/VorobiovD/air/issues/112)) ([2e7e3c6](https://github.com/VorobiovD/air/commit/2e7e3c67001136ff31c286d48448cc447dc43e30))
+* **managed:** fail loud on codex sandbox/inability apology ([#110](https://github.com/VorobiovD/air/issues/110)) ([9c639b2](https://github.com/VorobiovD/air/commit/9c639b262e97fff0b4712ad678e30a05bd4040f6))
+
 ## [1.19.1](https://github.com/VorobiovD/air/compare/v1.19.0...v1.19.1) (2026-06-03)
 
 
