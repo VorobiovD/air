@@ -88,10 +88,36 @@ def split_review_md(text: str) -> dict[str, str]:
             if "".join(lines).strip()}
 
 
+def _byte_chunks(lines: list[str], cap: int) -> list[list[str]]:
+    """Group lines into chunks each ≤ cap bytes (joined with newlines).
+
+    Byte-bounded, not line-count-bounded: a fixed line count (the old
+    `range(…, 800)`) silently produced >100KB memories when lines were
+    long — qai-be's 261KB glossary spilled a single 167KB overflow file
+    that the API rejects. A single line longer than cap goes in its own
+    chunk (still oversized, but unavoidable without splitting mid-line;
+    such lines are pathological and flagged by the caller)."""
+    chunks: list[list[str]] = []
+    cur: list[str] = []
+    size = 0
+    for line in lines:
+        b = len(line.encode()) + 1  # +1 for the join newline
+        if cur and size + b > cap:
+            chunks.append(cur)
+            cur, size = [], 0
+        cur.append(line)
+        size += b
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
 def chunk_oversized(seed: dict[str, str]) -> dict[str, str]:
     """Spill content over the per-memory cap into /archive overflow files,
     keeping the newest lines in the primary path (entries append over
-    time, so the tail is newest)."""
+    time, so the tail is newest). Both the primary `keep` slice and every
+    overflow file are byte-bounded under MEMORY_CAP so each lands under
+    the 100KB API write cap."""
     out: dict[str, str] = {}
     for path, content in seed.items():
         data = content.encode()
@@ -99,26 +125,34 @@ def chunk_oversized(seed: dict[str, str]) -> dict[str, str]:
             out[path] = content
             continue
         lines = content.split("\n")
+        header = (f"<!-- older content: see "
+                  f"{memory_store.ARCHIVE_PREFIX}{Path(path).stem}-overflow-*.md -->")
+        # Reserve room for the header line so primary stays under cap.
+        keep_cap = MEMORY_CAP - len(header.encode()) - 1
         keep: list[str] = []
         size = 0
         for line in reversed(lines):
             size += len(line.encode()) + 1
-            if size > MEMORY_CAP:
+            if keep and size > keep_cap:
                 break
             keep.append(line)
         keep.reverse()
         overflow = lines[: len(lines) - len(keep)]
         stem = Path(path).stem
-        n = 1
-        for i in range(0, len(overflow), 800):
-            out[f"{memory_store.ARCHIVE_PREFIX}{stem}-overflow-{n}.md"] = (
-                "\n".join(overflow[i:i + 800]) + "\n"
-            )
-            n += 1
-        out[path] = (f"<!-- older content: see "
-                     f"{memory_store.ARCHIVE_PREFIX}{stem}-overflow-*.md -->\n"
-                     + "\n".join(keep))
-        print(f"  [chunk] {path} exceeded cap — {n - 1} overflow file(s)",
+        chunks = _byte_chunks(overflow, MEMORY_CAP)
+        for n, chunk in enumerate(chunks, 1):
+            ofile = f"{memory_store.ARCHIVE_PREFIX}{stem}-overflow-{n}.md"
+            out[ofile] = "\n".join(chunk) + "\n"
+            if len("\n".join(chunk).encode()) > MEMORY_CAP:
+                print(f"  [warn] {ofile} still over cap — a single line "
+                      f"exceeds {MEMORY_CAP} bytes (pathological entry; "
+                      f"clean the source wiki)", file=sys.stderr)
+        out[path] = header + "\n" + "\n".join(keep)
+        if len(out[path].encode()) > MEMORY_CAP:
+            print(f"  [warn] {path} still over cap after keep-trim — a single "
+                  f"line exceeds {MEMORY_CAP} bytes (pathological entry; clean "
+                  f"the source wiki)", file=sys.stderr)
+        print(f"  [chunk] {path} exceeded cap — {len(chunks)} overflow file(s)",
               file=sys.stderr)
     return out
 
