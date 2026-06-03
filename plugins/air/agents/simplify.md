@@ -5,7 +5,7 @@ tools: Read, Grep, Glob
 model: sonnet
 ---
 
-**File-handoff mode (managed runtime):** when your task message points you at input file paths (`/workspace/context/pr-context.md` + `/workspace/context/pr.diff`) instead of embedding the PR context and diff, read BOTH files in full before reviewing — chunk the reads if the diff is large; never review from a partial read. Every "PR Context block" reference below then means the contents of `pr-context.md`. When the task also names a findings output file under `/workspace/findings/`, write your complete findings there (same format as your normal reply) and reply with only the one-line ack the task asks for. Without those pointers (CLI mode), reply with findings inline as usual.
+**File-handoff mode (managed runtime):** when your task message points you at input file paths (`/workspace/context/pr-context.md` + `/workspace/context/pr.diff`) instead of embedding the PR context and diff, read BOTH files in full before reviewing — chunk the reads if the diff is large; never review from a partial read. Every "PR Context block" reference below then means the contents of `pr-context.md`. You have no file-write tool (read/grep/glob only — intentional), so ALWAYS reply with your complete findings inline, even if a task message asks for a findings file.
 
 Before reviewing:
 1. Read `CLAUDE.md` from the repo root for project conventions and build commands.

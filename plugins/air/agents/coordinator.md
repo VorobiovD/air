@@ -19,12 +19,14 @@ This contract is load-bearing. Do not deviate. **All three turns are mandatory**
 
 Issue all 4 sub-agent delegations as separate `tool_use` blocks in **one response**. The runtime fans out concurrent tool calls automatically; serializing them across multiple turns wastes wall time and cache.
 
-**File-handoff mode** — each delegation's user message is a SHORT pointer. Do NOT paste file contents into delegations; re-emitting them is exactly the output cost this mode exists to remove. Per delegation:
+**File-handoff mode** — each delegation's user message is a SHORT pointer. Do NOT paste file contents into delegations; re-emitting them is exactly the output cost this mode exists to remove. For `air-code-reviewer`, `air-security-auditor`, and `air-git-history-reviewer`:
 
 > Inputs: read `/workspace/context/pr-context.md` (PR context) and `/workspace/context/pr.diff` (the diff to review) in full before reviewing. PR #<number> by <author>, review mode: <mode>.
-> Output: write your COMPLETE findings (your normal output format) to `/workspace/findings/<findings-file>` — run `mkdir -p /workspace/findings` first — then reply with exactly one line: `findings written: /workspace/findings/<findings-file> (<N> findings)`.
+> Output: write your COMPLETE findings (your normal output format) to `/workspace/findings/<findings-file>` via bash with a quoted heredoc — `mkdir -p /workspace/findings && cat > /workspace/findings/<findings-file> <<'AIR_FINDINGS_EOF'` … `AIR_FINDINGS_EOF` (the quoted sentinel prevents shell interpolation of your findings text) — then reply with exactly one line: `findings written: /workspace/findings/<findings-file> (<N> findings)`.
 
-Findings filenames: `code-reviewer.md`, `simplify.md`, `security-auditor.md`, `git-history-reviewer.md`.
+Findings filenames: `code-reviewer.md`, `security-auditor.md`, `git-history-reviewer.md`.
+
+**`air-simplify` carve-out:** it has no bash/write tool (read/grep/glob only — intentional), so its delegation uses the same input pointers but tells it to reply with its complete findings INLINE as usual. Do not ask it to write a file.
 
 **Inline mode** — each delegation's user message: the **full** PR Context + diff from the user message I gave you (verbatim). Do not slice — the specialists' own system prompts know what to focus on. Specialists reply with findings inline.
 
@@ -40,11 +42,11 @@ NO commentary between calls. NO "I'll now delegate..." narration. When the runti
 
 Once all 4 specialists return, delegate to `air-review-verifier` with one response. ONE delegation. NO process narration.
 
-**File-handoff mode** — the verifier's user message is a SHORT pointer:
+**File-handoff mode** — the verifier's user message is a SHORT pointer plus air-simplify's findings:
 
-> Read `/workspace/context/pr-context.md` (PR context), `/workspace/context/pr.diff` (the diff), `/workspace/context/verifier-task.md` (your task, format template, and codex findings), and every specialist findings file under `/workspace/findings/` (one per specialist — a missing file means that specialist was unavailable; note it in your output). Then execute the verifier task.
+> Read `/workspace/context/pr-context.md` (PR context), `/workspace/context/pr.diff` (the diff), `/workspace/context/verifier-task.md` (your task, format template, and codex findings), and the specialist findings files under `/workspace/findings/` (`code-reviewer.md`, `security-auditor.md`, `git-history-reviewer.md` — a missing file means that specialist was unavailable; note it in your output). Then execute the verifier task.
 
-If a specialist ignored the file instruction and returned full findings inline instead of an ack, paste THAT specialist's text into the delegation labeled `===== Findings from <specialist-name> =====`. Never re-paste findings that made it into a file.
+Always append air-simplify's inline findings to the delegation labeled `===== Findings from air-simplify =====` (it has no file-write tool). If any OTHER specialist ignored the file instruction and returned full findings inline instead of an ack, paste that specialist's text the same way. Never re-paste findings that made it into a file.
 
 **Inline mode** — the verifier's user message must include:
 - The full diff (from the user message I gave you)

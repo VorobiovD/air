@@ -1269,8 +1269,12 @@ async def _upload_handoff_files(client, docs: dict[str, str]) -> tuple[list[dict
         for fid in file_ids:
             try:
                 await client.beta.files.delete(fid)
-            except Exception:
-                pass
+            except Exception as cleanup_err:
+                print(
+                    f"  [warn] file-handoff cleanup failed for {fid}: "
+                    f"{type(cleanup_err).__name__}",
+                    file=sys.stderr,
+                )
         raise
     return resources, file_ids
 
@@ -2116,7 +2120,9 @@ async def run_review(args):
             "use this status for findings originally classified as `blocker`."
         )
 
-        verifier_task = f"""You have raw findings from the specialist reviewers.
+        verifier_task = f"""You have raw findings from the specialist reviewers
+(embedded in your task message, or read from /workspace/findings/ plus the labeled
+inline blocks in file-handoff mode).
 They were run in RE-REVIEW MODE — each result contains both (a) a classification of
 each prior finding and (b) any NEW findings in the inter-diff.
 
@@ -2180,7 +2186,9 @@ new-findings block (prior findings keep their #N from the last review).
 Reviewed at: {head_sha}
 """
     else:
-        verifier_task = f"""You have raw findings from the specialist reviewers.
+        verifier_task = f"""You have raw findings from the specialist reviewers
+(embedded in your task message, or read from /workspace/findings/ plus the labeled
+inline blocks in file-handoff mode).
 Verify each one per your system prompt (CONFIRMED / DOWNGRADED / IMPROVEMENT /
 PRE-EXISTING / ACCEPTED PATTERN / FALSE POSITIVE with a confidence score). Drop
 FALSE POSITIVE / below-threshold findings.
@@ -2270,12 +2278,6 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
             f"{codex_block}\n\n<verifier-task>\n{verifier_task}\n</verifier-task>"
         ),
     }
-    inline_user_text = (
-        f"{pr_context}\n\n"
-        f"<diff>\n{diff}\n</diff>\n\n"
-        f"{codex_block}\n\n"
-        f"<verifier-task>\n{verifier_task}\n</verifier-task>"
-    )
     # Dispatch note for file-handoff mode. Scalars only — PR title/body and
     # everything else attacker-influenced stays inside pr-context.md where
     # build_pr_context already escaped and wrapped it. The author login is
@@ -2318,13 +2320,19 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
             except Exception as e:
                 # Never block a review on handoff plumbing — fall back to
                 # the legacy inline message shape (coordinator.md handles
-                # both).
+                # both). Built here, not upfront: the happy path never
+                # needs this concatenation.
                 print(
                     f"  [warn] file-handoff upload failed "
                     f"({type(e).__name__}: {e}) — falling back to inline context",
                     file=sys.stderr,
                 )
-                coordinator_user_text = inline_user_text
+                coordinator_user_text = (
+                    f"{pr_context}\n\n"
+                    f"<diff>\n{diff}\n</diff>\n\n"
+                    f"{codex_block}\n\n"
+                    f"<verifier-task>\n{verifier_task}\n</verifier-task>"
+                )
             try:
                 coordinator_out = await asyncio.wait_for(
                     run_session(
@@ -2344,8 +2352,15 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
                 for fid in handoff_ids:
                     try:
                         await client.beta.files.delete(fid)
-                    except Exception:
-                        pass
+                    except Exception as cleanup_err:
+                        # Best-effort but never silent — a persistent delete
+                        # failure means scratch files accumulate in shared
+                        # org storage with no other signal.
+                        print(
+                            f"  [warn] file-handoff cleanup failed for {fid}: "
+                            f"{type(cleanup_err).__name__}",
+                            file=sys.stderr,
+                        )
     except SpecialistSessionError as e:
         # run_session raised because terminated_reason was set and no
         # parts were captured — common cause: `session.error` event

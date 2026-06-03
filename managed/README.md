@@ -103,7 +103,8 @@ Single air-coordinator session (callable_agents multi-agent runtime)
   │
   ├── TURN 1: dispatches specialists in parallel as sub-agents (one Anthropic session, one container);
   │     file-handoff: delegations are short pointers — specialists read /workspace/context/ and write
-  │     findings to /workspace/findings/<name>.md, returning a 1-line ack:
+  │     findings to /workspace/findings/<name>.md, returning a 1-line ack (simplify replies inline —
+  │     no write tool):
   │     ├── air-code-reviewer       — bugs, design, test coverage
   │     ├── air-simplify            — reuse, quality, efficiency
   │     ├── air-security-auditor    — 31-item checklist

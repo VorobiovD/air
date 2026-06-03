@@ -152,7 +152,8 @@ PR opened (or air-machine requested as reviewer) → GitHub Action → managed/r
   │     ├── TURN 1: dispatches the 4 Claude specialists in parallel as sub-agents
   │     │     (air-code-reviewer, air-simplify, air-security-auditor, air-git-history-reviewer)
   │     │     — file-handoff: each delegation is a short pointer; specialists read the mounted
-  │     │     context/diff and write findings to /workspace/findings/<name>.md (1-line ack back)
+  │     │     context/diff and write findings to /workspace/findings/<name>.md (1-line ack back;
+  │     │     simplify replies inline — no write tool)
   │     ├── TURN 2: dispatches air-review-verifier — file-handoff: pointer at the context/diff/
   │     │     task mounts + the findings directory; inline fallback: embeds all findings
   │     │     + codex findings + the verifier_task template
