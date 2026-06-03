@@ -128,7 +128,7 @@ ls go.mod package.json requirements.txt composer.json Makefile Dockerfile *.tf t
 ls -d */ 2>/dev/null | head -20
 ```
 
-Update the `## Languages` and `## Services` sections in `$AIR_TMP/PROJECT-PROFILE.md`. Do NOT touch:
+Update the `## Languages` and `## Services` sections in `$AIR_TMP/PROJECT-PROFILE.md` — REPLACE those sections in place; never append a per-pass changelog narrative (global anti-bloat rule). The profile describes the repo's CURRENT structure; the header is a single `Last updated: <date>` line. If the existing profile already carries accumulated "Nth pass / since previous pass" narrative, strip it to the current-state description (PROJECT-PROFILE.md has bloated past 170KB this way). Do NOT touch:
 - "Review Focus Rules" section — manually curated after initial generation
 - "Applicable Security Checks" section — unless a new language/framework was detected (e.g., SQL files appeared for the first time → add the SQL injection check)
 
@@ -192,6 +192,8 @@ Phase 1 makes 30 API calls (one per PR) and caches the responses. Phase 2 reuses
 
 **Rate limiting:** If any API call returns 403/429, pause for 5 seconds and retry once. Cap total API calls at 100. If Phase 1 alone approaches the cap, reduce `per_page` to 15.
 
+**Anti-bloat (parity with managed `learn-orchestrator.md`):** generate `REVIEW-HISTORY.md` **FRESH from the fetched ~30-PR window — REPLACE the file, never append to or merge the prior version**. All tables (including the Timeline) cover ONLY the fetched PRs; older rows drop off (git history retains them). This file is read by the git-history-reviewer every review, so an ever-growing all-PR log is direct cost (it has reached 550KB+ on bloated repos). The header is the title + `Last generated: <date>` + `PRs analyzed: <count>` — never a per-pass changelog narrative. The same global rule applies to GLOSSARY.md and PROJECT-PROFILE.md: no accumulating "Nth pass / since previous pass" narrative; each file reflects current state.
+
 From the raw data, generate `REVIEW-HISTORY.md` with these sections:
 
 ```markdown
@@ -226,10 +228,10 @@ PRs analyzed: <count>
 
 "Clean PRs" = consecutive merged PRs by this author where no findings matched their REVIEW.md author patterns. "PRs reviewed" = total merged PRs by this author in the analyzed set.
 
-**Reconciliation:** After generating REVIEW-HISTORY.md, cross-check its Author Trends against REVIEW.md author pattern counters. For each author with patterns in REVIEW.md:
-1. Compare the `Clean PRs (consecutive)` value from REVIEW-HISTORY.md against `last <N> PRs: <M> clean` in REVIEW.md.
-2. If REVIEW-HISTORY.md shows MORE clean PRs than REVIEW.md records (counters were missed during incremental learns), update REVIEW.md's counters to match REVIEW-HISTORY.md. Apply lifecycle transitions if thresholds are now met (5 → declining, 10 → archive).
-3. If REVIEW-HISTORY.md shows FEWER clean PRs (a pattern was triggered but REVIEW.md wasn't updated), reset the counter in REVIEW.md to the REVIEW-HISTORY.md value.
+**Reconciliation (windowed-safe — keep identical to managed `learn-orchestrator.md` Step 4):** REVIEW.md author-pattern counters are authoritative and CUMULATIVE; the windowed Author Trends clean-PR count is corroboration only, never the source of truth. For each author with patterns in REVIEW.md, compare `Clean PRs (consecutive)` from REVIEW-HISTORY.md against `last <N> PRs: <M> clean` in REVIEW.md, then:
+1. If the window shows MORE clean PRs than REVIEW.md records (counters missed during incremental learns), bump REVIEW.md up to the window value and apply lifecycle transitions if thresholds are now met (5 → declining, 10 → archive).
+2. If the window shows FEWER clean PRs, reset DOWN only when a triggered pattern inside the window explains the gap; NEVER lower a counter merely because older clean PRs fell outside the fetched window.
+3. When in doubt, keep the higher REVIEW.md value.
 4. Print any reconciliation adjustments in the Step 5 report.
 
 ## Timeline
@@ -356,20 +358,25 @@ then append (choose examples that go BEYOND what `builtin-checks.sh` already cov
 
 The user reads the suggestion on their next pull/pre-commit, decides whether to uncomment, and commits.
 
-## Step 4.7: Refresh GLOSSARY.md
+## Step 4.7: Refresh GLOSSARY.md (bounded — terse rows, no narrative)
 
-**Only run if `$AIR_TMP/GLOSSARY.md` exists** (first-run already created it).
+**Only run if `$AIR_TMP/GLOSSARY.md` exists** (first-run already created it). Skip if `--refresh-profile` already regenerated it this run (Step 3.5). This is a bounded remediation pass (parity with managed `learn-orchestrator.md` Step 4.7) — the glossary is read into 3-5 agent contexts every review, so its size is direct cost. It is a TERSE domain-term reference, NOT a changelog.
 
-Scan `$AIR_TMP/REVIEW.md`, `$AIR_TMP/ACCEPTED-PATTERNS.md`, `CLAUDE.md`, and `README.md` from the repo root for domain-specific terms not yet in the glossary:
-- Proper nouns (service names, tool names)
-- Abbreviated terms (JWT, API, OTP)
-- Business domain terms (guardrail, variant, tenant)
+Scan `$AIR_TMP/REVIEW.md`, `$AIR_TMP/ACCEPTED-PATTERNS.md`, `CLAUDE.md`, and `README.md` from the repo root for domain-specific terms (proper nouns / service + tool names; abbreviated terms like JWT, OTP; business domain terms like guardrail, variant, tenant).
 
-Append new terms. Do not remove existing terms. Format:
+Rules (HARD caps — not append-only):
+- Each term is ONE table row, definition ≤200 chars describing what it IS — **no PR-by-PR history, no deferred-finding annotations, no cross-references** (those live in REVIEW-HISTORY.md / REVIEW.md).
+- ADD genuinely new terms as terse rows.
+- REMEDIATE existing bloat: REWRITE any entry whose definition exceeds ~200 chars down to the terse one-liner. PRESERVE the full term set and each term's source — trim only the prose; never drop a real domain term.
+- Drop terms no longer referenced anywhere in the repo or wiki.
+- STRIP the header to the title + a single `Last updated: <date>, HEAD <sha>` line. Delete any accumulated "Nth cleanup pass / since the previous pass / new terms this pass" preamble (global anti-bloat rule).
+
+Target the whole file well under 60KB. (qai-be's glossary reached 261KB — ~300 terms averaging 810 bytes + an 18KB header essay — purely from append-without-cap; terse rows for the same terms fit in ~50KB.)
+
 ```markdown
 # Project Glossary — Domain Terms
 
-Last updated: <date>
+Last updated: <date>, HEAD <sha>
 
 | Term | Definition | Context |
 |---|---|---|
