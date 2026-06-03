@@ -30,6 +30,11 @@ on:
         required: false
         type: string
         default: 'false'
+      fresh:
+        description: 'Force a full review even if already reviewed at HEAD (replays/verification)'
+        required: false
+        type: string
+        default: 'false'
 
 jobs:
   review:
@@ -46,6 +51,7 @@ jobs:
       pr_number: ${{ inputs.pr_number }}
       closed: ${{ inputs.closed }}
       no_codex: ${{ inputs.no_codex }}
+      fresh: ${{ inputs.fresh }}
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
