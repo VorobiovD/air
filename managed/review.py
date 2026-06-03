@@ -2709,6 +2709,32 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
             _exit_nonzero_on_failed_run(args.pr_number, coordinator_failure_reason, posted=False)
         return
 
+    # Pre-post dedup re-check (TOCTOU guard). The early skip gate only saw
+    # the comments as of session start; our coordinator session then ran for
+    # minutes. A double-trigger — `review_requested` and `synchronize` firing
+    # together on one push — can spawn two runs for the same head SHA, and the
+    # job-level concurrency group doesn't reliably collapse same-second
+    # siblings (both can begin before either is cancelled). Without this check
+    # both runs post a full review on the same commit (observed on ai-relay
+    # #219: two `## Code Review (Re-review)` comments at one SHA, ~30 min
+    # apart). Re-fetch now and skip posting if a bot review for THIS head SHA
+    # already exists — a concurrent run beat us to it while we were busy.
+    # Best-effort: shrinks the duplicate window from minutes to the ms between
+    # this check and the POST; never fatal. Honored only when not --fresh (an
+    # explicit fresh run is a deliberate re-post and the early gate is skipped
+    # for it).
+    if not args.fresh and bot_login:
+        concurrent = find_prior_review(
+            fetch_issue_comments(args.repo, args.pr_number, bot_token), bot_login
+        )
+        if concurrent and extract_reviewed_at_sha(concurrent.get("body", "")) == head_sha:
+            print(
+                f"  [skip] a concurrent run already posted a review for "
+                f"{head_sha[:8]} (comment {concurrent.get('html_url') or concurrent['id']}). "
+                f"Not stacking a duplicate."
+            )
+            return
+
     print(f"\n[5] Posting review comment to PR #{args.pr_number}...")
     resp = _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
     if not resp.ok:
