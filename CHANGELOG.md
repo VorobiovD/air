@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.19.1](https://github.com/VorobiovD/air/compare/v1.19.0...v1.19.1) (2026-06-03)
+
+
+### Bug Fixes
+
+* **codex:** disable bwrap via ~/.codex/config.toml (review ignores the global bypass flag) ([#107](https://github.com/VorobiovD/air/issues/107)) ([7b7c686](https://github.com/VorobiovD/air/commit/7b7c6866074b74f99fd0d2432044a916706a4a53))
+* **managed:** pre-post dedup re-check so double-triggered runs don't stack duplicate reviews ([#109](https://github.com/VorobiovD/air/issues/109)) ([25734d0](https://github.com/VorobiovD/air/commit/25734d02057b98a881eeb35ac9b62d9bd9536c8d))
+
 ## [1.19.0](https://github.com/VorobiovD/air/compare/v1.18.0...v1.19.0) (2026-06-03)
 
 
