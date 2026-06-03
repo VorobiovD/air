@@ -118,19 +118,19 @@ GitHub Action triggers `python review.py <repo> <pr>`
   ▼
 Single air-coordinator session (callable_agents multi-agent runtime)
   │
-  ├── TURN 1: dispatches specialists in parallel as sub-agents (one Anthropic session, one container);
-  │     file-handoff: delegations are short pointers — specialists read /workspace/context/ and write
-  │     findings to /workspace/findings/<name>.md, returning a 1-line ack (simplify replies inline —
-  │     no write tool):
+  ├── TURN 1: dispatches specialists in parallel as sub-agents (one Anthropic session; each
+  │     thread runs in its OWN container — github_repository/wiki/memory mounts replicate per
+  │     thread, but file resources and cross-thread filesystem writes do not propagate,
+  │     verified 2026-06-03):
   │     ├── air-code-reviewer       — bugs, design, test coverage
   │     ├── air-simplify            — reuse, quality, efficiency
   │     ├── air-security-auditor    — 31-item checklist
   │     └── air-git-history-reviewer — blame, churn, recurring patterns
   │
-  ├── TURN 2: dispatches air-review-verifier — file-handoff: a pointer at the context/diff/task
-  │           mounts + the findings directory (inline fallback: embeds the 4 specialist findings +
-  │           codex findings + the verifier_task template). Verifies each finding, drops false
-  │           positives, emits markdown
+  ├── TURN 2: dispatches air-review-verifier with the 4 specialist findings + codex findings +
+  │           the verifier_task template embedded (inline — the production shape; the experimental
+  │           file-handoff pointer variant is blocked on thread isolation, see above). Verifies
+  │           each finding, drops false positives, emits markdown
   │
   └── TURN 3: outputs verifier's response verbatim + bash tool call to update the wiki (REVIEW.md
               author-pattern entry on recurring findings, with one-shot rebase-retry on push)
