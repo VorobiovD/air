@@ -410,6 +410,19 @@ _BILLING_REASON_HINTS: tuple[str, ...] = (
     "credit balance is too low",
 )
 
+# Transient billing_error retry. Anthropic's "credit balance is too low" is a
+# well-documented FALSE-POSITIVE (fires despite funded accounts; clears on
+# retry within minutes) and is rejected at PREFLIGHT — sub-second, ~0 tokens
+# billed. So re-attempting a FAST billing failure is ~free and usually
+# succeeds. Hard guard: only retry when the failed attempt died fast (preflight
+# window) — a billing_error that surfaces AFTER the session did real work
+# (mid-session: cache-written context / specialist output, e.g. qai-fe
+# 2026-06-03 ~9 min in) must NOT be retried, or we re-spend that work. Non-
+# billing failures never retry.
+BILLING_RETRY_MAX_ATTEMPTS = 3        # 1 initial + 2 retries
+BILLING_RETRY_BACKOFF_SECS = 90       # wait between attempts (within "a few minutes")
+BILLING_RETRY_PREFLIGHT_SECS = 30     # retry only if the attempt failed faster than this (≈ no tokens burned)
+
 # Cap for raw-error text echoed into the run-failed PR comment. 800 chars
 # captures the meaningful prefix of typical Anthropic SDK exception
 # reprs (~600-1200 chars) without bloating the comment. Mirrored across
@@ -2435,17 +2448,49 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
                     f"<verifier-task>\n{verifier_task}\n</verifier-task>"
                 )
             try:
-                coordinator_out = await asyncio.wait_for(
-                    run_session(
-                        client,
-                        agents[COORDINATOR_AGENT]["id"], agents[COORDINATOR_AGENT]["version"],
-                        env_id, args.repo, checkout, bot_token,
-                        coordinator_user_text, COORDINATOR_AGENT,
-                        store_id=store_id,
-                        file_resources=file_resources,
-                    ),
-                    timeout=COORDINATOR_TIMEOUT_SECS,
-                )
+                # Transient billing_error retry (see BILLING_RETRY_* above):
+                # re-attempt a FAST (preflight, ~0-token) billing rejection a
+                # couple of times with backoff before giving up. A slow /
+                # mid-session billing failure is NOT retried (it would re-spend
+                # real work), and non-billing failures propagate immediately.
+                for _attempt in range(1, BILLING_RETRY_MAX_ATTEMPTS + 1):
+                    _attempt_t0 = time.monotonic()
+                    try:
+                        coordinator_out = await asyncio.wait_for(
+                            run_session(
+                                client,
+                                agents[COORDINATOR_AGENT]["id"], agents[COORDINATOR_AGENT]["version"],
+                                env_id, args.repo, checkout, bot_token,
+                                coordinator_user_text, COORDINATOR_AGENT,
+                                store_id=store_id,
+                                file_resources=file_resources,
+                            ),
+                            timeout=COORDINATOR_TIMEOUT_SECS,
+                        )
+                        break  # success
+                    except SpecialistSessionError as _e:
+                        _elapsed = time.monotonic() - _attempt_t0
+                        _is_billing = any(h in _e.reason.lower() for h in _BILLING_REASON_HINTS)
+                        _preflight = _elapsed < BILLING_RETRY_PREFLIGHT_SECS
+                        if _is_billing and _preflight and _attempt < BILLING_RETRY_MAX_ATTEMPTS:
+                            print(
+                                f"  [retry] billing_error after {_elapsed:.1f}s "
+                                f"(preflight, ~0 tokens — likely the transient "
+                                f"credit-balance false-positive). Attempt "
+                                f"{_attempt}/{BILLING_RETRY_MAX_ATTEMPTS} failed; "
+                                f"retrying in {BILLING_RETRY_BACKOFF_SECS}s.",
+                                file=sys.stderr,
+                            )
+                            await asyncio.sleep(BILLING_RETRY_BACKOFF_SECS)
+                            continue
+                        if _is_billing and not _preflight:
+                            print(
+                                f"  [warn] billing_error after {_elapsed:.1f}s — past "
+                                f"the preflight window (real work already done); not "
+                                f"retrying (would re-spend). Failing loud.",
+                                file=sys.stderr,
+                            )
+                        raise  # non-billing, slow billing, or attempts exhausted
             finally:
                 # Per-run scratch — delete after the session ends (any exit
                 # path) to keep org Files storage clean. Never before: the
