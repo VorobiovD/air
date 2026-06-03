@@ -192,7 +192,12 @@ Phase 1 makes 30 API calls (one per PR) and caches the responses. Phase 2 reuses
 
 **Rate limiting:** If any API call returns 403/429, pause for 5 seconds and retry once. Cap total API calls at 100. If Phase 1 alone approaches the cap, reduce `per_page` to 15.
 
-**Anti-bloat (parity with managed `learn-orchestrator.md`):** generate `REVIEW-HISTORY.md` **FRESH from the fetched ~30-PR window — REPLACE the file, never append to or merge the prior version**. All tables (including the Timeline) cover ONLY the fetched PRs; older rows drop off (git history retains them). This file is read by the git-history-reviewer every review, so an ever-growing all-PR log is direct cost (it has reached 550KB+ on bloated repos). The header is the title + `Last generated: <date>` + `PRs analyzed: <count>` — never a per-pass changelog narrative. The same global rule applies to GLOSSARY.md and PROJECT-PROFILE.md: no accumulating "Nth pass / since previous pass" narrative; each file reflects current state.
+**Anti-bloat (parity with managed `learn-orchestrator.md` Step 4):** the bloat that pushed REVIEW-HISTORY.md past 550KB is the **per-PR narrative** (≈30 lines/PR for every PR ever) — that is what gets windowed; the aggregate tables are bounded by pattern/author/file count and stay CUMULATIVE.
+- **Timeline table — WINDOWED to the fetched ~30 PRs only.** Drop older per-PR rows + per-PR narrative prose (git history retains them). Big size win.
+- **Finding Frequency table — CUMULATIVE lifetime aggregate.** Carry forward prior lifetime counts and ADD the new window; do NOT reset to the 30-PR window (losing "Asymmetric refactor: 169x across 85 PRs" destroys the load-bearing signal). One row per pattern — bounded.
+- **Author Trends + File Hot Spots — CUMULATIVE**, same carry-forward, one row each per author / hot file.
+- Preserve any **Observations** narrative explaining cross-PR reasoning (not regenerable).
+- Header is the title + `Last generated: <date>` + `PRs analyzed: <count>` — never a per-pass changelog narrative. Same no-narrative rule applies to GLOSSARY.md and PROJECT-PROFILE.md.
 
 From the raw data, generate `REVIEW-HISTORY.md` with these sections:
 
@@ -358,20 +363,19 @@ then append (choose examples that go BEYOND what `builtin-checks.sh` already cov
 
 The user reads the suggestion on their next pull/pre-commit, decides whether to uncomment, and commits.
 
-## Step 4.7: Refresh GLOSSARY.md (bounded — terse rows, no narrative)
+## Step 4.7: Refresh GLOSSARY.md (bounded, surgical — terse by default, keep rules/gotchas)
 
-**Only run if `$AIR_TMP/GLOSSARY.md` exists** (first-run already created it). Skip if `--refresh-profile` already regenerated it this run (Step 3.5). This is a bounded remediation pass (parity with managed `learn-orchestrator.md` Step 4.7) — the glossary is read into 3-5 agent contexts every review, so its size is direct cost. It is a TERSE domain-term reference, NOT a changelog.
+**Only run if `$AIR_TMP/GLOSSARY.md` exists** (first-run already created it). Skip if `--refresh-profile` already regenerated it this run (Step 3.5). Bounded remediation pass (parity with managed `learn-orchestrator.md` Step 4.7) — the glossary is read into 3-5 agent contexts every review, so its size is direct cost. It is NOT a changelog.
 
-Scan `$AIR_TMP/REVIEW.md`, `$AIR_TMP/ACCEPTED-PATTERNS.md`, `CLAUDE.md`, and `README.md` from the repo root for domain-specific terms (proper nouns / service + tool names; abbreviated terms like JWT, OTP; business domain terms like guardrail, variant, tenant).
+Scan `$AIR_TMP/REVIEW.md`, `$AIR_TMP/ACCEPTED-PATTERNS.md`, `CLAUDE.md`, and `README.md` from the repo root for domain-specific terms (proper nouns / service + tool names; abbreviated terms like JWT, OTP; business domain terms like guardrail, variant, tenant). Each term is ONE table row: `| `Term` | Definition | source/PR |`.
 
-Rules (HARD caps — not append-only):
-- Each term is ONE table row, definition ≤200 chars describing what it IS — **no PR-by-PR history, no deferred-finding annotations, no cross-references** (those live in REVIEW-HISTORY.md / REVIEW.md).
-- ADD genuinely new terms as terse rows.
-- REMEDIATE existing bloat: REWRITE any entry whose definition exceeds ~200 chars down to the terse one-liner. PRESERVE the full term set and each term's source — trim only the prose; never drop a real domain term.
-- Drop terms no longer referenced anywhere in the repo or wiki.
+Rules (surgical — NOT a blanket truncation, NOT append-only):
+- **Definitions are terse by DEFAULT (~200 chars: what the term IS).** BUT keep IN FULL any definition that encodes a non-obvious **governance rule, gotcha, or safety property** — that knowledge lives nowhere in the code and is the glossary's whole value (e.g. "Octane workers hold stale Mongo/IAM clients across rotations — run `octane:reload`"; "`->visibleTo($user)` mandated on every user-facing query per AGENTS.md §14.5"; "Pennant caches the resolved closure — env flips need `pennant:purge`"; per-env security-gate defaults + failure modes).
+- **What to TRIM is per-PR changelog prose** restating a term's review history ("introduced #959, then #961 L3 deferred…", deferred-finding annotations, round-by-round notes) → collapse to a single source/PR ref. Test: *is this a rule/gotcha that lives only here (KEEP), or PR-history a reviewer re-derives from the next PR (TRIM)?*
+- ADD genuinely new terms. PRESERVE the full term set + each term's source; drop only terms no longer referenced anywhere.
 - STRIP the header to the title + a single `Last updated: <date>, HEAD <sha>` line. Delete any accumulated "Nth cleanup pass / since the previous pass / new terms this pass" preamble (global anti-bloat rule).
 
-Target the whole file well under 60KB. (qai-be's glossary reached 261KB — ~300 terms averaging 810 bytes + an 18KB header essay — purely from append-without-cap; terse rows for the same terms fit in ~50KB.)
+Surgical, not blanket: qai-be's glossary reached 261KB mostly from an 18KB header essay + entries padded with PR-by-PR history — strip those and the governance-bearing rows for the same ~300 terms fit comfortably, without losing a rule or gotcha.
 
 ```markdown
 # Project Glossary — Domain Terms
