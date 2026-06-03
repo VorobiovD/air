@@ -198,6 +198,37 @@ class SpecialistSessionError(Exception):
 
 CODEX_LABEL = "codex"
 
+# Codex's bwrap sandbox failure (and similar "I can't run commands" states)
+# make `codex review` EXIT 0 but emit a first-person apology INSTEAD of
+# findings — e.g. "I could not inspect the diff because every shell command
+# failed in the provided sandbox." Before the v1.19.1 config.toml fix this
+# happened on EVERY managed review for ~5 weeks, and the apology text was
+# forwarded to the coordinator as if it were findings — so a fleet-wide
+# regression looked green. The guard below treats these signatures as a hard
+# failure (raise → caller logs `[warn] codex failed` and proceeds without it)
+# so the next regression surfaces loudly instead of silently degrading 5
+# reviewers to 4.
+#
+# HARD signatures are codex's own runtime-inability phrasing (unlikely in a
+# real review even one that *discusses* sandboxing code). SOFT is a generic
+# first-person "I could not inspect/review" — gated on a short total length,
+# because a genuine review is long and structured while an apology is a
+# sentence or two.
+_CODEX_HARD_FAIL_RE = re.compile(
+    r"could not inspect the (diff|changes|repository)"
+    r"|every shell command.{0,60}(failed|denied|blocked|not permitted)"
+    r"|RTM_NEWADDR"
+    r"|\bbwrap\b"
+    r"|in the (provided|restricted) sandbox",
+    re.IGNORECASE,
+)
+_CODEX_SOFT_FAIL_RE = re.compile(
+    r"\bI(?:'m|\s+am|\s+was)?\s+(?:could\s+not|couldn'?t|cannot|can'?t|unable\s+to)\b"
+    r".{0,80}\b(inspect|review|access|read|run|execute|analyze)\b",
+    re.IGNORECASE,
+)
+_CODEX_SOFT_FAIL_MAX_LEN = 1200
+
 
 async def run_codex_session(target_repo: str, base_sha: str) -> str:
     """Invoke `codex review --base <sha>` in the target repo; return stdout.
@@ -295,6 +326,16 @@ async def run_codex_session(target_repo: str, base_sha: str) -> str:
     output = stdout.decode().strip()
     if not output:
         raise SpecialistSessionError(CODEX_LABEL, "empty stdout")
+    # Fail loud on a sandbox/inability apology returned with exit 0 (see the
+    # _CODEX_*_FAIL_RE comment above) — never forward it as findings.
+    if _CODEX_HARD_FAIL_RE.search(output) or (
+        len(output) < _CODEX_SOFT_FAIL_MAX_LEN and _CODEX_SOFT_FAIL_RE.search(output)
+    ):
+        raise SpecialistSessionError(
+            CODEX_LABEL,
+            "sandbox/inability signature in output — codex produced no usable "
+            f"findings (likely a bwrap/sandbox regression). First 200 chars: {output[:200]!r}",
+        )
     print(f"  [done] {CODEX_LABEL}")
     return output
 
