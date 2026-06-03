@@ -83,6 +83,8 @@ Read `$AIR_TMP/REVIEW.md` and analyze every pattern entry for:
 - Cap each pattern entry's inline narrative at the 3 most recent PR examples (~1,500 chars of prose); move older example narratives verbatim to `REVIEW-ARCHIVE.md` (create if missing) and leave a `(older examples: see REVIEW-ARCHIVE.md)` marker. Counts and PR-ref lists are never dropped — only prose. (Single entries have grown >15K chars, overflowing agent tool-output limits and dominating session token cost.)
 - Keep compliance reference sections unchanged
 
+**GLOBAL anti-bloat rule (applies to EVERY generated file — REVIEW.md, GLOSSARY.md, PROJECT-PROFILE.md, REVIEW-HISTORY.md):** NO accumulating per-pass changelog narrative. Never write "Nth cleanup pass", "since the previous pass", "new terms this pass", or a growing "Last updated:" essay. Each file reflects the CURRENT state; the pass-by-pass story lives in git history. A header is at most a single line: `Last updated: <date>, HEAD <sha>` — REPLACED each pass, never appended to. Unbounded header/entry narrative is the #1 bloat source (qai-be's glossary reached 261KB and project-profile 173KB this way; every review session loads these into 3-5 agent contexts, so size is direct cost). When you open a file that already carries accumulated narrative or oversized entries, REMEDIATE it (rewrite to the bounded form below) — don't preserve the bloat.
+
 ## Step 3.5: Refresh PROJECT-PROFILE.md
 
 If MODE is `refresh-profile` OR `$AIR_TMP/PROJECT-PROFILE.md` does NOT exist:
@@ -92,6 +94,7 @@ If MODE is `refresh-profile` OR `$AIR_TMP/PROJECT-PROFILE.md` does NOT exist:
 
 If `$AIR_TMP/PROJECT-PROFILE.md` exists and MODE is not `refresh-profile`:
 - Lightweight refresh: check for new manifest files, update Languages and Services sections
+- REPLACE the sections you touch; do NOT append per-pass narrative (see the global anti-bloat rule). The profile describes the repo's CURRENT structure — header is a single `Last updated: <date>` line. If the existing profile already carries accumulated "Nth pass / since previous pass" narrative, strip it down to the current-state description (PROJECT-PROFILE.md has bloated to 170KB+ this way).
 
 ## Step 4: Generate REVIEW-HISTORY.md (KAIROS)
 
@@ -102,22 +105,32 @@ Fetch review comments from recent merged PRs:
 RECENT_PRS=$(gh api "repos/$REPO/pulls?state=closed&per_page=30&sort=updated&direction=desc" --jq '.[] | select(.merged_at != null) | .number' 2>/dev/null)
 ```
 
-For each PR with review comments (`## Code Review`), extract findings. Generate REVIEW-HISTORY.md with:
+For each PR with review comments (`## Code Review`), extract findings. Generate REVIEW-HISTORY.md **FRESH from the fetched window above — REPLACE the file, do not append to or merge the prior version**. All four tables cover ONLY the fetched PRs; older rows are dropped (git history retains them). This file is read by the git-history-reviewer every review, so an all-time accumulation is direct cost (REVIEW-HISTORY.md has grown past 550KB by accumulating every PR ever). Tables:
 
 - Finding Frequency table
 - File Hot Spots table
 - Author Trends table (with Clean PRs columns)
-- Timeline table
+- Timeline table (windowed to the fetched PRs only — NOT an ever-growing all-PR log)
 
-**Reconciliation:** Compare Author Trends clean-PR counts against REVIEW.md author pattern counters. Adjust on drift.
+**Reconciliation:** Compare Author Trends clean-PR counts against REVIEW.md author pattern counters. Adjust on drift. (Because the history is windowed, the Author Trends clean-PR counts reflect only the window — when REVIEW.md's counter is higher, keep the higher REVIEW.md value; never lower a counter just because it fell outside the window.)
 
 ## Step 4.5: Recalculate SEVERITY-CALIBRATION.md
 
 From REVIEW-HISTORY.md + ACCEPTED-PATTERNS.md, compute per-agent dispute rates. Only if 10+ data points exist.
 
-## Step 4.7: Refresh GLOSSARY.md
+## Step 4.7: Refresh GLOSSARY.md (bounded — terse rows, no narrative)
 
-If GLOSSARY.md exists, scan for new domain terms in REVIEW.md, ACCEPTED-PATTERNS.md, CLAUDE.md, README.md. Append new terms.
+The glossary is a TERSE domain-term reference read into 3-5 agent contexts every review, so size is direct cost. It is NOT a changelog. Each term is ONE table row:
+
+`| `Term` | One-line definition — what it IS, ≤200 chars. No PR-by-PR history, no deferred-finding notes, no cross-references (those live in REVIEW-HISTORY.md / REVIEW.md). | source file or introducing PR |`
+
+If GLOSSARY.md exists, do a bounded refresh (NOT an append):
+- Scan REVIEW.md, ACCEPTED-PATTERNS.md, CLAUDE.md, README.md for terms. ADD genuinely new terms as terse rows.
+- REMEDIATE existing bloat: rewrite any entry whose definition exceeds ~200 chars down to the terse one-liner (keep the term and its source ref — only the prose is trimmed). PRESERVE the full term set; do not drop real domain terms.
+- Strip the accumulating header narrative entirely. The header is the title line + a single `Last updated: <date>, HEAD <sha>` line. Delete any "Nth cleanup pass / since the previous pass / new terms this pass" preamble (see the global anti-bloat rule).
+- Drop terms no longer referenced anywhere in the repo or wiki.
+
+Target: the whole file well under 60KB. qai-be's glossary reached 261KB (300 entries averaging 810 bytes + an 18KB header essay) purely from append-without-cap — terse rows for the same 300 terms fit in ~50KB.
 
 ## Step 5: Report
 
