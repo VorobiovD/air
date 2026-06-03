@@ -91,8 +91,9 @@ on:
       agent_versions:
         description: |
           Optional JSON map pinning agent versions, e.g.
-          '{"air-code-reviewer": 12, "air-simplify": 9, "air-security-auditor": 12,
-            "air-git-history-reviewer": 9, "air-review-verifier": 9, "air-coordinator": 7}'.
+          '{"air-code-reviewer": N, "air-simplify": N, "air-security-auditor": N,
+            "air-git-history-reviewer": N, "air-review-verifier": N, "air-coordinator": N}'
+          with N taken from the target air release's notes.
           Pinned agents skip prompt sync entirely and sessions reference the
           pinned version — work repos pin the blessed set published in each
           air release's notes and bump deliberately; leave empty to float on

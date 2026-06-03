@@ -2,8 +2,10 @@
 """
 Bootstrap and sync: creates/updates air review agents + environment.
 
-Fetches the agent list once, then creates or updates each agent.
-Called by review.py on every run to keep prompts in sync.
+Fetches the agent list once, then creates or updates each agent — except
+agents pinned via AIR_AGENT_VERSIONS, which skip prompt sync entirely and
+resolve to their pinned {id, version} (see parse_agent_pins).
+Called by review.py on every run.
 
 Usage:
     export ANTHROPIC_API_KEY=sk-ant-...
@@ -70,6 +72,22 @@ def parse_agent_pins() -> dict[str, int]:
             file=sys.stderr,
         )
         sys.exit(1)
+    # A pinned coordinator dispatches whatever sub-agent versions its pinned
+    # revision recorded — pinning it without pinning every specialist gives a
+    # roster the caller can't see or control. Specialists-without-coordinator
+    # is fine (the floating coordinator's roster is rebuilt from the pinned
+    # specialist versions each sync).
+    if "air-coordinator" in pins:
+        unpinned = [f"air-{n}" for n in SUB_AGENTS if f"air-{n}" not in pins]
+        if unpinned:
+            print(
+                f"Error: air-coordinator is pinned but {unpinned} are not — "
+                f"pin the whole blessed set from one release (a pinned "
+                f"coordinator's sub-agent roster is fixed at its pinned "
+                f"version; partial pins skew it silently).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     return pins
 
 

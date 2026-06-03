@@ -50,7 +50,7 @@ jobs:
       # Pin the blessed agent set from an air release's notes (recommended
       # for work repos — bump deliberately instead of riding main; omit to
       # float on latest). Pin the WHOLE set from one release.
-      # agent_versions: '{"air-code-reviewer": 12, "air-simplify": 9, "air-security-auditor": 12, "air-git-history-reviewer": 9, "air-review-verifier": 9, "air-coordinator": 7}'
+      # agent_versions: '{"air-code-reviewer": N, "air-simplify": N, "air-security-auditor": N, "air-git-history-reviewer": N, "air-review-verifier": N, "air-coordinator": N}'  # N = versions from the release notes
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
@@ -157,7 +157,7 @@ python review.py myorg/myrepo 123 --no-codex  # skip Codex even if OPENAI_API_KE
 
 ## Agent updates
 
-When agent prompts change in the air repo, the workflow auto-updates deployed agents on the next PR (compares and patches via API). No manual step needed.
+When agent prompts change in the air repo, the workflow auto-updates deployed agents on the next PR (compares and patches via API). No manual step needed — unless the caller pins via `agent_versions`, in which case pinned agents skip sync until the caller bumps the pin.
 
 ## Security
 
