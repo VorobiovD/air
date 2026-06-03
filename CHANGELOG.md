@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.19.0](https://github.com/VorobiovD/air/compare/v1.18.0...v1.19.0) (2026-06-03)
+
+
+### Features
+
+* **agents:** targeted context retrieval (Pattern A) — grep pattern files, not whole reads ([#105](https://github.com/VorobiovD/air/issues/105)) ([52fda9e](https://github.com/VorobiovD/air/commit/52fda9e955c3a6c6129712574f09c6ef5067e206))
+
+
+### Bug Fixes
+
+* **learn:** bound glossary/history/profile growth (kill append-without-cap bloat) ([#101](https://github.com/VorobiovD/air/issues/101)) ([020c0dd](https://github.com/VorobiovD/air/commit/020c0dd33f90506e8d91f1d27f7f53d18bdcdaf2))
+* **learn:** make glossary/history caps surgical — preserve rules, gotchas, lifetime aggregates ([#102](https://github.com/VorobiovD/air/issues/102)) ([35dd31e](https://github.com/VorobiovD/air/commit/35dd31e51a5531080e3116b2fbf782f8375b0ae6))
+* **migrate:** byte-bound overflow chunking so no memory exceeds the 100KB cap ([#99](https://github.com/VorobiovD/air/issues/99)) ([118e654](https://github.com/VorobiovD/air/commit/118e654087ea6a4b641573e8fbfc419b38947501))
+
 ## [1.18.0](https://github.com/VorobiovD/air/compare/v1.17.0...v1.18.0) (2026-06-03)
 
 
