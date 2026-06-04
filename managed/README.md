@@ -76,6 +76,86 @@ jobs:
       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
 ```
 
+**Variant C — multi-reviewer (post under the requested reviewer's identity):** the review posts as whichever teammate was requested as reviewer, using *their* PAT. air's contract is unchanged — it still receives exactly one `AIR_BOT_TOKEN` and derives the identity from it at runtime. Selection happens entirely caller-side: a `resolve` job maps the requested login → a friendly secret **stem** via one repo variable `AIR_PAT_MAP`, and only that one PAT is passed (no `secrets: inherit`). Reference implementation: **thecvlb/svc-transcribe PR #88**.
+
+```yaml
+name: air review
+on:
+  pull_request:
+    types: [review_requested]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: string
+      reviewer:
+        description: 'GitHub login whose PAT posts the review (workflow_dispatch only)'
+        required: true
+        type: string
+      closed:
+        description: 'Allow review of closed/merged PR'
+        required: false
+        type: string
+        default: 'true'
+
+# DEFERRED (match svc-transcribe): do NOT SHA-pin the air ref yet (#89) and
+# do NOT add expected_reviewer yet (#90) — land them as additive follow-ups.
+
+jobs:
+  # Map the requested reviewer's login -> friendly PAT stem via the
+  # AIR_PAT_MAP repo variable. Keys = the allowlist; an unmapped login
+  # yields an empty stem -> the review job is skipped (safe by default,
+  # so merging this file changes nothing until the variable + secrets exist).
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      stem: ${{ steps.map.outputs.stem }}
+    steps:
+      - id: map
+        env:
+          LOGIN: ${{ github.event.requested_reviewer.login || inputs.reviewer }}
+          MAP: ${{ vars.AIR_PAT_MAP }}
+        run: |
+          # Keep verbatim. Do NOT rewrite as ${MAP:-{}} — bash mis-parses
+          # the nested braces and jq errors. This guard form is correct.
+          [ -n "$MAP" ] || MAP='{}'
+          STEM=$(printf '%s' "$MAP" | jq -r --arg k "$LOGIN" '.[$k] // empty')
+          echo "stem=$STEM" >> "$GITHUB_OUTPUT"
+
+  review:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.stem != '' }}
+    uses: VorobiovD/air/.github/workflows/managed-review.yml@main
+    with:
+      pr_number: ${{ inputs.pr_number }}   # empty on review_requested -> falls back to the PR event
+      closed: ${{ inputs.closed }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # The needs.* context IS available in secrets:; the requester's login is
+      # never an input here, so hyphenated/dotted logins can't break a secret name.
+      AIR_BOT_TOKEN: ${{ secrets[format('{0}_PAT', needs.resolve.outputs.stem)] }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}   # optional
+```
+
+Setup for Variant C:
+
+```bash
+# 1. The allowlist + login->stem map (keys = logins, values = friendly stems):
+gh variable set AIR_PAT_MAP --repo <owner>/<repo> \
+  --body '{"caguilaron":"CARLOS","adamdanielsnavarro":"ADAM","VorobiovD":"DIMA"}'
+
+# 2. Each reviewer sets their own per-repo secret <STEM>_PAT (CARLOS_PAT, ADAM_PAT, ...)
+#    = a fine-grained PAT (Pull requests: RW, Contents: RO, Checks: RW).
+#    Corporate PATs are capped at 7-day expiry -> rotate weekly; per-repo only.
+```
+
+**Why a stem map (not bare `<LOGIN>_PAT`):** GHA expressions have no `upper()` and secret names allow only `[A-Za-z0-9_]`, so a raw login like `christinacephus-md` can't be a secret name and `caguilaron` won't match `CAGUILARON_PAT`. The `resolve` job decouples the login from the secret name and keeps the lookup off the unambiguous `needs` context.
+
+**Behavioral note:** air keys prior-review detection, the pre-post dedup, and the re-review FIXED/NOT-FIXED delta on the token owner's login. A review posted under one reviewer's identity is *not* seen as "prior" by a run under a different reviewer's token on the same PR — that run posts a **fresh** review, not a delta. This is intentional (each requested reviewer keeps an independent thread); the cooldown debounce is any-author, so burst-coalescing still works across reviewers.
+
+**Optional hardening (`expected_reviewer`, deferred):** when a caller wants to fail loud on a mis-pasted PAT, air can grow an optional `expected_reviewer` input that asserts the resolved token-owner login equals the requester's login (case-insensitive). The caller passes the **login** (not the stem). Empty/absent → byte-for-byte today's behavior, so legacy single-token and SHA-pinned callers are unaffected. Tracked alongside svc-transcribe #90; not yet shipped.
+
 First PR auto-bootstraps the agents. Subsequent PRs reuse them.
 
 **Blessed agent sets:** to capture the set for a release, list the current versions after a green run on that release and paste the JSON into the GitHub Release notes:
