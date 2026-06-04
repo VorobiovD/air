@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.20.0](https://github.com/VorobiovD/air/compare/v1.19.2...v1.20.0) (2026-06-04)
+
+
+### Features
+
+* **managed:** optional expected_reviewer identity assertion ([#116](https://github.com/VorobiovD/air/issues/116)) ([ce01a55](https://github.com/VorobiovD/air/commit/ce01a55db003cee070739504dedaa272550c3803))
+
+
+### Bug Fixes
+
+* **managed:** retry transient preflight billing_error with backoff ([#113](https://github.com/VorobiovD/air/issues/113)) ([1e476fd](https://github.com/VorobiovD/air/commit/1e476fd7369fe2ed425152c5236df0376fb2ce6b))
+
 ## [1.19.2](https://github.com/VorobiovD/air/compare/v1.19.1...v1.19.2) (2026-06-03)
 
 
