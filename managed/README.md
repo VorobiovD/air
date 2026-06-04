@@ -111,6 +111,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       stem: ${{ steps.map.outputs.stem }}
+      login: ${{ steps.map.outputs.login }}   # for the optional expected_reviewer assert
     steps:
       - id: map
         env:
@@ -122,6 +123,7 @@ jobs:
           [ -n "$MAP" ] || MAP='{}'
           STEM=$(printf '%s' "$MAP" | jq -r --arg k "$LOGIN" '.[$k] // empty')
           echo "stem=$STEM" >> "$GITHUB_OUTPUT"
+          echo "login=$LOGIN" >> "$GITHUB_OUTPUT"
 
   review:
     needs: resolve
@@ -154,7 +156,21 @@ gh variable set AIR_PAT_MAP --repo <owner>/<repo> \
 
 **Behavioral note:** air keys prior-review detection, the pre-post dedup, and the re-review FIXED/NOT-FIXED delta on the token owner's login. A review posted under one reviewer's identity is *not* seen as "prior" by a run under a different reviewer's token on the same PR — that run posts a **fresh** review, not a delta. This is intentional (each requested reviewer keeps an independent thread); the cooldown debounce is any-author, so burst-coalescing still works across reviewers.
 
-**Optional hardening (`expected_reviewer`, deferred):** when a caller wants to fail loud on a mis-pasted PAT, air can grow an optional `expected_reviewer` input that asserts the resolved token-owner login equals the requester's login (case-insensitive). The caller passes the **login** (not the stem). Empty/absent → byte-for-byte today's behavior, so legacy single-token and SHA-pinned callers are unaffected. Tracked alongside svc-transcribe #90; not yet shipped.
+**Optional hardening (`expected_reviewer`, available):** to fail loud on a mis-pasted PAT, pass the optional `expected_reviewer` input — air resolves the `AIR_BOT_TOKEN` owner (`GET /user`) before any review spend and exits with `::error::` unless it equals this login (case-insensitive). Pass the **login**, not the stem (the resolve job already outputs it):
+
+```yaml
+  review:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.stem != '' }}
+    uses: VorobiovD/air/.github/workflows/managed-review.yml@main
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      closed: ${{ inputs.closed }}
+      expected_reviewer: ${{ needs.resolve.outputs.login }}   # opt-in identity assert
+    secrets: # ... (unchanged)
+```
+
+Empty/absent → byte-for-byte today's behavior, so legacy single-token and SHA-pinned callers are unaffected. (Local/manual runs: `export AIR_EXPECTED_REVIEWER=<login>` before `python review.py`.)
 
 First PR auto-bootstraps the agents. Subsequent PRs reuse them.
 

@@ -137,6 +137,20 @@ on:
         required: false
         type: string
         default: '20'
+      expected_reviewer:
+        description: |
+          Optional identity assertion for the multi-reviewer PAT model.
+          Pass the GitHub LOGIN of the human requested as reviewer (e.g.
+          'caguilaron') — NOT the friendly secret stem. Before any review
+          spend, review.py resolves the AIR_BOT_TOKEN owner (GET /user) and
+          fails loud (::error::, exit 1) unless it equals this login
+          (case-insensitive) — catching a wrong PAT pasted into a reviewer's
+          <STEM>_PAT secret, which would otherwise post under the wrong
+          identity silently. Empty (default) => no assertion; legacy
+          single-token and SHA-pinned callers behave byte-for-byte as before.
+        required: false
+        type: string
+        default: ''
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -349,6 +363,7 @@ jobs:
           NO_CODEX: ${{ inputs.no_codex }}
           FRESH: ${{ inputs.fresh }}
           AIR_AGENT_VERSIONS: ${{ inputs.agent_versions }}
+          AIR_EXPECTED_REVIEWER: ${{ inputs.expected_reviewer }}
           # Absolute path to the local checkout. review.py uses it for
           # both `codex review` (when enabled) and client-side
           # pre-computation (blame/churn/file-status/diff-check

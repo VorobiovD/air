@@ -1966,6 +1966,39 @@ async def run_review(args):
     else:
         bot_login = bot_login_result
 
+    # Identity assertion (opt-in, additive). When the caller passes
+    # AIR_EXPECTED_REVIEWER — the GitHub LOGIN of the human requested as
+    # reviewer (not the secret stem) — confirm the AIR_BOT_TOKEN actually
+    # belongs to that person before spending anything. Catches a wrong PAT
+    # pasted into a reviewer's <STEM>_PAT secret, which would otherwise post
+    # the review under the wrong identity, silently. Runs before codex and
+    # the coordinator session, so a mismatch fails at $0. Empty/unset => no
+    # assertion, so legacy single-token and SHA-pinned callers are byte-for-
+    # byte unchanged.
+    expected_reviewer = os.environ.get("AIR_EXPECTED_REVIEWER", "").strip()
+    if expected_reviewer:
+        if not bot_login:
+            print(
+                f"::error::AIR_EXPECTED_REVIEWER={expected_reviewer} is set but the "
+                "token owner could not be resolved (GET /user failed) — refusing to "
+                "post under an unverified identity.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if bot_login.lower() != expected_reviewer.lower():
+            print(
+                f"::error::token owner '{bot_login}' != requested reviewer "
+                f"'{expected_reviewer}' — wrong PAT in the reviewer's secret? "
+                "Refusing to post under the wrong identity.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(
+            f"  [identity] token owner '{bot_login}' matches expected reviewer "
+            f"'{expected_reviewer}'",
+            file=sys.stderr,
+        )
+
     fetch_labels = ("issue comments", "pr reviews", "inline comments")
     coerced: list[list[dict]] = []
     for label, result in zip(fetch_labels, conversation_results):
