@@ -191,12 +191,14 @@ def test_archive_narratives_folded_into_review_archive():
         "/archive/legacy.md": "# Legacy\n\n- old export prose",
         "/archive/VorobiovD.md": "### VorobiovD (archived)\n\n- capped-out detail",
         "/archive/glossary-overflow-1.md": "OVERFLOW_FRAGMENT_NOT_STANDALONE",
+        "/archive/glossary-overflow-bad.md": "MALFORMED_CHUNK_NOT_STANDALONE",
     }
     read, paths = _reader(store)
     ra = r.render_shared_files(read, paths)["REVIEW-ARCHIVE.md"]
     assert "old export prose" in ra            # legacy export preserved
     assert "capped-out detail" in ra           # per-author archive folded in
-    assert "OVERFLOW_FRAGMENT_NOT_STANDALONE" not in ra   # chunk excluded
+    assert "OVERFLOW_FRAGMENT_NOT_STANDALONE" not in ra   # numeric chunk excluded
+    assert "MALFORMED_CHUNK_NOT_STANDALONE" not in ra     # malformed chunk also excluded
 
 
 _TESTS = [v for k, v in sorted(globals().items())

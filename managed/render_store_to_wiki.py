@@ -50,7 +50,11 @@ MIRROR_BANNER = (
 
 REVIEW_MISC_PATH = "/review-misc.md"
 _OVERFLOW_HEADER_RE = re.compile(r"^<!-- older content: see .*-overflow-\*\.md -->\s*$")
-_OVERFLOW_NAME_RE = re.compile(r"-overflow-\d+$")   # matches a chunk file's stem
+# Matches a chunk file's stem. Deliberately lenient (`[^.]+`, not `\d+`) to
+# stay symmetric with _overflow_paths' prefix-based collection — otherwise a
+# malformed `<stem>-overflow-bad.md` would be reassembled into its primary AND
+# folded standalone into REVIEW-ARCHIVE.md (double-inclusion).
+_OVERFLOW_NAME_RE = re.compile(r"-overflow-[^.]+$")
 
 # store path -> wiki filename. Derived as the literal inverse of
 # migrate.WIKI_FILE_MAP MINUS the counter (.air-meta.json never mirrors to the
@@ -79,11 +83,11 @@ def _overflow_paths(all_paths, stem: str) -> list[str]:
     for p in all_paths:
         if p.startswith(pref) and p.endswith(".md"):
             try:
-                found.append((float(int(p[len(pref):-3])), p))
+                found.append((int(p[len(pref):-3]), p))
             except ValueError:
                 # Unparseable index → sort LAST (newest), never first: a
                 # malformed name must not be prepended as the oldest chunk and
-                # corrupt the reassembled order.
+                # corrupt the reassembled order. (int and inf sort fine together.)
                 found.append((float("inf"), p))
     return [p for _, p in sorted(found)]
 
