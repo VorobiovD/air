@@ -158,6 +158,17 @@ VERIFIER_AGENT = "air-review-verifier"
 
 COORDINATOR_AGENT = "air-coordinator"
 
+# Single-session reviewer (opt-in AIR_REVIEW_MODE=solo|both). One agent applies
+# all 5 lenses + self-verifies; prompt assembled from the specialists in
+# setup.py (assemble_solo_prompt). Required only when a run uses solo/both.
+SOLO_AGENT = "air-solo-reviewer"
+
+# Review architecture axis (AIR_REVIEW_MODE / --mode), ORTHOGONAL to `mode`
+# (the scope axis: full vs re-review). full = 6-agent coordinator (default);
+# solo = single merged-lens agent; both = run both (full gates, solo posted
+# alongside for comparison — testing).
+REVIEW_ARCH_CHOICES = ("full", "solo", "both")
+
 # Per-session cap so one hung stream can't stall the whole review until the
 # GitHub Actions job timeout (default 30 min) kills it. asyncio.wait_for()
 # wraps each call; on expiry the coroutine raises TimeoutError. Used for
@@ -340,7 +351,7 @@ async def run_codex_session(target_repo: str, base_sha: str) -> str:
     return output
 
 
-def sync_agents():
+def sync_agents(review_arch: str = "full"):
     """Run setup.py to create/update agents (pinned agents skip sync)."""
     print("[1] Syncing agents with latest prompts...")
     # Narrow env to only what setup.py needs, avoiding accidental exposure of
@@ -352,6 +363,11 @@ def sync_agents():
         # prompt sync for pinned agents; run_review applies the same pins
         # to the session roster.
         "AIR_AGENT_VERSIONS": os.environ.get("AIR_AGENT_VERSIONS", ""),
+        # The resolved review architecture — setup.py only creates the
+        # air-solo-reviewer agent when the run actually needs it (solo/both),
+        # so a full-only run never creates it (and can't be aborted by a
+        # solo-agent creation failure on an at-capacity workspace).
+        "AIR_REVIEW_MODE": review_arch,
     }
     result = subprocess.run(
         [sys.executable, str(Path(__file__).parent / "setup.py")],
@@ -1829,14 +1845,386 @@ async def run_session(
     return output
 
 
+async def _run_session_with_billing_retry(make_session_coro, label: str) -> str:
+    """Run a managed session under the preflight billing-retry contract.
+
+    `make_session_coro` is a zero-arg callable returning a FRESH `run_session`
+    coroutine on each call (retries must re-create the awaitable). Each attempt
+    is wrapped in `asyncio.wait_for(COORDINATOR_TIMEOUT_SECS)`. A FAST (preflight,
+    ~0-token) billing_error is retried `BILLING_RETRY_MAX_ATTEMPTS` times with
+    backoff; a slow / mid-session billing error is NOT retried (it would re-spend
+    real work), and non-billing failures propagate immediately. Returns the
+    session output; raises `SpecialistSessionError` on exhaustion / non-billing /
+    mid-session billing. Shared by `_run_coordinator_session` and
+    `_run_solo_session` so the retry contract has one definition.
+    """
+    for _attempt in range(1, BILLING_RETRY_MAX_ATTEMPTS + 1):
+        _attempt_t0 = time.monotonic()
+        try:
+            return await asyncio.wait_for(make_session_coro(), timeout=COORDINATOR_TIMEOUT_SECS)
+        except SpecialistSessionError as _e:
+            _elapsed = time.monotonic() - _attempt_t0
+            _is_billing = any(h in _e.reason.lower() for h in _BILLING_REASON_HINTS)
+            _preflight = _elapsed < BILLING_RETRY_PREFLIGHT_SECS
+            if _is_billing and _preflight and _attempt < BILLING_RETRY_MAX_ATTEMPTS:
+                print(
+                    f"  [retry] {label} billing_error after {_elapsed:.1f}s "
+                    f"(preflight, ~0 tokens — likely the transient credit-balance "
+                    f"false-positive). Attempt {_attempt}/{BILLING_RETRY_MAX_ATTEMPTS} "
+                    f"failed; retrying in {BILLING_RETRY_BACKOFF_SECS}s.",
+                    file=sys.stderr,
+                )
+                await asyncio.sleep(BILLING_RETRY_BACKOFF_SECS)
+                continue
+            if _is_billing and not _preflight:
+                print(
+                    f"  [warn] {label} billing_error after {_elapsed:.1f}s — past the "
+                    f"preflight window (real work already done); not retrying (would "
+                    f"re-spend). Failing loud.",
+                    file=sys.stderr,
+                )
+            raise  # non-billing, slow billing, or attempts exhausted
+    # Unreachable: the loop returns on success or raises on the final attempt.
+    # Present only so every path satisfies the `-> str` contract.
+    raise SpecialistSessionError(label, "billing retry exhausted")  # pragma: no cover
+
+
+# Anti-spoof: compare the `Reviewed at:` footer SHA on a 12-hex-char prefix
+# (48 bits — unguessable for spoofing) rather than full 40-char equality, which
+# proved too strict (models occasionally corrupt the SHA tail; svc-transcribe
+# #84). Named here, alongside the function that enforces it.
+_SHA_PREFIX_LEN = 12
+
+
+def _extract_review_body(raw_text: str, head_sha: str) -> tuple[str, bool]:
+    """Extract the SHA-validated `## Code Review` body from a session output.
+
+    Returns (review_body, extracted). The runtime interleaves sub-agent
+    forwards (`<agent-notification thread_id="...">...</agent-notification>`)
+    with the agent's own voice. Strategy: ignore segmentation — anchor on the
+    `Reviewed at: <head_sha>` footer the review ALWAYS emits, walk back to the
+    most recent `## Code Review` line, and validate the captured SHA matches
+    the head_sha we reviewed. The SHA validation closes the verdict-flip
+    prompt-injection surface (PR #47 v1 audit): an attacker echoing PR diff
+    content can fake the `## Code Review` header + `### Blockers` template, but
+    can't predict head_sha (the commit's own SHA, not in the diff). Candidates
+    whose footer SHA doesn't match are rejected.
+
+    Tag-stripping flattens `<agent-notification ...>` open + close tags into
+    newlines so the header anchor works at byte 0, after a wrapper close, or
+    after a `\\n`. Backtick-prefixed mid-narration mentions are rejected by the
+    negative lookbehind.
+    """
+    _flattened = re.sub(r"</?agent-notification\b[^>]*>", "\n", raw_text)
+    # Walk every `## Code Review[^\n]*` occurrence NOT preceded by a backtick
+    # (inline-code narration). The header need NOT be at start-of-line
+    # (qai-be #635 had narration concatenated on the same line). The next-`## `
+    # heading bound prevents one candidate's body from swallowing downstream
+    # content. Walk candidates in reverse; pick the first whose footer matches.
+    _header_re = re.compile(r"(?<!`)## Code Review[^\n]*\n")
+    _next_h2_re = re.compile(r"(?<!`)(?:^|\n)## ")
+    # NOTE: do NOT add `\b` between the 40-char hex and `[^\n]*`. Word-boundary
+    # fails when the SHA is followed by another word char (qai-be #666 round 7:
+    # `...936Wiki push failed...` had no boundary between `6` and `W`). The
+    # 40-char exact quantifier is the anchor; the 12-char prefix compare below
+    # is the validator. `[^\n]*` eats the rest of the line so match end is defined.
+    _footer_re = re.compile(r"\nReviewed at:\s+([0-9a-f]{40})[^\n]*")
+    _candidates = []
+    for _hm in _header_re.finditer(_flattened):
+        _body_start = _hm.end()
+        _next_h2 = _next_h2_re.search(_flattened, _body_start)
+        _bound = _next_h2.start() if _next_h2 else len(_flattened)
+        _fm = _footer_re.search(_flattened, _body_start, _bound)
+        if _fm is None:
+            continue
+        _candidates.append((_hm.start(), _fm.end(), _fm.group(1)))
+    # Anti-spoof validator (see _SHA_PREFIX_LEN): a poisoned diff can echo
+    # `## Code Review` but can't predict the run's head SHA. Prefix equality
+    # keeps the security property while tolerating model tail-corruption.
+    for _start, _end, _sha in reversed(_candidates):
+        if _sha[:_SHA_PREFIX_LEN] != head_sha[:_SHA_PREFIX_LEN]:
+            print(
+                f"  [warn] discarding `## Code Review` block at offset "
+                f"{_start} — `Reviewed at:` SHA {_sha} doesn't match "
+                f"head_sha {head_sha} (first {_SHA_PREFIX_LEN} chars "
+                f"compared)",
+                file=sys.stderr,
+            )
+            continue
+        if _sha != head_sha:
+            print(
+                f"  [info] footer SHA tail-corrupted by the model "
+                f"({_sha} vs {head_sha}) — accepted on "
+                f"{_SHA_PREFIX_LEN}-char prefix match",
+                file=sys.stderr,
+            )
+        return _flattened[_start:_end].rstrip(), True
+    return "", False
+
+
+async def _run_coordinator_session(
+    agents, env_id, args, checkout, bot_token, store_id,
+    pr_context, diff, codex_block, verifier_task, meta, mode, head_sha,
+) -> tuple[str, str]:
+    """Run the multi-agent coordinator session (the default 'full' path).
+
+    One Anthropic session dispatches the 4 specialists + verifier as
+    callable_agents. Returns (output, failure_reason) for the shared
+    post-review pipeline. Includes the optional (default-off) file-handoff
+    path and the preflight billing-retry contract.
+    """
+    # File-handoff (EXPERIMENTAL — opt-in via AIR_FILE_HANDOFF=1): the three
+    # input docs ride into the session as mounted Files-API resources, and
+    # the coordinator user message shrinks to a pointer note. Targets the
+    # ~16K output tokens / ~240s the coordinator spends re-emitting the
+    # context+diff in TURN 1/2 (ai-relay #216 session audit).
+    #
+    # OFF BY DEFAULT: verified 2026-06-03 (air run 26855698173, session
+    # sesn_01BmuyMmoVUP6xeaWWNXW9pM) that callable-agent threads run in
+    # ISOLATED containers on the research-preview runtime — `file` session
+    # resources do not appear in sub-agent thread containers (the verifier
+    # found /workspace/context/ absent while /workspace/repo, a
+    # github_repository resource, was present), and one thread's writes to
+    # /workspace/findings/ are invisible to siblings. Specialists improvise
+    # when their input paths don't exist (simplify hallucinated a fantasy
+    # PR). Re-enable only after the runtime propagates file mounts +
+    # workspace writes to threads — re-verify with a closed-PR dispatch
+    # before flipping any caller.
+    handoff_enabled = os.environ.get("AIR_FILE_HANDOFF", "") in ("1", "true")
+    handoff_docs = {
+        "pr-context.md": pr_context,
+        "pr.diff": diff,
+        "verifier-task.md": (
+            f"{codex_block}\n\n<verifier-task>\n{verifier_task}\n</verifier-task>"
+        ),
+    }
+    # Dispatch note for file-handoff mode. Scalars only — PR title/body and
+    # everything else attacker-influenced stays inside pr-context.md where
+    # build_pr_context already escaped and wrapped it. The author login is
+    # GitHub-validated ([A-Za-z0-9-]) and safe to interpolate.
+    pattern_note = (
+        "memory store (read-only at /mnt/memory/ — TURN 3 Part B is SKIPPED)"
+        if store_id
+        else "legacy wiki at /workspace/wiki"
+    )
+    handoff_user_text = f"""MODE: FILE-HANDOFF — review inputs are mounted as files, not embedded here.
+
+- PR: #{meta['number']} by {meta['user']['login']} | repo: {args.repo} | review mode: {mode} | HEAD: {head_sha}
+- PR context: /workspace/context/pr-context.md
+- Diff under review: /workspace/context/pr.diff
+- Verifier task + codex findings: /workspace/context/verifier-task.md
+- Specialist findings directory: /workspace/findings/
+- Pattern source: {pattern_note}
+
+Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do not paste file contents into delegations — pass the paths."""
+
+    # Single coordinator session replaces v1.7's 4-specialist asyncio.gather +
+    # sequential verifier session (5 sessions → 1). Empirical -49% cost vs the
+    # prior 5-session shape on PR #40 fixture (managed/experiments/), same
+    # models + same prompts, just architectural change. Anthropic's
+    # `callable_agents` runtime fans the 4 specialists out concurrently within
+    # the one session — see managed/api.py for the research-preview header.
+    coordinator_out = ""
+    coordinator_failure_reason = ""
+    try:
+        async with AsyncAnthropic() as client:
+            file_resources: list[dict] = []
+            handoff_ids: list[str] = []
+            coordinator_user_text = ""
+            if handoff_enabled:
+                try:
+                    file_resources, handoff_ids = await _upload_handoff_files(
+                        client, handoff_docs
+                    )
+                    coordinator_user_text = handoff_user_text
+                    print(f"  file-handoff: {len(handoff_ids)} input files mounted under /workspace/context/ (EXPERIMENTAL)")
+                except Exception as e:
+                    # Never block a review on handoff plumbing — fall back to
+                    # the legacy inline message shape (coordinator.md handles
+                    # both).
+                    print(
+                        f"  [warn] file-handoff upload failed "
+                        f"({type(e).__name__}: {e}) — falling back to inline context",
+                        file=sys.stderr,
+                    )
+            if not coordinator_user_text:
+                # The MODE header is load-bearing: without it the coordinator
+                # defaults to file-handoff delegation (coordinator.md's former
+                # "primary" framing) even on inline runs — instructing
+                # specialists to read /workspace/context/ + write
+                # /workspace/findings/, which aren't mounted / don't propagate
+                # across threads here. It then re-delegates inline to recover,
+                # burning the very output the dance was meant to save (10 of 12
+                # sessions on 2026-06-03 leaked this way).
+                coordinator_user_text = (
+                    "MODE: INLINE — the full PR context, diff, and verifier "
+                    "task are embedded below. Delegate to specialists with this "
+                    "inline content; they reply with findings INLINE. Do NOT "
+                    "tell any specialist to read /workspace/context/ or write "
+                    "/workspace/findings/ — those paths are not mounted on this "
+                    "run.\n\n"
+                    f"{pr_context}\n\n"
+                    f"<diff>\n{diff}\n</diff>\n\n"
+                    f"{codex_block}\n\n"
+                    f"<verifier-task>\n{verifier_task}\n</verifier-task>"
+                )
+            try:
+                # Billing-retry contract lives in _run_session_with_billing_retry.
+                coordinator_out = await _run_session_with_billing_retry(
+                    lambda: run_session(
+                        client,
+                        agents[COORDINATOR_AGENT]["id"], agents[COORDINATOR_AGENT]["version"],
+                        env_id, args.repo, checkout, bot_token,
+                        coordinator_user_text, COORDINATOR_AGENT,
+                        store_id=store_id,
+                        file_resources=file_resources,
+                    ),
+                    "coordinator",
+                )
+            finally:
+                # Per-run scratch — delete after the session ends (any exit
+                # path) to keep org Files storage clean. Never before: the
+                # mounts belong to the session for its whole lifetime.
+                for fid in handoff_ids:
+                    try:
+                        await client.beta.files.delete(fid)
+                    except Exception as cleanup_err:
+                        # Best-effort but never silent — a persistent delete
+                        # failure means scratch files accumulate in shared
+                        # org storage with no other signal.
+                        print(
+                            f"  [warn] file-handoff cleanup failed for {fid}: "
+                            f"{type(cleanup_err).__name__}",
+                            file=sys.stderr,
+                        )
+    except SpecialistSessionError as e:
+        # run_session raised because terminated_reason was set and no
+        # parts were captured — common cause: `session.error` event
+        # carrying BetaManagedAgentsBillingError when ANTHROPIC_API_KEY
+        # is out of credits, surfaced here as `e.reason`. Stash the
+        # reason so the structured-fallback block can branch on it
+        # (billing → actionable "top up the key" message; other → the
+        # generic stale-cache message). coordinator_out stays empty so
+        # the SHA-extractor falls through to that block normally.
+        coordinator_failure_reason = e.reason
+        coordinator_out = ""
+        print(
+            f"  [warn] coordinator session raised SpecialistSessionError: "
+            f"{e.reason}",
+            file=sys.stderr,
+        )
+    return coordinator_out, coordinator_failure_reason
+
+
+async def _run_solo_session(
+    agents, env_id, args, checkout, bot_token, store_id,
+    pr_context, diff, codex_block, verifier_task,
+) -> tuple[str, str]:
+    """Run ONE merged-lens agent (air-solo-reviewer) in a single session.
+
+    The opt-in AIR_REVIEW_MODE=solo|both path: one agent applies all 5 lenses +
+    self-verifies + folds Codex findings, emitting the same `## Code Review`
+    (incl. the `Reviewed at:` footer the extractor validates). Mirrors the
+    coordinator's preflight billing-retry + wall timeout. A single agent spawns
+    no callable_agents sub-threads, so run_session breaks on first idle.
+    Returns (output, failure_reason) — same shape as the coordinator block.
+    """
+    solo_user_text = (
+        "MODE: SOLO — review this PR yourself, applying EVERY lens in your "
+        "system prompt (bugs, design, security, simplification, git-history "
+        "risk) and self-verifying (drop false positives / below-60 confidence). "
+        "There is no separate verifier pass; the verifier lens applies to your "
+        "OWN findings. The full source is mounted read-only at /workspace/repo "
+        "— read surrounding files as needed.\n\n"
+        f"{pr_context}\n\n"
+        f"<diff>\n{diff}\n</diff>\n\n"
+        "A separate reviewer (Codex) produced the candidate findings in the "
+        "<codex-findings> block below. VERIFY each against the diff and the "
+        "mounted source, drop false positives / below-60-confidence, dedup "
+        "against your own findings, and FOLD the confirmed ones into your "
+        f"`## Code Review`.\n{codex_block}\n\n"
+        "The block below is your OUTPUT FORMAT SPEC — use its `## Code Review` "
+        "template and rules verbatim (including the `Reviewed at:` footer, which "
+        "the orchestrator validates against the head SHA). It was written for a "
+        "multi-agent run, so IGNORE any reference in it to 'specialist reviewers' "
+        "or reading from `/workspace/findings/` — there are none; you produced "
+        "every finding yourself.\n"
+        f"<verifier-task>\n{verifier_task}\n</verifier-task>"
+    )
+    failure_reason = ""
+    out = ""
+    try:
+        async with AsyncAnthropic() as client:
+            out = await _run_session_with_billing_retry(
+                lambda: run_session(
+                    client,
+                    agents[SOLO_AGENT]["id"], agents[SOLO_AGENT]["version"],
+                    env_id, args.repo, checkout, bot_token,
+                    solo_user_text, SOLO_AGENT,
+                    store_id=store_id,
+                    file_resources=None,
+                ),
+                "solo",
+            )
+    except SpecialistSessionError as e:
+        failure_reason = e.reason
+        out = ""
+        print(
+            f"  [warn] solo session raised SpecialistSessionError: {e.reason}",
+            file=sys.stderr,
+        )
+    except Exception as e:  # noqa: BLE001
+        # Degrade gracefully — a solo failure (notably asyncio.TimeoutError from
+        # the wall-clock cap, which the billing-retry helper does NOT catch)
+        # must NEVER crash run_review and discard an already-computed coordinator
+        # review in `both` mode. Same posture as the codex degradation path.
+        failure_reason = f"{type(e).__name__}: {e}"
+        out = ""
+        print(f"  [warn] solo session failed: {failure_reason}", file=sys.stderr)
+    return out, failure_reason
+
+
+def _unpack_session_result(result, label: str) -> tuple[str, str]:
+    """Coerce an `asyncio.gather(return_exceptions=True)` entry to (out, reason).
+
+    A session helper returns `(out, reason)`; a raised exception (e.g. a
+    coordinator `asyncio.TimeoutError`, which `_run_coordinator_session` does
+    NOT catch — full-mode behavior is preserved by leaving it to propagate
+    there) becomes `("", reason)` so `both` mode never crashes and the other
+    session's result survives.
+    """
+    if isinstance(result, BaseException):
+        return "", f"{label} session error: {type(result).__name__}: {result}"
+    return result
+
+
 async def run_review(args):
     bot_token = os.environ["AIR_BOT_TOKEN"]
 
-    sync_agents()
+    # Review architecture: --mode > AIR_REVIEW_MODE > "full". Orthogonal to the
+    # `mode` scope var (full/re-review) resolved later in this function — the
+    # two compose (e.g. solo can run in re-review scope).
+    review_arch = args.mode or os.environ.get("AIR_REVIEW_MODE", "").strip() or "full"
+    if review_arch not in REVIEW_ARCH_CHOICES:
+        print(f"Error: invalid review mode {review_arch!r} (expected one of {REVIEW_ARCH_CHOICES}).", file=sys.stderr)
+        sys.exit(1)
+    if review_arch != "full":
+        print(f"  [mode] review architecture: {review_arch}")
+
+    sync_agents(review_arch)
     agents = list_agents()
     env_id = find_environment()
 
-    required = SPECIALIST_AGENTS + [VERIFIER_AGENT, COORDINATOR_AGENT]
+    # Required-agents gate is conditional on the architecture: full needs the
+    # specialists+verifier+coordinator; solo needs only the solo agent; both
+    # needs all. Full-only repos never require air-solo-reviewer, so its
+    # presence/absence can't break the default path.
+    if review_arch == "solo":
+        required = [SOLO_AGENT]
+    elif review_arch == "both":
+        required = SPECIALIST_AGENTS + [VERIFIER_AGENT, COORDINATOR_AGENT, SOLO_AGENT]
+    else:
+        required = SPECIALIST_AGENTS + [VERIFIER_AGENT, COORDINATOR_AGENT]
     missing = [n for n in required if n not in agents]
     if missing or not env_id:
         print(f"Missing agents: {missing}, env={env_id}. Run setup.py first.", file=sys.stderr)
@@ -2384,180 +2772,64 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     else:
         codex_block = "<codex-findings>(codex unavailable or disabled)</codex-findings>"
 
-    # File-handoff (EXPERIMENTAL — opt-in via AIR_FILE_HANDOFF=1): the three
-    # input docs ride into the session as mounted Files-API resources, and
-    # the coordinator user message shrinks to a pointer note. Targets the
-    # ~16K output tokens / ~240s the coordinator spends re-emitting the
-    # context+diff in TURN 1/2 (ai-relay #216 session audit).
-    #
-    # OFF BY DEFAULT: verified 2026-06-03 (air run 26855698173, session
-    # sesn_01BmuyMmoVUP6xeaWWNXW9pM) that callable-agent threads run in
-    # ISOLATED containers on the research-preview runtime — `file` session
-    # resources do not appear in sub-agent thread containers (the verifier
-    # found /workspace/context/ absent while /workspace/repo, a
-    # github_repository resource, was present), and one thread's writes to
-    # /workspace/findings/ are invisible to siblings. Specialists improvise
-    # when their input paths don't exist (simplify hallucinated a fantasy
-    # PR). Re-enable only after the runtime propagates file mounts +
-    # workspace writes to threads — re-verify with a closed-PR dispatch
-    # before flipping any caller.
-    handoff_enabled = os.environ.get("AIR_FILE_HANDOFF", "") in ("1", "true")
-    handoff_docs = {
-        "pr-context.md": pr_context,
-        "pr.diff": diff,
-        "verifier-task.md": (
-            f"{codex_block}\n\n<verifier-task>\n{verifier_task}\n</verifier-task>"
-        ),
-    }
-    # Dispatch note for file-handoff mode. Scalars only — PR title/body and
-    # everything else attacker-influenced stays inside pr-context.md where
-    # build_pr_context already escaped and wrapped it. The author login is
-    # GitHub-validated ([A-Za-z0-9-]) and safe to interpolate.
-    pattern_note = (
-        "memory store (read-only at /mnt/memory/ — TURN 3 Part B is SKIPPED)"
-        if store_id
-        else "legacy wiki at /workspace/wiki"
-    )
-    handoff_user_text = f"""MODE: FILE-HANDOFF — review inputs are mounted as files, not embedded here.
-
-- PR: #{meta['number']} by {meta['user']['login']} | repo: {args.repo} | review mode: {mode} | HEAD: {head_sha}
-- PR context: /workspace/context/pr-context.md
-- Diff under review: /workspace/context/pr.diff
-- Verifier task + codex findings: /workspace/context/verifier-task.md
-- Specialist findings directory: /workspace/findings/
-- Pattern source: {pattern_note}
-
-Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do not paste file contents into delegations — pass the paths."""
-
-    # Single coordinator session replaces v1.7's 4-specialist asyncio.gather +
-    # sequential verifier session (5 sessions → 1). Empirical -49% cost vs the
-    # prior 5-session shape on PR #40 fixture (managed/experiments/), same
-    # models + same prompts, just architectural change. Anthropic's
-    # `callable_agents` runtime fans the 4 specialists out concurrently within
-    # the one session — see managed/api.py for the research-preview header.
-    print(f"\n[4] Running coordinator session ({len(SPECIALIST_AGENTS)} specialists in parallel + verifier)...")
+    # ===== Review architecture branch (full / solo / both) =====
+    # full → multi-agent coordinator (default); solo → one merged-lens agent;
+    # both → run both, with the COORDINATOR review as the gating output (drives
+    # the verdict + pattern_writer + counter) and the SOLO review posted
+    # alongside, labeled and non-gating, for comparison (testing). Every path
+    # produces (coordinator_out, coordinator_failure_reason) for the shared
+    # post-review pipeline below; `both` additionally keeps (solo_out, ...).
+    print(f"\n[4] Running review session(s) [mode: {review_arch}]...")
     t0 = time.monotonic()
-    coordinator_failure_reason: str = ""
-    try:
-        async with AsyncAnthropic() as client:
-            file_resources: list[dict] = []
-            handoff_ids: list[str] = []
-            coordinator_user_text = ""
-            if handoff_enabled:
-                try:
-                    file_resources, handoff_ids = await _upload_handoff_files(
-                        client, handoff_docs
-                    )
-                    coordinator_user_text = handoff_user_text
-                    print(f"  file-handoff: {len(handoff_ids)} input files mounted under /workspace/context/ (EXPERIMENTAL)")
-                except Exception as e:
-                    # Never block a review on handoff plumbing — fall back to
-                    # the legacy inline message shape (coordinator.md handles
-                    # both).
-                    print(
-                        f"  [warn] file-handoff upload failed "
-                        f"({type(e).__name__}: {e}) — falling back to inline context",
-                        file=sys.stderr,
-                    )
-            if not coordinator_user_text:
-                # The MODE header is load-bearing: without it the coordinator
-                # defaults to file-handoff delegation (coordinator.md's former
-                # "primary" framing) even on inline runs — instructing
-                # specialists to read /workspace/context/ + write
-                # /workspace/findings/, which aren't mounted / don't propagate
-                # across threads here. It then re-delegates inline to recover,
-                # burning the very output the dance was meant to save (10 of 12
-                # sessions on 2026-06-03 leaked this way).
-                coordinator_user_text = (
-                    "MODE: INLINE — the full PR context, diff, and verifier "
-                    "task are embedded below. Delegate to specialists with this "
-                    "inline content; they reply with findings INLINE. Do NOT "
-                    "tell any specialist to read /workspace/context/ or write "
-                    "/workspace/findings/ — those paths are not mounted on this "
-                    "run.\n\n"
-                    f"{pr_context}\n\n"
-                    f"<diff>\n{diff}\n</diff>\n\n"
-                    f"{codex_block}\n\n"
-                    f"<verifier-task>\n{verifier_task}\n</verifier-task>"
-                )
-            try:
-                # Transient billing_error retry (see BILLING_RETRY_* above):
-                # re-attempt a FAST (preflight, ~0-token) billing rejection a
-                # couple of times with backoff before giving up. A slow /
-                # mid-session billing failure is NOT retried (it would re-spend
-                # real work), and non-billing failures propagate immediately.
-                for _attempt in range(1, BILLING_RETRY_MAX_ATTEMPTS + 1):
-                    _attempt_t0 = time.monotonic()
-                    try:
-                        coordinator_out = await asyncio.wait_for(
-                            run_session(
-                                client,
-                                agents[COORDINATOR_AGENT]["id"], agents[COORDINATOR_AGENT]["version"],
-                                env_id, args.repo, checkout, bot_token,
-                                coordinator_user_text, COORDINATOR_AGENT,
-                                store_id=store_id,
-                                file_resources=file_resources,
-                            ),
-                            timeout=COORDINATOR_TIMEOUT_SECS,
-                        )
-                        break  # success
-                    except SpecialistSessionError as _e:
-                        _elapsed = time.monotonic() - _attempt_t0
-                        _is_billing = any(h in _e.reason.lower() for h in _BILLING_REASON_HINTS)
-                        _preflight = _elapsed < BILLING_RETRY_PREFLIGHT_SECS
-                        if _is_billing and _preflight and _attempt < BILLING_RETRY_MAX_ATTEMPTS:
-                            print(
-                                f"  [retry] billing_error after {_elapsed:.1f}s "
-                                f"(preflight, ~0 tokens — likely the transient "
-                                f"credit-balance false-positive). Attempt "
-                                f"{_attempt}/{BILLING_RETRY_MAX_ATTEMPTS} failed; "
-                                f"retrying in {BILLING_RETRY_BACKOFF_SECS}s.",
-                                file=sys.stderr,
-                            )
-                            await asyncio.sleep(BILLING_RETRY_BACKOFF_SECS)
-                            continue
-                        if _is_billing and not _preflight:
-                            print(
-                                f"  [warn] billing_error after {_elapsed:.1f}s — past "
-                                f"the preflight window (real work already done); not "
-                                f"retrying (would re-spend). Failing loud.",
-                                file=sys.stderr,
-                            )
-                        raise  # non-billing, slow billing, or attempts exhausted
-            finally:
-                # Per-run scratch — delete after the session ends (any exit
-                # path) to keep org Files storage clean. Never before: the
-                # mounts belong to the session for its whole lifetime.
-                for fid in handoff_ids:
-                    try:
-                        await client.beta.files.delete(fid)
-                    except Exception as cleanup_err:
-                        # Best-effort but never silent — a persistent delete
-                        # failure means scratch files accumulate in shared
-                        # org storage with no other signal.
-                        print(
-                            f"  [warn] file-handoff cleanup failed for {fid}: "
-                            f"{type(cleanup_err).__name__}",
-                            file=sys.stderr,
-                        )
-    except SpecialistSessionError as e:
-        # run_session raised because terminated_reason was set and no
-        # parts were captured — common cause: `session.error` event
-        # carrying BetaManagedAgentsBillingError when ANTHROPIC_API_KEY
-        # is out of credits, surfaced here as `e.reason`. Stash the
-        # reason so the structured-fallback block can branch on it
-        # (billing → actionable "top up the key" message; other → the
-        # generic stale-cache message). coordinator_out stays empty so
-        # the SHA-extractor falls through to that block normally.
-        coordinator_failure_reason = e.reason
-        coordinator_out = ""
-        print(
-            f"  [warn] coordinator session raised SpecialistSessionError: "
-            f"{e.reason}",
-            file=sys.stderr,
+    coordinator_out = ""
+    coordinator_failure_reason = ""
+    solo_out = ""
+    solo_failure_reason = ""
+
+    if review_arch == "both":
+        # Run the two independent sessions CONCURRENTLY so wall-clock ≈
+        # max(coordinator, solo), not the sum — a sequential layout could hit
+        # codex + 45m coordinator + 45m solo and blow the 95-min GHA cap.
+        # return_exceptions so a crash in one (e.g. a coordinator
+        # asyncio.TimeoutError, which _run_coordinator_session does not catch)
+        # can't cancel the other — the surviving review still posts.
+        print("  Running coordinator + solo sessions concurrently (both mode)...")
+        _coord_res, _solo_res = await asyncio.gather(
+            _run_coordinator_session(
+                agents, env_id, args, checkout, bot_token, store_id,
+                pr_context, diff, codex_block, verifier_task, meta, mode, head_sha,
+            ),
+            _run_solo_session(
+                agents, env_id, args, checkout, bot_token, store_id,
+                pr_context, diff, codex_block, verifier_task,
+            ),
+            return_exceptions=True,
         )
+        coordinator_out, coordinator_failure_reason = _unpack_session_result(_coord_res, "coordinator")
+        solo_out, solo_failure_reason = _unpack_session_result(_solo_res, "solo")
+        if not solo_out and solo_failure_reason:
+            print(
+                f"  [warn] both-mode: solo review unavailable ({solo_failure_reason[:200]}) "
+                f"— no comparison comment will be posted",
+                file=sys.stderr,
+            )
+    elif review_arch == "full":
+        coordinator_out, coordinator_failure_reason = await _run_coordinator_session(
+            agents, env_id, args, checkout, bot_token, store_id,
+            pr_context, diff, codex_block, verifier_task, meta, mode, head_sha,
+        )
+    else:  # solo
+        print("  Running solo session (single merged-lens agent)...")
+        solo_out, solo_failure_reason = await _run_solo_session(
+            agents, env_id, args, checkout, bot_token, store_id,
+            pr_context, diff, codex_block, verifier_task,
+        )
+        # Solo IS the review — feed it through the shared post-review pipeline
+        # exactly like a coordinator output (extract / post / verdict / learn).
+        coordinator_out, coordinator_failure_reason = solo_out, solo_failure_reason
+
     coordinator_secs = time.monotonic() - t0
-    print(f"  Coordinator complete in {coordinator_secs:.1f}s")
+    print(f"  Review session(s) complete in {coordinator_secs:.1f}s")
 
     # Surface wiki-push silent failures. The coordinator's TURN 3 bash
     # has a one-shot rebase-retry on push (see coordinator.md); when both
@@ -2571,107 +2843,10 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
             file=sys.stderr,
         )
 
-    # Extract review comment from coordinator output. The runtime
-    # interleaves sub-agent forwards (`<agent-notification thread_id=
-    # "...">...</agent-notification>` blocks) with the coordinator's own
-    # voice (TURN 3 emits the verifier's response verbatim, not always
-    # wrapped). Empirical shapes seen in production:
-    #   - Clean: header at byte 0, footer at end
-    #   - Wrapped: `<agent-notification>...## Code Review...Reviewed at:
-    #     <sha></agent-notification>` (qai-be early shapes)
-    #   - Bundled (qai-be #617): N specialist forwards as notification
-    #     blocks, then `</agent-notification>## Code Review\n...Reviewed
-    #     at: <sha>...wiki update done` flat in the tail
-    #
-    # Strategy: ignore segmentation — anchor on the `Reviewed at: <head_sha>`
-    # footer the verifier ALWAYS emits, walk back to the most recent
-    # `## Code Review` line-start, and validate the captured SHA matches
-    # the actual head_sha we reviewed. The SHA validation closes the
-    # verdict-flip prompt-injection surface that the security audit on
-    # PR #47 v1 raised — an attacker echoing PR diff content through a
-    # specialist can fake the `## Code Review` header and `### Blockers`
-    # template, but they can't predict head_sha (it's the commit's own
-    # SHA, not in the diff). All `## Code Review` candidates whose footer
-    # SHA doesn't match are rejected.
-    #
-    # Tag-stripping flattens both `<agent-notification ...>` opening tags
-    # and `</agent-notification>` closing tags into newlines so the header
-    # anchor works whether the header is at byte 0, right after a wrapper
-    # close, or after a `\n`. Mid-narration mentions like
-    # "the `## Code Review` header" (backtick-prefixed, inline-code) are
-    # rejected by the negative lookbehind — preserves the v1.7 bare-
-    # substring fix without requiring start-of-line.
-    _flattened = re.sub(r"</?agent-notification\b[^>]*>", "\n", coordinator_out)
-    # Walk every `## Code Review[^\n]*` occurrence NOT preceded by a
-    # backtick (which would indicate inline-code narration). The header
-    # need NOT be at start-of-line — qai-be #635 had coordinator narration
-    # ("Now I have all 4 specialist reports. Delegating to the verifier.")
-    # concatenated to the header on the same line with no `\n` between.
-    # The strong protection here is the SHA validation: an attacker can
-    # echo `## Code Review\n### Blockers` content in a poisoned PR diff
-    # but can't predict the commit's own head_sha, so the `Reviewed at:`
-    # footer check rejects fake matches. The next-`## ` heading bound
-    # also prevents one candidate's body from swallowing downstream
-    # content all the way through the verifier's output. Walk candidates
-    # in reverse and pick the first whose `Reviewed at:` SHA matches.
-    _header_re = re.compile(r"(?<!`)## Code Review[^\n]*\n")
-    _next_h2_re = re.compile(r"(?<!`)(?:^|\n)## ")
-    # NOTE: do NOT add `\b` between the 40-char hex and `[^\n]*`. Word-
-    # boundary fails when the SHA is followed by another word char (no
-    # transition between `\w` and `\W`). qai-be #666 round 7 reproduced
-    # this: coordinator emitted the wiki-failure narration immediately
-    # after the verifier's `Reviewed at: <40-char-sha>` with NO newline
-    # separator, so the joined output was `...936Wiki push failed...`
-    # — the `\b` after the `6` digit and before the `W` letter both
-    # being `\w` had no boundary to match. The 40-char exact-length
-    # quantifier is the real anchor; the prefix comparison below is the
-    # real validator (12-char prefix, not full equality — see the
-    # anti-spoof validator comment). `[^\n]*` greedily eats whatever is
-    # left on the line (or none) so the match end is well-defined.
-    _footer_re = re.compile(r"\nReviewed at:\s+([0-9a-f]{40})[^\n]*")
-    _candidates = []
-    for _hm in _header_re.finditer(_flattened):
-        _body_start = _hm.end()
-        _next_h2 = _next_h2_re.search(_flattened, _body_start)
-        _bound = _next_h2.start() if _next_h2 else len(_flattened)
-        _fm = _footer_re.search(_flattened, _body_start, _bound)
-        if _fm is None:
-            continue
-        _candidates.append((_hm.start(), _fm.end(), _fm.group(1)))
-    # Anti-spoof validator: a poisoned diff can echo `## Code Review` but
-    # can't predict the run's head SHA. Full 40-char equality proved too
-    # strict in production — models occasionally corrupt the TAIL of the
-    # 40-hex footer while getting every permalink in the body right
-    # (svc-transcribe #84, 2026-06-02: footer prefix d339e243 correct,
-    # tail wrong; a perfectly valid review was discarded as "stale-cache",
-    # and the 8-char-truncated warn printed two identical-looking SHAs,
-    # masking the mismatch — the team burned cache-bust retry runs on it).
-    # A 12-hex-char prefix (48 bits) is still unguessable for spoofing,
-    # so prefix equality keeps the security property while tolerating
-    # transcription slips past char 12.
-    _SHA_PREFIX_LEN = 12
-    review_body = ""
-    review_extracted = False
-    for _start, _end, _sha in reversed(_candidates):
-        if _sha[:_SHA_PREFIX_LEN] != head_sha[:_SHA_PREFIX_LEN]:
-            print(
-                f"  [warn] discarding `## Code Review` block at offset "
-                f"{_start} — `Reviewed at:` SHA {_sha} doesn't match "
-                f"head_sha {head_sha} (first {_SHA_PREFIX_LEN} chars "
-                f"compared)",
-                file=sys.stderr,
-            )
-            continue
-        if _sha != head_sha:
-            print(
-                f"  [info] footer SHA tail-corrupted by the model "
-                f"({_sha} vs {head_sha}) — accepted on "
-                f"{_SHA_PREFIX_LEN}-char prefix match",
-                file=sys.stderr,
-            )
-        review_body = _flattened[_start:_end].rstrip()
-        review_extracted = True
-        break
+    # Extract the SHA-validated `## Code Review` body from the session output.
+    # See _extract_review_body for the segmentation + anti-spoof rationale.
+    # (Shared by full/solo here and by the `both`-mode solo comment below.)
+    review_body, review_extracted = _extract_review_body(coordinator_out, head_sha)
 
     if not review_extracted:
         # Diagnostic dump — log the actual coordinator output so we can
@@ -2838,6 +3013,13 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
         print("DRY RUN — not posting. Review comment below:")
         print("=" * 60 + "\n")
         print(review_body)
+        if review_arch == "both" and solo_out:
+            _solo_body, _solo_ok = _extract_review_body(solo_out, head_sha)
+            print("\n" + "=" * 60)
+            print("DRY RUN — solo (experimental) review below:" if _solo_ok
+                  else "DRY RUN — solo output (no valid `## Code Review` extracted):")
+            print("=" * 60 + "\n")
+            print(_solo_body or solo_out[:4000])
         if not review_extracted:
             _exit_nonzero_on_failed_run(args.pr_number, coordinator_failure_reason, posted=False)
         return
@@ -2867,6 +3049,46 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
                 f"Not stacking a duplicate."
             )
             return
+
+    # both-mode: post the solo review as a SEPARATE, clearly-labeled, non-gating
+    # comment for comparison. Re-headered so the body does NOT start with
+    # "## Code Review\n" → invisible to the cooldown/dedup/re-review detectors
+    # (they anchor on that exact prefix), so it never collides with the gating
+    # review. No verdict — only the coordinator review drives the gate. NOT
+    # gated on review_extracted: if the coordinator failed but solo succeeded,
+    # the solo review is the only useful output and must still be posted —
+    # which is also why this runs BEFORE the gating-comment post below (a
+    # failed gating POST `sys.exit`s, and the good solo review must survive it).
+    if review_arch == "both" and solo_out:
+        solo_body, solo_extracted = _extract_review_body(solo_out, head_sha)
+        if solo_extracted:
+            # Drop solo's own `## Code Review...` header line; the experimental
+            # banner becomes the new (dedup-safe) leading header.
+            _, _, solo_rest = solo_body.partition("\n")
+            solo_comment = (
+                "## Code Review (solo — experimental)\n\n"
+                "_Single-agent advisory review (`review_mode=both`), posted for "
+                "comparison. Not merge-blocking; the gating verdict comes from "
+                "the 6-agent review._\n\n"
+                f"{solo_rest}"
+            )
+            solo_resp = _post_review_comment_with_retry(
+                args.repo, args.pr_number, solo_comment, bot_token
+            )
+            if solo_resp.ok:
+                print(f"  Posted solo comparison comment: {solo_resp.json()['html_url']}")
+            else:
+                print(
+                    f"  [warn] solo comparison comment post failed: "
+                    f"{_github_error_message(solo_resp)}",
+                    file=sys.stderr,
+                )
+        else:
+            print(
+                "  [warn] both-mode: solo output had no valid `## Code Review` "
+                "footer — skipping the solo comparison comment",
+                file=sys.stderr,
+            )
 
     print(f"\n[5] Posting review comment to PR #{args.pr_number}...")
     resp = _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
@@ -3100,6 +3322,7 @@ def main():
     parser.add_argument("--fresh", action="store_true", help="Force a full review even if a prior review exists (ignore re-review auto-detect)")
     parser.add_argument("--closed", action="store_true", help="Allow review of closed/merged PRs (default: refuse and exit). Useful for post-merge audits or backfilling wiki patterns from historical PRs.")
     parser.add_argument("--no-codex", action="store_true", help="Skip the Codex review pass even if OPENAI_API_KEY + AIR_TARGET_REPO are set. Codex otherwise runs automatically when both are available.")
+    parser.add_argument("--mode", choices=REVIEW_ARCH_CHOICES, default=None, help="Review architecture: 'full' (default 6-agent coordinator), 'solo' (one merged-lens agent — ~70%% cheaper/faster, NOT gate-safe), or 'both' (run both; full gates, solo posted alongside for comparison). Falls back to AIR_REVIEW_MODE, then 'full'.")
     args = parser.parse_args()
 
     if not REPO_ARG_RE.match(args.repo):

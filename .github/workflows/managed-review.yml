@@ -151,6 +151,18 @@ on:
         required: false
         type: string
         default: ''
+      review_mode:
+        description: |
+          Review architecture (opt-in): 'full' (default — the 6-agent
+          coordinator), 'solo' (one merged-lens agent — ~70% cheaper/faster
+          but NOT gate-safe: it can downgrade a blocker's severity, so use
+          only where an advisory review is acceptable), or 'both' (run both;
+          the full review gates as usual and the solo review posts alongside,
+          labeled and non-blocking, for comparison). Default 'full' is
+          byte-identical to today. Set per-request via workflow_dispatch.
+        required: false
+        type: string
+        default: 'full'
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -364,6 +376,7 @@ jobs:
           FRESH: ${{ inputs.fresh }}
           AIR_AGENT_VERSIONS: ${{ inputs.agent_versions }}
           AIR_EXPECTED_REVIEWER: ${{ inputs.expected_reviewer }}
+          AIR_REVIEW_MODE: ${{ inputs.review_mode }}
           # Absolute path to the local checkout. review.py uses it for
           # both `codex review` (when enabled) and client-side
           # pre-computation (blame/churn/file-status/diff-check
