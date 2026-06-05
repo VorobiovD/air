@@ -237,12 +237,6 @@ def _store_reader(store_id: str):
     return read, all_paths
 
 
-def render_all(store_id: str) -> dict[str, str]:
-    """{wiki_filename: content} rendered from the live store."""
-    read, all_paths = _store_reader(store_id)
-    return render_files(read, all_paths)
-
-
 def render_and_push(store_id: str, repo: str, token: str,
                     dry_run: bool = False) -> bool:
     """Render the store and push the mirror to the repo's git wiki. Best-effort
