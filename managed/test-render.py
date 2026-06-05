@@ -161,6 +161,44 @@ def test_overflow_paths_numeric_sort():
     assert ordered == [f"/archive/glossary-overflow-{n}.md" for n in (1, 2, 10, 11)]
 
 
+def test_overflow_paths_malformed_sorts_last():
+    """A malformed chunk index must sort LAST (newest), never first — placing
+    it first would corrupt the reassembled order."""
+    paths = {"/archive/g-overflow-1.md", "/archive/g-overflow-2.md",
+             "/archive/g-overflow-bad.md"}
+    ordered = r._overflow_paths(paths, "g")
+    assert ordered[-1] == "/archive/g-overflow-bad.md"
+    assert ordered[:2] == ["/archive/g-overflow-1.md", "/archive/g-overflow-2.md"]
+
+
+def test_render_and_push_skips_empty_store(monkeypatch=None):
+    """Empty store listing → render_and_push returns False WITHOUT rendering or
+    pushing (a banner-only render would orphan-rm every shared wiki file)."""
+    orig = r._store_reader
+    r._store_reader = lambda sid: ((lambda p: None), set())
+    try:
+        # Returns False at the empty guard, before any clone/push.
+        assert r.render_and_push("sid", "owner/repo", "tok") is False
+    finally:
+        r._store_reader = orig
+
+
+def test_archive_narratives_folded_into_review_archive():
+    """/archive/<name>.md (ad-hoc learn-written narratives) fold into
+    REVIEW-ARCHIVE.md; legacy stays; overflow chunks are NOT folded."""
+    store = {
+        "/review-misc.md": "# P\n\n## Author Patterns\n\nintro",
+        "/archive/legacy.md": "# Legacy\n\n- old export prose",
+        "/archive/VorobiovD.md": "### VorobiovD (archived)\n\n- capped-out detail",
+        "/archive/glossary-overflow-1.md": "OVERFLOW_FRAGMENT_NOT_STANDALONE",
+    }
+    read, paths = _reader(store)
+    ra = r.render_shared_files(read, paths)["REVIEW-ARCHIVE.md"]
+    assert "old export prose" in ra            # legacy export preserved
+    assert "capped-out detail" in ra           # per-author archive folded in
+    assert "OVERFLOW_FRAGMENT_NOT_STANDALONE" not in ra   # chunk excluded
+
+
 _TESTS = [v for k, v in sorted(globals().items())
           if k.startswith("test_") and callable(v)]
 

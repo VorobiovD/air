@@ -50,6 +50,7 @@ MIRROR_BANNER = (
 
 REVIEW_MISC_PATH = "/review-misc.md"
 _OVERFLOW_HEADER_RE = re.compile(r"^<!-- older content: see .*-overflow-\*\.md -->\s*$")
+_OVERFLOW_NAME_RE = re.compile(r"-overflow-\d+$")   # matches a chunk file's stem
 
 # store path -> wiki filename. Derived as the literal inverse of
 # migrate.WIKI_FILE_MAP MINUS the counter (.air-meta.json never mirrors to the
@@ -78,9 +79,12 @@ def _overflow_paths(all_paths, stem: str) -> list[str]:
     for p in all_paths:
         if p.startswith(pref) and p.endswith(".md"):
             try:
-                found.append((int(p[len(pref):-3]), p))
+                found.append((float(int(p[len(pref):-3])), p))
             except ValueError:
-                found.append((0, p))
+                # Unparseable index → sort LAST (newest), never first: a
+                # malformed name must not be prepended as the oldest chunk and
+                # corrupt the reassembled order.
+                found.append((float("inf"), p))
     return [p for _, p in sorted(found)]
 
 
@@ -118,6 +122,12 @@ def render_review_md(read, all_paths) -> str:
     common = reassemble(read, all_paths, memory_store.COMMON_FINDINGS_PATH)
     service = reassemble(read, all_paths, memory_store.SERVICE_PATTERNS_PATH)
     misc = reassemble(read, all_paths, REVIEW_MISC_PATH) or ""
+    if not misc.strip():
+        # migrate always emits review-misc.md (the H1 + spine). Its absence on
+        # a non-empty store is a misconfiguration — REVIEW.md will lack its
+        # title/spine; surface it rather than rendering a headless file silently.
+        print("  [mirror] /review-misc.md missing/empty — REVIEW.md will have no "
+              "title spine", file=sys.stderr)
 
     authors = []
     for p in sorted(
@@ -137,7 +147,7 @@ def render_review_md(read, all_paths) -> str:
 
     out: list[str] = [MIRROR_BANNER, ""]
     misc_lines = misc.split("\n")
-    has_author_h2 = any(_is_author_patterns_h2(l) for l in misc_lines)
+    has_author_h2 = any(_is_author_patterns_h2(ln) for ln in misc_lines)
     inserted_cs = False
     i, n = 0, len(misc_lines)
     while i < n:
@@ -184,6 +194,27 @@ def render_shared_files(read, all_paths) -> dict[str, str]:
         content = reassemble(read, all_paths, store_path)
         if content and content.strip():
             out[wiki_name] = content if content.endswith("\n") else content + "\n"
+
+    # Fold ad-hoc archive narratives (/archive/<name>.md the learn session may
+    # write — e.g. a per-author "capped out" prose file, per memory_store's
+    # layout) into REVIEW-ARCHIVE.md, so they still reach the mirror. Exclude
+    # the legacy export (already mapped) and overflow chunks (reassembly
+    # fragments, not standalone content).
+    legacy_path = f"{memory_store.ARCHIVE_PREFIX}legacy.md"
+    extra = []
+    for p in sorted(all_paths):
+        if not (p.startswith(memory_store.ARCHIVE_PREFIX) and p.endswith(".md")):
+            continue
+        if p == legacy_path or _OVERFLOW_NAME_RE.search(PurePosixPath(p).stem):
+            continue
+        content = reassemble(read, all_paths, p)
+        if content and content.strip():
+            extra.append(content.rstrip("\n"))
+    if extra:
+        base = out.get("REVIEW-ARCHIVE.md", "").rstrip("\n")
+        out["REVIEW-ARCHIVE.md"] = (
+            "\n\n".join([base, *extra]) if base else "\n\n".join(extra)
+        ) + "\n"
     return out
 
 
@@ -218,12 +249,23 @@ def render_and_push(store_id: str, repo: str, token: str,
     — returns True on success (or dry-run), False on any failure. Never raises
     to the caller's hot path (review/learn wrap it, but we also swallow here)."""
     try:
-        files = render_all(store_id)
+        read, all_paths = _store_reader(store_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [mirror] store read failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return False
+    if not all_paths:
+        # Empty listing = a brand-new store OR a transient list_memories blip
+        # (no exception). render_files would still emit a banner-only REVIEW.md,
+        # and orphan reconciliation would then git-rm every shared wiki file —
+        # a full mirror wipe (visible up to an hour) for what's likely a blip.
+        # Empty store ⇒ render nothing, push nothing.
+        print("  [mirror] store listing empty — skipping render (no wipe)",
+              file=sys.stderr)
+        return False
+    try:
+        files = render_files(read, all_paths)
     except Exception as e:  # noqa: BLE001
         print(f"  [mirror] render failed: {type(e).__name__}: {e}", file=sys.stderr)
-        return False
-    if not files:
-        print("  [mirror] empty store — nothing to render", file=sys.stderr)
         return False
 
     if dry_run:
@@ -273,6 +315,14 @@ def render_push_and_stamp(store_id: str, repo: str, token: str) -> bool:
                 capture_output=True, text=True,
             )
             sys.stderr.write(stamp.stderr)
+            if stamp.returncode != 0:
+                # Throttle didn't advance → the next review re-renders. Harmless
+                # (self-heals) but worth flagging so it's not invisible churn.
+                print(f"  [warn] mirror stamp failed (rc={stamp.returncode}) — "
+                      "throttle not advanced", file=sys.stderr)
+        else:
+            print("  [warn] meta.py not found — mirror throttle stamp skipped",
+                  file=sys.stderr)
     return ok
 
 
