@@ -445,12 +445,10 @@ def main():
     # failure can't abort a default review that never touches the solo agent.
     solo_mode = os.environ.get("AIR_REVIEW_MODE", "full") in ("solo", "both")
     solo: dict | None = None
-    missing_md = [n for n in SUB_AGENTS if not (AGENTS_DIR / f"{n}.md").exists()]
     if not solo_mode:
         print("[5] Solo reviewer agent — skipped (review_mode=full)")
-    elif missing_md:
-        print("[5] Solo reviewer agent (single-session, all lenses)")
-        print(f"  air-solo-reviewer: SKIPPED — missing prompt files: {missing_md}", file=sys.stderr)
+    elif (missing_md := [n for n in SUB_AGENTS if not (AGENTS_DIR / f"{n}.md").exists()]):
+        print(f"[5] Solo reviewer agent — SKIPPED (missing prompt files: {missing_md})", file=sys.stderr)
     else:
         print("[5] Solo reviewer agent (single-session, all lenses)")
         solo = create_or_update_agent(

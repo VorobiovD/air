@@ -3050,20 +3050,15 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
             )
             return
 
-    print(f"\n[5] Posting review comment to PR #{args.pr_number}...")
-    resp = _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
-    if not resp.ok:
-        print(f"Error posting comment: {_github_error_message(resp)}", file=sys.stderr)
-        sys.exit(1)
-    print(f"  Posted: {resp.json()['html_url']}")
-
     # both-mode: post the solo review as a SEPARATE, clearly-labeled, non-gating
     # comment for comparison. Re-headered so the body does NOT start with
     # "## Code Review\n" → invisible to the cooldown/dedup/re-review detectors
     # (they anchor on that exact prefix), so it never collides with the gating
     # review. No verdict — only the coordinator review drives the gate. NOT
     # gated on review_extracted: if the coordinator failed but solo succeeded,
-    # the solo review is the only useful output and must still be posted.
+    # the solo review is the only useful output and must still be posted —
+    # which is also why this runs BEFORE the gating-comment post below (a
+    # failed gating POST `sys.exit`s, and the good solo review must survive it).
     if review_arch == "both" and solo_out:
         solo_body, solo_extracted = _extract_review_body(solo_out, head_sha)
         if solo_extracted:
@@ -3094,6 +3089,13 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
                 "footer — skipping the solo comparison comment",
                 file=sys.stderr,
             )
+
+    print(f"\n[5] Posting review comment to PR #{args.pr_number}...")
+    resp = _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
+    if not resp.ok:
+        print(f"Error posting comment: {_github_error_message(resp)}", file=sys.stderr)
+        sys.exit(1)
+    print(f"  Posted: {resp.json()['html_url']}")
 
     # Submit the formal review verdict so `reviewDecision` updates and
     # branch-protection rules see this review. The issue comment above

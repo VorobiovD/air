@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from review import _extract_review_body  # noqa: E402
+from review import _extract_review_body, _unpack_session_result  # noqa: E402
 
 HEAD = "fc3b2e03546153449edba2a224dbbbfff58a14b6"   # 40-char hex
 OTHER = "0000000000000000000000000000000000000000"
@@ -87,6 +87,20 @@ def test_picks_last_valid_candidate():
            f"## Code Review\n\nFresh.\n\nReviewed at: {HEAD}\n")
     body, ok = _extract_review_body(raw, HEAD)
     assert ok is True and "Fresh." in body
+
+
+def test_unpack_passthrough_tuple():
+    # A session helper's (out, reason) tuple passes through unchanged.
+    assert _unpack_session_result(("body", ""), "coordinator") == ("body", "")
+    assert _unpack_session_result(("", "boom"), "solo") == ("", "boom")
+
+
+def test_unpack_exception_coerced():
+    # A raised exception (gather return_exceptions=True) → ("", reason) so the
+    # both-mode crash-isolation contract holds — the other session survives.
+    out, reason = _unpack_session_result(TimeoutError("slow"), "solo")
+    assert out == ""
+    assert "solo session error" in reason and "TimeoutError" in reason
 
 
 _TESTS = [v for k, v in sorted(globals().items())
