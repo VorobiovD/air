@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.21.0](https://github.com/VorobiovD/air/compare/v1.20.0...v1.21.0) (2026-06-05)
+
+
+### Features
+
+* **managed:** opt-in single-agent solo review mode (AIR_REVIEW_MODE) ([#117](https://github.com/VorobiovD/air/issues/117)) ([b15e19f](https://github.com/VorobiovD/air/commit/b15e19f2df1a4a928b94021ba4f68da62abc0b10))
+
 ## [1.20.0](https://github.com/VorobiovD/air/compare/v1.19.2...v1.20.0) (2026-06-04)
 
 
