@@ -68,6 +68,7 @@ def test_roundtrip(wiki_dir):
         "last_check": "2026-04-02T00:00:00Z",
         "reviews_since": 4,
         "last_processed_pr": 42,
+        "last_mirror_render": "2026-04-02T01:00:00Z",
     }
     _write(wiki_dir, original)
     m = meta.read_meta(wiki_dir)

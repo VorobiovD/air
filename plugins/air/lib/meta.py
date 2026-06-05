@@ -19,10 +19,18 @@ Threshold:
 
 Stdlib-only, matches the `plugins/air/hooks/pre-commit-drift.py` idiom.
 
+Also gates the deterministic store→wiki mirror render (store-backed repos):
+`mirror-due` (exit 1 when the wiki mirror is stale by >= MIRROR_INTERVAL_HOURS
+or was never rendered) throttles the per-review render so it's a cheap meta
+read in the common case and a git push at most ~once/hour; `mirror-rendered`
+stamps the time after a successful render. (See managed/render_store_to_wiki.py.)
+
 Usage (CLI or managed):
     python3 meta.py bump  --wiki-dir <dir> --pr-number <N>
     python3 meta.py check --wiki-dir <dir>        # exit 1 triggers /air:learn, 0 skips
     python3 meta.py reset --wiki-dir <dir> --pr-number <N>  # after /air:learn finishes
+    python3 meta.py mirror-due      --store-id <id>   # exit 1 = render the mirror, 0 = within window
+    python3 meta.py mirror-rendered --store-id <id>   # stamp after a successful render
 """
 
 import argparse
@@ -137,6 +145,12 @@ def _store_mutate_meta(store_id: str, fn) -> dict:
 REVIEWS_THRESHOLD = 15
 DAYS_THRESHOLD = 14
 
+# Wiki-mirror render throttle: re-render the store→wiki mirror at most once
+# per this interval on the per-review path (the learn cadence forces an
+# authoritative render regardless). Keeps the wiki fresh within an hour while
+# making the common per-review case a single cheap meta read (no git push).
+MIRROR_INTERVAL_HOURS = 1
+
 
 def _utc_now_iso() -> str:
     """Timezone-aware UTC ISO-8601 string. One format everywhere for round-trip."""
@@ -157,6 +171,8 @@ def _default_meta() -> dict:
         "last_check": now,
         "reviews_since": 0,
         "last_processed_pr": 0,
+        # Empty = never rendered → the first mirror-due check renders.
+        "last_mirror_render": "",
     }
 
 
@@ -315,6 +331,60 @@ def cmd_reset(args) -> int:
     return 0
 
 
+def _mirror_due(meta: dict, now: datetime | None = None) -> tuple[bool, str]:
+    """Return (due, reason): render if never rendered or stale by the interval."""
+    last = meta.get("last_mirror_render", "") or ""
+    if not last:
+        return True, "never rendered → due"
+    try:
+        hrs = days_since(last, now=now) * 24
+    except (ValueError, TypeError):
+        return True, "unparseable last_mirror_render → due"
+    if hrs >= MIRROR_INTERVAL_HOURS:
+        return True, f"last render {hrs:.1f}h ago >= {MIRROR_INTERVAL_HOURS}h → due"
+    return False, f"last render {hrs:.1f}h ago < {MIRROR_INTERVAL_HOURS}h → within window"
+
+
+def cmd_mirror_due(args) -> int:
+    """Exit 1 if the wiki mirror should be re-rendered, 0 if within the window.
+    Read-only (one cheap meta read; never a git op). On store error, return 0
+    (skip) — a render would hit the same unreachable store anyway."""
+    if args.store_id:
+        try:
+            found = _store_find_meta(args.store_id)
+            meta = found[0] if found else _default_meta()
+        except Exception as e:
+            print(f"  [warn] meta: mirror-due check failed ({e}) — skipping render",
+                  file=sys.stderr)
+            return 0
+    else:
+        meta = read_meta(Path(args.wiki_dir))
+    due, reason = _mirror_due(meta)
+    print(f"  [meta] mirror {reason}", file=sys.stderr)
+    return 1 if due else 0
+
+
+def cmd_mirror_rendered(args) -> int:
+    """Stamp last_mirror_render after a successful render so the throttle resets."""
+    now = _utc_now_iso()
+
+    def fn(meta: dict) -> dict:
+        meta["last_mirror_render"] = now
+        return meta
+
+    if args.store_id:
+        try:
+            _store_mutate_meta(args.store_id, fn)
+        except Exception as e:
+            print(f"  [warn] meta: mirror-rendered update failed ({e})", file=sys.stderr)
+            return 0
+    else:
+        wiki = Path(args.wiki_dir)
+        write_meta(wiki, fn(read_meta(wiki)))
+    print(f"  [meta] mirror rendered at {now}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # __doc__ starts with a newline, so .splitlines()[0] is empty. Pick the
     # first non-blank line for a useful --help description.
@@ -345,6 +415,14 @@ def main(argv: list[str] | None = None) -> int:
     p_find = sub.add_parser("find-store", help="Print the repo's pattern-store id (empty = not migrated)")
     p_find.add_argument("--repo", required=True, help="owner/repo")
     p_find.set_defaults(fn=cmd_find_store)
+
+    p_mdue = sub.add_parser("mirror-due", help="Decide whether to re-render the wiki mirror (exit 1 = due)")
+    add_backend_args(p_mdue)
+    p_mdue.set_defaults(fn=cmd_mirror_due)
+
+    p_mrendered = sub.add_parser("mirror-rendered", help="Stamp a successful mirror render")
+    add_backend_args(p_mrendered)
+    p_mrendered.set_defaults(fn=cmd_mirror_rendered)
 
     args = parser.parse_args(argv)
     if args.cmd != "find-store" and not args.wiki_dir and not getattr(args, "store_id", None):

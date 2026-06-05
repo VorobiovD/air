@@ -7,6 +7,8 @@ Fetch REVIEW.md from the wiki, clean it up using AI, generate REVIEW-HISTORY.md 
 
 Note: `/air:review` auto-triggers this command every 15 reviews or every 14 days (whichever comes first). You can also run it manually for immediate cleanup.
 
+> **Store-backed repos (managed-agent fleet):** when a repo's patterns live in an Anthropic memory store (the source of truth), the canonical `/air:learn` is the managed `air-learner` session, which curates the store; a deterministic Python step (`managed/render_store_to_wiki.py`) then exports the git-wiki mirror. **This CLI command never reads or renders the store** — it operates on the git wiki directly. On a store-backed repo it still works on whatever the wiki holds, but the store stays untouched and the managed render will overwrite the wiki on its next run. For store repos, run the managed learn; reserve this CLI flow for legacy wiki-only repos.
+
 **Flags:**
 - `--dry-run` — preview changes without pushing to wiki
 - `--history-only` — only regenerate REVIEW-HISTORY.md, don't touch REVIEW.md

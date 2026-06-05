@@ -2,6 +2,7 @@
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -94,3 +95,69 @@ def test_store_bump_failure_never_blocks(monkeypatch):
 def test_backend_arg_required():
     with pytest.raises(SystemExit):
         meta.main(["bump", "--pr-number", "1"])
+
+
+# --- mirror-render throttle ------------------------------------------------
+
+_NOW = datetime(2026, 6, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_mirror_due_within_window():
+    m = {"last_mirror_render": (_NOW - timedelta(minutes=30)).isoformat()}
+    due, _ = meta._mirror_due(m, now=_NOW)
+    assert due is False
+
+
+def test_mirror_due_elapsed():
+    m = {"last_mirror_render": (_NOW - timedelta(hours=2)).isoformat()}
+    due, _ = meta._mirror_due(m, now=_NOW)
+    assert due is True
+
+
+def test_mirror_due_never_rendered():
+    due, reason = meta._mirror_due({"last_mirror_render": ""}, now=_NOW)
+    assert due is True and "never" in reason
+
+
+def test_mirror_due_unparseable_is_due():
+    due, _ = meta._mirror_due({"last_mirror_render": "garbage"}, now=_NOW)
+    assert due is True
+
+
+def test_cmd_mirror_due_never_exits_1(fake):
+    # Empty store → defaults (last_mirror_render="") → render due.
+    assert meta.main(["mirror-due", "--store-id", "memstore_x"]) == 1
+
+
+def test_cmd_mirror_due_within_window_exits_0(fake):
+    seed = meta._default_meta()
+    seed["last_mirror_render"] = meta._utc_now_iso()   # just rendered
+    fake.content = json.dumps(seed)
+    assert meta.main(["mirror-due", "--store-id", "memstore_x"]) == 0
+
+
+def test_cmd_mirror_due_elapsed_exits_1(fake):
+    seed = meta._default_meta()
+    seed["last_mirror_render"] = "2020-01-01T00:00:00Z"   # ancient
+    fake.content = json.dumps(seed)
+    assert meta.main(["mirror-due", "--store-id", "memstore_x"]) == 1
+
+
+def test_cmd_mirror_due_store_error_skips(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("api down")
+    monkeypatch.setattr(meta, "_store_api", boom)
+    # On store error a render would hit the same dead store — skip (exit 0), don't render.
+    assert meta.main(["mirror-due", "--store-id", "memstore_x"]) == 0
+
+
+def test_cmd_mirror_rendered_stamps(fake):
+    assert meta.main(["mirror-rendered", "--store-id", "memstore_x"]) == 0
+    stamped = json.loads(fake.content)["last_mirror_render"]
+    assert stamped and meta._parse_iso(stamped)   # non-empty + parseable
+
+
+def test_mirror_rendered_then_due_is_within_window(fake):
+    # End-to-end: stamping resets the throttle, so the next due-check is a no-op.
+    meta.main(["mirror-rendered", "--store-id", "memstore_x"])
+    assert meta.main(["mirror-due", "--store-id", "memstore_x"]) == 0

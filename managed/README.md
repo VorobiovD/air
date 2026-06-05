@@ -283,7 +283,9 @@ When agent prompts change in the air repo, the workflow auto-updates deployed ag
 
 ## Pattern memory store (pilot)
 
-Migrated repos store review patterns in a per-repo Anthropic memory store instead of the git wiki (`migrate_wiki_to_store.py owner/repo [--dry-run]` to migrate; store discovered by name `air-patterns <owner>/<repo>` — its presence is the rollout flag). Review sessions mount it **read-only** (PR content is untrusted; deterministic post-review writes happen in `pattern_writer.py`), learn sessions mount read-write and export a rendered mirror back to the git wiki for humans + CLI reads. The `/air:learn` counter lives at `/meta/air-meta.json` with sha256-preconditioned updates — no more wiki push races. Rollback: archive the store; the next run falls back to the wiki mount.
+Migrated repos store review patterns in a per-repo Anthropic memory store instead of the git wiki (`migrate_wiki_to_store.py owner/repo [--dry-run]` to migrate; store discovered by name `air-patterns <owner>/<repo>` — its presence is the rollout flag). Review sessions mount it **read-only** (PR content is untrusted; deterministic post-review writes happen in `pattern_writer.py`), learn sessions mount read-write to curate it. The `/air:learn` counter lives at `/meta/air-meta.json` with sha256-preconditioned updates — no more wiki push races. Rollback: archive the store; the next run falls back to the wiki mount.
+
+**Wiki mirror (`render_store_to_wiki.py`).** The git wiki is an exported mirror, rendered by a deterministic Python step (the inverse of the migrate split — `--dry-run` prints the rendered files + byte counts without pushing), NOT by the AI learn session. It runs throttled after each review (≤1×/hr — `meta.py mirror-due` is a cheap meta read; clone+push only when stale) and authoritatively after each `/air:learn` curation (always, resetting the throttle). The learn session pushes only REVIEW-HISTORY.md (not in the store); the renderer pushes everything else. Both call sites are best-effort and never fail the review/learn. Operator check: `python render_store_to_wiki.py owner/repo --dry-run` (needs the venv + `ANTHROPIC_API_KEY`).
 
 ## Cost
 
