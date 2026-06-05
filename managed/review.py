@@ -50,6 +50,7 @@ from api import list_agents, find_environment
 from setup import MODEL_ALIASES, parse_agent_pins
 import memory_store
 import pattern_writer
+import render_store_to_wiki
 
 # Make plugins/air/lib importable so we share stdlib helpers (the
 # conversation merger and the review-header constant) with the CLI path
@@ -3153,6 +3154,14 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
                 )
             except Exception as e:
                 print(f"  [warn] pattern write failed: {e}", file=sys.stderr)
+            # Refresh the git-wiki mirror from the store, THROTTLED (meta.py
+            # mirror-due — a cheap meta read most reviews; a git push at most
+            # ~1×/hr). Keeps the human/CLI wiki within an hour of the store.
+            # Never fail the review; a miss self-heals on the next render.
+            try:
+                _maybe_render_mirror(args.repo, store_id, bot_token)
+            except Exception as e:
+                print(f"  [warn] mirror render failed: {e}", file=sys.stderr)
         try:
             _update_learn_counter(args.repo, args.pr_number, bot_token,
                                   store_id=store_id)
@@ -3165,6 +3174,31 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
             file=sys.stderr,
         )
         _exit_nonzero_on_failed_run(args.pr_number, coordinator_failure_reason, posted=True)
+
+
+def _maybe_render_mirror(repo: str, store_id: str, bot_token: str) -> None:
+    """Throttled deterministic store→wiki mirror render (store-backed repos).
+
+    Checks meta.py `mirror-due` first (one cheap meta read, NO git op); only
+    when due (≥ MIRROR_INTERVAL_HOURS since the last render, or never) does it
+    render the store + push the wiki + stamp `mirror-rendered`. Best-effort —
+    the caller wraps this, and a missed/failed render self-heals on the next
+    one (the store is the source of truth). Managed-only; the CLI has no store
+    render. The authoritative post-curation render runs in managed/learn.py.
+    """
+    meta_script = _AIR_LIB_DIR / "meta.py"
+    if not meta_script.is_file():
+        return
+
+    def _meta(*a: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(meta_script), *a],
+                              capture_output=True, text=True)
+
+    due = _meta("mirror-due", "--store-id", store_id)
+    sys.stderr.write(due.stderr)
+    if due.returncode != 1:
+        return  # within the throttle window (0) or a store error (skip)
+    render_store_to_wiki.render_push_and_stamp(store_id, repo, bot_token)
 
 
 def _update_learn_counter(repo: str, pr_number: int, bot_token: str,

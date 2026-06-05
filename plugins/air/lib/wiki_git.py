@@ -61,33 +61,48 @@ def clone_wiki(wiki_url: str, dest: Path, depth: int = 1) -> bool:
         return False
 
 
-def commit_meta(wiki_dir: Path, message: str) -> bool:
-    """Stage .air-meta.json, commit if there's a delta, push with one retry.
-    Returns True on success (including 'no changes'), False on failure.
+def commit_paths(wiki_dir: Path, paths: list[str], message: str,
+                 remove: list[str] | None = None) -> bool:
+    """Stage the given paths (relative to wiki_dir, only those that exist),
+    optionally `git rm` the `remove` paths (orphan reconciliation), commit if
+    there's a delta, push with one rebase-retry. Returns True on success
+    (including 'no changes'), False on failure or nothing-to-stage.
+
+    Generalizes the counter push to an arbitrary file list — the
+    deterministic store→wiki mirror render (managed/render_store_to_wiki.py)
+    stages REVIEW.md, GLOSSARY.md, etc. and removes mirror files whose store
+    source was deleted.
 
     Concurrency (honest): if two CI runs push at the same time, the second
     gets a non-fast-forward error. We pull --rebase and push once more.
     - If the other side touched unrelated files, rebase auto-resolves and
       the retry succeeds.
-    - If the other side also mutated .air-meta.json, rebase produces a
-      content conflict and the except block below returns False — the
-      losing side's counter bump is dropped. The next review's bump starts
-      from whichever value won. Counter can be off by one under high
-      concurrency; acceptable until we add a merge-driver that re-applies
-      the bump mathematically. Tracked as a Future item.
+    - If the other side also mutated the same file, rebase produces a content
+      conflict and the except block returns False — that push is dropped.
+      For the counter this can leave it off by one; for the mirror it's
+      self-healing (the next render re-derives from the store, the source of
+      truth). Acceptable until a merge-driver re-applies mathematically.
     """
     wiki_dir = Path(wiki_dir)
-    meta_path = wiki_dir / META_FILENAME
-    if not meta_path.is_file():
-        print(f"  [wiki] no {META_FILENAME} to commit", file=sys.stderr)
-        return False
-
+    staged_any = False
     try:
-        _run(["git", "add", META_FILENAME], cwd=wiki_dir)
-        # Exit 0 = nothing staged, exit 1 = something staged. Either is fine.
+        for rel in paths:
+            if (wiki_dir / rel).is_file():
+                _run(["git", "add", rel], cwd=wiki_dir)
+                staged_any = True
+        for rel in (remove or []):
+            if (wiki_dir / rel).is_file():
+                # --ignore-unmatch: an untracked same-named file is a no-op,
+                # not a failure (keeps the push best-effort).
+                _run(["git", "rm", "--quiet", "--ignore-unmatch", rel], cwd=wiki_dir)
+                staged_any = True
+        if not staged_any:
+            print("  [wiki] no files to commit", file=sys.stderr)
+            return False
+        # Exit 0 = nothing staged (no delta), exit 1 = something staged.
         diff = _run(["git", "diff", "--cached", "--quiet"], cwd=wiki_dir, check=False)
         if diff.returncode == 0:
-            print(f"  [wiki] {META_FILENAME} unchanged — skipping commit", file=sys.stderr)
+            print("  [wiki] no changes to commit — skipping", file=sys.stderr)
             return True
         _run(["git", "commit", "-m", message], cwd=wiki_dir)
     except subprocess.CalledProcessError as e:
@@ -102,10 +117,8 @@ def commit_meta(wiki_dir: Path, message: str) -> bool:
     except subprocess.CalledProcessError:
         pass
 
-    # Retry: rebase onto the remote, then push again. On rebase conflict in
-    # .air-meta.json we give up — the next review's bump will write a fresh
-    # state based on whatever won the race.
-    print(f"  [wiki] push raced; retrying with pull --rebase", file=sys.stderr)
+    # Retry: rebase onto the remote, then push again.
+    print("  [wiki] push raced; retrying with pull --rebase", file=sys.stderr)
     try:
         _run(["git", "pull", "--rebase"], cwd=wiki_dir)
         _run(["git", "push"], cwd=wiki_dir)
@@ -114,6 +127,16 @@ def commit_meta(wiki_dir: Path, message: str) -> bool:
         detail = e.stderr.strip() if e.stderr else str(e)
         print(f"  [wiki] push retry failed: {_redact(detail)}", file=sys.stderr)
         return False
+
+
+def commit_meta(wiki_dir: Path, message: str) -> bool:
+    """Stage .air-meta.json, commit if there's a delta, push with one retry.
+    Thin wrapper over commit_paths (the counter is one file in the list)."""
+    wiki_dir = Path(wiki_dir)
+    if not (wiki_dir / META_FILENAME).is_file():
+        print(f"  [wiki] no {META_FILENAME} to commit", file=sys.stderr)
+        return False
+    return commit_paths(wiki_dir, [META_FILENAME], message)
 
 
 def configure_identity(wiki_dir: Path, name: str, email: str) -> None:

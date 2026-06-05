@@ -85,10 +85,12 @@ def main():
     client = Anthropic()
 
     # Store-backed repos: learn is the ONE flow that mounts the pattern
-    # store read_write (cleanup/merge/cap/archive need semantic edits).
-    # It also exports a rendered snapshot back to the git wiki so humans
-    # and the CLI keep a readable mirror. Non-migrated repos run the
-    # legacy wiki-clone pipeline unchanged.
+    # store read_write (cleanup/merge/cap/archive need semantic edits). It
+    # CURATES the store only — the deterministic store→wiki render
+    # (managed/render_store_to_wiki.py, run after this session) owns the
+    # mirror export; the session no longer renders it (REVIEW-HISTORY.md,
+    # which isn't in the store, is the one wiki file the session still
+    # writes). Non-migrated repos run the legacy wiki-clone pipeline unchanged.
     import memory_store
     store_id = memory_store.get_store_id(args.repo, flow="learn")
 
@@ -109,8 +111,10 @@ def main():
                 "air review patterns — SOURCE OF TRUTH. Per-author files "
                 "under authors/<login>.md; shared files at the root; older "
                 "narratives under archive/. Apply the cleanup pipeline to "
-                "these files, then export a rendered snapshot to the git "
-                "wiki (mirror)."
+                "these files. Do NOT render or push the git wiki mirror — a "
+                "deterministic step exports it after this session; you only "
+                "curate the store (and push REVIEW-HISTORY.md, which is not "
+                "in the store)."
             ),
         })
 
@@ -128,7 +132,7 @@ def main():
         f"REPO={args.repo}\n"
         f"GH_TOKEN={bot_token}\n"
         f"MODE={mode}\n"
-        f"PATTERN_STORE={'mounted (see /mnt/memory — operate on the store, then export the wiki mirror)' if store_id else 'none (legacy wiki pipeline)'}\n\n"
+        f"PATTERN_STORE={'mounted (see /mnt/memory — CURATE the store; do NOT render the wiki mirror, a deterministic step does that after this session)' if store_id else 'none (legacy wiki pipeline)'}\n\n"
         f"The repo is at /workspace/repo. Set GH_TOKEN as env var.\n"
         f"Execute the full learn pipeline."
     )
@@ -143,6 +147,18 @@ def main():
         poll(client, session.id)
     else:
         stream(client, session.id)
+
+    # The AI session curated the store; now render the git-wiki mirror
+    # deterministically (the session no longer renders it). This is the
+    # AUTHORITATIVE render — it always runs (unlike the throttled per-review
+    # render) so the wiki reflects the freshly curated store. Stamp
+    # `mirror-rendered` so the per-review throttle resets. Best-effort.
+    if store_id:
+        try:
+            import render_store_to_wiki
+            render_store_to_wiki.render_push_and_stamp(store_id, args.repo, bot_token)
+        except Exception as e:
+            print(f"  [warn] mirror render failed: {e}", file=sys.stderr)
 
     # Reset the shared `/air:learn` trigger counter so the next review sees
     # a clean `reviews_since: 0` and the cadence restarts. Store-backed

@@ -103,6 +103,31 @@ def test_commit_meta_retries_on_concurrent_push(tmp_path, fake_remote, wiki_clon
     assert json.loads((verify / wiki_git.META_FILENAME).read_text())["reviews_since"] == 7
 
 
+def test_commit_paths_multi_file_with_remove(wiki_clone, fake_remote, tmp_path):
+    """The mirror render path: stage several files AND git-rm orphans in one
+    commit. Confirms multi-file staging + remove= reconciliation land together,
+    and a non-existent remove target is a silent no-op."""
+    # Seed an orphan on the remote so the clone tracks it.
+    (wiki_clone / "ORPHAN.md").write_text("stale mirror file\n")
+    _git(wiki_clone, "add", "ORPHAN.md")
+    _git(wiki_clone, "commit", "-m", "seed orphan")
+    _git(wiki_clone, "push", "origin", "master")
+
+    (wiki_clone / "REVIEW.md").write_text("# review\n")
+    (wiki_clone / "GLOSSARY.md").write_text("# glossary\n")
+    ok = wiki_git.commit_paths(
+        wiki_clone, ["REVIEW.md", "GLOSSARY.md"], "mirror",
+        remove=["ORPHAN.md", "NEVER-EXISTED.md"],   # 2nd is a no-op (absent)
+    )
+    assert ok is True
+
+    verify = tmp_path / "verify-mr"
+    subprocess.run(["git", "clone", str(fake_remote), str(verify)], check=True, capture_output=True)
+    assert (verify / "REVIEW.md").is_file()
+    assert (verify / "GLOSSARY.md").is_file()
+    assert not (verify / "ORPHAN.md").exists()   # orphan reconciled away
+
+
 def test_clone_wiki_missing_repo(tmp_path):
     """If the wiki URL 404s, clone_wiki returns False rather than raising."""
     dest = tmp_path / "nope"

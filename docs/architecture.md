@@ -11,7 +11,7 @@
 1. **CLI Plugin** — runs locally in Claude Code, triggered manually with `/air:review`
 2. **Managed Agent** — runs in Anthropic's cloud, triggered by GitHub Actions: request-driven (review on bot reviewer-request; recommended) or push-driven with a cooldown debounce — see `managed/README.md` "Enable on a repo"
 
-Both paths use the same 5 agent prompts, same pattern source, same review format, and learn from each other. Pattern source is per-repo: a memory store (migrated repos — review sessions mount read-only, writes via `managed/pattern_writer.py`, git wiki kept as an exported mirror) or the legacy git wiki.
+Both paths use the same 5 agent prompts, same pattern source, same review format, and learn from each other. Pattern source is per-repo: a memory store (migrated repos — review sessions mount read-only, writes via `managed/pattern_writer.py`, git wiki kept as an exported mirror rendered deterministically by `managed/render_store_to_wiki.py` — throttled per-review + authoritative on learn, see "Store→wiki mirror render" below) or the legacy git wiki.
 
 ---
 
@@ -50,8 +50,10 @@ VorobiovD/air/
 │   ├── setup.py                      Creates/updates 5 specialist agents via API (no orchestrator agent)
 │   ├── review.py                     Client-side orchestrator — fans out 4 specialists via asyncio.gather, runs verifier, posts comment
 │   ├── learn.py                      Triggers wiki maintenance sessions (single-agent)
+│   ├── render_store_to_wiki.py       Deterministic store→wiki mirror render (inverse of migrate split; throttled per-review + on learn)
 │   ├── test-session.py               9-test verification (repo, auth, blame, comment, wiki)
 │   ├── test-learn.py                 Wiki clone/push verification
+│   ├── test-render.py                Render round-trip / overflow-inverse unit tests (pure, no API)
 │   ├── test-parallel.py              Smoke test for parallel sub-agent execution (detects Research Preview access)
 │   ├── prompts/
 │   │   └── learn-orchestrator.md     Learn pipeline for cloud (review orchestrator.md deleted in v1.7.0 — replaced by review.py)
@@ -224,6 +226,16 @@ Lifecycle:
 | GLOSSARY.md | Domain terminology: prevents false findings on intentional naming | First-run + learn |
 | ACCEPTED-PATTERNS.md | Team-approved patterns that suppress matching findings | Developer disputes (graduated resistance) |
 | SEVERITY-CALIBRATION.md | Per-agent confidence thresholds from dispute rates | Learn (when 10+ data points) |
+
+### Store→wiki mirror render (store-backed repos)
+
+For migrated repos the store is the source of truth and the wiki is an **exported mirror**. `managed/render_store_to_wiki.py` renders it deterministically (no AI session) — the inverse of `migrate_wiki_to_store.py`'s split: it reassembles REVIEW.md by driving off `/review-misc.md` as the structural spine (the verbatim catch-all that holds the H1 + `## Author Patterns` heading/intro + tail sections) and injecting the reassembled `## Common Findings`, `## Service-Specific Patterns`, and sorted per-author `### <login>` blocks at their anchor positions, plus pass-through of the shared whole-file memories (overflow chunks reassembled). REVIEW-HISTORY.md (not in the store) and the counter are skipped.
+
+It runs in two places, both store-id-gated and best-effort (a failure never fails the review/learn):
+- **Throttled per-review** (`review.py::_maybe_render_mirror`): `meta.py mirror-due` is a cheap meta read; only when the mirror is stale by ≥`MIRROR_INTERVAL_HOURS` (1h) does it clone+render+push and stamp `mirror-rendered`. Within the window it's a no-op — no git op. This keeps the wiki fresh between learns (the raw post-`pattern_writer` store).
+- **Authoritatively on learn** (`learn.py`, after the curation session): always renders the freshly curated store and stamps `mirror-rendered`, resetting the per-review throttle. The AI session pushes only REVIEW-HISTORY.md (single file, before the deterministic render — disjoint files, sequenced first to avoid a non-ff race).
+
+Managed-only: the CLI has no store render, so a CLI-only store repo sees a stale wiki between managed runs (accepted gap; CLI store writes are a later phase). Losslessness (`split(render(store)) == store`, modulo whitespace) is covered by `managed/test-render.py`.
 
 ---
 
