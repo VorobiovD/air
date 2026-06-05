@@ -136,6 +136,35 @@ def read_prompt(path: Path) -> str:
     return body
 
 
+# Preamble for the assembled solo-reviewer prompt. Mirrors the proven
+# managed/experiments/arch_bench.py _system_prompt(): one agent applies all
+# lenses + self-verifies in a single session (the opt-in AIR_REVIEW_MODE=solo
+# path in review.py), instead of the coordinator's fan-out.
+SOLO_PREAMBLE = (
+    "You are a thorough code reviewer applying the review lenses below, then "
+    "self-verifying your findings (drop false positives / below-60 confidence). "
+    "You are reviewing ALONE in a single session — there is no separate verifier "
+    "pass, so the verifier lens applies to your OWN findings in real time. Output "
+    "exactly the `## Code Review` format the lenses describe, including the "
+    "`Reviewed at: <head_sha>` footer.\n"
+)
+
+
+def assemble_solo_prompt() -> str:
+    """Merge the 5 specialist prompts into one solo-reviewer system prompt.
+
+    Assembled at sync time from the SAME `agents/*.md` files the specialists
+    use (frontmatter-stripped, each under a `===== LENS: <name> =====`
+    delimiter, behind SOLO_PREAMBLE) → zero drift, no 6th prompt to maintain.
+    Faithful port of arch_bench.py `_system_prompt()`.
+    """
+    parts = [SOLO_PREAMBLE]
+    for name in SUB_AGENTS:
+        body = read_prompt(AGENTS_DIR / f"{name}.md")
+        parts.append(f"\n\n===== LENS: {name} =====\n{body}")
+    return "".join(parts)
+
+
 def parse_agent_tools(path: Path) -> list[str]:
     """Extract tool names from agent frontmatter."""
     fields, _ = _split_frontmatter(path)
@@ -405,8 +434,34 @@ def main():
                 speed=speed,
             )
 
+    # 5. Solo reviewer agent. One agent applying all 5 lenses + self-verify in
+    # a single session — the opt-in AIR_REVIEW_MODE=solo|both path in review.py.
+    # Its prompt is assembled from the same specialist .md files (zero drift),
+    # so it is deliberately NOT in PINNABLE_AGENTS (pin the specialists). Synced
+    # ALWAYS (idempotent); review.py only REQUIRES it when a run uses solo/both,
+    # so full-only repos are unaffected.
+    print("[5] Solo reviewer agent (single-session, all lenses)")
+    missing_md = [n for n in SUB_AGENTS if not (AGENTS_DIR / f"{n}.md").exists()]
+    solo: dict | None = None
+    if missing_md:
+        print(f"  air-solo-reviewer: SKIPPED — missing prompt files: {missing_md}", file=sys.stderr)
+    else:
+        solo = create_or_update_agent(
+            name="air-solo-reviewer",
+            system=assemble_solo_prompt(),
+            tools=[{
+                "type": "agent_toolset_20260401",
+                "default_config": {"enabled": False},
+                "configs": [{"name": t, "enabled": True} for t in ["bash", "read", "grep", "glob"]],
+            }],
+            existing=agents_by_name.get("air-solo-reviewer"),
+            model=DEFAULT_OPUS,
+            speed="fast",
+        )
+
     coord_status = "+ coordinator" if coordinator else "(coordinator absent)"
-    print(f"\nDone. {len(synced)} specialist agents synced {coord_status}.")
+    solo_status = "+ solo" if solo else "(solo absent)"
+    print(f"\nDone. {len(synced)} specialist agents synced {coord_status} {solo_status}.")
 
 
 if __name__ == "__main__":

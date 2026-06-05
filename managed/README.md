@@ -187,6 +187,22 @@ curl -s https://api.anthropic.com/v1/agents?limit=100 \
 
 The `workflow_dispatch` trigger lets you review any PR on-demand from the Actions tab — including closed or merged PRs (post-merge audits, wiki-pattern backfills from history). For `pull_request` triggers, `pr_number` / `closed` defaults apply (current PR, state gate enforced).
 
+### Review mode (`review_mode` — opt-in single-agent path)
+
+Optional `review_mode` input (default `full`) selects the review architecture:
+
+- **`full`** (default) — the 6-agent coordinator. Byte-identical to leaving it unset.
+- **`solo`** — ONE `air-solo-reviewer` agent applies all 5 lenses + self-verifies + folds Codex in a single session. Benchmarked at ~$2–4 / ~7 min vs full's ~$10 / ~25 min (qai-be #994). Its prompt is assembled at sync from the 5 specialist prompts (zero-drift; no standalone file) and the agent is not pinnable. **⚠️ NOT gate-safe:** a single agent downgrades blocker *severity* (it can APPROVE a PR whose real blocker it rated medium). Use only where an advisory review is acceptable.
+- **`both`** — runs full AND solo. The **full** review gates as usual and drives the verdict/learn; the solo review posts alongside as a separate, non-blocking `## Code Review (solo — experimental)` comment for comparison (testing).
+
+```yaml
+    # workflow_dispatch input, then pass it through:
+    with:
+      review_mode: ${{ inputs.review_mode }}   # 'full' | 'solo' | 'both'
+```
+
+`review_mode` is per-request (set it on a `workflow_dispatch` run, or pin it in a caller's `with:`). It's **managed-only** — the CLI `/air:review` runs its agents locally with no managed coordinator, so there is no CLI solo equivalent.
+
 ## How it works
 
 **Multi-agent coordinator (v1.9.0+)**: the Python driver does upstream prep (fetch PR data, state gates, build context, optionally run codex), then hands off to a single `air-coordinator` session that dispatches the specialists in parallel + verifier as `callable_agents` sub-agents within one Anthropic session — mirroring the local CLI's architecture. This replaced v1.7's client-side `asyncio.gather` over 5 separate sessions once Anthropic granted research-preview access for `callable_agents` on 2026-04-25.
@@ -197,7 +213,7 @@ PR opened (or air-machine requested as reviewer)
   ▼
 GitHub Action triggers `python review.py <repo> <pr>`
   │
-  ├── Syncs 5 specialist agents + air-coordinator (creates on first run, updates prompts otherwise)
+  ├── Syncs 5 specialist agents + air-coordinator + air-solo-reviewer (creates on first run, updates prompts otherwise)
   ├── Fetches PR metadata + diff via GitHub API
   ├── Fetches current PR conversation (issue comments + reviews + inline comments) and bot identity
   │     concurrently — humans + other AI bots are surfaced to specialists as <pr-conversation>
