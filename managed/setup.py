@@ -437,15 +437,22 @@ def main():
     # 5. Solo reviewer agent. One agent applying all 5 lenses + self-verify in
     # a single session — the opt-in AIR_REVIEW_MODE=solo|both path in review.py.
     # Its prompt is assembled from the same specialist .md files (zero drift),
-    # so it is deliberately NOT in PINNABLE_AGENTS (pin the specialists). Synced
-    # ALWAYS (idempotent); review.py only REQUIRES it when a run uses solo/both,
-    # so full-only repos are unaffected.
-    print("[5] Solo reviewer agent (single-session, all lenses)")
-    missing_md = [n for n in SUB_AGENTS if not (AGENTS_DIR / f"{n}.md").exists()]
+    # so it is deliberately NOT in PINNABLE_AGENTS (pin the specialists).
+    #
+    # Synced ONLY when the run actually uses it (AIR_REVIEW_MODE in solo|both;
+    # review.py passes the resolved mode through sync_agents). A full-only run
+    # never creates it — so an at-capacity workspace or a transient create
+    # failure can't abort a default review that never touches the solo agent.
+    solo_mode = os.environ.get("AIR_REVIEW_MODE", "full") in ("solo", "both")
     solo: dict | None = None
-    if missing_md:
+    missing_md = [n for n in SUB_AGENTS if not (AGENTS_DIR / f"{n}.md").exists()]
+    if not solo_mode:
+        print("[5] Solo reviewer agent — skipped (review_mode=full)")
+    elif missing_md:
+        print("[5] Solo reviewer agent (single-session, all lenses)")
         print(f"  air-solo-reviewer: SKIPPED — missing prompt files: {missing_md}", file=sys.stderr)
     else:
+        print("[5] Solo reviewer agent (single-session, all lenses)")
         solo = create_or_update_agent(
             name="air-solo-reviewer",
             system=assemble_solo_prompt(),
@@ -460,7 +467,7 @@ def main():
         )
 
     coord_status = "+ coordinator" if coordinator else "(coordinator absent)"
-    solo_status = "+ solo" if solo else "(solo absent)"
+    solo_status = "+ solo" if solo else ("(solo not needed)" if not solo_mode else "(solo absent)")
     print(f"\nDone. {len(synced)} specialist agents synced {coord_status} {solo_status}.")
 
 

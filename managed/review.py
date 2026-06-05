@@ -351,7 +351,7 @@ async def run_codex_session(target_repo: str, base_sha: str) -> str:
     return output
 
 
-def sync_agents():
+def sync_agents(review_arch: str = "full"):
     """Run setup.py to create/update agents (pinned agents skip sync)."""
     print("[1] Syncing agents with latest prompts...")
     # Narrow env to only what setup.py needs, avoiding accidental exposure of
@@ -363,6 +363,11 @@ def sync_agents():
         # prompt sync for pinned agents; run_review applies the same pins
         # to the session roster.
         "AIR_AGENT_VERSIONS": os.environ.get("AIR_AGENT_VERSIONS", ""),
+        # The resolved review architecture — setup.py only creates the
+        # air-solo-reviewer agent when the run actually needs it (solo/both),
+        # so a full-only run never creates it (and can't be aborted by a
+        # solo-agent creation failure on an at-capacity workspace).
+        "AIR_REVIEW_MODE": review_arch,
     }
     result = subprocess.run(
         [sys.executable, str(Path(__file__).parent / "setup.py")],
@@ -1881,7 +1886,7 @@ async def _run_session_with_billing_retry(make_session_coro, label: str) -> str:
             raise  # non-billing, slow billing, or attempts exhausted
     # Unreachable: the loop returns on success or raises on the final attempt.
     # Present only so every path satisfies the `-> str` contract.
-    raise SpecialistSessionError(f"{label}: billing retry exhausted")  # pragma: no cover
+    raise SpecialistSessionError(label, "billing retry exhausted")  # pragma: no cover
 
 
 # Anti-spoof: compare the `Reviewed at:` footer SHA on a 12-hex-char prefix
@@ -2168,7 +2173,29 @@ async def _run_solo_session(
             f"  [warn] solo session raised SpecialistSessionError: {e.reason}",
             file=sys.stderr,
         )
+    except Exception as e:  # noqa: BLE001
+        # Degrade gracefully — a solo failure (notably asyncio.TimeoutError from
+        # the wall-clock cap, which the billing-retry helper does NOT catch)
+        # must NEVER crash run_review and discard an already-computed coordinator
+        # review in `both` mode. Same posture as the codex degradation path.
+        failure_reason = f"{type(e).__name__}: {e}"
+        out = ""
+        print(f"  [warn] solo session failed: {failure_reason}", file=sys.stderr)
     return out, failure_reason
+
+
+def _unpack_session_result(result, label: str) -> tuple[str, str]:
+    """Coerce an `asyncio.gather(return_exceptions=True)` entry to (out, reason).
+
+    A session helper returns `(out, reason)`; a raised exception (e.g. a
+    coordinator `asyncio.TimeoutError`, which `_run_coordinator_session` does
+    NOT catch — full-mode behavior is preserved by leaving it to propagate
+    there) becomes `("", reason)` so `both` mode never crashes and the other
+    session's result survives.
+    """
+    if isinstance(result, BaseException):
+        return "", f"{label} session error: {type(result).__name__}: {result}"
+    return result
 
 
 async def run_review(args):
@@ -2184,7 +2211,7 @@ async def run_review(args):
     if review_arch != "full":
         print(f"  [mode] review architecture: {review_arch}")
 
-    sync_agents()
+    sync_agents(review_arch)
     agents = list_agents()
     env_id = find_environment()
 
@@ -2759,27 +2786,44 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     solo_out = ""
     solo_failure_reason = ""
 
-    if review_arch in ("full", "both"):
+    if review_arch == "both":
+        # Run the two independent sessions CONCURRENTLY so wall-clock ≈
+        # max(coordinator, solo), not the sum — a sequential layout could hit
+        # codex + 45m coordinator + 45m solo and blow the 95-min GHA cap.
+        # return_exceptions so a crash in one (e.g. a coordinator
+        # asyncio.TimeoutError, which _run_coordinator_session does not catch)
+        # can't cancel the other — the surviving review still posts.
+        print("  Running coordinator + solo sessions concurrently (both mode)...")
+        _coord_res, _solo_res = await asyncio.gather(
+            _run_coordinator_session(
+                agents, env_id, args, checkout, bot_token, store_id,
+                pr_context, diff, codex_block, verifier_task, meta, mode, head_sha,
+            ),
+            _run_solo_session(
+                agents, env_id, args, checkout, bot_token, store_id,
+                pr_context, diff, codex_block, verifier_task,
+            ),
+            return_exceptions=True,
+        )
+        coordinator_out, coordinator_failure_reason = _unpack_session_result(_coord_res, "coordinator")
+        solo_out, solo_failure_reason = _unpack_session_result(_solo_res, "solo")
+        if not solo_out and solo_failure_reason:
+            print(
+                f"  [warn] both-mode: solo review unavailable ({solo_failure_reason[:200]}) "
+                f"— no comparison comment will be posted",
+                file=sys.stderr,
+            )
+    elif review_arch == "full":
         coordinator_out, coordinator_failure_reason = await _run_coordinator_session(
             agents, env_id, args, checkout, bot_token, store_id,
             pr_context, diff, codex_block, verifier_task, meta, mode, head_sha,
         )
-    if review_arch in ("solo", "both"):
+    else:  # solo
         print("  Running solo session (single merged-lens agent)...")
         solo_out, solo_failure_reason = await _run_solo_session(
             agents, env_id, args, checkout, bot_token, store_id,
             pr_context, diff, codex_block, verifier_task,
         )
-        if review_arch == "both" and not solo_out and solo_failure_reason:
-            # In both-mode the solo review is advisory (the coordinator gates),
-            # so a solo failure isn't fatal — but surface it rather than silently
-            # dropping the comparison comment.
-            print(
-                f"  [warn] both-mode: solo session failed ({solo_failure_reason[:200]}) "
-                f"— solo comparison comment will not be posted",
-                file=sys.stderr,
-            )
-    if review_arch == "solo":
         # Solo IS the review — feed it through the shared post-review pipeline
         # exactly like a coordinator output (extract / post / verdict / learn).
         coordinator_out, coordinator_failure_reason = solo_out, solo_failure_reason
@@ -3017,8 +3061,10 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
     # comment for comparison. Re-headered so the body does NOT start with
     # "## Code Review\n" → invisible to the cooldown/dedup/re-review detectors
     # (they anchor on that exact prefix), so it never collides with the gating
-    # review above. No verdict — the coordinator review drives the single gate.
-    if review_arch == "both" and solo_out and review_extracted:
+    # review. No verdict — only the coordinator review drives the gate. NOT
+    # gated on review_extracted: if the coordinator failed but solo succeeded,
+    # the solo review is the only useful output and must still be posted.
+    if review_arch == "both" and solo_out:
         solo_body, solo_extracted = _extract_review_body(solo_out, head_sha)
         if solo_extracted:
             # Drop solo's own `## Code Review...` header line; the experimental
@@ -3026,8 +3072,9 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
             _, _, solo_rest = solo_body.partition("\n")
             solo_comment = (
                 "## Code Review (solo — experimental)\n\n"
-                "_Single-agent advisory review, posted alongside the gating "
-                "review above for comparison. Not merge-blocking._\n\n"
+                "_Single-agent advisory review (`review_mode=both`), posted for "
+                "comparison. Not merge-blocking; the gating verdict comes from "
+                "the 6-agent review._\n\n"
                 f"{solo_rest}"
             )
             solo_resp = _post_review_comment_with_retry(
