@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.22.0](https://github.com/VorobiovD/air/compare/v1.21.0...v1.22.0) (2026-06-05)
+
+
+### Features
+
+* **managed:** deterministic store→wiki mirror render ([#119](https://github.com/VorobiovD/air/issues/119)) ([7612058](https://github.com/VorobiovD/air/commit/76120587ef99d65021f56ba476f062b79b4051b0))
+
 ## [1.21.0](https://github.com/VorobiovD/air/compare/v1.20.0...v1.21.0) (2026-06-05)
 
 
