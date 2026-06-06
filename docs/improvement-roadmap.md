@@ -11,21 +11,21 @@
 
 **External commitments** (Cowork, etc.) tracked separately in `docs/external-commitments.md`.
 
-_Last updated: 2026-05-21 (post-v1.13.0 + plan consolidation + 2026-05-19/21 SSE-degraded incident data)._
+_Last updated: 2026-06-06 (post-v1.22.0 — memory-store migration complete fleet-wide, deterministic wiki-mirror render, solo/both review mode, multi-reviewer PAT model). See "Since v1.13.0" below for the delivery summary._
 
 ---
 
 ## TL;DR
 
-**Current shipped:** v1.13.0 (2026-05-14) — 5 new prompt capabilities (exposure escalation, CLAUDE.md gotcha grep, paired-doc drift, gate-output symmetry, category-symmetric respond gate).
+**Current shipped:** v1.22.0 (2026-06-06) — deterministic store→wiki mirror render. The big arc since v1.13.0: the **memory-store migration is complete fleet-wide** (all 4 repos store-backed), which addressed the dominant cache-read cost lever; **solo/both review mode** ships the cheaper-review experiment; the **multi-reviewer PAT model** is live on all callers. Full delivery list in "Since v1.13.0 — delivered + active" below and the Shipped table.
 
-**Next 3 ships** (cross-source agreement + empirical justification + low effort):
-1. **Phase 0** — Capture full `coordinator_out` on SHA-mismatch + SSE-quiet informational log + drop `-research-preview` header. `<1 day total.`
-2. **Phase 1** — Fast-mode Opus for code-reviewer/security-auditor + session metadata. `~1 day.`
-3. **P2 Re-review fast path** — inter-diff only, skip git-history-reviewer, target 5-10 min. `~3 days.`
+**Active fronts (where attention goes next):**
+1. **Solo/both routing decision** — `both` benchmarking is live; collect ~10 PRs (esp. ones with blockers/mediums) then decide the routing rule (full for initial/large, solo for re-review/small). Solo is ~3× cheaper/faster but NOT gate-safe on substantial PRs (severity downgrade observed). See §Since-v1.13.0 C.
+2. **Coordinator output cost (60–150K tokens/review)** — the #1 structural spend; the fix (file-handoff) is built but **runtime-blocked** (isolated callable-agent threads). Solo-routing is the live lever instead.
+3. **Rotation/ops hardening** — the `rotate-air-pat.sh` fan-out skips ai-relay + never refreshes `AIR_BOT_TOKEN` (caused the 06-03→06-05 ai-relay outage). Add ai-relay to the fan-out for all `<STEM>_PAT` + the bot token. See §Since-v1.13.0 D.
 
 **Phase 5** carries the P0-P9 priorities (existing) with status updates.
-**Phase 6** integrates the managed-agents platform features (P10-P13 + new Items A-N from the May 2026 capability survey).
+**Phase 6** integrates the managed-agents platform features (P10-P13). C10/P12 (drop `-research-preview`) is still OPEN — `managed/api.py` still sends the research-preview suffix.
 
 ---
 
@@ -51,6 +51,41 @@ _Last updated: 2026-05-21 (post-v1.13.0 + plan consolidation + 2026-05-19/21 SSE
 | v1.12.5 | Billing-aware structured-fallback (`BetaManagedAgentsBillingError`) | #64 | svc-tx billing exhaustion → actionable comment instead of stack trace |
 | v1.12.6 | Footer-regex word-boundary trap fixed | #67 | qai-be #666 round 7 verifier output recovered: `\b` failed when 40-hex SHA followed by `Wiki` (both `\w`) |
 | **v1.13.0** | **5 prompt additions** — exposure escalation (verifier), CLAUDE.md gotcha grep + paired-doc drift + gate-output symmetry (code-reviewer), category-symmetric respond gate (review-respond) | #70 | Captures new failure classes from ai-relay #153 + qai-be HIPAA cross-patient leak + qai-be #732 respond cycle |
+| v1.14.0 | Fast-mode Opus on code-reviewer + security-auditor (B1/Item E); security-audit FAIL-only 4-col table (drop PASS/FAIL clutter) | #74, #77, #78 | ~2× faster generation on the two heaviest agents at zero prompt cost (fast premium unbilled on managed) |
+| v1.15.0 | Learn cadence cut **3×** → every 15 reviews / 14 days (was 5/2); `air-learner` Opus→Sonnet | #81 | Biggest single learn-cost cut; cadence config verified correct 2026-06-05 |
+| v1.16.0 | Opus alias 4.7→4.8 + cost-doc correction ($5/$25, not $15/$75); cooldown debounce + respond-driven re-request; agent removal = archive (no DELETE route) | #84, #86, #83 | Re-request fires the re-review exactly on `--respond`, not every push |
+| v1.17.0 | **Per-repo memory-store backend (svc-transcribe pilot)**; fail-loud on run-failed + billing canary preflight; cross-PR awareness + session-efficiency guidance; 12-char SHA-prefix footer match | #90, #87, #80, #89 | Store migration begins; billing exhaustion no longer leaves CI silently green |
+| v1.18.0 | **Agent version pinning** (`agent_versions` input — Item F); file-handoff via Files-API mounts (#92) **gated OFF** (#96 — threads are isolated containers); `fresh` input | #95, #92, #96, #94 | Pinning enables canary/rollback; file-handoff parked pending runtime support |
+| v1.19.0 | **Pattern A targeted retrieval** (grep pattern files, not whole reads — Track 1); learn bloat caps (surgical); byte-bound 100KB overflow chunking | #105, #101, #102, #99 | Attacks the dominant cache-read cost lever; chunking enables the store split |
+| v1.19.1–1.19.2 | Codex bwrap-disable fix; pre-post dedup (no stacked duplicate reviews); default coordinator to **inline mode** via explicit MODE header; fail-loud on codex apology | #107, #109, #112, #110 | Restores Codex on the runner; inline is the production handoff shape |
+| v1.20.0 | Optional **`expected_reviewer` identity assertion** (token-owner == requested reviewer); retry transient preflight billing_error w/ backoff | #116, #113 | Closes the multi-reviewer PAT trust seam (was deferred as qai-be #90) |
+| v1.21.0 | **Solo / both review mode** (`AIR_REVIEW_MODE` full\|solo\|both) — single-agent advisory review for comparison/cost | #117 | ~3× cheaper/faster than the 6-agent coordinator; benchmarking live (see §Since-v1.13.0 C) |
+| **v1.22.0** | **Deterministic store→wiki mirror render** — `render_store_to_wiki.py` replaces the in-session AI render; throttled per-review (≤1×/hr) + authoritative on learn | #119 | Wiki stays fresh between learns; ~40% less learn-session output (in-session render removed) |
+
+---
+
+## Since v1.13.0 — delivered + active (2026-05-23 → 06-06)
+
+The five arcs that dominated the last two weeks. Each links to the Shipped rows above.
+
+### A. Memory-store migration — COMPLETE fleet-wide
+The "wiki split" top-backlog item (40-60% of session input tokens) shipped as a per-repo Anthropic memory store as source of truth. **All four repos are now store-backed** (svc-transcribe pilot v1.17.0 #90 → qai-be 2026-06-03 → qai-fe + ai-relay). Shape: per-author `/authors/<login>.md`, 100KB byte-chunking (#99), review sessions mount **read-only** with deterministic post-review writes (`pattern_writer.py` — kills the injection-poisoning write path AND exact-string-replace fragility), counter at `/meta/air-meta.json` (sha256-preconditioned, no push races). **Pattern A targeted retrieval** (#105, v1.19.0) layered on top — agents grep pattern files instead of whole-reads. Net: directly attacks the dominant cache-read cost lever (was ~68% of spend). Store discovery by name `air-patterns <owner>/<repo>` IS the rollout flag.
+
+### B. Deterministic store→wiki mirror render — SHIPPED v1.22.0 (#119)
+`managed/render_store_to_wiki.py` (the inverse of the migrate split) replaces the in-session AI wiki render the `air-learner` used to do. Runs **throttled per-review** (≤1×/hr, gated by `meta.py mirror-due` — a cheap meta read, git push only when stale) + **authoritatively after each learn** curation. The AI learn shrinks to store curation + REVIEW-HISTORY only. **Measured:** post-merge learns dropped ~40% output (29K/21K vs pre-merge 59K/47K — the in-session render is gone); confirmed live on qai-be (`last_mirror_render` stamping). Verified lossless + delete-nothing against all 4 live wikis before merge. **Managed-only** — CLI store-awareness is the deferred next phase (CLI reads the mirror fine; its writes are non-authoritative and get overwritten by the next render).
+
+### C. Solo / both review mode — SHIPPED v1.21.0 (#117), BENCHMARKING
+`AIR_REVIEW_MODE` (or `review_mode` input / `review.py --mode`): `full` (6-agent coordinator, default + only gate-safe), `solo` (one agent, all lenses, ~3× cheaper/faster), `both` (full gates + solo posts alongside for comparison). **Measured per-session (qai-be #1025, 2026-06-05):** full ~$5 / 15 min wall, solo ~$2 / 3.5 min — ~60% cheaper, ~4× faster. `both` runs them concurrently (wall ≈ full; pays full+solo, no time saving — it's a measurement mode). **Gate-safety finding (3 both-mode PRs):** solo caught the same blocker on #1025 but **missed 2 of 3 mediums (incl. a PHI one) and downgraded a PHI medium to a nit** — confirms "not gate-safe on substantial PRs"; competitive-to-better on trivial PRs (#395) and re-review delta-tracking (#1018). **Active decision:** collect ~10 both-mode PRs (esp. with live blockers/mediums) → adopt adaptive routing — **full for initial/large, solo for re-review/small** — if the data holds. Default stays `full`.
+
+### D. Multi-reviewer PAT model — SHIPPED on callers (+ an ops gap)
+Caller workflows resolve the **requested reviewer's** `<STEM>_PAT` from an `AIR_PAT_MAP` repo variable (`secrets[format('{0}_PAT', stem)] || AIR_BOT_TOKEN`), with the **`expected_reviewer` assertion** (v1.20.0 #116) closing the trust seam. Live on qai-be/qai-fe; **ai-relay ported 2026-06-05** (PR #228, was on the legacy bare-`AIR_BOT_TOKEN` caller).
+**OPS GAP (caused a 2-day ai-relay outage):** the weekly `rotate-air-pat.sh` fan-out refreshes the per-reviewer `<STEM>_PAT` secrets but **NOT `AIR_BOT_TOKEN`**, and **intermittently skips ai-relay entirely** — ai-relay's `AIR_BOT_TOKEN` went stale (06-03→06-05, every review 403'd at checkout), and `ADAM_PAT` landed on the other 3 repos 06-05 but not ai-relay. **Fix to track:** add `thecvlb/ai-relay` to the fan-out for all `<STEM>_PAT` + refresh its `AIR_BOT_TOKEN`; until then only `DIMA_PAT` works on ai-relay and other reviewers spend-then-fail. Cheap detector: a lone-stale `AIR_BOT_TOKEN` `updated_at` vs the fleet.
+
+### E. Reliability + ops (v1.16.0–v1.20.0)
+Fail-loud on run-failed outcomes + **billing canary preflight** (v1.17.0 #87 — billing exhaustion no longer leaves CI silently green); cooldown debounce + respond-driven re-request (v1.16.0 #86); inline-MODE default + Codex bwrap fix (v1.19.x); pre-post dedup against double-triggered runs (#109). The 06-03→06-05 ai-relay 403s cost **$0** (failed at git-checkout, before any session) — confirms the preflight ordering.
+
+### F. MCP Tunnels — FUTURE IDEA (captured, unscheduled)
+Give the managed reviewer internal-context MCP tools (DB-schema / contracts / scanners) over a private tunnel so reviews reason against live internal context. Full-mode-only, post-learn, pilot locally first. Not scheduled; tracked so it isn't lost.
 
 ---
 
@@ -81,7 +116,7 @@ learn.py epilogue (15/PR) ~3-10 min   only every 15 reviews / 14 days
 
 PR #635 received 9 reviews over 2 days. Comment sizes converged but not monotonically: 8.2KB → 6.7KB → 4.1KB → 6.0KB → 9.5KB → 5.7KB → 6.3KB → 4.6KB → 2.4KB. Specialists flag *different* things on similar diffs — variance, not just convergence.
 
-### Failure profile (updated 2026-05-21)
+### Failure profile (updated 2026-06-05)
 
 | Mode | Recent count | Status |
 |---|---|---|
@@ -91,7 +126,8 @@ PR #635 received 9 reviews over 2 days. Comment sizes converged but not monotoni
 | `422 Validation Failed` posting comment | 0 in last 7d | v1.12.1 retry path holding |
 | Stale-coordinator regurgitation | 0 in last 7d | v1.12.3/v1.12.4 mitigations holding |
 | Billing exhaustion | 2026-05-22 (air key, 11d invisible) + 2026-06-02 (org key, ~4h, 3 repos) | run-failed comment posts but job stayed green → fail-loud + billing canary preflight shipped post-1.16.0 |
-| **SSE-quiet / coordinator dispatch latency** | 3+ in last 3d (2026-05-19→21) | **NEW PATTERN — see below** |
+| **SSE-quiet / coordinator dispatch latency** | 3+ in 3d (2026-05-19→21) | see "coordinator dispatch latency" below |
+| **ai-relay stale-token outage** | 06-03→06-05 (every ai-relay review 403'd at git-checkout) | rotation fan-out skipped ai-relay AND never refreshes `AIR_BOT_TOKEN` → stale token. Fixed by porting ai-relay to the multi-PAT caller (PR #228, uses fresh `DIMA_PAT`); fan-out gap itself still OPEN — see §Since-v1.13.0 D. Cost: $0 (failed pre-session) |
 
 ### 2026-06-02 session-efficiency analysis (ai-relay #216 re-review)
 
@@ -99,7 +135,7 @@ A managed-session self-analysis + raw event audit of one re-review session (~3.7
 
 **Shipped (this PR — combined with cross-PR awareness):** scoped-search + timeout-retry + note-the-gap discipline in code-reviewer/security-auditor (a single unscoped search timeout cost ~10 min wall AND expired the 5-min prompt cache for every later turn); verifier treats declared gaps as unverified; coordinator idle-wake hygiene (measured: 4 wakes × ~40K cache-reads — pennies, but free to fix); per-pattern narrative caps in both learn flows.
 
-**Top backlog item — wiki split + structured appends (est. 40-60% of session input tokens):** REVIEW.md (132K chars on ai-relay) is loaded by the coordinator + 2-3 specialists + the verifier every session; the verifier already fails to read it (110K tool-output cap), silently degrading the accepted-patterns whitelist. **IN PROGRESS — implemented as the memory-store migration (PR A, svc-transcribe pilot):** per-repo Anthropic memory store as source of truth (per-author `/authors/<login>.md` files, 100KB/memory cap enforces the split), review sessions mount read-only with deterministic post-review writes (`pattern_writer.py` — kills both the injection-poisoning write path and exact-string-replace fragility), learn mounts read-write + exports a git-wiki mirror for humans/CLI, counter moves to the store with sha256 preconditions (no more push races). ai-relay migrates after soak; **qai-be migrated 2026-06-03** (store memstore_01SWmkzjVhLGFfPwLPM8xaH6, after a one-time chunked wiki cleanup — glossary 261→171KB all terms preserved, history 553→379KB, profile 173→119KB).
+**Top backlog item — wiki split + structured appends (est. 40-60% of session input tokens):** REVIEW.md (132K chars on ai-relay) is loaded by the coordinator + 2-3 specialists + the verifier every session; the verifier already fails to read it (110K tool-output cap), silently degrading the accepted-patterns whitelist. **DONE (fleet-wide) — see §Since-v1.13.0 A.** Shipped as the memory-store migration (PR A, svc-transcribe pilot v1.17.0): per-repo Anthropic memory store as source of truth (per-author `/authors/<login>.md` files, 100KB/memory cap enforces the split), review sessions mount read-only with deterministic post-review writes (`pattern_writer.py` — kills both the injection-poisoning write path and exact-string-replace fragility), learn mounts read-write to curate it (the git-wiki mirror is now rendered **deterministically post-session**, not in-session — v1.22.0), counter moves to the store with sha256 preconditions (no more push races). **All 4 repos migrated** (svc-transcribe → qai-be 2026-06-03 store memstore_01SWmkzjVhLGFfPwLPM8xaH6 → qai-fe + ai-relay), qai-be after a one-time chunked wiki cleanup (glossary 261→171KB all terms preserved, history 553→379KB, profile 173→119KB).
 
 **Additions from the 2026-06-02 session-event audit (second pass):**
 - **Coordinator wake batching** — the per-specialist-completion wakes are runtime behavior (~33K cache-reads × 4-6 wakes ≈ $0.25/run after the prompt-side hygiene). Check whether the multiagent roster supports wake-on-all-complete; if not, file as Anthropic feedback. Acceptable waste, not urgent.
@@ -180,6 +216,8 @@ This is a **model-behavior issue**, not caching. Fix is on prompt/orchestrator s
 
 Three small fixes derived from the 2026-05-19/20/21 audit. All client-side patches in `managed/review.py` + `managed/api.py`. No new managed-agents features. `<1 day total.`
 
+**Status (2026-06-06):** A1/A2 (full coordinator dump + SSE-degraded info log) effectively subsumed by the v1.12.3–v1.12.6 REST-drain work + v1.17.0 fail-loud. **C10 still OPEN** — `managed/api.py` still sends `managed-agents-2026-04-01-research-preview` (verified 2026-06-05; the research-preview surfaces we rely on, e.g. callable-agent threads + the sessions usage API, still work, so no forcing function to drop the suffix).
+
 ### A1 — Capture full `coordinator_out` on SHA-mismatch
 **Why:** Today only first 2000 chars dump on failure. qai-be #830 (2026-05-19) had a substantive 4715-char Re-review rejected by SHA-validator; without full dump we can't tell if footer was absent, stale, or regex-missed.
 **Fix:** ~5 LOC change to dump full `coordinator_out` to a debug artifact instead of truncating.
@@ -205,8 +243,9 @@ Three small fixes derived from the 2026-05-19/20/21 audit. All client-side patch
 **Verification needed:** local CLI router must honor the `model:` field's object form. If not, gate on managed-agent path only.
 **Source:** `air-improvements-plan.md §3.1 E + §3.4 O`
 
-### C8 / Item M — Session metadata
+### C8 / Item M — Session metadata — **still OPEN (worth doing)**
 **What:** Patch the managed entrypoint (`client.beta.sessions.create`) to set `metadata: {pr_number, repo_path, mode, plugin_version}`. Enables every future ops question — cost per repo/mode/version, failure rate per cohort.
+**Status (2026-06-06):** NOT shipped — sessions still carry an empty `metadata: {}` (confirmed via the sessions API). The 2026-06-05 cost reconciliation (per-session usage → $/day, full-vs-solo) was ad-hoc archaeology against `sessions.list()` + `.retrieve()` keyed off the session **title** (`air-coordinator — <repo>`); structured `metadata` would make it a filter, not a parse. Cheap; compounds with Track 3 observability.
 **Cost:** trivial.
 **Source:** `air-improvements-plan.md §3.3 M`
 
@@ -439,8 +478,8 @@ Things that should be tracked but currently aren't captured in any doc/issue/tas
 
 ## Explicit non-fits (won't ship)
 
-- **Memory stores in place of GitHub wiki for `REVIEW.md`** — would lose GitHub commit history (audit trail), cross-platform CLI ↔ managed sharing, per-repo isolation via wiki branches, public visibility.
-- **Dreaming** (research preview) — coupled to memory stores. No-op until memory stores ship (we shouldn't).
+- ~~**Memory stores in place of GitHub wiki for `REVIEW.md`**~~ — **SUPERSEDED (shipped v1.17.0→v1.22.0).** The original objection (loses commit history, CLI sharing, public visibility) was resolved by making the store the source of truth AND keeping the git wiki as a **deterministically-rendered mirror** (`render_store_to_wiki.py`, v1.22.0): commit history + CLI reads + visibility all preserved via the mirror, while the store gives the 100KB split + injection-safe deterministic writes. See §Since-v1.13.0 A/B.
+- **Dreaming** (research preview) — coupled to memory stores. Now that stores ARE in use, re-assessable — but no identified fit; leave deferred.
 - **Thread archival** — relevant only at thread-count pressure. We use 6/25 threads. No-op.
 - **Vault credentials with `mcp_oauth` background refresh** — relevant for OAuth-rotating secrets. Our `ANTHROPIC_API_KEY` and `AIR_BOT_TOKEN` are static GitHub secrets. No-op.
 - **Finance agent templates** — domain-specific, not our use case.
