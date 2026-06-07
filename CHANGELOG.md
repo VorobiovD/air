@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.23.0](https://github.com/VorobiovD/air/compare/v1.22.0...v1.23.0) (2026-06-07)
+
+
+### Features
+
+* **ci:** auth preflight — fail $0 on a missing/expired/no-access review token ([#122](https://github.com/VorobiovD/air/issues/122)) ([d931e4c](https://github.com/VorobiovD/air/commit/d931e4c0ff7dc7a2e3a038915dc8fd4f40e0ce3c))
+
 ## [1.22.0](https://github.com/VorobiovD/air/compare/v1.21.0...v1.22.0) (2026-06-05)
 
 
