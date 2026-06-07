@@ -247,6 +247,39 @@ jobs:
       # the bot login) — worst case a spoofed comment delays a push-
       # triggered review by one window; fail direction is always
       # "review runs", never "review suppressed".
+      - name: Auth preflight (fail $0 on a missing / expired / no-access review token)
+        # A missing/expired/no-access review PAT otherwise dies with a cryptic
+        # git 403 at the target-repo checkout below. Probe GET /repos first:
+        # 401/403/404 is a definitive auth failure → fail loud and $0 with an
+        # actionable message (GitHub returns 404, not 403, for a private repo a
+        # token can't see — an out-of-scope fine-grained PAT or a non-
+        # collaborator bot; the caller's own repo always exists, so 404 here can
+        # only mean no-access). Any OTHER code (5xx, network) only warns and
+        # proceeds, so a flaky GitHub API can never turn this guard into a fleet
+        # outage. Scope is deliberately missing/expired/no-access ONLY — we do
+        # NOT gate on `permissions.push`: the production <login>_PATs are
+        # Contents:RO + Pull-requests:RW, so `push` is false on a perfectly
+        # valid review token, and gating on it would false-fail every review.
+        # (A read-only token mistakenly pasted as a PAT thus still reaches the
+        # post step — a rarer misconfig the 200-check can't safely close without
+        # risking that outage.) Runs before checkout/session (and the cooldown
+        # sleep) so a doomed run fails instantly; lives in the reusable workflow
+        # → every caller repo gets it with no per-repo config.
+        env:
+          AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${AIR_BOT_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${REPO}" 2>/dev/null || echo 000)
+          case "$code" in
+            200) echo "auth preflight OK — review token can access ${REPO}" ;;
+            401|403|404) echo "::error::air: the review token for ${REPO} is missing, expired, or has no access (HTTP ${code}). No review ran — \$0 spent. Fix this repo's review-PAT secret (the per-reviewer *_PAT, or AIR_BOT_TOKEN) or its rotation fan-out." ; exit 1 ;;
+            *) echo "::warning::air: auth preflight got HTTP ${code} for ${REPO} (transient?) — proceeding without blocking." ;;
+          esac
+
       - name: Cooldown debounce
         if: ${{ github.event.action == 'synchronize' && inputs.cooldown_minutes != '0' }}
         env:
