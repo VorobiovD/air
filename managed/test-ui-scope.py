@@ -14,9 +14,11 @@ empty, the fail-open default, and that assemble_solo_prompt() includes the UI
 lens (solo applies it too — it self-scopes on non-UI diffs).
 """
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import review  # noqa: E402 — module handle for patching review.memory_store
 from review import (  # noqa: E402
     _diff_touches_ui,
     _path_is_ui,
@@ -25,6 +27,17 @@ from review import (  # noqa: E402
     _user_facing_copy_globs,
 )
 from setup import assemble_solo_prompt, SUB_AGENTS  # noqa: E402
+
+
+@contextmanager
+def patched_attr(obj, name, value):
+    """Temporarily swap an attribute (e.g. review.memory_store.read_memory)."""
+    saved = getattr(obj, name)
+    setattr(obj, name, value)
+    try:
+        yield
+    finally:
+        setattr(obj, name, saved)
 
 
 def _diff_with(*paths):
@@ -145,6 +158,22 @@ def test_parse_copy_paths_missing_or_empty():
 def test_user_facing_copy_globs_no_store_is_empty():
     # No store → no read, no globs (web-only fallback). Pure, no network.
     assert _user_facing_copy_globs(None) == []
+
+
+def test_user_facing_copy_globs_reads_and_parses_store():
+    # Happy path: store returns profile text → section parsed into globs.
+    with patched_attr(review.memory_store, "read_memory",
+                      lambda sid, path: (_PROFILE_WITH_SECTION, "sha", "id")):
+        assert _user_facing_copy_globs("memstore_x") == [
+            "agent-core/agents/*.py", "**/messages/*.py"]
+
+
+def test_user_facing_copy_globs_read_error_returns_empty():
+    # A store read that raises must fail safe to [] (never block a review).
+    def _boom_read(sid, path):
+        raise RuntimeError("store down")
+    with patched_attr(review.memory_store, "read_memory", _boom_read):
+        assert _user_facing_copy_globs("memstore_x") == []
 
 
 def test_path_matches_globs_greedy_and_excludes():

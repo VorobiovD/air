@@ -1307,10 +1307,9 @@ def _parse_copy_paths_section(profile_text: str) -> list[str]:
             g = s[2:].strip().strip("`").strip()
             if g:
                 globs.append(g)
-        elif s and not globs:
-            continue  # intro prose before the list
         elif not s and globs:
             break  # blank line after the list ends it
+        # else: intro prose before the list (s and not globs) — skip, loop on
     return globs
 
 
@@ -1322,11 +1321,19 @@ def _user_facing_copy_globs(store_id: str | None) -> list[str]:
     if not store_id:
         return []
     try:
-        got = memory_store.read_memory(store_id, "/project-profile.md")
+        got = memory_store.read_memory(store_id, memory_store.PROJECT_PROFILE_PATH)
     except Exception as e:  # noqa: BLE001 — never fail a review on a store read
         print(f"  [ui-copy] could not read project-profile from store: {e}", file=sys.stderr)
         return []
     return _parse_copy_paths_section(got[0]) if got else []
+
+
+def _collect_changed_paths(post_paths: list[str], diff: str) -> list[str]:
+    """UNION of the pre-computed `post_paths` (capped, empty without
+    AIR_TARGET_REPO) and the uncapped `+++ b/<path>` headers parsed from the
+    raw diff — so a path past the precomp cap is still seen. The header scan is
+    a cheap regex over `+++` lines even on a large diff."""
+    return list(post_paths) + _DIFF_PATH_RE.findall(diff or "")
 
 
 def _diff_touches_ui(post_paths: list[str], diff: str, extra_globs: tuple | list = ()) -> bool:
@@ -1348,7 +1355,7 @@ def _diff_touches_ui(post_paths: list[str], diff: str, extra_globs: tuple | list
     all, return True so an ambiguous case still gets a copy review (correctness
     over the cost saving on the rare unparseable diff).
     """
-    paths = list(post_paths) + _DIFF_PATH_RE.findall(diff or "")
+    paths = _collect_changed_paths(post_paths, diff)
     if not paths:
         return True  # fail open — couldn't determine paths
     return any(_path_is_ui(p) or _path_matches_globs(p, extra_globs) for p in paths)
@@ -2872,11 +2879,15 @@ async def run_review(args):
     # web check misses, so web PRs and store-less repos pay nothing extra.
     # Backend-only PRs skip it ($0 added). Solo/both's merged prompt always
     # includes the UI lens regardless — it self-scopes there.
-    ui_in_scope = _diff_touches_ui(post_paths, diff)
-    ui_scope_reason = "web markup/i18n/docs"
-    if not ui_in_scope:
-        copy_globs = _user_facing_copy_globs(store_id)
-        if copy_globs and _diff_touches_ui(post_paths, diff, copy_globs):
+    changed_paths = _collect_changed_paths(post_paths, diff)  # built once, shared by both checks
+    if not changed_paths:
+        ui_in_scope, ui_scope_reason = True, "fail-open (no paths)"
+    elif any(_path_is_ui(p) for p in changed_paths):
+        ui_in_scope, ui_scope_reason = True, "web markup/i18n/docs"
+    else:
+        ui_in_scope, ui_scope_reason = False, ""
+        copy_globs = _user_facing_copy_globs(store_id)  # store read only when the web check missed
+        if copy_globs and any(_path_matches_globs(p, copy_globs) for p in changed_paths):
             ui_in_scope, ui_scope_reason = True, "declared copy paths"
     print(f"  ui-copy: {f'in scope ({ui_scope_reason})' if ui_in_scope else 'skipped (no user-facing files)'}")
 
