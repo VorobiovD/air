@@ -11,7 +11,7 @@
 1. **CLI Plugin** — runs locally in Claude Code, triggered manually with `/air:review`
 2. **Managed Agent** — runs in Anthropic's cloud, triggered by GitHub Actions: request-driven (review on bot reviewer-request; recommended) or push-driven with a cooldown debounce — see `managed/README.md` "Enable on a repo"
 
-Both paths use the same 5 agent prompts, same pattern source, same review format, and learn from each other. Pattern source is per-repo: a memory store (migrated repos — review sessions mount read-only, writes via `managed/pattern_writer.py`, git wiki kept as an exported mirror rendered deterministically by `managed/render_store_to_wiki.py` — throttled per-review + authoritative on learn, see "Store→wiki mirror render" below) or the legacy git wiki.
+Both paths use the same 6 agent prompts, same pattern source, same review format, and learn from each other. Pattern source is per-repo: a memory store (migrated repos — review sessions mount read-only, writes via `managed/pattern_writer.py`, git wiki kept as an exported mirror rendered deterministically by `managed/render_store_to_wiki.py` — throttled per-review + authoritative on learn, see "Store→wiki mirror render" below) or the legacy git wiki.
 
 ---
 
@@ -47,8 +47,8 @@ VorobiovD/air/
 │
 ├── managed/                        ← MANAGED AGENT (Anthropic cloud)
 │   ├── api.py                        Shared helpers: get_headers, list_agents, find_environment
-│   ├── setup.py                      Creates/updates 5 specialist agents via API (no orchestrator agent)
-│   ├── review.py                     Client-side orchestrator — fans out 4 specialists via asyncio.gather, runs verifier, posts comment
+│   ├── setup.py                      Creates/updates 6 specialist agents via API (no orchestrator agent)
+│   ├── review.py                     Client-side orchestrator — fans out the specialists via asyncio.gather, runs verifier, posts comment
 │   ├── learn.py                      Triggers wiki maintenance sessions (single-agent)
 │   ├── render_store_to_wiki.py       Deterministic store→wiki mirror render (inverse of migrate split; throttled per-review + on learn)
 │   ├── test-session.py               9-test verification (repo, auth, blame, comment, wiki)
@@ -107,13 +107,14 @@ VorobiovD/air/
   ├── Step 5: Pre-flight checks (state, draft, CI, conflict markers, file complexity, pure-promotion detection)
   ├── Step 6: Re-review mode (inter-diff, developer responses, FIXED/NOT FIXED tracking)
   │
-  ├── Step 7: Parallel review ← 5 reviewers launched simultaneously
+  ├── Step 7: Parallel review ← the in-scope reviewers launched simultaneously (UI/copy joins on user-facing diffs)
   │   ├── Phase A: Codex (background, GPT-5.4)
-  │   └── Phase B: 4 agents via Agent tool
+  │   └── Phase B: the core agents via Agent tool (+ ui-copy-reviewer on user-facing diffs)
   │       ├── code-reviewer (+ author pattern matching)
   │       ├── simplify (reuse, quality, efficiency)
   │       ├── security-auditor (31-item checklist + author patterns)
-  │       └── git-history-reviewer (blame, churn + author patterns)
+  │       ├── git-history-reviewer (blame, churn + author patterns)
+  │       └── ui-copy-reviewer (jargon / AI-fluff + static UX/a11y — conditional)
   │
   ├── Step 8: Verification (review-verifier filters false positives, bootstrap calibration defaults when no SEVERITY-CALIBRATION.md exists)
   ├── Step 9: Console attribution (severity table, drops/downgrades — never posted)
@@ -137,7 +138,7 @@ VorobiovD/air/
 ```
 PR opened (or air-machine requested as reviewer) → GitHub Action → managed/review.py
   │
-  ├── [1] Sync 5 specialist agents + air-coordinator + air-solo-reviewer (setup.py: find by name → create or PATCH)
+  ├── [1] Sync 6 specialist agents + air-coordinator + air-solo-reviewer (setup.py: find by name → create or PATCH)
   ├── [2] Fetch PR metadata + diff from GitHub API (via AIR_BOT_TOKEN on the runner)
   ├── [3] Build PR Context block (Python)
   ├── [4] Optional codex pass (Pattern B, GHA-side sequential): `codex review --base <sha>`
@@ -169,7 +170,7 @@ PR opened (or air-machine requested as reviewer) → GitHub Action → managed/r
 
 The Python driver does upstream prep (fetch PR data, state gates, build context, optionally run codex), then hands off to a single **`air-coordinator` session** that dispatches the specialists in parallel + verifier as `callable_agents` sub-agents within one Anthropic session — mirroring the local CLI's Claude Code orchestrator. This replaced v1.7's client-side `asyncio.gather` over 5 separate sessions once Anthropic granted research-preview access for `callable_agents` on 2026-04-25 (beta header `managed-agents-2026-04-01-research-preview`).
 
-**Review-architecture axis (`AIR_REVIEW_MODE` / `review_mode` input / `review.py --mode`):** `full` (default) runs the coordinator above; `solo` replaces step [5] with ONE `air-solo-reviewer` session (its system prompt assembled at sync from the 5 specialist `.md` files — `setup.py:assemble_solo_prompt()`, zero-drift, no standalone file; the agent is created only when a run uses solo/both), which applies all lenses + self-verifies + folds Codex in one pass (~$2–4 / ~7 min vs ~$10 / ~25 min on qai-be #994); `both` runs the coordinator AND the solo session **concurrently** (wall-clock ≈ the slower of the two — keeps it inside the GHA cap; a solo failure can't take down the gating coordinator review), with the coordinator review gating + driving the verdict/learn and the solo review posted alongside as a non-gating `## Code Review (solo — experimental)` comment for comparison. Solo posts the same `APPROVE`/`REQUEST_CHANGES` verdict as full (it can gate/approve), but is **not gate-safe** — it downgrades blocker severity, so that verdict isn't a trustworthy hard gate; enable only where a single agent's verdict is acceptable. Default is `full`. Managed-only — the CLI runs its agents locally and has no solo equivalent. `air-solo-reviewer` is not pinnable. The required-agents gate is conditional on the mode (full-only repos never require the solo agent).
+**Review-architecture axis (`AIR_REVIEW_MODE` / `review_mode` input / `review.py --mode`):** `full` (default) runs the coordinator above; `solo` replaces step [5] with ONE `air-solo-reviewer` session (its system prompt assembled at sync from the 6 specialist `.md` files — `setup.py:assemble_solo_prompt()`, zero-drift, no standalone file; the agent is created only when a run uses solo/both), which applies all lenses + self-verifies + folds Codex in one pass (~$2–4 / ~7 min vs ~$10 / ~25 min on qai-be #994); `both` runs the coordinator AND the solo session **concurrently** (wall-clock ≈ the slower of the two — keeps it inside the GHA cap; a solo failure can't take down the gating coordinator review), with the coordinator review gating + driving the verdict/learn and the solo review posted alongside as a non-gating `## Code Review (solo — experimental)` comment for comparison. Solo posts the same `APPROVE`/`REQUEST_CHANGES` verdict as full (it can gate/approve), but is **not gate-safe** — it downgrades blocker severity, so that verdict isn't a trustworthy hard gate; enable only where a single agent's verdict is acceptable. Default is `full`. Managed-only — the CLI runs its agents locally and has no solo equivalent. `air-solo-reviewer` is not pinnable. The required-agents gate is conditional on the mode (full-only repos never require the solo agent).
 
 ---
 
@@ -265,7 +266,7 @@ Managed-only: the CLI has no store render, so a CLI-only store repo sees a stale
 
 **Self-bootstrapping:** First PR on any org auto-creates agents. No manual setup.py needed.
 
-**Find by name:** `GET /v1/agents` → Python driver looks up each of the 5 specialists (`air-code-reviewer`, `air-simplify`, `air-security-auditor`, `air-git-history-reviewer`, `air-review-verifier`) by name. No config files, no stored IDs. Each org's API key isolates their agents.
+**Find by name:** `GET /v1/agents` → Python driver looks up each of the 6 specialists (`air-code-reviewer`, `air-simplify`, `air-security-auditor`, `air-git-history-reviewer`, `air-ui-copy-reviewer`, `air-review-verifier`) by name. No config files, no stored IDs. Each org's API key isolates their agents.
 
 **Auto-update:** Every run calls setup.py which PATCHes each agent with the latest prompt from the air repo. Uses `version` field for optimistic concurrency. When you merge a prompt change to main, the next PR on any org picks it up automatically.
 
@@ -373,7 +374,7 @@ Measured from real Managed Agents session usage (~340 review sessions, May–Jun
 
 | Session | Tokens (median) | Cost (median) | Cost (heavy PR) |
 |---|---|---|---|
-| Review — coordinator + 4 specialists + verifier | ~5M cache-read, ~0.5M cache-write, ~80K output | **~$5–9** | $15–30 (30M cache-read) |
+| Review — coordinator + 4 specialists + verifier (+ UI/copy specialist on user-facing diffs) | ~5M cache-read, ~0.5M cache-write, ~80K output | **~$5–9** | $15–30 (30M cache-read) |
 | Learn epilogue — full wiki cleanup | ~15M cache-read, ~0.3M cache-write, ~65K output | ~$8–11 on Opus (pre-v1.15.0); ~40% less on Sonnet | $20+ |
 | Session runtime ($0.08/h) | 10–45 min | ~$0.02–0.06 | — |
 

@@ -12,7 +12,7 @@
 
 Code reviews are slow, inconsistent, and lose institutional knowledge when people leave. air fixes this:
 
-- **5 specialized agents** review in parallel — security, code quality, simplification, git history, and an optional Codex second opinion
+- **6 specialized agents** review in parallel — security, code quality, simplification, git history, UI/business-audience copy (on user-facing diffs), and an optional Codex second opinion
 - **A verification agent** filters false positives before posting — findings must score 60+ confidence
 - **Wiki-backed learning** captures patterns from every review — author tendencies, service gotchas, accepted patterns
 - **Re-review tracking** knows what was fixed and what wasn't — no starting over
@@ -101,7 +101,7 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 4. **Fetch** — batched API call (1 call for all metadata), diff, commits, blame summaries, file churn, previous PR comments (cross-PR pattern signal), current PR conversation (humans + other AI bots on this PR), CI status, file statuses (A/M/D/R)
 5. **Pre-flight** — CI failures flagged to agents, conflict markers = automatic blocker, file complexity alerts, pure-promotion PR detection
 6. **Re-review** — inter-diff generation, developer response parsing, FIXED/NOT FIXED/DISPUTED tracking
-7. **Review** — 5 agents + Codex in parallel, each receives full PR Context block including history data
+7. **Review** — up to 6 agents + Codex in parallel (the UI/copy reviewer joins on user-facing diffs), each receives full PR Context block including history data
 8. **Verify** — dedicated verification agent filters false positives with git blame decision tree. Bootstrap calibration defaults when no severity data exists.
 9. **Attribution** — console-only table showing which agent found what (never posted)
 10. **Consolidate** — deduplicate, assign severity, generate Strengths section
@@ -129,7 +129,7 @@ Each agent receives the same rich context block (PR metadata, CI status, blame s
 
 ### Verification Agent
 
-After all 5 reviewers complete, the **review-verifier** checks every finding against the actual code:
+After all in-scope reviewers complete, the **review-verifier** checks every finding against the actual code:
 
 - Reads the source file at the flagged line + surrounding context
 - Uses a structured decision tree to classify findings:
@@ -276,7 +276,7 @@ Review your own code before pushing:
 /air:review --self --fix    # Get a fix plan + auto-apply fixes
 ```
 
-Same quality as PR review (all 5 agents + Codex + verifier). Output is a fix plan with exact current/replacement code for each finding, grouped by file. Never posts a PR comment — wiki pattern updates still push.
+Same quality as PR review (all in-scope agents + Codex + verifier). Output is a fix plan with exact current/replacement code for each finding, grouped by file. Never posts a PR comment — wiki pattern updates still push.
 
 ## Cross-Repo Reviews
 
@@ -295,7 +295,7 @@ CLI mode bills your Claude Code seat (subscription usage, not API dollars). Mana
 
 | Session | Median | Heavy PR |
 |---|---|---|
-| Review (coordinator + 4 specialists + verifier) | **~$5–9** | $15–30 |
+| Review (coordinator + 4 specialists + verifier; +UI/copy specialist on user-facing diffs) | **~$5–9** | $15–30 |
 | Learn epilogue (full wiki cleanup) | ~$8–11 on Opus (pre-v1.15.0); ~40% less on Sonnet | $20+ |
 
 The dominant cost driver is **cache-read volume**, not output: a median review session reads ~5M cached tokens (the multi-agent loop re-reads the PR context + wiki block every tool-use turn); large PRs reach 30M reads. Output is a minor share (50–170K tokens/review). The structurally identical PR Context block across agents keeps those reads at the $0.10-per-$1 cache-hit rate — without it costs would be ~10× higher.
@@ -357,7 +357,7 @@ The first PR auto-creates the review agents. Re-reviews fire on reviewer re-requ
 
 1. GitHub Action triggers → checks out air repo → syncs agent prompts
 2. Creates a Managed Agent session with the repo pre-cloned
-3. Orchestrator runs the full review pipeline (same 5 agents as CLI)
+3. Orchestrator runs the full review pipeline (same agents as CLI)
 4. Posts review as the bot account
 5. Pushes learned patterns to the repo's wiki
 

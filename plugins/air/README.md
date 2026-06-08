@@ -98,7 +98,7 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 4. **Fetch** — batched API call (1 call for all metadata), diff, commits, blame summaries, file churn, previous PR comments (cross-PR pattern signal), current PR conversation (humans + other AI bots on this PR), CI status, file statuses (A/M/D/R)
 5. **Pre-flight** — CI failures flagged to agents, conflict markers = automatic blocker, file complexity alerts
 6. **Re-review** — inter-diff generation, developer response parsing, FIXED/NOT FIXED/DISPUTED tracking
-7. **Review** — 5 agents + Codex in parallel, each receives full PR Context block including history data
+7. **Review** — up to 6 agents + Codex in parallel (the UI/copy reviewer joins on user-facing diffs), each receives full PR Context block including history data
 8. **Verify** — dedicated verification agent filters false positives with git blame decision tree
 9. **Attribution** — console-only table showing which agent found what (never posted)
 10. **Consolidate** — deduplicate, assign severity, generate Strengths section
@@ -124,7 +124,7 @@ Each agent receives the same rich context block (PR metadata, CI status, blame s
 
 ### Verification Agent
 
-After all 5 reviewers complete, the **review-verifier** checks every finding against the actual code:
+After all in-scope reviewers complete, the **review-verifier** checks every finding against the actual code:
 
 - Reads the source file at the flagged line + surrounding context
 - Uses a structured decision tree to classify findings:
@@ -255,7 +255,7 @@ Review your own code before pushing:
 /air:review --self --fix    # Get a fix plan + auto-apply fixes
 ```
 
-Same quality as PR review (all 5 agents + Codex + verifier). Output is a fix plan with exact current/replacement code for each finding, grouped by file.
+Same quality as PR review (all in-scope agents + Codex + verifier). Output is a fix plan with exact current/replacement code for each finding, grouped by file.
 
 ## Cross-Repo Reviews
 
