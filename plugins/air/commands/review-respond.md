@@ -235,7 +235,7 @@ echo "Respond diff size: $DIFF_LINES lines"
 
 - If `DIFF_LINES < 50`: launch **air:code-reviewer + air:review-verifier only** (+ Codex unless `--no-codex`). Small fix diffs don't need the full 4-agent panel — a focused code review + verification catches regressions without the overhead. Print: "Small diff ($DIFF_LINES lines) — running code-reviewer + verifier."
 
-- If `DIFF_LINES >= 50` OR prior review had **blocker findings**: launch all 4 core agents in parallel (+ Codex unless `--no-codex`), PLUS `air:ui-copy-reviewer` when the fix diff touches user-facing files (markup/components/templates, i18n catalog values, or user-facing docs — skip on backend-only fixes), so a UI-touching fix gets the same copy/a11y re-check the original review ran. Full pipeline for substantial changes. Print: "Diff $DIFF_LINES lines — running full review pipeline."
+- If `DIFF_LINES >= 50` OR prior review had **blocker findings**: launch all 4 core agents in parallel (+ Codex unless `--no-codex`), PLUS `air:ui-copy-reviewer` when the fix diff touches user-facing files (markup/components/templates, i18n catalog values, user-facing help/content docs (`help/`/`content/`/`faq` — NOT internal eng docs/specs), or files matching a `## User-Facing Copy Paths` glob in PROJECT-PROFILE.md — skip on backend-only fixes), so a UI-touching fix gets the same copy/a11y re-check the original review ran. Full pipeline for substantial changes. Print: "Diff $DIFF_LINES lines — running full review pipeline."
 
 Each agent receives a PR Context block with an additional section:
 
