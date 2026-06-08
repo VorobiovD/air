@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.26.0](https://github.com/VorobiovD/air/compare/v1.25.0...v1.26.0) (2026-06-08)
+
+
+### Features
+
+* **ci:** enable promote fast-path via a caller repo/org variable ([#128](https://github.com/VorobiovD/air/issues/128)) ([5fcbb5f](https://github.com/VorobiovD/air/commit/5fcbb5fd4fd6977e15a4648d16425939f06aa3bc))
+
 ## [1.25.0](https://github.com/VorobiovD/air/compare/v1.24.0...v1.25.0) (2026-06-08)
 
 
