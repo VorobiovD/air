@@ -109,7 +109,10 @@ RECENT_PRS=$(gh api "repos/$REPO/pulls?state=closed&per_page=30&sort=updated&dir
 # (user / urls / reactions / timestamps) is 2-3x the body and never used here;
 # fetching it whole is the single biggest learn context-churn source (a learn
 # session re-reads its growing thread ~10x, so every wasted token is paid ~10x).
-# `--jq` to {pr, body} BEFORE it enters context, and skip PRs with no review:
+# `--jq` to {pr, body} BEFORE it enters context. The call still fires per PR,
+# but `select` emits nothing for PRs without a `## Code Review` comment, so no
+# envelope ever enters context. (Matches re-review / solo comments too — that's
+# intended: the timeline wants every review round, not just the first.)
 for PR in $RECENT_PRS; do
   gh api "repos/$REPO/issues/$PR/comments" \
     --jq '.[] | select(.body | startswith("## Code Review")) | {pr: '"$PR"', body: .body}' 2>/dev/null
