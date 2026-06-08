@@ -104,6 +104,18 @@ Fetch review comments from recent merged PRs:
 ```bash
 # Fetch last 30 merged PRs
 RECENT_PRS=$(gh api "repos/$REPO/pulls?state=closed&per_page=30&sort=updated&direction=desc" --jq '.[] | select(.merged_at != null) | .number' 2>/dev/null)
+
+# Pull ONLY the review-comment bodies, envelope stripped. The gh comment object
+# (user / urls / reactions / timestamps) is 2-3x the body and never used here;
+# fetching it whole is the single biggest learn context-churn source (a learn
+# session re-reads its growing thread ~10x, so every wasted token is paid ~10x).
+# `--jq` to {pr, body} BEFORE it enters context, and skip PRs with no review:
+for PR in $RECENT_PRS; do
+  gh api "repos/$REPO/issues/$PR/comments" \
+    --jq '.[] | select(.body | startswith("## Code Review")) | {pr: '"$PR"', body: .body}' 2>/dev/null
+done
+# Incremental: if REVIEW-HISTORY.md already covers recent PRs, you only need the
+# PRs NEWER than its current timeline window — don't re-pull the whole 30 each run.
 ```
 
 For each PR with review comments (`## Code Review`), extract findings. The bloat that pushed REVIEW-HISTORY.md past 550KB is the **per-PR narrative** (≈30 lines/PR accumulated for every PR ever) — that is what gets windowed. The aggregate tables are bounded by pattern/author/file count, not PR count, so they stay CUMULATIVE:

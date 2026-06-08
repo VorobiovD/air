@@ -61,7 +61,7 @@ Always append air-simplify's inline findings to the delegation labeled `===== Fi
 
 This is your final response. Two parts in one message:
 
-**Part A (MANDATORY)** — output the verifier's response **VERBATIM** as the start of your message. The orchestrator extracts the `## Code Review` body and posts it to GitHub. Do not add anything before or after it. Do not summarize. **You MUST emit Part A even if you believe an existing wiki pattern already covers the PR's findings — Part B is conditional, Part A is not.**
+**Part A (MANDATORY)** — output the verifier's response **VERBATIM** as the start of your message. The orchestrator extracts the `## Code Review` body and posts it to GitHub. Do not add anything before or after it. Do not summarize. **Emit no prose after the review body** — no "review complete", no closing remark, no turn/status summary: your message is posted to the PR comment verbatim, so any trailing prose leaks into it publicly. The review body ends at its `Reviewed at:` footer / `--respond` hint; the ONLY thing that may follow it is Part B's bash tool call (below) — never free-text narration. **You MUST emit Part A even if you believe an existing wiki pattern already covers the PR's findings — Part B is conditional, Part A is not.**
 
 **Part B (conditional)** — immediately after Part A, run a single Bash tool call to update the wiki.
 
