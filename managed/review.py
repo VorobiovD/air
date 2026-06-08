@@ -27,6 +27,7 @@ Usage:
 import argparse
 import asyncio
 import atexit
+import fnmatch
 import html
 import io
 import os
@@ -1272,24 +1273,92 @@ def _path_is_ui(path: str) -> bool:
     return False
 
 
-def _diff_touches_ui(post_paths: list[str], diff: str) -> bool:
-    """True when the change touches a user-facing surface (markup / i18n /
-    user-facing docs) and the UI-copy reviewer should be dispatched.
+def _path_matches_globs(path: str, globs: tuple | list) -> bool:
+    """True if `path` matches any repo-declared copy-module glob. fnmatch
+    semantics — `*` is GREEDY across `/`, so `agent-core/agents/*.py` matches at
+    any depth (kept intentional so globs stay short; documented in the
+    PROJECT-PROFILE `## User-Facing Copy Paths` section). Exclusions still win,
+    so a repo can't glob air's own wiki/pattern files into scope."""
+    p = path.strip()
+    if not p or _UI_EXCLUDE_RE.search(p):
+        return False
+    return any(fnmatch.fnmatch(p, g) for g in globs)
+
+
+# PROJECT-PROFILE section header that lists repo-declared user-facing copy
+# paths (one `- <glob>` per line) — the opt-in that extends the web-only gate
+# to a repo's CLI/TUI copy modules (e.g. ai-relay's Python patient/agent copy).
+_COPY_PATHS_HEADER_RE = re.compile(r"^#{1,6}\s+User-Facing Copy Paths\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _parse_copy_paths_section(profile_text: str) -> list[str]:
+    """Extract the glob list under a `## User-Facing Copy Paths` heading from
+    PROJECT-PROFILE.md. Reads `- <glob>` bullet lines until the next heading or
+    a blank-line-terminated list. Returns [] if the section is absent."""
+    m = _COPY_PATHS_HEADER_RE.search(profile_text or "")
+    if not m:
+        return []
+    globs: list[str] = []
+    for line in profile_text[m.end():].splitlines():
+        s = line.strip()
+        if s.startswith("#"):  # next heading → section ends
+            break
+        if s.startswith(("- ", "* ")):
+            g = s[2:].strip().strip("`").strip()
+            if g:
+                globs.append(g)
+        elif not s and globs:
+            break  # blank line after the list ends it
+        # else: intro prose before the list (s and not globs) — skip, loop on
+    return globs
+
+
+def _user_facing_copy_globs(store_id: str | None) -> list[str]:
+    """Repo-declared copy-module globs from the store's PROJECT-PROFILE.md, or
+    []. Store-backed only (the dispatch gate runs pre-session, before any wiki
+    clone); legacy-wiki repos fall back to the web-only gate. Fail-safe: any
+    miss/error → [] (web-only), never blocks a review on store plumbing."""
+    if not store_id:
+        return []
+    try:
+        got = memory_store.read_memory(store_id, memory_store.PROJECT_PROFILE_PATH)
+    except Exception as e:  # noqa: BLE001 — never fail a review on a store read
+        print(f"  [ui-copy] could not read project-profile from store: {e}", file=sys.stderr)
+        return []
+    return _parse_copy_paths_section(got[0]) if got else []
+
+
+def _collect_changed_paths(post_paths: list[str], diff: str) -> list[str]:
+    """UNION of the pre-computed `post_paths` (capped, empty without
+    AIR_TARGET_REPO) and the uncapped `+++ b/<path>` headers parsed from the
+    raw diff — so a path past the precomp cap is still seen. The header scan is
+    a cheap regex over `+++` lines even on a large diff."""
+    return list(post_paths) + _DIFF_PATH_RE.findall(diff or "")
+
+
+def _diff_touches_ui(post_paths: list[str], diff: str, extra_globs: tuple | list = ()) -> bool:
+    """True when the change touches a user-facing surface and the UI-copy
+    reviewer should be dispatched.
 
     UNION of two signals: the pre-computed `post_paths` AND the `+++ b/<path>`
     headers parsed from the raw diff. Both are consulted because `post_paths` is
     capped at PRECOMP_FILE_LIMIT (and empty without AIR_TARGET_REPO), so a UI
     file sorting past the cap would be invisible to it alone — the diff headers
     are uncapped and cover every changed file. The header scan is a cheap regex
-    over `+++` lines even on a large diff. CSS/SCSS-only changes and air's own
-    wiki/pattern `.md` files never trigger. **Fails open**: if neither signal
-    yields any path at all, return True so an ambiguous case still gets a copy
-    review (correctness over the cost saving on the rare unparseable diff).
+    over `+++` lines even on a large diff.
+
+    A path is in-scope if it hits the built-in WEB allowlist (`_path_is_ui`:
+    markup / i18n / user-facing docs) OR matches a repo-declared copy-module
+    glob (`extra_globs`, from PROJECT-PROFILE `## User-Facing Copy Paths` — the
+    TUI/`.py` opt-in). CSS/SCSS-only changes and air's own wiki/pattern `.md`
+    files never trigger. **Fails open**: if neither signal yields any path at
+    all, return True so an ambiguous case still gets a copy review (correctness
+    over the cost saving on the rare unparseable diff).
     """
-    paths = list(post_paths) + _DIFF_PATH_RE.findall(diff or "")
+    paths = _collect_changed_paths(post_paths, diff)
     if not paths:
         return True  # fail open — couldn't determine paths
-    return any(_path_is_ui(p) for p in paths)
+    return any(_path_is_ui(p) or _path_matches_globs(p, extra_globs) for p in paths)
 
 
 def compute_blame_summaries(repo_dir: str, files: list[str]) -> str:
@@ -2793,21 +2862,34 @@ async def run_review(args):
         precomp_signals = sum(bool(x) for x in (file_statuses, blame_summaries, churn_data, diff_check_warnings))
         print(f"  pre-computation: {precomp_signals}/4 sections populated in {precomp_secs:.1f}s")
 
-    # UI-copy reviewer dispatch gate: only dispatch the 6th specialist when the
-    # diff touches a user-facing surface (markup / i18n / user-facing docs).
-    # Backend-only PRs skip it ($0 added). Solo/both's merged prompt always
-    # includes the UI lens regardless — it self-scopes there.
-    ui_in_scope = _diff_touches_ui(post_paths, diff)
-    print(f"  ui-copy: {'in scope' if ui_in_scope else 'skipped (no user-facing files)'}")
-
     # Pattern-store rollout flag: a repo with a store has migrated (mount
     # it read-only, write via pattern_writer post-review, counter via the
     # store); a repo without one keeps the wiki path end-to-end. Lookup
-    # failures fall back to the wiki — never block a review on store
-    # plumbing.
+    # failures fall back to the wiki — never block a review on store plumbing.
+    # Resolved BEFORE the ui-copy gate, which reads the store's PROJECT-PROFILE
+    # for repo-declared copy paths.
     store_id = memory_store.get_store_id(args.repo, flow="review")
     if store_id:
         print(f"  pattern store: {store_id} (wiki mount skipped)")
+
+    # UI-copy reviewer dispatch gate: dispatch the 6th specialist when the diff
+    # touches a user-facing surface. Web markup/i18n/docs match the built-in
+    # allowlist; a repo can ALSO declare CLI/TUI copy modules in PROJECT-PROFILE
+    # `## User-Facing Copy Paths` (store-backed). Read those globs ONLY when the
+    # web check misses, so web PRs and store-less repos pay nothing extra.
+    # Backend-only PRs skip it ($0 added). Solo/both's merged prompt always
+    # includes the UI lens regardless — it self-scopes there.
+    changed_paths = _collect_changed_paths(post_paths, diff)  # built once, shared by both checks
+    if not changed_paths:
+        ui_in_scope, ui_scope_reason = True, "fail-open (no paths)"
+    elif any(_path_is_ui(p) for p in changed_paths):
+        ui_in_scope, ui_scope_reason = True, "web markup/i18n/docs"
+    else:
+        ui_in_scope, ui_scope_reason = False, ""
+        copy_globs = _user_facing_copy_globs(store_id)  # store read only when the web check missed
+        if copy_globs and any(_path_matches_globs(p, copy_globs) for p in changed_paths):
+            ui_in_scope, ui_scope_reason = True, "declared copy paths"
+    print(f"  ui-copy: {f'in scope ({ui_scope_reason})' if ui_in_scope else 'skipped (no user-facing files)'}")
 
     pr_context = build_pr_context(
         meta, args.repo,

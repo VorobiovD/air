@@ -220,6 +220,18 @@ Two ways to turn it on (either one being `true` enables it):
 
 Conservative by construction — any uncertainty (no merged sibling, sibling never reviewed or missing a SHA footer, compare-API failure, <80% overlap) falls back to full review. Enable only on repos that use the `promote/staging-to-main-*` convention. Decision logs print `[promote] …` lines (chosen sibling #, overlap %, fired vs full) to the run log. **v1 limitation:** no periodic full-anchor re-read — a long chain rides re-reviews indefinitely; watch the logs and force a `--fresh` (or disable the flag) if drift accumulates. Backtested on the qai-be/qai-fe Phase-4 promote chain at ~64% cost reduction with zero net-new-finding loss.
 
+### UI / copy reviewer — covering CLI/TUI copy (`## User-Facing Copy Paths`)
+
+`air-ui-copy-reviewer` dispatches whenever a PR's diff touches a **web** surface (`.tsx/.jsx/.vue/.svelte/.html`, i18n catalogs, user-facing docs) — automatically, no config. For **CLI/TUI products** whose user-facing copy lives in non-markup files (e.g. ai-relay's Python patient/agent message modules), add a `## User-Facing Copy Paths` section to the repo's **PROJECT-PROFILE.md** listing glob patterns, one per `- ` line:
+
+```markdown
+## User-Facing Copy Paths
+- agent-core/agents/*.py
+- `**/messages/*.py`
+```
+
+The dispatch gate reads those globs from the store (`read_memory`) **only when the web check misses**, so web PRs and repos without the section pay nothing extra. Keep the globs **narrow** — they should match only the copy modules, so routine backend PRs still skip the reviewer ($0). `fnmatch` semantics (`*` is greedy across `/`, so `agent-core/agents/*.py` matches any depth). **Store-backed repos only** (legacy-wiki repos fall back to the web-only gate). The reviewer reviews **static** user-visible strings (display text, prompts, canned/template messages) — not runtime-generated agent output.
+
 ## How it works
 
 **Multi-agent coordinator (v1.9.0+)**: the Python driver does upstream prep (fetch PR data, state gates, build context, optionally run codex), then hands off to a single `air-coordinator` session that dispatches the specialists in parallel + verifier as `callable_agents` sub-agents within one Anthropic session — mirroring the local CLI's architecture. This replaced v1.7's client-side `asyncio.gather` over 5 separate sessions once Anthropic granted research-preview access for `callable_agents` on 2026-04-25.

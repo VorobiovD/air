@@ -1,0 +1,39 @@
+name: managed tests
+
+# Runs the pure, network-free unit tests under managed/ (test-*.py). These
+# import review.py / setup.py / render_store_to_wiki.py, so they need the
+# managed deps installed — but they make no API calls (seams are mocked) and
+# need no secrets. Mirrors air-lib-tests.yml for the plugins/air/lib suite.
+on:
+  pull_request:
+    paths:
+      - 'managed/**'
+      - '.github/workflows/managed-tests.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'managed/**'
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install managed deps + pytest
+        run: pip install -r managed/requirements.txt pytest
+
+      - name: Run pure managed tests
+        working-directory: managed
+        # Only the network-free suites (others need AIR_BOT_TOKEN / a live API).
+        run: python -m pytest test-extract.py test-ui-scope.py test-promote-fastpath.py test-render.py -v
