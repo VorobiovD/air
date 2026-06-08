@@ -151,7 +151,7 @@ SOLO_PREAMBLE = (
 
 
 def assemble_solo_prompt() -> str:
-    """Merge the 5 specialist prompts into one solo-reviewer system prompt.
+    """Merge the 6 specialist prompts into one solo-reviewer system prompt.
 
     Assembled at sync time from the SAME `agents/*.md` files the specialists
     use (frontmatter-stripped, each under a `===== LENS: <name> =====`
@@ -434,7 +434,7 @@ def main():
                 speed=speed,
             )
 
-    # 5. Solo reviewer agent. One agent applying all 5 lenses + self-verify in
+    # 5. Solo reviewer agent. One agent applying all 6 lenses + self-verify in
     # a single session — the opt-in AIR_REVIEW_MODE=solo|both path in review.py.
     # Its prompt is assembled from the same specialist .md files (zero drift),
     # so it is deliberately NOT in PINNABLE_AGENTS (pin the specialists).

@@ -50,7 +50,7 @@ jobs:
       # Pin the blessed agent set from an air release's notes (recommended
       # for work repos — bump deliberately instead of riding main; omit to
       # float on latest). Pin the WHOLE set from one release.
-      # agent_versions: '{"air-code-reviewer": N, "air-simplify": N, "air-security-auditor": N, "air-git-history-reviewer": N, "air-review-verifier": N, "air-coordinator": N}'  # N = versions from the release notes
+      # agent_versions: '{"air-code-reviewer": N, "air-simplify": N, "air-security-auditor": N, "air-git-history-reviewer": N, "air-ui-copy-reviewer": N, "air-review-verifier": N, "air-coordinator": N}'  # N = versions from the release notes
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
@@ -184,6 +184,8 @@ curl -s https://api.anthropic.com/v1/agents?limit=100 \
 ```
 
 `air-learner` is not pinnable (learn always tracks the latest prompt).
+
+**Migration note — adding a specialist (e.g. `air-ui-copy-reviewer`, v1.27.0):** when a new specialist joins the pinnable set, a caller that pins `agent_versions` with the coordinator pinned will fail `setup.py` with `air-coordinator is pinned but ['air-<new>'] are not` on its next run. To adopt: float once (drop `agent_versions`) so the agent is created, then add its version to the blessed set. Callers that float `@main` with no `agent_versions` (the default) are unaffected.
 
 The `workflow_dispatch` trigger lets you review any PR on-demand from the Actions tab — including closed or merged PRs (post-merge audits, wiki-pattern backfills from history). For `pull_request` triggers, `pr_number` / `closed` defaults apply (current PR, state gate enforced).
 

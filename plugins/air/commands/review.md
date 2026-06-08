@@ -1066,7 +1066,7 @@ If wiki not found, print guidance. If push fails, warn but don't fail.
 
 **Read and follow `commands/review-self.md` for the complete self-review pipeline.**
 
-Summary: reviews local uncommitted changes (staged + unstaged) using the same 4 agents + Codex + verifier. Outputs a fix plan with exact current/replacement code per finding. `--self --fix` auto-applies fixes. Never posts a PR comment; wiki patterns still push.
+Summary: reviews local uncommitted changes (staged + unstaged) using the same in-scope agents + Codex + verifier (the UI/copy reviewer joins on user-facing diffs). Outputs a fix plan with exact current/replacement code per finding. `--self --fix` auto-applies fixes. Never posts a PR comment; wiki patterns still push.
 
 ---
 

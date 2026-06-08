@@ -1249,7 +1249,7 @@ _UI_EXTENSIONS = (
 # i18n / copy catalogs (user-visible string VALUES live here).
 _UI_I18N_RE = re.compile(
     r"(^|/)(locales?|i18n|lang|translations?)/|"
-    r"(^|/)(en|messages?)[.-][^/]*\.(json|ya?ml|po|pot|arb|strings|resx|ftl)$|"
+    r"(^|/)(en|messages?)([.-][^/]*)?\.(json|ya?ml|po|pot|arb|strings|resx|ftl)$|"
     r"\.(po|pot|arb|ftl)$",
     re.IGNORECASE,
 )
@@ -1276,14 +1276,17 @@ def _diff_touches_ui(post_paths: list[str], diff: str) -> bool:
     """True when the change touches a user-facing surface (markup / i18n /
     user-facing docs) and the UI-copy reviewer should be dispatched.
 
-    Two-tier: prefer the pre-computed `post_paths` (cheap, exact); fall back to
-    parsing `+++ b/<path>` headers from the raw diff when post_paths is empty
-    (no AIR_TARGET_REPO) or capped. CSS/SCSS-only changes and air's own
+    UNION of two signals: the pre-computed `post_paths` AND the `+++ b/<path>`
+    headers parsed from the raw diff. Both are consulted because `post_paths` is
+    capped at PRECOMP_FILE_LIMIT (and empty without AIR_TARGET_REPO), so a UI
+    file sorting past the cap would be invisible to it alone — the diff headers
+    are uncapped and cover every changed file. The header scan is a cheap regex
+    over `+++` lines even on a large diff. CSS/SCSS-only changes and air's own
     wiki/pattern `.md` files never trigger. **Fails open**: if neither signal
     yields any path at all, return True so an ambiguous case still gets a copy
     review (correctness over the cost saving on the rare unparseable diff).
     """
-    paths = list(post_paths) if post_paths else _DIFF_PATH_RE.findall(diff or "")
+    paths = list(post_paths) + _DIFF_PATH_RE.findall(diff or "")
     if not paths:
         return True  # fail open — couldn't determine paths
     return any(_path_is_ui(p) for p in paths)
@@ -2183,7 +2186,8 @@ async def _run_coordinator_session(
 ) -> tuple[str, str]:
     """Run the multi-agent coordinator session (the default 'full' path).
 
-    One Anthropic session dispatches the 4 specialists + verifier as
+    One Anthropic session dispatches the 4 core specialists (+ the UI/copy
+    reviewer when ui_in_scope) + verifier as
     callable_agents. Returns (output, failure_reason) for the shared
     post-review pipeline. Includes the optional (default-off) file-handoff
     path and the preflight billing-retry contract.
@@ -2226,7 +2230,7 @@ async def _run_coordinator_session(
     # dispatches the 4 core specialists ALWAYS and air-ui-copy-reviewer ONLY when
     # it appears here — keeps backend-only PRs from paying for a 6th agent.
     ui_scope_line = (
-        "Optional specialists in scope this run: air-ui-copy-reviewer"
+        f"Optional specialists in scope this run: {UI_COPY_AGENT}"
         if ui_in_scope
         else "Optional specialists in scope this run: none"
     )

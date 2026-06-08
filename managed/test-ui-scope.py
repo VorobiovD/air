@@ -40,6 +40,13 @@ def test_path_i18n_catalogs():
         assert _path_is_ui(p), p
 
 
+def test_path_bare_root_i18n():
+    # Bare en.json / messages.json at repo root — no locales/ tree, no
+    # separator between stem and extension (the regex must still match).
+    for p in ("en.json", "messages.json", "en.yaml", "messages.yml"):
+        assert _path_is_ui(p), p
+
+
 def test_path_user_facing_docs():
     for p in ("docs/help/faq.md", "help/getting-started.mdx", "content/landing.md"):
         assert _path_is_ui(p), p
@@ -74,6 +81,15 @@ def test_scope_from_post_paths_negative():
 
 def test_scope_mixed_any_ui_triggers():
     assert _diff_touches_ui(["api/handler.go", "src/Modal.tsx"], "") is True
+
+
+def test_scope_union_catches_ui_beyond_post_paths_cap():
+    # post_paths is capped (40 non-UI files) but the diff headers include a UI
+    # file — the union of both sources must still trigger. post_paths alone
+    # (capped) would miss it.
+    backend_paths = [f"svc/file{i}.go" for i in range(40)]
+    diff = _diff_with("svc/file0.go", "web/Modal.tsx")
+    assert _diff_touches_ui(backend_paths, diff) is True
 
 
 # --- _diff_touches_ui (diff-header fallback when post_paths empty) -----------
