@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.25.0](https://github.com/VorobiovD/air/compare/v1.24.0...v1.25.0) (2026-06-08)
+
+
+### Features
+
+* **managed:** promote fast-path — re-review sibling promotes instead of full re-read ([#126](https://github.com/VorobiovD/air/issues/126)) ([8e3571d](https://github.com/VorobiovD/air/commit/8e3571dff3343123e2b7d8bc9193b1692d4779a7))
+
 ## [1.24.0](https://github.com/VorobiovD/air/compare/v1.23.0...v1.24.0) (2026-06-08)
 
 
