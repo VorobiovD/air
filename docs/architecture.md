@@ -109,11 +109,12 @@ VorobiovD/air/
   │
   ├── Step 7: Parallel review ← the in-scope reviewers launched simultaneously (UI/copy joins on user-facing diffs)
   │   ├── Phase A: Codex (background, GPT-5.4)
-  │   └── Phase B: 4 agents via Agent tool
+  │   └── Phase B: the core agents via Agent tool (+ ui-copy-reviewer on user-facing diffs)
   │       ├── code-reviewer (+ author pattern matching)
   │       ├── simplify (reuse, quality, efficiency)
   │       ├── security-auditor (31-item checklist + author patterns)
-  │       └── git-history-reviewer (blame, churn + author patterns)
+  │       ├── git-history-reviewer (blame, churn + author patterns)
+  │       └── ui-copy-reviewer (jargon / AI-fluff + static UX/a11y — conditional)
   │
   ├── Step 8: Verification (review-verifier filters false positives, bootstrap calibration defaults when no SEVERITY-CALIBRATION.md exists)
   ├── Step 9: Console attribution (severity table, drops/downgrades — never posted)

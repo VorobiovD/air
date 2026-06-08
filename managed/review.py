@@ -2351,7 +2351,7 @@ async def _run_solo_session(
 ) -> tuple[str, str]:
     """Run ONE merged-lens agent (air-solo-reviewer) in a single session.
 
-    The opt-in AIR_REVIEW_MODE=solo|both path: one agent applies all 5 lenses +
+    The opt-in AIR_REVIEW_MODE=solo|both path: one agent applies all 6 lenses +
     self-verifies + folds Codex findings, emitting the same `## Code Review`
     (incl. the `Reviewed at:` footer the extractor validates). Mirrors the
     coordinator's preflight billing-retry + wall timeout. A single agent spawns

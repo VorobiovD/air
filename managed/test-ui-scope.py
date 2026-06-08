@@ -92,7 +92,7 @@ def test_scope_union_catches_ui_beyond_post_paths_cap():
     assert _diff_touches_ui(backend_paths, diff) is True
 
 
-# --- _diff_touches_ui (diff-header fallback when post_paths empty) -----------
+# --- _diff_touches_ui (union of post_paths + diff-header paths) --------------
 
 def test_scope_diff_fallback_positive():
     assert _diff_touches_ui([], _diff_with("web/Button.vue")) is True
