@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.29.0](https://github.com/VorobiovD/air/compare/v1.28.1...v1.29.0) (2026-06-08)
+
+
+### Features
+
+* **ci:** resolve review_mode from a caller AIR_REVIEW_MODE variable ([#138](https://github.com/VorobiovD/air/issues/138)) ([a790d4e](https://github.com/VorobiovD/air/commit/a790d4edee8a9c15f72a449c3aef4dbcb04cdb2b))
+
 ## [1.28.1](https://github.com/VorobiovD/air/compare/v1.28.0...v1.28.1) (2026-06-08)
 
 
