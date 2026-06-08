@@ -207,10 +207,14 @@ Optional `review_mode` input (default `full`) selects the review architecture:
 
 Optional `promote_fastpath` input (default `false`). Repos that ship via a `promote/staging-to-main-*` branch chain open a near-identical promote PR over and over; each one normally reviews from scratch as a full read. When enabled, a fresh promote PR with **no prior review of its own** is instead re-reviewed as a delta against its last-merged, already-reviewed sibling promote — **but only when the two overlap ≥80% of changed lines** (else it falls back to a full review). It reuses the whole re-review engine: inter-diff against the sibling's `Reviewed at:` SHA, carry-forward verifier, unfixed-blocker-only gating; the repo is still mounted read-only so specialists keep full-file context on unchanged lines.
 
+Two ways to turn it on (either one being `true` enables it):
+
 ```yaml
     with:
       promote_fastpath: ${{ inputs.promote_fastpath }}   # 'true' | 'false' (default)
 ```
+
+…or — **with no caller workflow change at all** — set a repository (or organization) **variable** `AIR_PROMOTE_FASTPATH=true` on the **caller** repo (Settings → Secrets and variables → Actions → Variables). `vars` in a reusable workflow resolves to the *caller's* repo + org variables, so the reusable `managed-review.yml` reads it directly. Flip the variable to `false` (or delete it) to disable instantly — no PR either way. An **org-level** variable is a single fleet-wide switch.
 
 Conservative by construction — any uncertainty (no merged sibling, sibling never reviewed or missing a SHA footer, compare-API failure, <80% overlap) falls back to full review. Enable only on repos that use the `promote/staging-to-main-*` convention. Decision logs print `[promote] …` lines (chosen sibling #, overlap %, fired vs full) to the run log. **v1 limitation:** no periodic full-anchor re-read — a long chain rides re-reviews indefinitely; watch the logs and force a `--fresh` (or disable the flag) if drift accumulates. Backtested on the qai-be/qai-fe Phase-4 promote chain at ~64% cost reduction with zero net-new-finding loss.
 

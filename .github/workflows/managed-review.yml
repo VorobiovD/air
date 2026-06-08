@@ -172,6 +172,11 @@ on:
           overlap by >= 80% of changed lines; below that it falls back to a
           full review. Default 'false' is byte-identical to today. Enable only
           on repos that use the promote/staging-to-main-* branch convention.
+          NOTE: you don't need to pass this input at all — setting a repo (or
+          org) VARIABLE `AIR_PROMOTE_FASTPATH=true` on the CALLER repo enables
+          it too (vars flow from the caller into this reusable workflow), so a
+          caller can toggle it from Settings → Variables with no workflow edit.
+          This input OR the variable being 'true' turns it on.
         required: false
         type: string
         default: 'false'
@@ -422,7 +427,11 @@ jobs:
           AIR_AGENT_VERSIONS: ${{ inputs.agent_versions }}
           AIR_EXPECTED_REVIEWER: ${{ inputs.expected_reviewer }}
           AIR_REVIEW_MODE: ${{ inputs.review_mode }}
-          AIR_PROMOTE_FASTPATH: ${{ inputs.promote_fastpath }}
+          # Enabled by the input OR a caller-repo/org variable. `vars` in a
+          # reusable workflow resolves to the CALLER's repository + org
+          # variables, so a caller can flip AIR_PROMOTE_FASTPATH=true in
+          # Settings → Variables to turn this on with no workflow edit / PR.
+          AIR_PROMOTE_FASTPATH: ${{ (inputs.promote_fastpath == 'true' || vars.AIR_PROMOTE_FASTPATH == 'true') && 'true' || 'false' }}
           # Absolute path to the local checkout. review.py uses it for
           # both `codex review` (when enabled) and client-side
           # pre-computation (blame/churn/file-status/diff-check
