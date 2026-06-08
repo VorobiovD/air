@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.28.0](https://github.com/VorobiovD/air/compare/v1.27.0...v1.28.0) (2026-06-08)
+
+
+### Features
+
+* **agents:** ui-copy reviewer covers CLI/TUI copy via PROJECT-PROFILE opt-in ([#134](https://github.com/VorobiovD/air/issues/134)) ([928d331](https://github.com/VorobiovD/air/commit/928d331444f23d2516910eaffda38eddcd76e8e8))
+
 ## [1.27.0](https://github.com/VorobiovD/air/compare/v1.26.0...v1.27.0) (2026-06-08)
 
 
