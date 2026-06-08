@@ -14,10 +14,13 @@ extract_reviewed_at_sha, _count_diff_changed_lines) run for real.
 
 Covers: changed-line counting (header exclusion), the 0.80 overlap boundary
 (fires/falls back), the head-prefix gate short-circuiting before any network
-call, sibling selection (most-recent merged promote; open / unmerged / self /
-non-promote-head excluded), and every fallback-returns-None path (no sibling,
-sibling never reviewed, sibling missing a Reviewed-at SHA, compare failure,
-unknown bot identity).
+call, sibling selection (most-recent merged promote by merged_at — open /
+unmerged / self / non-promote-head excluded, and list-order distinct from
+merged-order so it locks in the max-by-merged_at fix), every
+fallback-returns-None path (no sibling, sibling never reviewed, sibling missing
+a Reviewed-at SHA, compare failure, unknown bot identity), and the
+build_pr_context `prior_pr_number` provenance plumbing (present when set,
+byte-absent when None).
 """
 import sys
 from contextlib import contextmanager
@@ -56,14 +59,19 @@ def _review_comment(sha=SIB_SHA, cid=999, login=BOT):
     return {"user": {"login": login}, "body": body, "id": cid}
 
 
-# Newest-first closed-PR list (as GitHub returns with sort=updated&desc).
-# #48 is the answer: merged + promote head + not the current PR.
+# Closed-PR list as the API returns it under sort=updated (NOT merged_at order).
+# #48 is the answer: merged + promote head + not the current PR + newest
+# merged_at among valid promotes. Critically, the first VALID promote in *list
+# order* (#47) is NOT the newest-merged — so this fixture only passes under the
+# max-by-merged_at selection, not a naive break-on-first-valid. #49 (newest
+# overall merge) is a non-promote head and must be excluded; #51 (newer promote
+# merge than #48) is the current PR and must be excluded as self.
 CANDIDATES = [
     {"number": 50, "merged_at": None, "head": {"ref": "promote/staging-to-main-10"}},   # open
     {"number": 49, "merged_at": "2026-06-07T00:00:00Z", "head": {"ref": "feature/x"}},  # non-promote head
     {"number": 51, "merged_at": "2026-06-06T12:00:00Z", "head": {"ref": "promote/staging-to-main-09"}},  # self
-    {"number": 48, "merged_at": "2026-06-06T00:00:00Z", "head": {"ref": "promote/staging-to-main-08"}},  # ← pick
-    {"number": 47, "merged_at": "2026-06-05T00:00:00Z", "head": {"ref": "promote/staging-to-main-07"}},  # older
+    {"number": 47, "merged_at": "2026-06-05T00:00:00Z", "head": {"ref": "promote/staging-to-main-07"}},  # valid but OLDER — first in list order
+    {"number": 48, "merged_at": "2026-06-06T00:00:00Z", "head": {"ref": "promote/staging-to-main-08"}},  # ← newest-merged promote, later in list
 ]
 
 
@@ -123,7 +131,9 @@ def test_picks_most_recent_merged_promote_sibling():
             "o/r", 51, _meta("promote/staging-to-main-09"), HEAD, BOT, "tok")
     assert result is not None
     sib_review, sib_sha, sib_num = result
-    assert sib_num == 48          # self (#51), open (#50), non-promote (#49) skipped
+    # #48 wins on newest merged_at among valid promotes — NOT #47 (first valid
+    # in list order). Self (#51), open (#50), non-promote (#49) all excluded.
+    assert sib_num == 48
     assert sib_sha == SIB_SHA
     assert sib_review["id"] == 999
 

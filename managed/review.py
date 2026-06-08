@@ -1069,7 +1069,13 @@ def _detect_promote_fastpath(
     # before the full-review path gets its own chance to fetch + report.
     try:
         full_lines = _count_diff_changed_lines(fetch_pr_diff(repo, pr_number, token))
-    except SystemExit:
+    except SystemExit as exc:
+        # Catch ONLY fetch_pr_diff's own sys.exit(1) (non-OK response). The
+        # SIGTERM handler raises sys.exit(143); that must propagate so a CI
+        # job-kill actually stops the process instead of being swallowed here
+        # and letting the run continue (and post) after the kill signal.
+        if exc.code != 1:
+            raise
         print("  [promote] PR diff fetch failed — full review", file=sys.stderr)
         return None
     inter_lines = _count_diff_changed_lines(inter)
@@ -2619,7 +2625,10 @@ async def run_review(args):
                 file=sys.stderr,
             )
             mode = "full"
-            promote_sibling_pr = None  # reverted to full — don't carry the sibling flag forward
+            # Reverted to full — clear all re-review state so nothing stale
+            # escapes (symmetric with the empty-inter-diff fast-path branch).
+            promote_sibling_pr = None
+            prior, prior_sha = None, None
             diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
             dev_context = ""
         elif not inter_diff.strip():
