@@ -203,7 +203,7 @@ Optional `review_mode` input (default `full`) selects the review architecture:
       review_mode: ${{ inputs.review_mode }}   # 'full' | 'solo' | 'both'
 ```
 
-`review_mode` is per-request (set it on a `workflow_dispatch` run, or pin it in a caller's `with:`). It's **managed-only** — the CLI `/air:review` runs its agents locally with no managed coordinator, so there is no CLI solo equivalent.
+`review_mode` is per-request (set it on a `workflow_dispatch` run, or pin it in a caller's `with:`) — **or persistently via a caller repo/org variable** `AIR_REVIEW_MODE` (Settings → Variables). `managed-review.yml` resolves `vars.AIR_REVIEW_MODE || inputs.review_mode || 'full'`, and `vars` in a reusable workflow reads the *caller's* variables — so to run `both` across a data-collection window, set `AIR_REVIEW_MODE=both` on the repo and delete it to revert (no workflow edit, immune to caller-file/mirror resets). The variable **wins over the input** (callers commonly pass `review_mode: ${{ inputs.review_mode || 'full' }}`, which would otherwise pin the input to `full` on `review_requested`); a one-off `workflow_dispatch` mode is overridden while the variable is set. An invalid value fails loud (review.py validates the mode). It's **managed-only** — the CLI `/air:review` runs its agents locally with no managed coordinator, so there is no CLI solo equivalent.
 
 ### Promote fast-path (`promote_fastpath` — opt-in cost saver for promote chains)
 
