@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.28.1](https://github.com/VorobiovD/air/compare/v1.28.0...v1.28.1) (2026-06-08)
+
+
+### Bug Fixes
+
+* **agents:** ui-copy gate no longer treats internal docs/ as user-facing ([#136](https://github.com/VorobiovD/air/issues/136)) ([861c3a6](https://github.com/VorobiovD/air/commit/861c3a6f4f1a6e6812571d1cef5932f8c5b6ccbf))
+
 ## [1.28.0](https://github.com/VorobiovD/air/compare/v1.27.0...v1.28.0) (2026-06-08)
 
 
