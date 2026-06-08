@@ -159,7 +159,10 @@ on:
           only where an advisory review is acceptable), or 'both' (run both;
           the full review gates as usual and the solo review posts alongside,
           labeled and non-blocking, for comparison). Default 'full' is
-          byte-identical to today. Set per-request via workflow_dispatch.
+          byte-identical to today. Set per-request via workflow_dispatch, or
+          persistently by setting a repo/org VARIABLE `AIR_REVIEW_MODE` on the
+          CALLER repo (it wins over this input — handy for running 'both' over
+          a data-collection window with no workflow edit; delete it to revert).
         required: false
         type: string
         default: 'full'
@@ -426,7 +429,15 @@ jobs:
           FRESH: ${{ inputs.fresh }}
           AIR_AGENT_VERSIONS: ${{ inputs.agent_versions }}
           AIR_EXPECTED_REVIEWER: ${{ inputs.expected_reviewer }}
-          AIR_REVIEW_MODE: ${{ inputs.review_mode }}
+          # Resolved from a caller repo/org VARIABLE first, then the input,
+          # then 'full'. `vars` in a reusable workflow reads the CALLER's
+          # repo+org variables, so a caller sets AIR_REVIEW_MODE=both to run
+          # the comparison fleet-lessly (no workflow edit) and deletes it to
+          # revert. The variable wins because callers commonly pass a literal
+          # `review_mode: ${{ inputs.review_mode || 'full' }}`, which would
+          # otherwise pin the input to 'full' on review_requested events. An
+          # invalid value fails loud — review.py validates the mode.
+          AIR_REVIEW_MODE: ${{ vars.AIR_REVIEW_MODE || inputs.review_mode || 'full' }}
           # Enabled by the input OR a caller-repo/org variable. `vars` in a
           # reusable workflow resolves to the CALLER's repository + org
           # variables, so a caller can flip AIR_PROMOTE_FASTPATH=true in
