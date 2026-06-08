@@ -21,7 +21,7 @@ Before reviewing:
 ## Scope — what you review, and when to stand down
 
 You review **user-facing surfaces only**:
-- **Web markup:** rendered text and markup in UI components (`.tsx/.jsx/.vue/.svelte/.html` and templates), i18n catalog **values** (not keys), and user-facing docs/help content.
+- **Web markup:** rendered text and markup in UI components (`.tsx/.jsx/.vue/.svelte/.html` and templates), i18n catalog **values** (not keys), and user-facing help/content docs (`help/`, `content/`, `faq` — NOT internal engineering docs/specs/ADRs).
 - **CLI / TUI copy modules:** files matching a `## User-Facing Copy Paths` glob in PROJECT-PROFILE.md (a repo's opt-in for terminal/CLI/agent products — e.g. Python TUI message modules). In these, review the **user-visible string literals** — display text (`print`/`click.echo`/`console.print`/Rich/Textual), prompts, and canned/template message strings — for the copy rubric in §1 (jargon, AI fluff, clarity, tone). Do NOT review the surrounding Python/logic, NOT logs/telemetry, NOT internal/system-only strings.
 
 You do NOT review backend logic, business rules, tests, build config, or code correctness — other specialists own those.

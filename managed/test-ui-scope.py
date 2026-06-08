@@ -67,8 +67,17 @@ def test_path_bare_root_i18n():
 
 
 def test_path_user_facing_docs():
-    for p in ("docs/help/faq.md", "help/getting-started.mdx", "content/landing.md"):
+    for p in ("help/getting-started.mdx", "content/landing.md", "site/faq/billing.md",
+              "docs/help/faq.md"):  # docs/help/ still matches via the help/ segment
         assert _path_is_ui(p), p
+
+
+def test_path_internal_docs_excluded():
+    # Bare docs/ is internal eng material (specs/plans/ADRs) — must NOT trigger
+    # the copy reviewer. Regression for ai-relay #231 (billing-tool docs/).
+    for p in ("docs/architecture.md", "docs/specs/design.md", "docs/adr/0001.md",
+              "gcp/functions/apis/billing-tool/docs/superpowers/plans/2026-06-07-fix.md"):
+        assert not _path_is_ui(p), p
 
 
 def test_path_negatives():

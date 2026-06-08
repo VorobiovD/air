@@ -693,7 +693,7 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 - Agent 2 → `subagent_type: "air:simplify"` (Sonnet — pattern matching against codebase + heuristics)
 - Agent 3 → `subagent_type: "air:security-auditor"` (Opus — judgment-heavy threat modeling)
 - Agent 4 → `subagent_type: "air:git-history-reviewer"` (Sonnet — mostly mechanical blame/churn analysis)
-- Agent 5 → `subagent_type: "air:ui-copy-reviewer"` (Sonnet — user-facing copy + static UX/a11y; **launch ONLY when the diff touches user-facing files**: `.tsx/.jsx/.vue/.svelte/.html`, templates, i18n catalogs (`locales/`, `en.json`, `.po`/`.arb`), user-facing docs, OR files matching a `## User-Facing Copy Paths` glob in PROJECT-PROFILE.md (CLI/TUI copy modules, e.g. Python message modules) — skip entirely on backend-only diffs)
+- Agent 5 → `subagent_type: "air:ui-copy-reviewer"` (Sonnet — user-facing copy + static UX/a11y; **launch ONLY when the diff touches user-facing files**: `.tsx/.jsx/.vue/.svelte/.html`, templates, i18n catalogs (`locales/`, `en.json`, `.po`/`.arb`), user-facing help/content docs (`help/`/`content/`/`faq` — NOT internal eng docs/specs), OR files matching a `## User-Facing Copy Paths` glob in PROJECT-PROFILE.md (CLI/TUI copy modules, e.g. Python message modules) — skip entirely on backend-only diffs)
 - Verifier (Step 8) → `subagent_type: "air:review-verifier"` (Opus — final quality gate, must be precise)
 
 **Model tiering rationale:** Each agent's model is declared in its own frontmatter (`plugins/air/agents/<name>.md`). Judgment-heavy reviewers (code-reviewer, security-auditor, review-verifier) run on Opus. Mechanical / pattern-matching reviewers (git-history-reviewer, simplify) run on Sonnet — ~5× cheaper input, minimal quality risk on their task shape. Do not override models when launching agents — the frontmatter is the source of truth.
@@ -733,7 +733,7 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 - Cross-reference with REVIEW.md accepted patterns and known issues
 
 **Agent 5: UI/Copy Reviewer (read-only — conditional)**
-- **Dispatch ONLY when the diff touches user-facing files** (markup/component/template extensions, i18n catalog values, user-facing docs, or files matching a `## User-Facing Copy Paths` glob in PROJECT-PROFILE.md — CLI/TUI copy modules). On a backend-only diff, do NOT launch it.
+- **Dispatch ONLY when the diff touches user-facing files** (markup/component/template extensions, i18n catalog values, user-facing help/content docs (`help/`/`content/`/`faq` — NOT internal eng docs/specs), or files matching a `## User-Facing Copy Paths` glob in PROJECT-PROFILE.md — CLI/TUI copy modules). On a backend-only diff, do NOT launch it.
 - User-facing copy: developer jargon, AI-generated fluff, plain-language/clarity, error/empty/loading-state wording (see `ui-copy-reviewer.md`).
 - Static UX/a11y: alt text, aria-label/role, label↔input association, link/button text, heading order, non-semantic clickables, terminology consistency.
 - Advisory by default (nit/low/medium); reserves blocker for clear user/clinical harm only.
