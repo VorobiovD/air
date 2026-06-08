@@ -45,18 +45,18 @@ Same as regular Step 3 — clone the wiki (into `$AIR_TMP/review-wiki-self`) and
 
 Also generate blame summaries and churn data for the changed files (same as Step 4's "Git history context") so all agents — including git-history-reviewer — have the data they need.
 
-### Self Step 3: Full Review (4 agents + Codex)
+### Self Step 3: Full Review (4 core agents + Codex, plus UI/copy on user-facing diffs)
 
 Same quality as PR review. Construct a PR Context block (same structure as Step 7 in `commands/review.md`) with the self-review diff summary, blame summaries, churn data, and — critically — the two-field wiki contract.
 
-**Omit the `<pr-conversation>` field — there is no PR yet, so there is no conversation to fetch.** The 4 specialist agent prompts are written conditionally (`If the PR Context block contains a <pr-conversation> field…`) and gracefully skip the duplicate-flagging step when the field is absent. Do not attempt the Step 4 conversation fetches in self-review mode — they're scoped to a real PR number that doesn't exist here. The `<related-prs>` field is likewise omitted by design — local uncommitted changes have no sibling-PR overlap to scan; agents proceed without it.
+**Omit the `<pr-conversation>` field — there is no PR yet, so there is no conversation to fetch.** The specialist agent prompts are written conditionally (`If the PR Context block contains a <pr-conversation> field…`) and gracefully skip the duplicate-flagging step when the field is absent. Do not attempt the Step 4 conversation fetches in self-review mode — they're scoped to a real PR number that doesn't exist here. The `<related-prs>` field is likewise omitted by design — local uncommitted changes have no sibling-PR overlap to scan; agents proceed without it.
 
 ```
 - Wiki files directory: <literal $AIR_TMP path — e.g. /tmp/air-self-AbCdEf>
 - Wiki files available in that directory: <list which of REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md, GLOSSARY.md actually exist>
 ```
 
-The 5 agents require the literal `Wiki files directory:` field to locate wiki patterns — without it they proceed without patterns. Pass this context block to all agents. Launch ALL reviewers in parallel:
+The agents require the literal `Wiki files directory:` field to locate wiki patterns — without it they proceed without patterns. Pass this context block to all agents. Launch ALL in-scope reviewers in parallel (the 4 core + Codex always; add `air:ui-copy-reviewer` when your changes touch user-facing files):
 
 **Agent 1: Code Reviewer** - focused on YOUR changes:
 - Bugs you might have introduced
@@ -80,6 +80,10 @@ The 5 agents require the literal `Wiki files directory:` field to locate wiki pa
 - Recent churn on files you touched (are you in a refactor loop?)
 - Blame context — modifying code you didn't write? Verify assumptions
 - Previous PR feedback on these files
+
+**Agent 5: UI/Copy Reviewer** (read-only — ONLY if your changes touch user-facing files: markup/components/templates, i18n catalog values, or user-facing docs; skip on backend-only changes):
+- User-facing copy: developer jargon, AI-generated fluff, unclear wording, error/empty/loading states
+- Static UX/a11y: alt text, aria-label/role, label↔input association, link/button text, heading order, terminology consistency
 
 **Codex** (unless `--no-codex`):
 ```bash

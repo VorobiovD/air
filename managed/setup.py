@@ -25,7 +25,7 @@ from api import API_BASE, HEADERS, get_headers, api_error_message, list_agents
 AGENTS_DIR = Path(__file__).parent.parent / "plugins" / "air" / "agents"
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-SUB_AGENTS = ["code-reviewer", "simplify", "security-auditor", "git-history-reviewer", "review-verifier"]
+SUB_AGENTS = ["code-reviewer", "simplify", "security-auditor", "git-history-reviewer", "ui-copy-reviewer", "review-verifier"]
 
 # Agent names accepted in AIR_AGENT_VERSIONS pins (the review roster).
 # air-learner is deliberately NOT pinnable — learn is wiki maintenance,

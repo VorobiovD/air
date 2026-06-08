@@ -616,9 +616,9 @@ Include `Reviewed at: <headRefOid>` in the posted review footer.
 
 ## Step 7: Parallel Review (Round 1)
 
-**CRITICAL: Launch ALL 5 reviewers (4 agents + Codex) in a SINGLE parallel batch.** Do NOT run agents first and then Codex separately.
+**CRITICAL: Launch ALL in-scope reviewers in a SINGLE parallel batch** — the 4 core agents + Codex ALWAYS, PLUS `air:ui-copy-reviewer` when the diff touches user-facing files (Agent 5). Do NOT run agents first and then Codex separately.
 
-**NEVER skip any reviewer based on PR size, diff size, or perceived complexity.** A 1-line PR can have a blocker. Always launch all 5.
+**NEVER skip a core reviewer based on PR size, diff size, or perceived complexity.** A 1-line PR can have a blocker. Always launch the 4 core agents + Codex. (Agent 5, the UI/copy reviewer, is the one conditional reviewer — dispatch it only when the diff touches user-facing files; see Agent 5.)
 
 Checkout was already done in Step 4. If cross-repo and Codex needs code, clone to `$AIR_TMP/codex-review-<number>` before launching.
 
@@ -632,7 +632,7 @@ CODEX_SCRIPT=$(find ~/.claude/plugins/cache/openai-codex -name "codex-companion.
 ```
 Run with `run_in_background: true`. Graceful skip if not configured.
 
-**Phase B:** Immediately after launching Codex (don't wait for it), launch 4 agents in parallel.
+**Phase B:** Immediately after launching Codex (don't wait for it), launch the in-scope agents in parallel — the 4 core agents, plus `air:ui-copy-reviewer` when the diff touches user-facing files (see Agent 5).
 
 **Each agent receives a PR Context block at the top of its prompt** (inline, not a separate file).
 
@@ -693,6 +693,7 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 - Agent 2 → `subagent_type: "air:simplify"` (Sonnet — pattern matching against codebase + heuristics)
 - Agent 3 → `subagent_type: "air:security-auditor"` (Opus — judgment-heavy threat modeling)
 - Agent 4 → `subagent_type: "air:git-history-reviewer"` (Sonnet — mostly mechanical blame/churn analysis)
+- Agent 5 → `subagent_type: "air:ui-copy-reviewer"` (Sonnet — user-facing copy + static UX/a11y; **launch ONLY when the diff touches user-facing files**: `.tsx/.jsx/.vue/.svelte/.html`, templates, i18n catalogs (`locales/`, `en.json`, `.po`/`.arb`), or user-facing docs — skip entirely on backend-only diffs)
 - Verifier (Step 8) → `subagent_type: "air:review-verifier"` (Opus — final quality gate, must be precise)
 
 **Model tiering rationale:** Each agent's model is declared in its own frontmatter (`plugins/air/agents/<name>.md`). Judgment-heavy reviewers (code-reviewer, security-auditor, review-verifier) run on Opus. Mechanical / pattern-matching reviewers (git-history-reviewer, simplify) run on Sonnet — ~5× cheaper input, minimal quality risk on their task shape. Do not override models when launching agents — the frontmatter is the source of truth.
@@ -731,9 +732,16 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 - **Author pattern matching:** Same as Agent 1 — annotate every finding that matches the author's known patterns. See `git-history-reviewer.md` for matching rules.
 - Cross-reference with REVIEW.md accepted patterns and known issues
 
+**Agent 5: UI/Copy Reviewer (read-only — conditional)**
+- **Dispatch ONLY when the diff touches user-facing files** (markup/component/template extensions, i18n catalog values, or user-facing docs). On a backend-only diff, do NOT launch it.
+- User-facing copy: developer jargon, AI-generated fluff, plain-language/clarity, error/empty/loading-state wording (see `ui-copy-reviewer.md`).
+- Static UX/a11y: alt text, aria-label/role, label↔input association, link/button text, heading order, non-semantic clickables, terminology consistency.
+- Advisory by default (nit/low/medium); reserves blocker for clear user/clinical harm only.
+- If a `## Voice & Copy` section exists in PROJECT-PROFILE.md, it overrides/extends the built-in rubric.
+
 **Phase C:** After agents complete, wait for Codex background task to finish. Collect Codex findings.
 
-**WAIT for ALL 5 (4 agents + Codex) to complete before proceeding to Step 8.** Do not start verification until Codex results are collected.
+**WAIT for ALL in-scope reviewers (the 4 core agents + Codex, plus Agent 5 if launched) to complete before proceeding to Step 8.** Do not start verification until Codex results are collected.
 
 **CRITICAL: DO NOT edit any files between Step 7 and Step 12.** The review must reflect what the agents actually found. The orchestrator's job is to report findings, not fix them. Even if a fix is obvious, post the finding — the PR author (or `--respond` flow) handles fixes. Editing code and then posting a "0 findings" review defeats the purpose of the review cycle.
 
@@ -741,7 +749,7 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 
 **CRITICAL: ALWAYS run the verification agent, even if findings seem obvious or the diff is small. Do NOT skip verification based on perceived simplicity. A 1-line finding can still be a false positive.**
 
-**Only run AFTER all 5 reviewers (4 agents + Codex) from Step 7 have completed.** Collect ALL findings into one list, then launch **review-verifier**.
+**Only run AFTER all in-scope reviewers from Step 7 (the 4 core agents + Codex, plus Agent 5 if launched) have completed.** Collect ALL findings into one list, then launch **review-verifier**.
 
 Pass to the verifier: "The PR Context block includes a `Wiki files directory:` field pointing at `$AIR_TMP`. Read `$AIR_TMP/SEVERITY-CALIBRATION.md` if listed as available and use its per-agent+category thresholds. Read `$AIR_TMP/ACCEPTED-PATTERNS.md` if listed as available as the primary accepted-pattern whitelist."
 

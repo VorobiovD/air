@@ -160,9 +160,19 @@ VERIFIER_AGENT = "air-review-verifier"
 
 COORDINATOR_AGENT = "air-coordinator"
 
+# Conditional 6th specialist (UI / business-audience copy + static UX/a11y).
+# Synced as part of SUB_AGENTS so it's always in the coordinator's
+# callable_agents roster, but only DISPATCHED when the diff touches a
+# user-facing surface (_diff_touches_ui) — the coordinator's per-run dispatch
+# note names it as in-scope or not. Not in SPECIALIST_AGENTS: it must not join
+# the always-required gate (backend-only PRs never need it). Advisory-mostly;
+# it can emit a blocker only for clear user/clinical harm.
+UI_COPY_AGENT = "air-ui-copy-reviewer"
+
 # Single-session reviewer (opt-in AIR_REVIEW_MODE=solo|both). One agent applies
-# all 5 lenses + self-verifies; prompt assembled from the specialists in
-# setup.py (assemble_solo_prompt). Required only when a run uses solo/both.
+# all lenses + self-verifies; prompt assembled from the specialists in
+# setup.py (assemble_solo_prompt — includes the UI lens, which self-scopes).
+# Required only when a run uses solo/both.
 SOLO_AGENT = "air-solo-reviewer"
 
 # Review architecture axis (AIR_REVIEW_MODE / --mode), ORTHOGONAL to `mode`
@@ -1227,6 +1237,58 @@ def compute_file_statuses(repo_dir: str, base_ref: str, head_ref: str) -> tuple[
     return "\n".join(sections), post_paths[:PRECOMP_FILE_LIMIT]
 
 
+# --- UI-copy reviewer dispatch gate ------------------------------------------
+# Decides whether the air-ui-copy-reviewer specialist is dispatched for a run.
+# It only adds value (and cost) when the diff touches a user-facing surface, so
+# backend-only PRs skip it entirely ($0 added). Path/extension allowlist — a
+# user-facing-MARKUP extension or an i18n/copy catalog or a user-facing doc.
+_UI_EXTENSIONS = (
+    ".tsx", ".jsx", ".vue", ".svelte", ".html", ".htm", ".hbs", ".ejs",
+    ".erb", ".astro", ".mdx", ".blade.php", ".razor", ".twig", ".liquid", ".njk",
+)
+# i18n / copy catalogs (user-visible string VALUES live here).
+_UI_I18N_RE = re.compile(
+    r"(^|/)(locales?|i18n|lang|translations?)/|"
+    r"(^|/)(en|messages?)[.-][^/]*\.(json|ya?ml|po|pot|arb|strings|resx|ftl)$|"
+    r"\.(po|pot|arb|ftl)$",
+    re.IGNORECASE,
+)
+# User-facing docs/help/content markdown (NOT internal/wiki/review docs).
+_UI_DOC_RE = re.compile(r"(^|/)(docs?|help|content|faq)/.*\.mdx?$", re.IGNORECASE)
+# Never-trigger: air's own pattern/wiki files and styling-only changes.
+_UI_EXCLUDE_RE = re.compile(r"(REVIEW|REVIEW-HISTORY|GLOSSARY|PROJECT-PROFILE|ACCEPTED-PATTERNS|SEVERITY-CALIBRATION)\.md$", re.IGNORECASE)
+_DIFF_PATH_RE = re.compile(r"^\+\+\+ b/(.+)$", re.MULTILINE)
+
+
+def _path_is_ui(path: str) -> bool:
+    p = path.strip()
+    if not p or _UI_EXCLUDE_RE.search(p):
+        return False
+    low = p.lower()
+    if low.endswith(_UI_EXTENSIONS):
+        return True
+    if _UI_I18N_RE.search(p) or _UI_DOC_RE.search(p):
+        return True
+    return False
+
+
+def _diff_touches_ui(post_paths: list[str], diff: str) -> bool:
+    """True when the change touches a user-facing surface (markup / i18n /
+    user-facing docs) and the UI-copy reviewer should be dispatched.
+
+    Two-tier: prefer the pre-computed `post_paths` (cheap, exact); fall back to
+    parsing `+++ b/<path>` headers from the raw diff when post_paths is empty
+    (no AIR_TARGET_REPO) or capped. CSS/SCSS-only changes and air's own
+    wiki/pattern `.md` files never trigger. **Fails open**: if neither signal
+    yields any path at all, return True so an ambiguous case still gets a copy
+    review (correctness over the cost saving on the rare unparseable diff).
+    """
+    paths = list(post_paths) if post_paths else _DIFF_PATH_RE.findall(diff or "")
+    if not paths:
+        return True  # fail open — couldn't determine paths
+    return any(_path_is_ui(p) for p in paths)
+
+
 def compute_blame_summaries(repo_dir: str, files: list[str]) -> str:
     """Per-file top-N authors + most-recent commit date.
 
@@ -2117,6 +2179,7 @@ def _extract_review_body(raw_text: str, head_sha: str) -> tuple[str, bool]:
 async def _run_coordinator_session(
     agents, env_id, args, checkout, bot_token, store_id,
     pr_context, diff, codex_block, verifier_task, meta, mode, head_sha,
+    ui_in_scope=False,
 ) -> tuple[str, str]:
     """Run the multi-agent coordinator session (the default 'full' path).
 
@@ -2159,6 +2222,14 @@ async def _run_coordinator_session(
         if store_id
         else "legacy wiki at /workspace/wiki"
     )
+    # Per-run dispatch gate for the optional UI/copy specialist. The coordinator
+    # dispatches the 4 core specialists ALWAYS and air-ui-copy-reviewer ONLY when
+    # it appears here — keeps backend-only PRs from paying for a 6th agent.
+    ui_scope_line = (
+        "Optional specialists in scope this run: air-ui-copy-reviewer"
+        if ui_in_scope
+        else "Optional specialists in scope this run: none"
+    )
     handoff_user_text = f"""MODE: FILE-HANDOFF — review inputs are mounted as files, not embedded here.
 
 - PR: #{meta['number']} by {meta['user']['login']} | repo: {args.repo} | review mode: {mode} | HEAD: {head_sha}
@@ -2167,6 +2238,7 @@ async def _run_coordinator_session(
 - Verifier task + codex findings: /workspace/context/verifier-task.md
 - Specialist findings directory: /workspace/findings/
 - Pattern source: {pattern_note}
+- {ui_scope_line}
 
 Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do not paste file contents into delegations — pass the paths."""
 
@@ -2215,6 +2287,7 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
                     "tell any specialist to read /workspace/context/ or write "
                     "/workspace/findings/ — those paths are not mounted on this "
                     "run.\n\n"
+                    f"{ui_scope_line}\n\n"
                     f"{pr_context}\n\n"
                     f"<diff>\n{diff}\n</diff>\n\n"
                     f"{codex_block}\n\n"
@@ -2687,6 +2760,7 @@ async def run_review(args):
     blame_summaries = ""
     churn_data = ""
     diff_check_warnings = ""
+    post_paths: list[str] = []
     if target_repo and os.path.isdir(target_repo):
         # Promote fast-path: the sibling's reviewed SHA lived on a now-merged
         # (often deleted) promote branch. Under squash/rebase merges it isn't an
@@ -2714,6 +2788,13 @@ async def run_review(args):
         precomp_secs = time.monotonic() - precomp_t0
         precomp_signals = sum(bool(x) for x in (file_statuses, blame_summaries, churn_data, diff_check_warnings))
         print(f"  pre-computation: {precomp_signals}/4 sections populated in {precomp_secs:.1f}s")
+
+    # UI-copy reviewer dispatch gate: only dispatch the 6th specialist when the
+    # diff touches a user-facing surface (markup / i18n / user-facing docs).
+    # Backend-only PRs skip it ($0 added). Solo/both's merged prompt always
+    # includes the UI lens regardless — it self-scopes there.
+    ui_in_scope = _diff_touches_ui(post_paths, diff)
+    print(f"  ui-copy: {'in scope' if ui_in_scope else 'skipped (no user-facing files)'}")
 
     # Pattern-store rollout flag: a repo with a store has migrated (mount
     # it read-only, write via pattern_writer post-review, counter via the
@@ -3017,6 +3098,7 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
             _run_coordinator_session(
                 agents, env_id, args, checkout, bot_token, store_id,
                 pr_context, diff, codex_block, verifier_task, meta, mode, head_sha,
+                ui_in_scope=ui_in_scope,
             ),
             _run_solo_session(
                 agents, env_id, args, checkout, bot_token, store_id,
@@ -3036,6 +3118,7 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         coordinator_out, coordinator_failure_reason = await _run_coordinator_session(
             agents, env_id, args, checkout, bot_token, store_id,
             pr_context, diff, codex_block, verifier_task, meta, mode, head_sha,
+            ui_in_scope=ui_in_scope,
         )
     else:  # solo
         print("  Running solo session (single merged-lens agent)...")

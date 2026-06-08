@@ -192,7 +192,7 @@ The `workflow_dispatch` trigger lets you review any PR on-demand from the Action
 Optional `review_mode` input (default `full`) selects the review architecture:
 
 - **`full`** (default) — the 6-agent coordinator. Byte-identical to leaving it unset.
-- **`solo`** — ONE `air-solo-reviewer` agent applies all 5 lenses + self-verifies + folds Codex in a single session. Benchmarked at ~$2–4 / ~7 min vs full's ~$10 / ~25 min (qai-be #994). Its prompt is assembled at sync from the 5 specialist prompts (zero-drift; no standalone file; the agent is created only when a run uses solo/both) and is not pinnable. **Solo posts the same `APPROVE`/`REQUEST_CHANGES` verdict as full** (it can gate/approve), but **⚠️ is NOT gate-safe** — a single agent downgrades blocker *severity* (it can APPROVE a PR whose real blocker it rated medium), so that verdict is not a trustworthy hard gate. Enable only where a single agent's verdict is acceptable. (Pattern learning: store-backed repos still strengthen author patterns post-review; legacy-wiki repos skip per-review reinforcement — only `/air:learn` cleanup runs.)
+- **`solo`** — ONE `air-solo-reviewer` agent applies all 6 lenses + self-verifies + folds Codex in a single session (the UI/copy lens self-scopes on non-UI diffs). Benchmarked at ~$2–4 / ~7 min vs full's ~$10 / ~25 min (qai-be #994). Its prompt is assembled at sync from the 6 specialist prompts (zero-drift; no standalone file; the agent is created only when a run uses solo/both) and is not pinnable. **Solo posts the same `APPROVE`/`REQUEST_CHANGES` verdict as full** (it can gate/approve), but **⚠️ is NOT gate-safe** — a single agent downgrades blocker *severity* (it can APPROVE a PR whose real blocker it rated medium), so that verdict is not a trustworthy hard gate. Enable only where a single agent's verdict is acceptable. (Pattern learning: store-backed repos still strengthen author patterns post-review; legacy-wiki repos skip per-review reinforcement — only `/air:learn` cleanup runs.)
 - **`both`** — runs full AND solo **concurrently** (wall-clock ≈ the slower of the two, not the sum). The **full** review gates as usual and drives the verdict/learn; the solo review posts alongside as a separate, non-blocking `## Code Review (solo — experimental)` comment for comparison (testing). A solo failure never affects the gating coordinator review.
 
 ```yaml
@@ -228,7 +228,7 @@ PR opened (or air-machine requested as reviewer)
   ▼
 GitHub Action triggers `python review.py <repo> <pr>`
   │
-  ├── Syncs 5 specialist agents + air-coordinator + air-solo-reviewer (creates on first run, updates prompts otherwise)
+  ├── Syncs 6 specialist agents + air-coordinator + air-solo-reviewer (creates on first run, updates prompts otherwise)
   ├── Fetches PR metadata + diff via GitHub API
   ├── Fetches current PR conversation (issue comments + reviews + inline comments) and bot identity
   │     concurrently — humans + other AI bots are surfaced to specialists as <pr-conversation>
@@ -254,7 +254,7 @@ Single air-coordinator session (callable_agents multi-agent runtime)
   │     ├── air-security-auditor    — 31-item checklist
   │     └── air-git-history-reviewer — blame, churn, recurring patterns
   │
-  ├── TURN 2: dispatches air-review-verifier with the 4 specialist findings + codex findings +
+  ├── TURN 2: dispatches air-review-verifier with the dispatched specialist findings + codex findings +
   │           the verifier_task template embedded (inline — the production shape; the experimental
   │           file-handoff pointer variant is blocked on thread isolation, see above). Verifies
   │           each finding, drops false positives, emits markdown
