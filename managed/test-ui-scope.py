@@ -67,8 +67,25 @@ def test_path_bare_root_i18n():
 
 
 def test_path_user_facing_docs():
-    for p in ("docs/help/faq.md", "help/getting-started.mdx", "content/landing.md"):
+    for p in ("help/getting-started.mdx", "content/landing.md", "site/faq/billing.md",
+              "docs/help/faq.md"):  # matches because help/ is a user-facing segment
         assert _path_is_ui(p), p
+
+
+def test_path_mdx_is_markup_regardless_of_dir():
+    # `.mdx` is matched as MARKUP via _UI_EXTENSIONS (rendered doc-site page),
+    # so it's in scope even under docs/ — distinct from bare docs/**.md below.
+    for p in ("docs/guide.mdx", "docs/architecture.mdx"):
+        assert _path_is_ui(p), p
+
+
+def test_path_internal_docs_excluded():
+    # Bare docs/**.md is internal eng material (specs/plans/ADRs) — must NOT
+    # trigger the copy reviewer. Regression for ai-relay #231 (billing-tool
+    # docs/). (.mdx differs — see test_path_mdx_is_markup_regardless_of_dir.)
+    for p in ("docs/architecture.md", "docs/specs/design.md", "docs/adr/0001.md",
+              "gcp/functions/apis/billing-tool/docs/superpowers/plans/2026-06-07-fix.md"):
+        assert not _path_is_ui(p), p
 
 
 def test_path_negatives():

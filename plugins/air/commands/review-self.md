@@ -81,7 +81,7 @@ The agents require the literal `Wiki files directory:` field to locate wiki patt
 - Blame context — modifying code you didn't write? Verify assumptions
 - Previous PR feedback on these files
 
-**Agent 5: UI/Copy Reviewer** (read-only — ONLY if your changes touch user-facing files: markup/components/templates, i18n catalog values, user-facing docs, or files matching a `## User-Facing Copy Paths` glob in PROJECT-PROFILE.md (CLI/TUI copy modules); skip on backend-only changes):
+**Agent 5: UI/Copy Reviewer** (read-only — ONLY if your changes touch user-facing files: markup/components/templates, i18n catalog values, user-facing help/content docs (`help/`/`content/`/`faq` — NOT internal eng docs/specs), or files matching a `## User-Facing Copy Paths` glob in PROJECT-PROFILE.md (CLI/TUI copy modules); skip on backend-only changes):
 - User-facing copy: developer jargon, AI-generated fluff, unclear wording, error/empty/loading states
 - Static UX/a11y: alt text, aria-label/role, label↔input association, link/button text, heading order, terminology consistency
 

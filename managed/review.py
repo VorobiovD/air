@@ -1254,8 +1254,17 @@ _UI_I18N_RE = re.compile(
     r"\.(po|pot|arb|ftl)$",
     re.IGNORECASE,
 )
-# User-facing docs/help/content markdown (NOT internal/wiki/review docs).
-_UI_DOC_RE = re.compile(r"(^|/)(docs?|help|content|faq)/.*\.mdx?$", re.IGNORECASE)
+# User-facing help/content markdown. Deliberately does NOT match a bare
+# `docs/` dir — `docs/` is overwhelmingly INTERNAL engineering material
+# (specs, ADRs, design docs, plans, runbooks; e.g. billing-tool/docs/
+# superpowers/plans/*.md), and matching it dispatched the copy reviewer on
+# backend PRs that merely included eng docs. NOTE: `.mdx` is separately matched
+# as MARKUP via _UI_EXTENSIONS (it implies a rendered doc-site page) regardless
+# of directory — so `docs/*.mdx` IS in scope as user-facing markup; only a bare
+# `docs/**.md` with no help/content/faq segment falls through. Opt genuinely
+# user-facing `.md`-under-`docs/` in via PROJECT-PROFILE `## User-Facing Copy
+# Paths`.
+_UI_DOC_RE = re.compile(r"(^|/)(help|content|faq)/.*\.mdx?$", re.IGNORECASE)
 # Never-trigger: air's own pattern/wiki files and styling-only changes.
 _UI_EXCLUDE_RE = re.compile(r"(REVIEW|REVIEW-HISTORY|GLOSSARY|PROJECT-PROFILE|ACCEPTED-PATTERNS|SEVERITY-CALIBRATION)\.md$", re.IGNORECASE)
 _DIFF_PATH_RE = re.compile(r"^\+\+\+ b/(.+)$", re.MULTILINE)
