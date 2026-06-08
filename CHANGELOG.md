@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.24.0](https://github.com/VorobiovD/air/compare/v1.23.0...v1.24.0) (2026-06-08)
+
+
+### Features
+
+* **prompts:** safe cost/quality fixes from the 06-07 review audit ([#124](https://github.com/VorobiovD/air/issues/124)) ([311eeb2](https://github.com/VorobiovD/air/commit/311eeb22a71890eeacee68ff18a9bd52b96ac52a))
+
 ## [1.23.0](https://github.com/VorobiovD/air/compare/v1.22.0...v1.23.0) (2026-06-07)
 
 
