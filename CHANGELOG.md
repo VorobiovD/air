@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.27.0](https://github.com/VorobiovD/air/compare/v1.26.0...v1.27.0) (2026-06-08)
+
+
+### Features
+
+* **agents:** UI / business-audience copy reviewer (air-ui-copy-reviewer) ([#130](https://github.com/VorobiovD/air/issues/130)) ([9389a56](https://github.com/VorobiovD/air/commit/9389a567a1fc7e7c2e92d409d2ede63bc85018d0))
+
 ## [1.26.0](https://github.com/VorobiovD/air/compare/v1.25.0...v1.26.0) (2026-06-08)
 
 
