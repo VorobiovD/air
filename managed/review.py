@@ -39,6 +39,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 import requests as req
 from anthropic import (
@@ -1025,24 +1026,27 @@ def _detect_promote_fastpath(
         print("  [promote] bot identity unknown — skipping fast-path", file=sys.stderr)
         return None
 
+    # `base_ref` is attacker-influenceable (a branch name can contain &, =, %,
+    # +, #), so URL-encode it rather than concatenate raw into the query.
     base_ref = (meta.get("base") or {}).get("ref", "")
     url = (
         f"https://api.github.com/repos/{repo}/pulls"
-        f"?state=closed&base={base_ref}&sort=updated&direction=desc&per_page=100"
+        f"?state=closed&base={quote(base_ref, safe='')}&sort=updated&direction=desc&per_page=100"
     )
-    sibling = None
-    for c in _github_paginate(url, token, max_pages=_PROMOTE_MAX_SIBLING_PAGES):
-        if c.get("number") == pr_number:
-            continue
-        if not c.get("merged_at"):
-            continue
-        if not ((c.get("head") or {}).get("ref", "")).startswith(PROMOTE_HEAD_PREFIX):
-            continue
-        sibling = c
-        break
-    if sibling is None:
+    # The list API has no `sort=merged_at`; `sort=updated` is bumped by any late
+    # comment/label edit, so it can't be trusted to put the last-merged sibling
+    # first. Collect every merged promote candidate, then pick the one with the
+    # newest merged_at (ISO-8601 UTC → lexicographic max == chronological max).
+    candidates = [
+        c for c in _github_paginate(url, token, max_pages=_PROMOTE_MAX_SIBLING_PAGES)
+        if c.get("number") != pr_number
+        and c.get("merged_at")
+        and ((c.get("head") or {}).get("ref", "")).startswith(PROMOTE_HEAD_PREFIX)
+    ]
+    if not candidates:
         print(f"  [promote] {head_ref}: no merged sibling promote — full review", file=sys.stderr)
         return None
+    sibling = max(candidates, key=lambda c: c["merged_at"])
 
     sibling_num = sibling["number"]
     sib_review = find_prior_review(fetch_issue_comments(repo, sibling_num, token), bot_login)
@@ -1058,12 +1062,23 @@ def _detect_promote_fastpath(
     if inter is None:
         print(f"  [promote] compare {sib_sha[:8]}..{head_sha[:8]} failed — full review", file=sys.stderr)
         return None
-    full_lines = _count_diff_changed_lines(fetch_pr_diff(repo, pr_number, token))
+    # fetch_pr_diff sys.exit(1)s on a non-OK response; here that would break
+    # this function's "fall back to full review at every failing gate" contract
+    # (and a full review can't run without the PR diff either). Catch it and
+    # fall back to None so a transient diff-endpoint blip doesn't kill the run
+    # before the full-review path gets its own chance to fetch + report.
+    try:
+        full_lines = _count_diff_changed_lines(fetch_pr_diff(repo, pr_number, token))
+    except SystemExit:
+        print("  [promote] PR diff fetch failed — full review", file=sys.stderr)
+        return None
     inter_lines = _count_diff_changed_lines(inter)
     overlap = 1 - (inter_lines / max(full_lines, 1))
     if overlap < PROMOTE_OVERLAP_THRESHOLD:
+        # Clamp the displayed percentage: a rebase/merge-commit-inflated
+        # inter-diff can exceed the PR diff, making overlap negative.
         print(
-            f"  [promote] sibling #{sibling_num} @ {sib_sha[:8]}: overlap {overlap:.0%} "
+            f"  [promote] sibling #{sibling_num} @ {sib_sha[:8]}: overlap {max(0.0, overlap):.0%} "
             f"(< {PROMOTE_OVERLAP_THRESHOLD:.0%}) — full review",
             file=sys.stderr,
         )
@@ -2604,16 +2619,36 @@ async def run_review(args):
                 file=sys.stderr,
             )
             mode = "full"
+            promote_sibling_pr = None  # reverted to full — don't carry the sibling flag forward
             diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
             dev_context = ""
         elif not inter_diff.strip():
-            # Commits landed but the tree is unchanged — empty commits,
-            # force-push to the same tree, or merge-only commits that
-            # shift parent pointers. Nothing to review.
-            print(
-                f"No inter-diff between {prior_sha[:8]} and {head_sha[:8]}. Skipping."
-            )
-            return
+            if promote_sibling_pr is not None:
+                # Fast-path with an empty inter-diff: this promote's tree
+                # already matches the sibling's reviewed tree. Unlike a same-PR
+                # re-review (where a review comment already exists on THIS PR),
+                # a fast-path PR has no review of its own yet — skipping here
+                # would let it merge entirely unreviewed. Fall back to a full
+                # review so the PR still gets covered.
+                print(
+                    f"  [promote] empty inter-diff vs sibling #{promote_sibling_pr} — "
+                    f"PR has no review of its own; falling back to full review.",
+                    file=sys.stderr,
+                )
+                mode = "full"
+                promote_sibling_pr = None
+                prior, prior_sha = None, None
+                diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
+                dev_context = ""
+            else:
+                # Commits landed but the tree is unchanged — empty commits,
+                # force-push to the same tree, or merge-only commits that
+                # shift parent pointers. The PR already has a review; nothing
+                # new to review.
+                print(
+                    f"No inter-diff between {prior_sha[:8]} and {head_sha[:8]}. Skipping."
+                )
+                return
         else:
             diff = inter_diff
             if promote_sibling_pr is not None:
@@ -2644,6 +2679,23 @@ async def run_review(args):
     churn_data = ""
     diff_check_warnings = ""
     if target_repo and os.path.isdir(target_repo):
+        # Promote fast-path: the sibling's reviewed SHA lived on a now-merged
+        # (often deleted) promote branch. Under squash/rebase merges it isn't an
+        # ancestor of the checked-out head, so the precomp + codex `git … <sha>`
+        # calls below would silently return nothing — losing exactly the context
+        # this feature reuses. Best-effort fetch the sibling PR head (GitHub
+        # retains refs/pull/<n>/head post-merge) so the SHA resolves locally; if
+        # it still can't, log so the degradation is visible (the review diff
+        # itself uses the GitHub compare API and is unaffected either way).
+        if promote_sibling_pr is not None and mode == "re-review":
+            if not _git(target_repo, "rev-parse", "--verify", "--quiet", f"{prior_sha}^{{commit}}"):
+                _git(target_repo, "fetch", "origin", f"pull/{promote_sibling_pr}/head", timeout=60.0)
+                if not _git(target_repo, "rev-parse", "--verify", "--quiet", f"{prior_sha}^{{commit}}"):
+                    print(
+                        f"  [promote] sibling SHA {prior_sha[:8]} unreachable in local "
+                        f"checkout — precomp/codex context degraded (review diff unaffected)",
+                        file=sys.stderr,
+                    )
         precomp_t0 = time.monotonic()
         precomp_base = prior_sha if mode == "re-review" else f"origin/{meta['base']['ref']}"
         file_statuses, post_paths = compute_file_statuses(target_repo, precomp_base, head_sha)

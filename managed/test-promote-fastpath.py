@@ -25,7 +25,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import review  # noqa: E402
-from review import _count_diff_changed_lines, _detect_promote_fastpath  # noqa: E402
+from review import (  # noqa: E402
+    _count_diff_changed_lines,
+    _detect_promote_fastpath,
+    build_pr_context,
+)
 
 BOT = "air-bot"
 HEAD = "fc3b2e03546153449edba2a224dbbbfff58a14b6"   # current PR head, 40-char hex
@@ -194,6 +198,39 @@ def test_overlap_below_threshold_falls_back():
 def test_overlap_high_fires():
     # Near-identical promote: inter 2 / full 200 -> overlap 0.99 -> fires.
     assert _overlap_result(2, 200) is not None
+
+
+# --- prior_pr_number provenance plumbing (build_pr_context) ------------------
+
+def _full_meta(head_ref="promote/staging-to-main-09"):
+    return {
+        "user": {"login": "dev"},
+        "title": "Promote staging to main",
+        "body": "promotion body",
+        "number": 51,
+        "base": {"ref": "main", "sha": "b" * 40},
+        "head": {"ref": head_ref, "sha": HEAD},
+        "additions": 10, "deletions": 2, "changed_files": 3, "commits": 4,
+    }
+
+
+def test_provenance_line_present_when_prior_pr_number_set():
+    ctx = build_pr_context(
+        _full_meta(), "o/r", mode="re-review",
+        prior_review_body="## Code Review\n\nx\n",
+        prior_sha=SIB_SHA, prior_pr_number=48)
+    assert "predecessor promote PR #48" in ctx
+    assert "carried from" in ctx
+
+
+def test_provenance_absent_when_prior_pr_number_none():
+    # Default (None) must be byte-identical to a normal same-PR re-review.
+    ctx = build_pr_context(
+        _full_meta(), "o/r", mode="re-review",
+        prior_review_body="## Code Review\n\nx\n",
+        prior_sha=SIB_SHA, prior_pr_number=None)
+    assert "predecessor promote PR" not in ctx
+    assert "carried from" not in ctx
 
 
 _TESTS = [v for k, v in sorted(globals().items())
