@@ -163,6 +163,18 @@ on:
         required: false
         type: string
         default: 'full'
+      promote_fastpath:
+        description: |
+          Opt-in cost saver for promote chains. When 'true', a fresh
+          promote/staging-to-main-* PR with no prior review of its own is
+          re-reviewed as a delta against its last-merged, already-reviewed
+          sibling promote (instead of a full re-read) — but only when the two
+          overlap by >= 80% of changed lines; below that it falls back to a
+          full review. Default 'false' is byte-identical to today. Enable only
+          on repos that use the promote/staging-to-main-* branch convention.
+        required: false
+        type: string
+        default: 'false'
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -410,6 +422,7 @@ jobs:
           AIR_AGENT_VERSIONS: ${{ inputs.agent_versions }}
           AIR_EXPECTED_REVIEWER: ${{ inputs.expected_reviewer }}
           AIR_REVIEW_MODE: ${{ inputs.review_mode }}
+          AIR_PROMOTE_FASTPATH: ${{ inputs.promote_fastpath }}
           # Absolute path to the local checkout. review.py uses it for
           # both `codex review` (when enabled) and client-side
           # pre-computation (blame/churn/file-status/diff-check

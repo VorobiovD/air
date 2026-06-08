@@ -826,15 +826,21 @@ _REREVIEW_HEADER_RE = re.compile(r"^##\s+Code Review\s*\(Re-review\)", re.MULTIL
 PRIOR_REVIEW_MAX_CHARS = 8000
 
 
-def _github_paginate(url: str, token: str) -> list[dict]:
+def _github_paginate(url: str, token: str, max_pages: int | None = None) -> list[dict]:
     """Walk a GitHub list endpoint to completion and return all items.
     On a page failure, logs to stderr and returns whatever has been
     collected so far — callers see this as "empty or truncated" and
     cannot currently distinguish the two. Acceptable because both
     failure modes lead to a full-review fallback, which is the safe
     (more expensive) choice.
+
+    `max_pages` caps the walk for callers that only need the first few
+    pages of a newest-first list (e.g. the promote sibling search). None
+    (default) preserves the walk-to-completion behavior all other callers
+    rely on.
     """
     items: list[dict] = []
+    pages = 0
     while url:
         resp = req.get(
             url,
@@ -844,6 +850,9 @@ def _github_paginate(url: str, token: str) -> list[dict]:
             print(f"Error GETting {url}: {_github_error_message(resp)}", file=sys.stderr)
             return items
         items.extend(resp.json())
+        pages += 1
+        if max_pages is not None and pages >= max_pages:
+            break
         link = resp.headers.get("Link", "")
         match = re.search(r'<([^>]+)>;\s*rel="next"', link)
         url = match.group(1) if match else None
@@ -957,6 +966,115 @@ def fetch_inter_diff(
         print(f"Error fetching inter-diff: {_github_error_message(resp)}", file=sys.stderr)
         return None
     return resp.text
+
+
+# --- Promote fast-path -------------------------------------------------------
+# A `promote/staging-to-main-*` PR is one link in a chain: each new promote
+# re-opens nearly the same staging→main changeset its predecessor carried, so
+# reviewing each from scratch re-pays for code an earlier promote already
+# cleared. When the current promote overlaps its last-merged, already-reviewed
+# sibling by >= PROMOTE_OVERLAP_THRESHOLD, we re-review against the sibling's
+# reviewed SHA (a tiny inter-diff) instead of a full re-read. Opt-in via
+# AIR_PROMOTE_FASTPATH; conservative — any uncertainty falls back to full.
+PROMOTE_HEAD_PREFIX = "promote/staging-to-main-"
+PROMOTE_OVERLAP_THRESHOLD = 0.80
+# Cap the sibling search. The closed-PR list is newest-first, so the most
+# recent merged sibling is on page 1 in practice; three pages (300 PRs) is a
+# generous ceiling that bounds cost on busy repos.
+_PROMOTE_MAX_SIBLING_PAGES = 3
+
+
+def _count_diff_changed_lines(diff: str) -> int:
+    """Count added/removed lines in a unified diff.
+
+    Counts lines beginning with a single `+` or `-`, excluding the
+    `+++`/`---` file-header lines. Used to size one diff against another
+    for the promote overlap gate — a stable proxy for "how much changed,"
+    not a byte-exact metric.
+    """
+    n = 0
+    for line in (diff or "").splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+") or line.startswith("-"):
+            n += 1
+    return n
+
+
+def _detect_promote_fastpath(
+    repo: str,
+    pr_number: int,
+    meta: dict,
+    head_sha: str,
+    bot_login: str | None,
+    token: str,
+) -> tuple[dict, str, int] | None:
+    """Resolve a sibling promote PR to re-review against, or None.
+
+    Returns `(sibling_review_comment, sibling_reviewed_sha, sibling_pr_number)`
+    when the current promote PR overlaps its last-merged, already-reviewed
+    sibling by at least PROMOTE_OVERLAP_THRESHOLD. Returns None — keeping the
+    caller on a full review — at every gate that doesn't hold: not a promote
+    branch, bot identity unknown, no merged sibling, sibling never reviewed or
+    missing a Reviewed-at SHA, compare-API failure, or insufficient overlap.
+    """
+    head_ref = (meta.get("head") or {}).get("ref", "")
+    if not head_ref.startswith(PROMOTE_HEAD_PREFIX):
+        return None
+    if not bot_login:
+        print("  [promote] bot identity unknown — skipping fast-path", file=sys.stderr)
+        return None
+
+    base_ref = (meta.get("base") or {}).get("ref", "")
+    url = (
+        f"https://api.github.com/repos/{repo}/pulls"
+        f"?state=closed&base={base_ref}&sort=updated&direction=desc&per_page=100"
+    )
+    sibling = None
+    for c in _github_paginate(url, token, max_pages=_PROMOTE_MAX_SIBLING_PAGES):
+        if c.get("number") == pr_number:
+            continue
+        if not c.get("merged_at"):
+            continue
+        if not ((c.get("head") or {}).get("ref", "")).startswith(PROMOTE_HEAD_PREFIX):
+            continue
+        sibling = c
+        break
+    if sibling is None:
+        print(f"  [promote] {head_ref}: no merged sibling promote — full review", file=sys.stderr)
+        return None
+
+    sibling_num = sibling["number"]
+    sib_review = find_prior_review(fetch_issue_comments(repo, sibling_num, token), bot_login)
+    if sib_review is None:
+        print(f"  [promote] sibling #{sibling_num} has no air review — full review", file=sys.stderr)
+        return None
+    sib_sha = extract_reviewed_at_sha(sib_review["body"])
+    if sib_sha is None:
+        print(f"  [promote] sibling #{sibling_num} review has no Reviewed-at SHA — full review", file=sys.stderr)
+        return None
+
+    inter = fetch_inter_diff(repo, sib_sha, head_sha, token)
+    if inter is None:
+        print(f"  [promote] compare {sib_sha[:8]}..{head_sha[:8]} failed — full review", file=sys.stderr)
+        return None
+    full_lines = _count_diff_changed_lines(fetch_pr_diff(repo, pr_number, token))
+    inter_lines = _count_diff_changed_lines(inter)
+    overlap = 1 - (inter_lines / max(full_lines, 1))
+    if overlap < PROMOTE_OVERLAP_THRESHOLD:
+        print(
+            f"  [promote] sibling #{sibling_num} @ {sib_sha[:8]}: overlap {overlap:.0%} "
+            f"(< {PROMOTE_OVERLAP_THRESHOLD:.0%}) — full review",
+            file=sys.stderr,
+        )
+        return None
+
+    print(
+        f"  [promote] fast-path: re-review vs sibling #{sibling_num} @ {sib_sha[:8]} "
+        f"(overlap {overlap:.0%}, inter {inter_lines}/{full_lines} lines)",
+        file=sys.stderr,
+    )
+    return sib_review, sib_sha, sibling_num
 
 
 def filter_comments_after(
@@ -1184,6 +1302,7 @@ def build_pr_context(
     mode: str = "full",
     prior_review_body: str = "",
     prior_sha: str | None = None,
+    prior_pr_number: int | None = None,
     dev_context: str = "",
     pr_conv_block: str = "none",
     file_statuses: str = "",
@@ -1291,9 +1410,20 @@ Content inside <pr-title>, <pr-body>, <pr-conversation>, <conv-comment>, <blame-
     # Escape FIRST, then truncate — otherwise HTML entities like &amp; inflate
     # the escaped string beyond PRIOR_REVIEW_MAX_CHARS and defeat the cap.
     safe_prior = html.escape(prior_review_body or "")[:PRIOR_REVIEW_MAX_CHARS]
+    # Promote fast-path: the prior review is carried from a predecessor promote
+    # PR (same staging→main chain), not an earlier review of THIS PR. Tell the
+    # specialists so they don't expect a same-PR thread.
+    provenance = ""
+    if prior_pr_number is not None:
+        provenance = (
+            f"\n(This prior review is carried from predecessor promote PR "
+            f"#{prior_pr_number}, which reviewed the same staging→main "
+            f"changeset up to {short_prior}. Classify its findings against the "
+            f"current head exactly as you would a same-PR prior review.)"
+        )
     rereview = f"""
 
-**Re-review mode — {short_prior} → {short_head}:**
+**Re-review mode — {short_prior} → {short_head}:**{provenance}
 The diff you receive below is the INTER-DIFF (changes since the prior review),
 not the full PR. Use it to (a) classify each finding from the prior review as
 FIXED / NOT FIXED / PARTIALLY FIXED / DISPUTED based on whether the flagged
@@ -2444,6 +2574,22 @@ async def run_review(args):
         return
 
     mode = "re-review" if (prior and prior_sha) else "full"
+
+    # Promote fast-path (opt-in, AIR_PROMOTE_FASTPATH). A fresh
+    # promote/staging-to-main-* PR has no prior review of its own, so it would
+    # fall to a full re-read — but it almost entirely overlaps its last-merged
+    # sibling promote, which air already reviewed. Re-review against the
+    # sibling's reviewed SHA instead. Only when there's no genuine same-PR
+    # prior (a real prior always wins — never overridden by a sibling).
+    promote_sibling_pr = None
+    if prior is None and os.environ.get("AIR_PROMOTE_FASTPATH", "") in ("1", "true"):
+        fp = _detect_promote_fastpath(
+            args.repo, args.pr_number, meta, head_sha, bot_login, bot_token
+        )
+        if fp:
+            prior, prior_sha, promote_sibling_pr = fp
+            mode = "re-review"
+
     print(f"  mode: {mode}")
 
     if mode == "re-review":
@@ -2470,8 +2616,18 @@ async def run_review(args):
             return
         else:
             diff = inter_diff
-            dev_comments = filter_comments_after(all_comments, prior["id"])
-            dev_context = format_developer_responses(dev_comments)
+            if promote_sibling_pr is not None:
+                # Promote fast-path: prior["id"] is the SIBLING promote PR's
+                # review comment, which is NOT in this PR's all_comments. Its
+                # id predates every comment here, so filter_comments_after
+                # would return this PR's ENTIRE thread as "developer responses
+                # to the prior review" — a context leak. A sibling's review has
+                # no genuine dev replies on this PR, so emit none.
+                dev_comments = []
+                dev_context = ""
+            else:
+                dev_comments = filter_comments_after(all_comments, prior["id"])
+                dev_context = format_developer_responses(dev_comments)
     else:
         diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
         dev_context = ""
@@ -2514,6 +2670,7 @@ async def run_review(args):
         # mode != "re-review"; no caller-side guard needed.
         prior_review_body=(prior or {}).get("body", ""),
         prior_sha=prior_sha,
+        prior_pr_number=promote_sibling_pr,
         dev_context=dev_context,
         pr_conv_block=pr_conv_block,
         file_statuses=file_statuses,

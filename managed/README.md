@@ -203,6 +203,17 @@ Optional `review_mode` input (default `full`) selects the review architecture:
 
 `review_mode` is per-request (set it on a `workflow_dispatch` run, or pin it in a caller's `with:`). It's **managed-only** — the CLI `/air:review` runs its agents locally with no managed coordinator, so there is no CLI solo equivalent.
 
+### Promote fast-path (`promote_fastpath` — opt-in cost saver for promote chains)
+
+Optional `promote_fastpath` input (default `false`). Repos that ship via a `promote/staging-to-main-*` branch chain open a near-identical promote PR over and over; each one normally reviews from scratch as a full read. When enabled, a fresh promote PR with **no prior review of its own** is instead re-reviewed as a delta against its last-merged, already-reviewed sibling promote — **but only when the two overlap ≥80% of changed lines** (else it falls back to a full review). It reuses the whole re-review engine: inter-diff against the sibling's `Reviewed at:` SHA, carry-forward verifier, unfixed-blocker-only gating; the repo is still mounted read-only so specialists keep full-file context on unchanged lines.
+
+```yaml
+    with:
+      promote_fastpath: ${{ inputs.promote_fastpath }}   # 'true' | 'false' (default)
+```
+
+Conservative by construction — any uncertainty (no merged sibling, sibling never reviewed or missing a SHA footer, compare-API failure, <80% overlap) falls back to full review. Enable only on repos that use the `promote/staging-to-main-*` convention. Decision logs print `[promote] …` lines (chosen sibling #, overlap %, fired vs full) to the run log. **v1 limitation:** no periodic full-anchor re-read — a long chain rides re-reviews indefinitely; watch the logs and force a `--fresh` (or disable the flag) if drift accumulates. Backtested on the qai-be/qai-fe Phase-4 promote chain at ~64% cost reduction with zero net-new-finding loss.
+
 ## How it works
 
 **Multi-agent coordinator (v1.9.0+)**: the Python driver does upstream prep (fetch PR data, state gates, build context, optionally run codex), then hands off to a single `air-coordinator` session that dispatches the specialists in parallel + verifier as `callable_agents` sub-agents within one Anthropic session — mirroring the local CLI's architecture. This replaced v1.7's client-side `asyncio.gather` over 5 separate sessions once Anthropic granted research-preview access for `callable_agents` on 2026-04-25.
