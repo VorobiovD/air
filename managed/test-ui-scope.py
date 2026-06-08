@@ -17,7 +17,13 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from review import _diff_touches_ui, _path_is_ui  # noqa: E402
+from review import (  # noqa: E402
+    _diff_touches_ui,
+    _path_is_ui,
+    _path_matches_globs,
+    _parse_copy_paths_section,
+    _user_facing_copy_globs,
+)
 from setup import assemble_solo_prompt, SUB_AGENTS  # noqa: E402
 
 
@@ -106,6 +112,65 @@ def test_scope_fail_open_when_no_paths():
     # No post_paths AND no parseable diff headers → fail OPEN (review it).
     assert _diff_touches_ui([], "") is True
     assert _diff_touches_ui([], "some prose with no diff headers") is True
+
+
+# --- PROJECT-PROFILE `## User-Facing Copy Paths` opt-in (TUI/.py coverage) ---
+
+_PROFILE_WITH_SECTION = """# Project Profile
+
+## Architecture
+A Python TUI.
+
+## User-Facing Copy Paths
+- agent-core/agents/*.py
+- `**/messages/*.py`
+
+## Applicable Security Checks
+Checks: 1, 2, 3
+"""
+
+_PROFILE_NO_SECTION = "# Project Profile\n\n## Architecture\nNo copy paths here.\n"
+
+
+def test_parse_copy_paths_section():
+    assert _parse_copy_paths_section(_PROFILE_WITH_SECTION) == [
+        "agent-core/agents/*.py", "**/messages/*.py"]  # backticks stripped, stops at next heading
+
+
+def test_parse_copy_paths_missing_or_empty():
+    assert _parse_copy_paths_section(_PROFILE_NO_SECTION) == []
+    assert _parse_copy_paths_section("") == []
+
+
+def test_user_facing_copy_globs_no_store_is_empty():
+    # No store → no read, no globs (web-only fallback). Pure, no network.
+    assert _user_facing_copy_globs(None) == []
+
+
+def test_path_matches_globs_greedy_and_excludes():
+    globs = ["agent-core/agents/*.py", "**/messages/*.py"]
+    assert _path_matches_globs("agent-core/agents/clinical/intake.py", globs)  # * greedy across /
+    assert _path_matches_globs("src/messages/welcome.py", globs)
+    assert not _path_matches_globs("agent-core/handlers/db.py", globs)         # not under a glob
+    assert not _path_matches_globs("REVIEW.md", globs)                         # exclude still wins
+
+
+def test_diff_touches_ui_copy_path_py_in_scope():
+    globs = ["agent-core/agents/*.py"]
+    assert _diff_touches_ui(["agent-core/agents/intake.py"], "", globs) is True
+
+
+def test_diff_touches_ui_backend_py_stays_out_of_scope():
+    # The $0-backend guarantee: a .py NOT under any declared glob never triggers.
+    globs = ["agent-core/agents/*.py"]
+    assert _diff_touches_ui(["agent-core/handlers/db.py", "infra/sam.yaml"], "", globs) is False
+    # And with no globs at all, plain .py is out.
+    assert _diff_touches_ui(["svc/handler.py"], "", ()) is False
+
+
+def test_diff_touches_ui_web_unaffected_by_globs():
+    assert _diff_touches_ui(["src/App.tsx"], "", ()) is True
+    assert _diff_touches_ui(["src/App.tsx"], "", ["agent-core/agents/*.py"]) is True
 
 
 # --- solo includes the UI lens ----------------------------------------------
