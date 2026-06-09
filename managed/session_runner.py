@@ -169,6 +169,56 @@ BILLING_RETRY_BACKOFF_SECS = 90       # wait between attempts (within "a few min
 BILLING_RETRY_PREFLIGHT_SECS = 30     # retry only if the attempt failed faster than this (≈ no tokens burned)
 
 
+async def _list_events_paged(
+    client, session_id: str, *, label: str,
+    page_limit: int = 200, max_pages: int = 25,
+) -> list:
+    """Fetch a session's events via REST, walking cursor pages.
+
+    A full coordinator run can exceed one 200-event page; the pre-pagination
+    drain read a single page and could miss the final `agent.message`. Page
+    shape is probed defensively (`has_more` / `last_id` / `after_id` are the
+    SDK's standard cursor-page surface): if the SDK rejects the cursor kwarg
+    we keep the first page — the exact pre-pagination behavior — and say so.
+    `max_pages` is a runaway bound, far above any observed session (25 pages
+    = 5,000 events).
+    """
+    events: list = []
+    after_id = None
+    for _ in range(max_pages):
+        kwargs: dict = {"limit": page_limit}
+        if after_id is not None:
+            kwargs["after_id"] = after_id
+        try:
+            page = await client.beta.sessions.events.list(session_id, **kwargs)
+        except TypeError as e:
+            # Only treat this as "SDK lacks cursor kwargs" when the error is
+            # actually about the kwarg — a TypeError raised from inside the
+            # SDK on a later page must surface, not silently truncate the
+            # drain (the exact missed-final-message bug paging exists to fix).
+            if after_id is None or "after_id" not in str(e):
+                raise
+            print(
+                f"  [warn] {label}: SDK rejects events cursor kwargs — "
+                f"single-page drain only ({len(events)} events)",
+                file=sys.stderr,
+            )
+            break
+        page_events = getattr(page, "data", None) or []
+        events.extend(page_events)
+        if not getattr(page, "has_more", False):
+            break
+        after_id = getattr(page, "last_id", None)
+        if after_id is None:
+            print(
+                f"  [warn] {label}: events page reports has_more but no "
+                f"last_id cursor — stopping drain at {len(events)} events",
+                file=sys.stderr,
+            )
+            break
+    return events
+
+
 async def run_session(
     client,
     agent_id: str,
@@ -392,10 +442,14 @@ async def run_session(
 
         Uses the same SDK client to keep auth / beta headers consistent.
         Calls `events.list` if available; otherwise yields None and the
-        caller continues waiting on SSE.
+        caller continues waiting on SSE. Walks cursor pages — a full
+        coordinator run (6 sub-agent threads + tool calls) can exceed one
+        200-event page, and a single-page drain could permanently miss the
+        final `agent.message`, converting a successful billed review into
+        a false run-failure.
         """
         try:
-            page = await client.beta.sessions.events.list(session.id, limit=200)
+            events = await _list_events_paged(client, session.id, label=label)
         except AttributeError:
             # Older SDK: no events.list. Fall back to letting SSE keep
             # streaming; we'll just keep paying the latency.
@@ -412,7 +466,6 @@ async def run_session(
                 file=sys.stderr,
             )
             return None
-        events = getattr(page, "data", None) or []
         new_count = 0
         for ev in events:
             res = _process_event(ev)

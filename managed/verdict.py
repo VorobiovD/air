@@ -301,30 +301,60 @@ def _extract_review_body(raw_text: str, head_sha: str) -> tuple[str, bool]:
     _flattened = re.sub(r"</?agent-notification\b[^>]*>", "\n", raw_text)
     # Walk every `## Code Review[^\n]*` occurrence NOT preceded by a backtick
     # (inline-code narration). The header need NOT be at start-of-line
-    # (qai-be #635 had narration concatenated on the same line). The next-`## `
-    # heading bound prevents one candidate's body from swallowing downstream
-    # content. Walk candidates in reverse; pick the first whose footer matches.
+    # (qai-be #635 had narration concatenated on the same line). Walk
+    # candidates in reverse; pick the first whose footer matches.
+    #
+    # A candidate's bound is the NEXT `## Code Review` header (or EOF) — the
+    # true candidate boundary — NOT the next generic `## ` line. A `## ` line
+    # inside the body (a fenced markdown example quoting a heading, a
+    # malformed mid-review section) is content; bounding on it cut the
+    # candidate before its footer and converted a fully-billed review into a
+    # run-failed comment (2026-06-09 audit). Markdown-fence parsing was
+    # evaluated and rejected for this: transcript-wide fence parity is
+    # hostile territory (unterminated fences in narration, four-backtick
+    # nesting, quoted diffs toggling parity) — adversarial review reproduced
+    # extraction drops on all three. The header bound + SHA validation need
+    # no fence model: extraction always ENDS at the matching footer, so an
+    # over-wide bound can at worst include same-message content, and a
+    # too-early header can't capture a later candidate's footer (the bound
+    # stops at that candidate's own header).
     _header_re = re.compile(r"(?<!`)## Code Review[^\n]*\n")
-    _next_h2_re = re.compile(r"(?<!`)(?:^|\n)## ")
     # NOTE: do NOT add `\b` between the 40-char hex and `[^\n]*`. Word-boundary
     # fails when the SHA is followed by another word char (qai-be #666 round 7:
     # `...936Wiki push failed...` had no boundary between `6` and `W`). The
     # 40-char exact quantifier is the anchor; the 12-char prefix compare below
     # is the validator. `[^\n]*` eats the rest of the line so match end is defined.
-    _footer_re = re.compile(r"\nReviewed at:\s+([0-9a-f]{40})[^\n]*")
+    # Case-insensitive to match REVIEWED_AT_RE (the skip-gate parser): the two
+    # used to disagree — `Reviewed At:` passed the gate but failed extraction.
+    _footer_re = re.compile(r"\nReviewed at:\s+([0-9a-fA-F]{40})[^\n]*", re.IGNORECASE)
+    _expected_prefix = head_sha.lower()[:_SHA_PREFIX_LEN]
+
     _candidates = []
     for _hm in _header_re.finditer(_flattened):
         _body_start = _hm.end()
-        _next_h2 = _next_h2_re.search(_flattened, _body_start)
-        _bound = _next_h2.start() if _next_h2 else len(_flattened)
-        _fm = _footer_re.search(_flattened, _body_start, _bound)
+        _next_header = _header_re.search(_flattened, _body_start)
+        _bound = _next_header.start() if _next_header else len(_flattened)
+        # Prefer the first footer whose SHA prefix-matches head_sha — a body
+        # may QUOTE a prior round's footer (any case) before its own; taking
+        # the first match blindly would capture the stale SHA and discard the
+        # candidate. Fall back to the first footer so the mismatch-warning
+        # path below still fires for genuinely-spoofed candidates.
+        _fm = None
+        for _m in _footer_re.finditer(_flattened, _body_start, _bound):
+            if _m.group(1).lower()[:_SHA_PREFIX_LEN] == _expected_prefix:
+                _fm = _m
+                break
+            if _fm is None:
+                _fm = _m
         if _fm is None:
             continue
         _candidates.append((_hm.start(), _fm.end(), _fm.group(1)))
     # Anti-spoof validator (see _SHA_PREFIX_LEN): a poisoned diff can echo
     # `## Code Review` but can't predict the run's head SHA. Prefix equality
     # keeps the security property while tolerating model tail-corruption.
+    head_sha = head_sha.lower()
     for _start, _end, _sha in reversed(_candidates):
+        _sha = _sha.lower()
         if _sha[:_SHA_PREFIX_LEN] != head_sha[:_SHA_PREFIX_LEN]:
             print(
                 f"  [warn] discarding `## Code Review` block at offset "

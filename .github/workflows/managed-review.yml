@@ -303,14 +303,25 @@ jobs:
       - name: Cooldown debounce
         if: ${{ github.event.action == 'synchronize' && inputs.cooldown_minutes != '0' }}
         env:
-          GH_TOKEN: ${{ github.token }}
+          # AIR_BOT_TOKEN, not github.token: a caller running least-privilege
+          # `permissions: {}` gives github.token no read on issue comments, and
+          # the fetch failure silently disabled the debounce on every push
+          # (it looked identical to "no prior review").
+          GH_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
           COOLDOWN_MIN: ${{ inputs.cooldown_minutes }}
         run: |
           case "$COOLDOWN_MIN" in
             (*[!0-9]*|'') echo "cooldown: non-numeric cooldown_minutes '$COOLDOWN_MIN' — skipping debounce"; exit 0;;
           esac
-          LAST=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER_RESOLVED}/comments?sort=created&direction=desc&per_page=100" \
-                 --jq '[.[] | select(.body | startswith("## Code Review\n"))] | first | .created_at // empty' 2>/dev/null || true)
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::warning::air cooldown: jq not available on this runner — debounce skipped"
+            exit 0
+          fi
+          if ! COMMENTS=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER_RESOLVED}/comments?sort=created&direction=desc&per_page=100" 2>&1); then
+            echo "::warning::air cooldown: comment fetch failed (debounce skipped this run): ${COMMENTS}"
+            exit 0
+          fi
+          LAST=$(printf '%s' "$COMMENTS" | jq -r '[.[] | select(.body | startswith("## Code Review\n"))] | first | .created_at // empty' 2>/dev/null || true)
           if [ -z "$LAST" ]; then
             echo "cooldown: no prior review comment — starting immediately"
             exit 0
