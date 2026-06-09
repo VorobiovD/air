@@ -20,6 +20,11 @@ def _github_error_message(resp) -> str:
     return f"{resp.status_code} {msg}"
 
 
+def _gh_headers(token: str, accept: str = "application/vnd.github+json") -> dict:
+    """Standard GitHub API auth headers (one builder for every call site)."""
+    return {"Authorization": f"Bearer {token}", "Accept": accept}
+
+
 # Heuristic strings that indicate GitHub's 422 was caused by near-
 # duplicate-comment detection (vs e.g. body-too-long or schema). On a
 # duplicate-detection 422, retrying with the SAME body is guaranteed to
@@ -54,10 +59,7 @@ def _post_review_comment_with_retry(
     url = (
         f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
     )
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-    }
+    headers = _gh_headers(token)
     payload = {"body": body}
     resp = req.post(url, headers=headers, json=payload, timeout=30)
     if resp.status_code != 422:
@@ -100,7 +102,7 @@ def _gh_error_message_only(resp) -> str:
 def fetch_pr_metadata(repo: str, pr_number: int, token: str) -> dict:
     resp = req.get(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        headers=_gh_headers(token),
     )
     if not resp.ok:
         print(f"Error fetching PR metadata: {_github_error_message(resp)}", file=sys.stderr)
@@ -138,7 +140,7 @@ def submit_review_verdict(
     """
     resp = req.post(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews",
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        headers=_gh_headers(token),
         json={"event": event, "body": body, "commit_id": commit_id},
     )
     if not resp.ok:
@@ -155,7 +157,7 @@ def submit_review_verdict(
 def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
     resp = req.get(
         f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.v3.diff"},
+        headers=_gh_headers(token, accept="application/vnd.github.v3.diff"),
     )
     if not resp.ok:
         print(f"Error fetching PR diff: {_github_error_message(resp)}", file=sys.stderr)
@@ -181,7 +183,7 @@ def _github_paginate(url: str, token: str, max_pages: int | None = None) -> list
     while url:
         resp = req.get(
             url,
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+            headers=_gh_headers(token),
         )
         if not resp.ok:
             print(f"Error GETting {url}: {_github_error_message(resp)}", file=sys.stderr)
@@ -203,7 +205,7 @@ def fetch_bot_login(token: str) -> str | None:
     mis-steer the next review."""
     resp = req.get(
         "https://api.github.com/user",
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+        headers=_gh_headers(token),
     )
     if not resp.ok:
         print(f"Error fetching bot identity: {_github_error_message(resp)}", file=sys.stderr)
@@ -273,7 +275,7 @@ def fetch_inter_diff(
     """
     resp = req.get(
         f"https://api.github.com/repos/{repo}/compare/{base_sha}...{head_sha}",
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.v3.diff"},
+        headers=_gh_headers(token, accept="application/vnd.github.v3.diff"),
     )
     if not resp.ok:
         print(f"Error fetching inter-diff: {_github_error_message(resp)}", file=sys.stderr)

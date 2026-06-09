@@ -2214,6 +2214,14 @@ Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
         _exit_nonzero_on_failed_run(args.pr_number, coordinator_failure_reason, posted=True)
 
 
+def _run_meta(meta_script: Path, *args: str) -> subprocess.CompletedProcess:
+    """Invoke plugins/air/lib/meta.py as a subprocess. Shared by the mirror
+    throttle check and the learn-counter epilogue (each resolves its own
+    meta_script path)."""
+    return subprocess.run([sys.executable, str(meta_script), *args],
+                          capture_output=True, text=True)
+
+
 def _maybe_render_mirror(repo: str, store_id: str, bot_token: str) -> None:
     """Throttled deterministic store→wiki mirror render (store-backed repos).
 
@@ -2229,8 +2237,7 @@ def _maybe_render_mirror(repo: str, store_id: str, bot_token: str) -> None:
         return
 
     def _meta(*a: str) -> subprocess.CompletedProcess:
-        return subprocess.run([sys.executable, str(meta_script), *a],
-                              capture_output=True, text=True)
+        return _run_meta(meta_script, *a)
 
     due = _meta("mirror-due", "--store-id", store_id)
     sys.stderr.write(due.stderr)
@@ -2262,10 +2269,7 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
         return
 
     def _meta(*meta_args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            [sys.executable, str(meta_script), *meta_args],
-            capture_output=True, text=True,
-        )
+        return _run_meta(meta_script, *meta_args)
 
     if store_id:
         bump = _meta("bump", "--store-id", store_id,
