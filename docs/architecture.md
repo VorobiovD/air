@@ -50,7 +50,11 @@ VorobiovD/air/
 ├── managed/                        ← MANAGED AGENT (Anthropic cloud)
 │   ├── api.py                        Shared helpers: get_headers, list_agents, find_environment
 │   ├── setup.py                      Creates/updates 6 specialists + air-coordinator + air-solo-reviewer via API
-│   ├── review.py                     Client-side driver — launches the air-coordinator session (callable specialists), runs verifier, posts comment
+│   ├── review.py                     Client-side driver — orchestrates the run (coordinator session launch, gating, epilogue)
+│   ├── github_client.py              GitHub REST: fetchers, pagination, comment/verdict POSTs
+│   ├── verdict.py                    Review-body parsing + gating (blocker counts, prior statuses, body extractor)
+│   ├── session_runner.py             Session lifecycle: run_session, REST drain, billing retry, SIGTERM cleanup
+│   ├── prompts.py                    Prompt builders: PR context block + verifier-task templates
 │   ├── learn.py                      Triggers wiki maintenance sessions (single-agent)
 │   ├── memory_store.py               Per-repo pattern store: discovery, reads, sha256-preconditioned writes
 │   ├── pattern_writer.py             Applies pattern_lifecycle ops to the store post-review
