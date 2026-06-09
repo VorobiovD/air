@@ -1,8 +1,9 @@
 """GitHub REST helpers for the managed review driver.
 
-Extracted verbatim from review.py (module split). All HTTP to api.github.com
-lives here: fetchers, pagination, the review-comment POST with its 422 retry,
-and the formal review-verdict POST.
+Extracted from review.py (module split); GitHub auth headers consolidated
+into `_gh_headers()`. All HTTP to api.github.com lives here: fetchers,
+pagination, the review-comment POST with its 422 retry, and the formal
+review-verdict POST.
 """
 import re
 import sys
@@ -11,12 +12,25 @@ import time
 import requests as req
 
 
+def _gh_message(resp) -> str | None:
+    """Parse the GitHub-controlled `message` field; None on non-JSON.
+
+    Shared parse for the two scrubbed-summary helpers below — they differ
+    only in fallback semantics (loggers want placeholders, keyword-matching
+    callers want "")."""
+    try:
+        return resp.json().get("message")
+    except ValueError:
+        return None
+
+
 def _github_error_message(resp) -> str:
     """Extract a scrubbed GitHub API error summary safe to log in CI."""
-    try:
-        msg = resp.json().get("message") or "(no message)"
-    except ValueError:
+    msg = _gh_message(resp)
+    if msg is None:
         msg = "(non-JSON response)"
+    elif not msg:
+        msg = "(no message)"
     return f"{resp.status_code} {msg}"
 
 
@@ -93,10 +107,7 @@ def _gh_error_message_only(resp) -> str:
     callers that lower-case match against keyword hints handle "" safely.
     Mirrors `_github_error_message` but without the status-code prefix.
     """
-    try:
-        return resp.json().get("message") or ""
-    except ValueError:
-        return ""
+    return _gh_message(resp) or ""
 
 
 def fetch_pr_metadata(repo: str, pr_number: int, token: str) -> dict:

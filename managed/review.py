@@ -58,8 +58,10 @@ if str(_AIR_LIB_DIR) not in sys.path:
 import pr_conversation  # noqa: E402  (deferred import; relies on sys.path tweak above)
 
 # --- Module split: moved code lives in github_client / verdict / session_runner /
-# --- prompts (same dir). Names re-exported so `from review import X` and
-# --- `setattr(review, ...)` test patching keep working unchanged.
+# --- prompts (same dir). Names re-exported so `from review import X` keeps
+# --- working, and `setattr(review, ...)` patching still reaches every caller
+# --- that LIVES in this module. Cross-module calls (e.g. verdict.should_request_changes
+# --- → count_blockers) resolve in the owning module's namespace — patch there.
 from github_client import (  # noqa: E402,F401 — split modules; re-exported for tests/callers
     _github_error_message,
     _GH_DUPLICATE_HINTS,
@@ -2060,10 +2062,7 @@ def _maybe_render_mirror(repo: str, store_id: str, bot_token: str) -> None:
     if not meta_script.is_file():
         return
 
-    def _meta(*a: str) -> subprocess.CompletedProcess:
-        return _run_meta(meta_script, *a)
-
-    due = _meta("mirror-due", "--store-id", store_id)
+    due = _run_meta(meta_script, "mirror-due", "--store-id", store_id)
     sys.stderr.write(due.stderr)
     if due.returncode != 1:
         return  # within the throttle window (0) or a store error (skip)
@@ -2085,9 +2084,9 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
     """
     import tempfile
 
-    air_root = Path(__file__).resolve().parent.parent
-    lib_dir = air_root / "plugins" / "air" / "lib"
-    meta_script = lib_dir / "meta.py"
+    air_root = _AIR_LIB_DIR.parents[2]
+    lib_dir = _AIR_LIB_DIR
+    meta_script = _AIR_LIB_DIR / "meta.py"
     if not meta_script.is_file():
         print(f"  [warn] meta.py not found at {meta_script}", file=sys.stderr)
         return

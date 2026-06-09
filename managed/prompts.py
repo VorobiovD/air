@@ -1,6 +1,8 @@
 """Prompt/context builders for review sessions.
 
-Extracted verbatim from review.py (module split).
+Extracted from review.py (module split); the verifier-task templates moved
+behind `build_verifier_task()` with their interpolations as parameters —
+rendering proven byte-identical to the pre-split inline f-strings.
 """
 import html
 from verdict import (
