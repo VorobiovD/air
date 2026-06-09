@@ -11,16 +11,16 @@
 
 **External commitments** (Cowork, etc.) tracked separately in `docs/external-commitments.md`.
 
-_Last updated: 2026-06-06 (post-v1.22.0 — memory-store migration complete fleet-wide, deterministic wiki-mirror render, solo/both review mode, multi-reviewer PAT model). See "Since v1.13.0" below for the delivery summary._
+_Last updated: 2026-06-09 (post-v1.29.0 — promote fast-path + caller-variable toggle, the UI/business-audience copy reviewer (6th specialist) with CLI/TUI-copy coverage, $0 auth preflight, and the `AIR_REVIEW_MODE` caller variable. Earlier arc, post-v1.22.0: memory-store migration complete fleet-wide, deterministic wiki-mirror render, solo/both review mode, multi-reviewer PAT model). See "Since v1.13.0" below for the delivery summary._
 
 ---
 
 ## TL;DR
 
-**Current shipped:** v1.22.0 (2026-06-06) — deterministic store→wiki mirror render. The big arc since v1.13.0: the **memory-store migration is complete fleet-wide** (all 4 repos store-backed), which addressed the dominant cache-read cost lever; **solo/both review mode** ships the cheaper-review experiment; the **multi-reviewer PAT model** is live on all callers. Full delivery list in "Since v1.13.0 — delivered + active" below and the Shipped table.
+**Current shipped:** v1.29.0 (2026-06-08). The arc since v1.22.0: the **promote fast-path** (delta-review sibling promotes, opt-in via a caller variable — v1.25/v1.26), the **UI / business-audience copy reviewer** (6th specialist, Carlos's request — v1.27, extended to CLI/TUI copy v1.28), **$0 auth preflight** (v1.23), and the **`AIR_REVIEW_MODE` caller variable** (v1.29 — flip full/solo/both from Settings). The earlier arc since v1.13.0: the **memory-store migration is complete fleet-wide** (all 4 repos store-backed), which addressed the dominant cache-read cost lever; **solo/both review mode** ships the cheaper-review experiment; the **multi-reviewer PAT model** is live on all callers. Full delivery list in the Shipped table and "Since v1.13.0 — delivered + active" below.
 
 **Active fronts (where attention goes next):**
-1. **Solo/both routing decision** — `both` benchmarking is live; collect ~10 PRs (esp. ones with blockers/mediums) then decide the routing rule (full for initial/large, solo for re-review/small). Solo is ~3× cheaper/faster but NOT gate-safe on substantial PRs (severity downgrade observed). See §Since-v1.13.0 C.
+1. **Solo/both routing decision** — the routing call is still open (full for initial/large, solo for re-review/small). **Caveat found 2026-06-08:** `both` had been silently NOT running on the qai callers (they forced `review_mode: || 'full'`), so no comparison data was actually collected; v1.29.0 (#138) made `review_mode` resolve from the `AIR_REVIEW_MODE` caller variable, and `both` is now set on qai-be + qai-fe — collection starts now (revert by deleting the variable after the window). Solo is ~3× cheaper/faster but NOT gate-safe on substantial PRs (severity downgrade observed). See §Since-v1.13.0 C.
 2. **Coordinator output cost (60–150K tokens/review)** — the #1 structural spend; the fix (file-handoff) is built but **runtime-blocked** (isolated callable-agent threads). Solo-routing is the live lever instead.
 3. **Rotation/ops hardening** — the `rotate-air-pat.sh` fan-out skips ai-relay + never refreshes `AIR_BOT_TOKEN` (caused the 06-03→06-05 ai-relay outage). Add ai-relay to the fan-out for all `<STEM>_PAT` + the bot token. See §Since-v1.13.0 D.
 
@@ -61,6 +61,14 @@ _Last updated: 2026-06-06 (post-v1.22.0 — memory-store migration complete flee
 | v1.20.0 | Optional **`expected_reviewer` identity assertion** (token-owner == requested reviewer); retry transient preflight billing_error w/ backoff | #116, #113 | Closes the multi-reviewer PAT trust seam (was deferred as qai-be #90) |
 | v1.21.0 | **Solo / both review mode** (`AIR_REVIEW_MODE` full\|solo\|both) — single-agent advisory review for comparison/cost | #117 | ~3× cheaper/faster than the 6-agent coordinator; benchmarking live (see §Since-v1.13.0 C) |
 | **v1.22.0** | **Deterministic store→wiki mirror render** — `render_store_to_wiki.py` replaces the in-session AI render; throttled per-review (≤1×/hr) + authoritative on learn | #119 | Wiki stays fresh between learns; ~40% less learn-session output (in-session render removed) |
+| v1.23.0 | **Auth preflight** — fail $0 before any session on a missing/expired/no-access review token | #122 | Token failures cost nothing and surface an actionable comment instead of a silent/late error |
+| v1.24.0 | Safe cost/quality prompt fixes from the 06-07 review audit | #124 | Low-risk verifier/reviewer prompt tightening — no behavior gamble |
+| v1.25.0 | **Promote fast-path** — re-review a `promote/staging-to-main-*` PR as a delta vs its last-reviewed sibling (≥80% line overlap) instead of a full re-read | #126 | ~64% cost cut on the qai Phase-4 promote chain (backtest), zero net-new-finding loss; conservative full-review fallback below threshold |
+| v1.26.0 | Promote fast-path **opt-in via a caller `AIR_PROMOTE_FASTPATH` repo/org variable** (no caller-workflow edit) | #128 | Fleet/repo toggle from Settings; default OFF |
+| **v1.27.0** | **UI / business-audience copy reviewer** (`air-ui-copy-reviewer`, 6th specialist, Sonnet) — flags dev jargon, AI "writing fluff", clarity + static UX/a11y on user-facing diffs | #130 | Carlos's request; dispatch-gated so backend-only PRs add $0; blocker reserved for clear user/clinical harm |
+| v1.28.0 | ui-copy reviewer extends to **CLI/TUI copy** via a PROJECT-PROFILE `## User-Facing Copy Paths` opt-in | #134 | Covers non-web patient/agent copy (ai-relay system prompts) while keeping backend PRs $0 |
+| v1.28.1 | ui-copy dispatch gate no longer treats internal `docs/` as user-facing (narrowed to help/content/faq) | #136 | Removes false dispatch on eng-doc PRs |
+| **v1.29.0** | `review_mode` resolvable from a caller **`AIR_REVIEW_MODE` variable** (variable wins over input) | #138 | Lets a caller flip full/solo/both from Settings — fixed `both` silently never running on qai (callers forced `\|\| 'full'`) |
 
 ---
 
