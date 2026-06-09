@@ -26,9 +26,11 @@ VorobiovD/air/
 │   │   ├── simplify.md                3 sections: Code Reuse, Quality, Efficiency (16 items)
 │   │   ├── security-auditor.md        31-item checklist + resource exhaustion
 │   │   ├── git-history-reviewer.md    Blame, churn, previous PR comments, author patterns
-│   │   └── review-verifier.md         False positive filter, confidence scoring, 6 verdicts
+│   │   ├── ui-copy-reviewer.md        UI/business-audience copy + static UX/a11y (user-facing diffs)
+│   │   ├── review-verifier.md         False positive filter, confidence scoring, 6 verdicts
+│   │   └── coordinator.md             Managed-mode delegator (fans out specialists, assembles output)
 │   ├── commands/                   ← CLI-only orchestration
-│   │   ├── review.md                 13-step pipeline (~879 lines, core orchestration)
+│   │   ├── review.md                 13-step pipeline (~1080 lines, core orchestration)
 │   │   ├── review-self.md            Self-review flow (--self mode, extracted)
 │   │   ├── review-respond.md         Respond flow (--respond mode, extracted)
 │   │   ├── learn.md                  Wiki maintenance + KAIROS history
@@ -40,16 +42,19 @@ VorobiovD/air/
 │   ├── lib/                        ← Shared Python helpers (stdlib-only)
 │   │   ├── meta.py                   `.air-meta.json` read/write + /air:learn trigger threshold
 │   │   ├── wiki_git.py               clone + commit-meta-with-retry helpers
-│   │   ├── pattern_lifecycle.py   # Deterministic author-pattern lifecycle ops
-│   └── pr_conversation.py        merge GitHub PR comments/reviews into `<pr-conversation>` agent context
+│   │   ├── pattern_lifecycle.py       Deterministic author-pattern lifecycle ops
+│   │   └── pr_conversation.py         Merge GitHub PR comments/reviews into `<pr-conversation>` agent context
 │   └── .claude-plugin/
 │       └── plugin.json             Plugin manifest (version source of truth)
 │
 ├── managed/                        ← MANAGED AGENT (Anthropic cloud)
 │   ├── api.py                        Shared helpers: get_headers, list_agents, find_environment
-│   ├── setup.py                      Creates/updates 6 specialist agents via API (no orchestrator agent)
-│   ├── review.py                     Client-side orchestrator — fans out the specialists via asyncio.gather, runs verifier, posts comment
+│   ├── setup.py                      Creates/updates 6 specialists + air-coordinator + air-solo-reviewer via API
+│   ├── review.py                     Client-side driver — launches the air-coordinator session (callable specialists), runs verifier, posts comment
 │   ├── learn.py                      Triggers wiki maintenance sessions (single-agent)
+│   ├── memory_store.py               Per-repo pattern store: discovery, reads, sha256-preconditioned writes
+│   ├── pattern_writer.py             Applies pattern_lifecycle ops to the store post-review
+│   ├── migrate_wiki_to_store.py      One-shot wiki → store migration (per-author split, --dry-run)
 │   ├── render_store_to_wiki.py       Deterministic store→wiki mirror render (inverse of migrate split; throttled per-review + on learn)
 │   ├── test-session.py               9-test verification (repo, auth, blame, comment, wiki)
 │   ├── test-learn.py                 Wiki clone/push verification
@@ -79,7 +84,7 @@ VorobiovD/air/
 
 | Component | CLI Plugin | Managed Agent | Shared? |
 |---|---|---|---|
-| Agent prompts (5 files) | Loaded as subagent_type | Read by setup.py → API agents | **YES — single source** |
+| Agent prompts (7 files) | Loaded as subagent_type | Read by setup.py → API agents | **YES — single source** |
 | Wiki patterns (6 files) | git clone/push locally | git clone/push from sandbox | **YES — same wiki** |
 | Review output format | Defined in review.md | Templated in review.py verifier prompt | Equivalent — same markdown shape |
 | Orchestrator logic | review.md (markdown → Claude Code) | review.py (upstream prep) → air-coordinator session (callable_agents) | Mirror architectures since v1.9.0 |
@@ -276,17 +281,20 @@ Managed-only: the CLI has no store render, so a CLI-only store repo sees a stale
 
 | Agent | Model | Tools | Purpose |
 |---|---|---|---|
-| air-code-reviewer | Opus | read, grep, glob, bash | Code quality review |
+| air-code-reviewer | Opus (fast) | read, grep, glob, bash | Code quality review |
 | air-simplify | Sonnet | read, grep, glob | Reuse, quality, efficiency (no bash) |
-| air-security-auditor | Opus | read, grep, glob, bash | 31-item security audit |
+| air-security-auditor | Opus (fast) | read, grep, glob, bash | 31-item security audit |
 | air-git-history-reviewer | Haiku | read, grep, glob, bash | Blame, churn, history |
-| air-review-verifier | Opus | read, grep, glob, bash | False-positive filtering + emits the final review comment markdown (v1.7.0+) |
+| air-ui-copy-reviewer | Sonnet | read, grep, glob | UI/business-audience copy + static UX/a11y (user-facing diffs) |
+| air-review-verifier | Sonnet | read, grep, glob, bash | False-positive filtering + confidence scoring |
+| air-coordinator | Sonnet | bash, read, grep, glob | Managed-mode delegator — fans the specialists out as callable_agents, then verifier, assembles + posts |
+| air-solo-reviewer | Opus (fast) | read, grep, glob, bash | All 6 lenses + self-verify in one session (created only on solo/both) |
 | air-learner | Sonnet | all (agent_toolset) | Wiki maintenance |
 | air-test | Sonnet | all (agent_toolset) | Quick 9-test verification |
 
 **Note:** `air-reviewer` (server-side orchestrator) was removed in v1.7.0 — `managed/review.py` is now the orchestrator (client-side). Existing deployments can safely archive or leave the old `air-reviewer` agent — it's orphaned but harmless.
 
-Model tiering introduced in v1.5.0: judgment-heavy reviewers stay on Opus, mechanical / pattern-matching reviewers (simplify, git-history-reviewer) run on Sonnet for ~5× cheaper input. Models are declared in each agent's frontmatter (`plugins/air/agents/<name>.md`) and resolved to API IDs via `managed/setup.py::MODEL_ALIASES`.
+Model tiering (introduced v1.5.0, since refined): the judgment-heavy reviewers (code-reviewer, security-auditor) run on Opus 4.8 in fast mode; the verifier, simplify, and the UI/copy reviewer run on Sonnet 4.6; git-history-reviewer runs on Haiku 4.5 — cheaper models matched to lighter task shapes. Models (and the optional `speed:`) are declared in each agent's frontmatter (`plugins/air/agents/<name>.md`) and resolved to API IDs via `managed/setup.py::MODEL_ALIASES`.
 
 ---
 
@@ -393,7 +401,7 @@ Cost ranges span Sonnet-rate (floor) to Opus-rate (ceiling) bounds — sub-agent
 - `github_repository` resource only clones the PR branch — base branch must be fetched separately (`git fetch origin main`).
 
 **CLI Plugin:**
-- review.md reduced to 879 lines (from 1276) — --self and --respond extracted to separate files. Still long; further extraction planned.
+- review.md sits at ~1080 lines (--self and --respond already extracted to separate files; it has regrown past the 879-line post-extraction low as features landed). Still long; further extraction planned.
 - Subagents CANNOT spawn other subagents (Claude Code hard limit, nesting depth = 1).
 - Plugin auto-update unreliable — marketplace pulls repo but doesn't always re-install to cache.
 - Auto-trigger for /air:learn sometimes skipped due to prompt length (mitigated with >>> markers and explicit RETURN in Step 13).
@@ -439,7 +447,7 @@ Subagents cannot nest in Claude Code — only the main session can use the Agent
 | **Done** | Auto-trigger visibility | 0.5 day | Reliability | v1.4.0 — markers + explicit RETURN |
 | **Done** | Respond --dry-run | 0.5 day | Preview | v1.4.0 |
 | **High** | Reduce orchestrator duplication | 1 day | Maintenance burden | |
-| **High** | Further slim review.md (879 → ~300) | 1 day | CLI consistency | Extract verbose sections to reference file |
+| **High** | Further slim review.md (~1080 → ~300) | 1 day | CLI consistency | Extract verbose sections to reference file |
 | **Medium** | GitLab in managed agent | 2-3 days | Platform coverage | |
 | **Medium** | Wiki push reliability | 1 day | Sandbox timeout handling | |
 | **Low** | Codex in managed agent | 1 day | Second model opinion | |

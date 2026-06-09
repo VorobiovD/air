@@ -10,7 +10,7 @@
 
 Code reviews are slow, inconsistent, and lose institutional knowledge when people leave. air fixes this:
 
-- **5 specialized agents** review in parallel — security, code quality, simplification, git history, and an optional Codex second opinion
+- **6 specialized agents** review in parallel — security, code quality, simplification, git history, UI/business-audience copy (on user-facing diffs), and an optional Codex second opinion
 - **A verification agent** filters false positives before posting — findings must score 60+ confidence
 - **Wiki-backed learning** captures patterns from every review — author tendencies, service gotchas, accepted patterns
 - **Re-review tracking** knows what was fixed and what wasn't — no starting over
@@ -106,11 +106,11 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 12. **Post** — new comment, or PATCH existing (--rewrite), or console-only (--dry-run)
 13. **Learn** — wiki push with graduated resistance + auto-trigger full cleanup every 15 reviews
 
-### Five Specialized Agents
+### Six Specialized Agents
 
-Each agent receives the same rich context block (PR metadata, CI status, blame summaries, file churn, previous PR comments, project memory, session context). The identical prefix across the 4 parallel agents enables prompt-cache hits within each model family.
+Each agent receives the same rich context block (PR metadata, CI status, blame summaries, file churn, previous PR comments, project memory, session context). The identical prefix across the parallel agents enables prompt-cache hits within each model family.
 
-**Model tiering (v1.5.0+):** Judgment-heavy reviewers (code-reviewer, security-auditor, review-verifier) run on Opus. Mechanical / pattern-matching reviewers (git-history-reviewer, simplify) run on Sonnet — ~5× cheaper input with minimal quality risk on their task shape. Each agent's model is declared in its own frontmatter.
+**Model tiering (v1.5.0+):** Judgment-heavy reviewers (code-reviewer, security-auditor) run on Opus 4.8 in fast mode. The verifier, simplify, and the UI/copy reviewer run on Sonnet 4.6; git-history-reviewer runs on Haiku 4.5 — cheaper models matched to lighter task shapes. Each agent's model is declared in its own frontmatter.
 
 **code-reviewer** — Bugs, logic errors, error handling, design issues, and test coverage gaps. Checks for orphan imports on deleted files, reference updates on renames, missing tests for new functionality. Reads TODO/FIXME/HACK markers and flags comment rot (outdated comments that no longer match the code). Greps `CLAUDE.md` and `**/*CONTEXT*.md` / `**/*HANDOFF*.md` / `**/*GOTCHAS*.md` files (repo root and any subdirectory) for diff-scope keywords so path-keyed gotchas get cross-referenced. Detects paired-doc drift when a PR adds a row to an enumerated structure but the paired sentinel doc or count string wasn't updated. Flags gate-output asymmetry — when an aggregate-predicate scope admits a parent record but the eager-load returns child rows without re-applying the per-row filter (cross-tenant data-leak class; blocker-grade for PHI / multi-tenant).
 
@@ -119,6 +119,8 @@ Each agent receives the same rich context block (PR metadata, CI status, blame s
 **security-auditor** — 31-item checklist covering sensitive data protection (6 items, conditional on project type), injection vulnerabilities (4), authentication/authorization (3), input validation (3), data exposure (3), operational security (4), silent failures (5), and resource exhaustion (3). PROJECT-PROFILE.md controls which checks apply per repo. Produces a PASS/FAIL table for every PR.
 
 **git-history-reviewer** — Reviews code through the lens of git history. Blame analysis (stale code, absent authors, integration boundaries), file churn patterns (5+ commits in 6 months = design smell), previous PR review comments on the same files. Uses REVIEW-HISTORY.md for finding frequency and file hot spot data.
+
+**ui-copy-reviewer** — UI / business-audience copy on user-facing diffs (web markup, i18n catalogs, help/content docs, and CLI/TUI copy modules a repo declares under `## User-Facing Copy Paths` in PROJECT-PROFILE.md). Flags developer jargon, AI "writing fluff", and clarity/tone problems in user-visible strings, plus statically-detectable UX/a11y issues in markup. Dispatch-gated so backend-only PRs add $0; advisory by default, reserving a blocker only for clear user/clinical harm.
 
 **Codex** (GPT-5.4) — Independent second opinion from a different model family. Catches things Claude agents miss due to shared blind spots. Runs as a background process, results collected before verification.
 

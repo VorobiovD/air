@@ -692,11 +692,11 @@ Do NOT update the wiki yourself during the review — the PR isn't merged yet an
 - Agent 1 → `subagent_type: "air:code-reviewer"` (Opus — judgment-heavy bug/design review)
 - Agent 2 → `subagent_type: "air:simplify"` (Sonnet — pattern matching against codebase + heuristics)
 - Agent 3 → `subagent_type: "air:security-auditor"` (Opus — judgment-heavy threat modeling)
-- Agent 4 → `subagent_type: "air:git-history-reviewer"` (Sonnet — mostly mechanical blame/churn analysis)
+- Agent 4 → `subagent_type: "air:git-history-reviewer"` (Haiku — mostly mechanical blame/churn analysis)
 - Agent 5 → `subagent_type: "air:ui-copy-reviewer"` (Sonnet — user-facing copy + static UX/a11y; **launch ONLY when the diff touches user-facing files**: `.tsx/.jsx/.vue/.svelte/.html`, templates, i18n catalogs (`locales/`, `en.json`, `.po`/`.arb`), user-facing help/content docs (`help/`/`content/`/`faq` — NOT internal eng docs/specs), OR files matching a `## User-Facing Copy Paths` glob in PROJECT-PROFILE.md (CLI/TUI copy modules, e.g. Python message modules) — skip entirely on backend-only diffs)
-- Verifier (Step 8) → `subagent_type: "air:review-verifier"` (Opus — final quality gate, must be precise)
+- Verifier (Step 8) → `subagent_type: "air:review-verifier"` (Sonnet — final quality gate, must be precise)
 
-**Model tiering rationale:** Each agent's model is declared in its own frontmatter (`plugins/air/agents/<name>.md`). Judgment-heavy reviewers (code-reviewer, security-auditor, review-verifier) run on Opus. Mechanical / pattern-matching reviewers (git-history-reviewer, simplify) run on Sonnet — ~5× cheaper input, minimal quality risk on their task shape. Do not override models when launching agents — the frontmatter is the source of truth.
+**Model tiering rationale:** Each agent's model is declared in its own frontmatter (`plugins/air/agents/<name>.md`). Judgment-heavy reviewers (code-reviewer, security-auditor) run on Opus. The verifier, simplify, and ui-copy-reviewer run on Sonnet; git-history-reviewer runs on Haiku — cheaper models matched to lighter task shapes. Do not override models when launching agents — the frontmatter is the source of truth.
 
 **Fallback:** If a `subagent_type: "air:<name>"` fails (plugin not installed or agent file not found), fall back to `subagent_type: "general-purpose"` and include the full agent instructions from `plugins/air/agents/<name>.md` in the prompt. The review quality is the same — only the UI label changes.
 

@@ -14,13 +14,14 @@ Two CLI commands: `/air:review` (13-step review pipeline) and `/air:learn` (wiki
 
 ```
 plugins/air/
-├── agents/              # 6 review agent definitions (markdown prompts)
+├── agents/              # 6 review specialists + 1 managed-mode coordinator (markdown prompts)
 │   ├── code-reviewer.md
 │   ├── security-auditor.md
 │   ├── simplify.md
 │   ├── git-history-reviewer.md
 │   ├── ui-copy-reviewer.md    # UI/business-audience copy + static UX/a11y (conditional — UI-touching diffs)
-│   └── review-verifier.md
+│   ├── review-verifier.md
+│   └── coordinator.md         # Managed-mode delegator — fans out specialists via callable_agents (not a reviewer)
 ├── commands/            # CLI command orchestration
 │   ├── review.md              # Main pipeline — the core of the plugin
 │   ├── review-self.md         # Self-review flow (--self mode)
@@ -47,10 +48,12 @@ plugins/air/
 managed/                          # Managed Agent (CI automation)
 ├── api.py                        # Shared API helpers
 ├── setup.py                      # Creates/updates agents + environment via API
-├── review.py                     # Triggers review sessions
+├── review.py                     # Client-side driver: launches the coordinator session, runs verifier, posts
+├── learn.py                      # Triggers wiki/store maintenance sessions (single-agent)
 ├── memory_store.py               # Per-repo pattern memory store: discovery, reads, sha256-preconditioned writes
 ├── pattern_writer.py             # Applies pattern_lifecycle ops to the store after each review
 ├── migrate_wiki_to_store.py      # One-shot wiki → store migration (per-author split, --dry-run)
+├── render_store_to_wiki.py       # Deterministic store→wiki mirror render (throttled per-review + on learn)
 ├── test-session.py               # Quick 9-test verification script
 ├── prompts/learn-orchestrator.md # System prompt for cloud learn agent
 │                                 # (review orchestrator.md deleted in v1.7.0 — review.py orchestrates client-side)
