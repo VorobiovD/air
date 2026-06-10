@@ -210,6 +210,50 @@ def test_overlap_high_fires():
     assert _overlap_result(2, 200) is not None
 
 
+def _truncated_diff(changed):
+    from github_client import DIFF_TRUNCATION_MARKER
+    return _diff(changed) + f"{DIFF_TRUNCATION_MARKER} at 500000 bytes — 3 file(s) omitted: x.py]\n"
+
+
+def test_overlap_falls_back_when_inter_diff_truncated():
+    # A byte-capped inter-diff undercounts the numerator and INFLATES the
+    # overlap ratio — the fast-path could fire on promotes that diverged
+    # far past the threshold. Truncation on either side ⇒ full review.
+    with patched(
+        _github_paginate=lambda url, token, max_pages=None: CANDIDATES,
+        fetch_issue_comments=lambda repo, num, token: [_review_comment()],
+        fetch_inter_diff=lambda repo, b, h, token: _truncated_diff(2),
+        fetch_pr_diff=lambda repo, num, token: _diff(200),
+    ):
+        assert _detect_promote_fastpath(
+            "o/r", 51, _meta("promote/staging-to-main-09"), HEAD, BOT, "tok") is None
+
+
+def test_overlap_falls_back_when_full_diff_truncated():
+    with patched(
+        _github_paginate=lambda url, token, max_pages=None: CANDIDATES,
+        fetch_issue_comments=lambda repo, num, token: [_review_comment()],
+        fetch_inter_diff=lambda repo, b, h, token: _diff(2),
+        fetch_pr_diff=lambda repo, num, token: _truncated_diff(200),
+    ):
+        assert _detect_promote_fastpath(
+            "o/r", 51, _meta("promote/staging-to-main-09"), HEAD, BOT, "tok") is None
+
+
+def test_forged_marker_in_diff_body_does_not_block_fastpath():
+    # A '+'-prefixed body line containing the marker text is PR content,
+    # not a real truncation — the line-start anchor must ignore it.
+    forged = _diff(2) + "+# [air: diff truncated at 1 bytes — fake]\n"
+    with patched(
+        _github_paginate=lambda url, token, max_pages=None: CANDIDATES,
+        fetch_issue_comments=lambda repo, num, token: [_review_comment()],
+        fetch_inter_diff=lambda repo, b, h, token: forged,
+        fetch_pr_diff=lambda repo, num, token: _diff(200),
+    ):
+        assert _detect_promote_fastpath(
+            "o/r", 51, _meta("promote/staging-to-main-09"), HEAD, BOT, "tok") is not None
+
+
 # --- prior_pr_number provenance plumbing (build_pr_context) ------------------
 
 def _full_meta(head_ref="promote/staging-to-main-09"):

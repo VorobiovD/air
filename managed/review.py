@@ -39,6 +39,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 from urllib.parse import quote
 
 from anthropic import Anthropic, AsyncAnthropic
@@ -421,7 +422,7 @@ CONVERSATION_MAX_ENTRIES = 30
 
 async def _start_codex_task(
     codex_repo: str, codex_base_sha: str,
-) -> tuple["asyncio.Task[str]", float, "asyncio.TimerHandle"]:
+) -> tuple["asyncio.Task[str]", float, "asyncio.TimerHandle", "Callable[[], bool]"]:
     """Launch codex as a background task and ensure it has actually started.
 
     `asyncio.create_task` alone is lazy — the coroutine's first step (which
@@ -436,9 +437,17 @@ async def _start_codex_task(
     past its budget just because the overlap window ran long (cancel
     reaches run_codex_session's finally, which kills the subprocess). The
     await site re-checks the same budget from `launch_monotonic` and must
-    `timer.cancel()` when the task completes. The overlap window must keep
-    the loop free for the long legs (run them via `asyncio.to_thread`) so
-    the subprocess pipes keep draining.
+    `timer.cancel()` when the task completes.
+
+    Returns (task, launch_monotonic, timer, watchdog_fired). The callable is
+    the ONLY reliable way to attribute a CancelledError at the await site:
+    `codex_task.cancelled()` is True both when the watchdog fired AND when
+    an outer cancellation (SIGTERM / loop shutdown) propagated through
+    `wait_for` — which cancels the inner task before re-raising on
+    Python ≤3.11 — so checking the task state would swallow real shutdowns.
+
+    The overlap window must keep the loop free for the long legs (run them
+    via `asyncio.to_thread`) so the subprocess pipes keep draining.
     """
     print(
         f"\n[3] codex launched (target-repo={codex_repo}, "
@@ -446,8 +455,15 @@ async def _start_codex_task(
     )
     task = asyncio.create_task(run_codex_session(codex_repo, codex_base_sha))
     await asyncio.sleep(0)
-    timer = asyncio.get_running_loop().call_later(SESSION_TIMEOUT_SECS, task.cancel)
-    return task, time.monotonic(), timer
+    fired = False
+
+    def _watchdog() -> None:
+        nonlocal fired
+        fired = True
+        task.cancel()
+
+    timer = asyncio.get_running_loop().call_later(SESSION_TIMEOUT_SECS, _watchdog)
+    return task, time.monotonic(), timer, lambda: fired
 
 
 def _codex_skip_tiny_delta(mode: str, diff: str) -> int | None:
@@ -463,10 +479,7 @@ def _codex_skip_tiny_delta(mode: str, diff: str) -> int | None:
     """
     if mode != "re-review":
         return None
-    if any(
-        line.startswith(DIFF_TRUNCATION_MARKER)
-        for line in (diff or "").splitlines()
-    ):
+    if _diff_is_truncated(diff):
         return None
     n = count_diff_changed_lines(diff)
     return n if n < CODEX_RE_REVIEW_MIN_LINES else None
@@ -556,7 +569,7 @@ def _detect_promote_fastpath(
     # fall back to None so a transient diff-endpoint blip doesn't kill the run
     # before the full-review path gets its own chance to fetch + report.
     try:
-        full_lines = count_diff_changed_lines(fetch_pr_diff(repo, pr_number, token))
+        full = fetch_pr_diff(repo, pr_number, token)
     except SystemExit as exc:
         # Catch ONLY fetch_pr_diff's own sys.exit(1) (non-OK response). The
         # SIGTERM handler raises sys.exit(143); that must propagate so a CI
@@ -569,6 +582,19 @@ def _detect_promote_fastpath(
     except RequestException as e:
         print(f"  [promote] PR diff fetch errored ({e}) — full review", file=sys.stderr)
         return None
+    # A byte-capped diff undercounts changed lines. Generated-file STUBS are
+    # symmetric (same files → same stub decision on both sides, ratio holds),
+    # but the CAP binds each diff independently of the other: a capped
+    # inter-diff deflates the numerator and INFLATES overlap — the fast-path
+    # could fire on promotes that diverged far past the threshold. Either
+    # side truncated ⇒ the ratio is meaningless ⇒ full review.
+    if _diff_is_truncated(inter) or _diff_is_truncated(full):
+        print(
+            "  [promote] diff byte-capped — overlap ratio unreliable, full review",
+            file=sys.stderr,
+        )
+        return None
+    full_lines = count_diff_changed_lines(full)
     inter_lines = count_diff_changed_lines(inter)
     overlap = 1 - (inter_lines / max(full_lines, 1))
     if overlap < PROMOTE_OVERLAP_THRESHOLD:
@@ -817,11 +843,25 @@ def _user_facing_copy_globs(store_id: str | None) -> list[str]:
     return _parse_copy_paths_section(got[0]) if got else []
 
 
+def _diff_is_truncated(diff: str) -> bool:
+    """Line-start-anchored check for the byte-cap truncation marker.
+
+    Diff body lines always begin with `+`/`-`/space, so PR content cannot
+    forge a line starting with the marker (same anchoring as the
+    codex-skip guard)."""
+    return any(
+        line.startswith(DIFF_TRUNCATION_MARKER)
+        for line in (diff or "").splitlines()
+    )
+
+
 def _collect_changed_paths(post_paths: list[str], diff: str) -> list[str]:
-    """UNION of the pre-computed `post_paths` (capped, empty without
-    AIR_TARGET_REPO) and the uncapped `+++ b/<path>` headers parsed from the
-    raw diff — so a path past the precomp cap is still seen. The header scan is
-    a cheap regex over `+++` lines even on a large diff."""
+    """UNION of the pre-computed `post_paths` (capped at PRECOMP_FILE_LIMIT,
+    empty without AIR_TARGET_REPO) and the `+++ b/<path>` headers parsed from
+    the diff. NOTE: since the diff is hygiene-processed, the header scan is
+    bounded by the byte cap — a file in a cap-omitted segment has no header
+    here (callers that need cap-safety check `_diff_is_truncated`). The
+    header scan is a cheap regex over `+++` lines even on a large diff."""
     return list(post_paths) + _DIFF_PATH_RE.findall(diff or "")
 
 
@@ -830,23 +870,27 @@ def _diff_touches_ui(post_paths: list[str], diff: str, extra_globs: tuple | list
     reviewer should be dispatched.
 
     UNION of two signals: the pre-computed `post_paths` AND the `+++ b/<path>`
-    headers parsed from the raw diff. Both are consulted because `post_paths` is
+    headers parsed from the diff. Both are consulted because `post_paths` is
     capped at PRECOMP_FILE_LIMIT (and empty without AIR_TARGET_REPO), so a UI
-    file sorting past the cap would be invisible to it alone — the diff headers
-    are uncapped and cover every changed file. The header scan is a cheap regex
-    over `+++` lines even on a large diff.
+    file sorting past the cap would be invisible to it alone. The diff headers
+    cover every segment that SURVIVED the byte cap — on a truncated diff with
+    no checkout (`post_paths` empty), omitted segments could hide UI files
+    from both signals, so that combination fails open.
 
     A path is in-scope if it hits the built-in WEB allowlist (`_path_is_ui`:
     markup / i18n / user-facing docs) OR matches a repo-declared copy-module
     glob (`extra_globs`, from PROJECT-PROFILE `## User-Facing Copy Paths` — the
     TUI/`.py` opt-in). CSS/SCSS-only changes and air's own wiki/pattern `.md`
     files never trigger. **Fails open**: if neither signal yields any path at
-    all, return True so an ambiguous case still gets a copy review (correctness
-    over the cost saving on the rare unparseable diff).
+    all, or the diff is byte-cap-truncated with no precomp paths to fall back
+    on, return True so an ambiguous case still gets a copy review (correctness
+    over the cost saving on the rare oversized/unparseable diff).
     """
     paths = _collect_changed_paths(post_paths, diff)
     if not paths:
         return True  # fail open — couldn't determine paths
+    if not post_paths and _diff_is_truncated(diff):
+        return True  # fail open — omitted segments could hide UI files
     return any(_path_is_ui(p) or _path_matches_globs(p, extra_globs) for p in paths)
 
 
@@ -1725,6 +1769,7 @@ async def run_review(args):
             codex_enabled = False
     codex_task: "asyncio.Task[str] | None" = None
     codex_timer = None
+    codex_watchdog_fired: "Callable[[], bool]" = lambda: False
     t_codex = 0.0
 
     # Client-side pre-computation. Skipped when AIR_TARGET_REPO is unset
@@ -1767,7 +1812,7 @@ async def run_review(args):
         # once its pipe buffer filled. The remaining on-loop tail
         # (build_pr_context and friends) is millisecond-scale formatting.
         if codex_enabled and codex_task is None:
-            codex_task, t_codex, codex_timer = await _start_codex_task(codex_repo, codex_base_sha)
+            codex_task, t_codex, codex_timer, codex_watchdog_fired = await _start_codex_task(codex_repo, codex_base_sha)
         precomp_t0 = time.monotonic()
         precomp_base = prior_sha if mode == "re-review" else f"origin/{meta['base']['ref']}"
 
@@ -1867,7 +1912,7 @@ async def run_review(args):
     codex_findings = ""
     if codex_enabled:
         if codex_task is None:
-            codex_task, t_codex, codex_timer = await _start_codex_task(codex_repo, codex_base_sha)
+            codex_task, t_codex, codex_timer, codex_watchdog_fired = await _start_codex_task(codex_repo, codex_base_sha)
         overlapped = time.monotonic() - t_codex
         try:
             # Cap measured FROM LAUNCH: the budget already spent in the
@@ -1891,12 +1936,15 @@ async def run_review(args):
                 file=sys.stderr,
             )
         except asyncio.CancelledError:
-            # codex_task.cancelled() ⇒ the launch-armed watchdog fired
-            # during the overlap window — a timeout, not a shutdown. A
-            # CancelledError with the task NOT cancelled means run_review
-            # itself is being cancelled (SIGTERM / loop shutdown) and must
-            # keep propagating.
-            if not codex_task.cancelled():
+            # Attribution must come from the watchdog's own flag, NOT
+            # codex_task.cancelled(): when run_review itself is cancelled
+            # (SIGTERM / loop shutdown) while suspended in wait_for, the
+            # inner task is ALSO cancelled before the error propagates (on
+            # Python ≤3.11 always; timing-dependent on 3.12) — task state
+            # cannot distinguish the two, and misreading a shutdown as a
+            # codex timeout would swallow the cancellation and keep the
+            # run executing past SIGTERM.
+            if not codex_watchdog_fired():
                 raise
             print(
                 f"  [warn] codex hit its {SESSION_TIMEOUT_SECS}s budget during "
