@@ -303,14 +303,35 @@ jobs:
       - name: Cooldown debounce
         if: ${{ github.event.action == 'synchronize' && inputs.cooldown_minutes != '0' }}
         env:
-          GH_TOKEN: ${{ github.token }}
+          # AIR_BOT_TOKEN, not github.token: a caller running least-privilege
+          # `permissions: {}` gives github.token no read on issue comments, and
+          # the fetch failure silently disabled the debounce on every push
+          # (it looked identical to "no prior review").
+          GH_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
           COOLDOWN_MIN: ${{ inputs.cooldown_minutes }}
         run: |
           case "$COOLDOWN_MIN" in
             (*[!0-9]*|'') echo "cooldown: non-numeric cooldown_minutes '$COOLDOWN_MIN' — skipping debounce"; exit 0;;
           esac
-          LAST=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER_RESOLVED}/comments?sort=created&direction=desc&per_page=100" \
-                 --jq '[.[] | select(.body | startswith("## Code Review\n"))] | first | .created_at // empty' 2>/dev/null || true)
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::warning::air cooldown: jq not available on this runner — debounce skipped"
+            exit 0
+          fi
+          # Capture stderr SEPARATELY — merging it into COMMENTS (2>&1) would
+          # let a zero-exit gh notice (deprecation/auth-refresh chatter) prepend
+          # non-JSON to the body, breaking the jq parse below → empty LAST →
+          # silent "start immediately" (the exact fail-open this step guards).
+          GH_ERR="${RUNNER_TEMP:-/tmp}/air-cooldown-gh-err"
+          if ! COMMENTS=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER_RESOLVED}/comments?sort=created&direction=desc&per_page=100" 2>"$GH_ERR"); then
+            echo "::warning::air cooldown: comment fetch failed (debounce skipped this run): $(cat "$GH_ERR")"
+            exit 0
+          fi
+          # Filter on the bot author, mirroring the Python skip gate
+          # (find_prior_review): without it any PR participant could move
+          # the debounce window by posting a "## Code Review"-prefixed
+          # comment (scheduling-only nuisance, but free to close).
+          BOT_LOGIN=$(gh api user --jq .login 2>/dev/null || true)
+          LAST=$(printf '%s' "$COMMENTS" | jq -r --arg bot "$BOT_LOGIN" '[.[] | select((.body | startswith("## Code Review\n")) and ($bot == "" or .user.login == $bot))] | first | .created_at // empty' 2>/dev/null || true)
           if [ -z "$LAST" ]; then
             echo "cooldown: no prior review comment — starting immediately"
             exit 0

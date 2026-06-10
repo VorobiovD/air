@@ -39,6 +39,94 @@ def _gh_headers(token: str, accept: str = "application/vnd.github+json") -> dict
     return {"Authorization": f"Bearer {token}", "Accept": accept}
 
 
+class PartialPageError(RuntimeError):
+    """A paginated GitHub walk failed mid-way.
+
+    Raised instead of returning a partial list: callers could not
+    distinguish "no items" from "truncated", and for the prior-review
+    lookup that ambiguity caused a duplicate full review on an unchanged
+    SHA (the skip gate saw "no prior comments"). Callers that genuinely
+    prefer a degraded result catch this explicitly."""
+
+
+# Connect/read timeouts for every GitHub call. `requests` has NO default
+# timeout — a black-holed TCP connection used to hang the run until the
+# workflow-level 95-min kill, orphaning the live session the shutdown
+# hook exists to interrupt.
+GH_TIMEOUT = (10, 30)
+GH_RETRIES = 2
+GH_RETRY_BACKOFF_SECS = 3.0
+
+
+def _gh_request(
+    method: str,
+    url: str,
+    *,
+    token: str,
+    accept: str = "application/vnd.github+json",
+    retries: int = GH_RETRIES,
+    timeout: tuple = GH_TIMEOUT,
+    retry_timeouts: bool = True,
+    **kwargs,
+) -> "req.Response":
+    """Single entrypoint for GitHub HTTP: timeout + bounded retry.
+
+    Retries (with linear backoff) on 5xx responses and on
+    connection/timeout exceptions — the transient classes where a blind
+    second attempt is cheap and usually succeeds. 4xx responses return
+    immediately (retrying can't change them; the 422 duplicate-comment
+    special case keeps its own logic in _post_review_comment_with_retry).
+    Raises the last network exception when retries are exhausted —
+    callers treat that like any other fatal GitHub failure.
+
+    `retry_timeouts=False` is for non-replay-safe POSTs (comment posts):
+    a READ timeout means the request was sent and the response lost — the
+    server may have committed it, so a blind re-POST risks a duplicate.
+    Connection errors and 5xx stay retryable for those callers.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            resp = req.request(
+                method, url, headers=_gh_headers(token, accept=accept),
+                timeout=timeout, **kwargs,
+            )
+        except (req.exceptions.ConnectionError, req.exceptions.Timeout) as e:
+            # `retry_timeouts=False` (non-replay-safe POSTs) must NOT retry a
+            # READ timeout — the request was sent and the response was lost, so
+            # the server may have committed it. But a CONNECT timeout (and any
+            # plain ConnectionError) means the connection never established and
+            # nothing was sent — those are safe to retry even for POSTs.
+            # ConnectTimeout subclasses BOTH Timeout and ConnectionError, so we
+            # exclude it explicitly rather than letting the Timeout check eat it.
+            if (
+                not retry_timeouts
+                and isinstance(e, req.exceptions.Timeout)
+                and not isinstance(e, req.exceptions.ConnectTimeout)
+            ):
+                raise
+            last_exc = e
+            if attempt < retries:
+                print(
+                    f"  [warn] GitHub {method} {url}: {type(e).__name__} — "
+                    f"retry {attempt + 1}/{retries}",
+                    file=sys.stderr,
+                )
+                time.sleep(GH_RETRY_BACKOFF_SECS * (attempt + 1))
+            continue
+        if resp.status_code >= 500 and attempt < retries:
+            print(
+                f"  [warn] GitHub {method} {url}: {resp.status_code} — "
+                f"retry {attempt + 1}/{retries}",
+                file=sys.stderr,
+            )
+            time.sleep(GH_RETRY_BACKOFF_SECS * (attempt + 1))
+            continue
+        return resp
+    assert last_exc is not None
+    raise last_exc
+
+
 # Heuristic strings that indicate GitHub's 422 was caused by near-
 # duplicate-comment detection (vs e.g. body-too-long or schema). On a
 # duplicate-detection 422, retrying with the SAME body is guaranteed to
@@ -73,9 +161,8 @@ def _post_review_comment_with_retry(
     url = (
         f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
     )
-    headers = _gh_headers(token)
     payload = {"body": body}
-    resp = req.post(url, headers=headers, json=payload, timeout=30)
+    resp = _gh_request("POST", url, token=token, json=payload, retry_timeouts=False)
     if resp.status_code != 422:
         return resp
     msg = _gh_error_message_only(resp)
@@ -91,7 +178,7 @@ def _post_review_comment_with_retry(
         )
         return resp
     time.sleep(2.0)
-    resp2 = req.post(url, headers=headers, json=payload, timeout=30)
+    resp2 = _gh_request("POST", url, token=token, json=payload, retry_timeouts=False)
     if resp2.status_code == 422:
         msg2 = _gh_error_message_only(resp2)
         print(
@@ -111,9 +198,8 @@ def _gh_error_message_only(resp) -> str:
 
 
 def fetch_pr_metadata(repo: str, pr_number: int, token: str) -> dict:
-    resp = req.get(
-        f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
-        headers=_gh_headers(token),
+    resp = _gh_request(
+        "GET", f"https://api.github.com/repos/{repo}/pulls/{pr_number}", token=token,
     )
     if not resp.ok:
         print(f"Error fetching PR metadata: {_github_error_message(resp)}", file=sys.stderr)
@@ -149,10 +235,13 @@ def submit_review_verdict(
     GitHub rejects self-reviews (PR author == reviewer) with 422.
     Caller is responsible for the own-PR guard.
     """
-    resp = req.post(
-        f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews",
-        headers=_gh_headers(token),
-        json={"event": event, "body": body, "commit_id": commit_id},
+    # retry_timeouts=False: POST /reviews is non-idempotent and GitHub does
+    # NOT dedupe reviews — a read-timeout retry would submit a SECOND formal
+    # review. Same replay-safety posture as the comment POST.
+    resp = _gh_request(
+        "POST", f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews",
+        token=token, json={"event": event, "body": body, "commit_id": commit_id},
+        retry_timeouts=False,
     )
     if not resp.ok:
         print(
@@ -166,9 +255,9 @@ def submit_review_verdict(
 
 
 def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
-    resp = req.get(
-        f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
-        headers=_gh_headers(token, accept="application/vnd.github.v3.diff"),
+    resp = _gh_request(
+        "GET", f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
+        token=token, accept="application/vnd.github.v3.diff",
     )
     if not resp.ok:
         print(f"Error fetching PR diff: {_github_error_message(resp)}", file=sys.stderr)
@@ -178,11 +267,12 @@ def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
 
 def _github_paginate(url: str, token: str, max_pages: int | None = None) -> list[dict]:
     """Walk a GitHub list endpoint to completion and return all items.
-    On a page failure, logs to stderr and returns whatever has been
-    collected so far — callers see this as "empty or truncated" and
-    cannot currently distinguish the two. Acceptable because both
-    failure modes lead to a full-review fallback, which is the safe
-    (more expensive) choice.
+
+    Raises PartialPageError on a mid-walk page failure (after _gh_request's
+    own retries) — a partial list is indistinguishable from a short one,
+    and that ambiguity caused duplicate full reviews when the prior-review
+    lookup saw a truncated comment list. Callers that prefer a degraded
+    result catch it explicitly.
 
     `max_pages` caps the walk for callers that only need the first few
     pages of a newest-first list (e.g. the promote sibling search). None
@@ -192,13 +282,12 @@ def _github_paginate(url: str, token: str, max_pages: int | None = None) -> list
     items: list[dict] = []
     pages = 0
     while url:
-        resp = req.get(
-            url,
-            headers=_gh_headers(token),
-        )
+        resp = _gh_request("GET", url, token=token)
         if not resp.ok:
-            print(f"Error GETting {url}: {_github_error_message(resp)}", file=sys.stderr)
-            return items
+            raise PartialPageError(
+                f"page {pages + 1} of {url} failed after {len(items)} items: "
+                f"{_github_error_message(resp)}"
+            )
         items.extend(resp.json())
         pages += 1
         if max_pages is not None and pages >= max_pages:
@@ -214,10 +303,7 @@ def fetch_bot_login(token: str) -> str | None:
     prior-review lookup can filter on author. Without this filter, any PR
     participant could post a fake `## Code Review` comment to suppress or
     mis-steer the next review."""
-    resp = req.get(
-        "https://api.github.com/user",
-        headers=_gh_headers(token),
-    )
+    resp = _gh_request("GET", "https://api.github.com/user", token=token)
     if not resp.ok:
         print(f"Error fetching bot identity: {_github_error_message(resp)}", file=sys.stderr)
         return None
@@ -284,9 +370,9 @@ def fetch_inter_diff(
     - API error (404 / 5xx / rate-limit) → return None so the caller can
       fall back to a full review instead of silently skipping.
     """
-    resp = req.get(
-        f"https://api.github.com/repos/{repo}/compare/{base_sha}...{head_sha}",
-        headers=_gh_headers(token, accept="application/vnd.github.v3.diff"),
+    resp = _gh_request(
+        "GET", f"https://api.github.com/repos/{repo}/compare/{base_sha}...{head_sha}",
+        token=token, accept="application/vnd.github.v3.diff",
     )
     if not resp.ok:
         print(f"Error fetching inter-diff: {_github_error_message(resp)}", file=sys.stderr)

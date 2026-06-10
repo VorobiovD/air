@@ -39,6 +39,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from anthropic import Anthropic, AsyncAnthropic
+from requests import RequestException
 
 from api import list_agents, find_environment
 from setup import MODEL_ALIASES, parse_agent_pins
@@ -63,6 +64,7 @@ import pr_conversation  # noqa: E402  (deferred import; relies on sys.path tweak
 # --- that LIVES in this module. Cross-module calls (e.g. verdict.should_request_changes
 # --- → count_blockers) resolve in the owning module's namespace — patch there.
 from github_client import (  # noqa: E402,F401 — split modules; re-exported for tests/callers
+    PartialPageError,
     _github_error_message,
     _GH_DUPLICATE_HINTS,
     _post_review_comment_with_retry,
@@ -83,6 +85,7 @@ from verdict import (  # noqa: E402,F401 — split modules; re-exported for test
     extract_prior_statuses,
     format_prior_statuses_block,
     should_request_changes,
+    has_conflict_markers,
     REVIEWED_AT_RE,
     _BLOCKERS_SECTION_RE,
     _BLOCKER_ENTRY_RE,
@@ -451,19 +454,28 @@ def _detect_promote_fastpath(
     # comment/label edit, so it can't be trusted to put the last-merged sibling
     # first. Collect every merged promote candidate, then pick the one with the
     # newest merged_at (ISO-8601 UTC → lexicographic max == chronological max).
-    candidates = [
-        c for c in _github_paginate(url, token, max_pages=_PROMOTE_MAX_SIBLING_PAGES)
-        if c.get("number") != pr_number
-        and c.get("merged_at")
-        and ((c.get("head") or {}).get("ref", "")).startswith(PROMOTE_HEAD_PREFIX)
-    ]
+    try:
+        candidates = [
+            c for c in _github_paginate(url, token, max_pages=_PROMOTE_MAX_SIBLING_PAGES)
+            if c.get("number") != pr_number
+            and c.get("merged_at")
+            and ((c.get("head") or {}).get("ref", "")).startswith(PROMOTE_HEAD_PREFIX)
+        ]
+    except (PartialPageError, RequestException) as e:
+        print(f"  [promote] sibling search failed ({e}) — full review", file=sys.stderr)
+        return None
     if not candidates:
         print(f"  [promote] {head_ref}: no merged sibling promote — full review", file=sys.stderr)
         return None
     sibling = max(candidates, key=lambda c: c["merged_at"])
 
     sibling_num = sibling["number"]
-    sib_review = find_prior_review(fetch_issue_comments(repo, sibling_num, token), bot_login)
+    try:
+        sib_comments = fetch_issue_comments(repo, sibling_num, token)
+    except (PartialPageError, RequestException) as e:
+        print(f"  [promote] sibling #{sibling_num} comment fetch failed ({e}) — full review", file=sys.stderr)
+        return None
+    sib_review = find_prior_review(sib_comments, bot_login)
     if sib_review is None:
         print(f"  [promote] sibling #{sibling_num} has no air review — full review", file=sys.stderr)
         return None
@@ -472,13 +484,22 @@ def _detect_promote_fastpath(
         print(f"  [promote] sibling #{sibling_num} review has no Reviewed-at SHA — full review", file=sys.stderr)
         return None
 
-    inter = fetch_inter_diff(repo, sib_sha, head_sha, token)
+    # fetch_inter_diff returns None on a non-OK response, but _gh_request now
+    # RAISES RequestException after exhausting retries (timeout / connection).
+    # Uncaught, that propagates out of this gate as a bare traceback, breaking
+    # the "fall back to full review at every failing gate" contract. Catch it.
+    try:
+        inter = fetch_inter_diff(repo, sib_sha, head_sha, token)
+    except RequestException as e:
+        print(f"  [promote] compare {sib_sha[:8]}..{head_sha[:8]} errored ({e}) — full review", file=sys.stderr)
+        return None
     if inter is None:
         print(f"  [promote] compare {sib_sha[:8]}..{head_sha[:8]} failed — full review", file=sys.stderr)
         return None
-    # fetch_pr_diff sys.exit(1)s on a non-OK response; here that would break
-    # this function's "fall back to full review at every failing gate" contract
-    # (and a full review can't run without the PR diff either). Catch it and
+    # fetch_pr_diff sys.exit(1)s on a non-OK response AND _gh_request raises
+    # RequestException on retry exhaustion; here either would break this
+    # function's "fall back to full review at every failing gate" contract
+    # (and a full review can't run without the PR diff either). Catch both and
     # fall back to None so a transient diff-endpoint blip doesn't kill the run
     # before the full-review path gets its own chance to fetch + report.
     try:
@@ -491,6 +512,9 @@ def _detect_promote_fastpath(
         if exc.code != 1:
             raise
         print("  [promote] PR diff fetch failed — full review", file=sys.stderr)
+        return None
+    except RequestException as e:
+        print(f"  [promote] PR diff fetch errored ({e}) — full review", file=sys.stderr)
         return None
     inter_lines = _count_diff_changed_lines(inter)
     overlap = 1 - (inter_lines / max(full_lines, 1))
@@ -1065,6 +1089,19 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
             f"{e.reason}",
             file=sys.stderr,
         )
+    except Exception as e:  # noqa: BLE001
+        # Mirror _run_solo_session: the wall-clock cap raises
+        # asyncio.TimeoutError, which the billing-retry helper does NOT catch.
+        # Uncaught in full mode this surfaced as a bare traceback after a
+        # fully billed ~45-min session — no run-failed comment, no ::error::.
+        # Coerce to the structured-fallback path instead (run-failed comment +
+        # nonzero exit). SIGTERM still propagates: SystemExit is BaseException.
+        coordinator_failure_reason = f"{type(e).__name__}: {e}"
+        coordinator_out = ""
+        print(
+            f"  [warn] coordinator session failed: {coordinator_failure_reason}",
+            file=sys.stderr,
+        )
     return coordinator_out, coordinator_failure_reason
 
 
@@ -1139,15 +1176,91 @@ async def _run_solo_session(
 def _unpack_session_result(result, label: str) -> tuple[str, str]:
     """Coerce an `asyncio.gather(return_exceptions=True)` entry to (out, reason).
 
-    A session helper returns `(out, reason)`; a raised exception (e.g. a
-    coordinator `asyncio.TimeoutError`, which `_run_coordinator_session` does
-    NOT catch — full-mode behavior is preserved by leaving it to propagate
-    there) becomes `("", reason)` so `both` mode never crashes and the other
-    session's result survives.
+    A session helper returns `(out, reason)`; a raised exception becomes
+    `("", reason)` so `both` mode never crashes and the other session's
+    result survives. Both helpers now catch Exception themselves, so this
+    is a last line of defense for BaseException-adjacent escapes (e.g.
+    CancelledError) rather than the primary TimeoutError handler.
     """
     if isinstance(result, BaseException):
         return "", f"{label} session error: {type(result).__name__}: {result}"
     return result
+
+
+def _backfill_verdict_if_missing(
+    args, head_sha: str, prior: dict, *,
+    bot_login: str | None, pr_state: str, pr_author: str, token: str,
+) -> None:
+    """Repair a missing review verdict for an already-reviewed SHA.
+
+    The post sequence (comment → verdict) is non-transactional: a kill or
+    network failure between the two leaves `reviewDecision` stuck at
+    REVIEW_REQUIRED, and the early skip gate (`prior_sha == head_sha`)
+    used to exit without ever looking again. The posted comment is
+    deterministic state — `should_request_changes` recomputes the same
+    verdict from its body — so when GitHub shows no bot verdict for this
+    SHA, submit it now. Best-effort: any failure leaves the skip path
+    exactly as it was (exit 0, no verdict), to be retried on the next
+    trigger.
+
+    Two integrity guards (adversarial-review findings):
+    - The comment must be UNEDITED (`updated_at == created_at`). The body
+      is the verdict source and is collaborator-editable post-hoc — an
+      edited body could otherwise mint a fresh APPROVE on an unchanged
+      SHA. Session-derived verdicts (the normal path) never re-read the
+      comment, so this surface exists only here.
+    - A DISMISSED bot verdict for this SHA counts as "present": a human
+      dismissing the bot's verdict is a governance action this best-effort
+      repair must not override.
+    """
+    if args.dry_run or pr_state != "open" or not bot_login or bot_login == pr_author:
+        return
+    prior_body = prior.get("body", "")
+    if prior.get("updated_at") and prior.get("updated_at") != prior.get("created_at"):
+        print(
+            "  [info] verdict backfill skipped — the review comment was edited "
+            "after posting, so it is no longer a trusted verdict source",
+            file=sys.stderr,
+        )
+        return
+    try:
+        for r in fetch_pr_reviews(args.repo, args.pr_number, token):
+            if (
+                (r.get("user") or {}).get("login") == bot_login
+                and r.get("commit_id") == head_sha
+                and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")
+            ):
+                return  # verdict already present (or deliberately dismissed)
+        request_changes, reason = should_request_changes(prior_body)
+        print(
+            f"  [backfill] no verdict found for reviewed SHA {head_sha[:8]} — "
+            f"submitting {'REQUEST_CHANGES' if request_changes else 'APPROVE'} "
+            f"recomputed from the posted review comment"
+        )
+        if request_changes:
+            submit_review_verdict(
+                args.repo, args.pr_number, token,
+                event="REQUEST_CHANGES",
+                body=f"Changes requested — {reason}. See review comment above. "
+                     f"(Verdict backfilled — the original run posted the comment "
+                     f"but its verdict step did not complete.)",
+                commit_id=head_sha,
+            )
+        else:
+            submit_review_verdict(
+                args.repo, args.pr_number, token,
+                event="APPROVE",
+                body="Approved — 0 blockers found. See review comment for "
+                     "medium/low/nit findings. (Verdict backfilled — the original "
+                     "run posted the comment but its verdict step did not complete.)",
+                commit_id=head_sha,
+            )
+    except Exception as e:
+        print(
+            f"  [warn] verdict backfill failed ({type(e).__name__}: {e}) — "
+            f"skip path continues unchanged; next trigger retries",
+            file=sys.stderr,
+        )
 
 
 async def run_review(args):
@@ -1289,6 +1402,9 @@ async def run_review(args):
     # losing the diff fetch + the review post we already have lined up.
     # Same posture as the SPECIALIST_AGENTS gather later in this function.
     loop = asyncio.get_running_loop()
+    # ORDER COUPLING: the pre-spend abort below indexes conversation_results[0]
+    # as the issue-comments slot (bot_login is stripped first). Reordering this
+    # gather without updating that index silently re-points the abort.
     fetch_results = await asyncio.gather(
         loop.run_in_executor(None, fetch_bot_login, bot_token),
         loop.run_in_executor(None, fetch_issue_comments, args.repo, args.pr_number, bot_token),
@@ -1339,6 +1455,19 @@ async def run_review(args):
             file=sys.stderr,
         )
 
+    # Issue comments feed re-review detection AND the early skip gate — a
+    # degraded-to-empty list here means "no prior review", which posts a
+    # duplicate full review on an unchanged SHA. We're pre-spend, so the
+    # cheap correct move is to fail the run and let the next trigger retry
+    # (PartialPageError already survived _gh_request's own retries).
+    if isinstance(conversation_results[0], BaseException):
+        print(
+            f"::error::air: issue-comments fetch failed pre-spend "
+            f"({conversation_results[0]!r}) — aborting before any session cost; "
+            f"a partial comment list would risk a duplicate review.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     fetch_labels = ("issue comments", "pr reviews", "inline comments")
     coerced: list[list[dict]] = []
     for label, result in zip(fetch_labels, conversation_results):
@@ -1392,6 +1521,17 @@ async def run_review(args):
             f"Already reviewed at {prior_sha[:8]}. No changes since; skipping. "
             f"Pass --fresh to force a full review."
         )
+        # A kill between the comment POST and the verdict POST used to lose
+        # the verdict for this SHA permanently — this gate refused to look
+        # again. The posted comment is deterministic state: recompute the
+        # verdict from it and backfill if GitHub has none for this SHA.
+        _backfill_verdict_if_missing(
+            args, head_sha, prior,
+            bot_login=bot_login,
+            pr_state=meta.get("state", ""),
+            pr_author=(meta.get("user") or {}).get("login", ""),
+            token=bot_token,
+        )
         return
 
     mode = "re-review" if (prior and prior_sha) else "full"
@@ -1414,7 +1554,14 @@ async def run_review(args):
     print(f"  mode: {mode}")
 
     if mode == "re-review":
-        inter_diff = fetch_inter_diff(args.repo, prior_sha, head_sha, bot_token)
+        # fetch_inter_diff returns None on non-OK, but _gh_request raises
+        # RequestException on retry exhaustion — coerce that to None so the
+        # block below falls back to full review instead of crashing.
+        try:
+            inter_diff = fetch_inter_diff(args.repo, prior_sha, head_sha, bot_token)
+        except RequestException as e:
+            print(f"Inter-diff fetch errored ({e}) — falling back to full review.", file=sys.stderr)
+            inter_diff = None
         if inter_diff is None:
             # API error (404 / 5xx / rate limit). We can't tell whether
             # there's code to review, so fall back to full review rather
@@ -1904,9 +2051,16 @@ async def run_review(args):
     # explicit fresh run is a deliberate re-post and the early gate is skipped
     # for it).
     if not args.fresh and bot_login:
-        concurrent = find_prior_review(
-            fetch_issue_comments(args.repo, args.pr_number, bot_token), bot_login
-        )
+        try:
+            recheck_comments = fetch_issue_comments(args.repo, args.pr_number, bot_token)
+        except (PartialPageError, RequestException) as e:
+            print(
+                f"  [warn] pre-post dedup re-check fetch failed ({e}) — "
+                f"posting without it (its comment says best-effort, never fatal)",
+                file=sys.stderr,
+            )
+            recheck_comments = []
+        concurrent = find_prior_review(recheck_comments, bot_login)
         if concurrent and extract_reviewed_at_sha(concurrent.get("body", "")) == head_sha:
             print(
                 f"  [skip] a concurrent run already posted a review for "
@@ -1937,12 +2091,20 @@ async def run_review(args):
                 "the 6-agent review._\n\n"
                 f"{solo_rest}"
             )
-            solo_resp = _post_review_comment_with_retry(
-                args.repo, args.pr_number, solo_comment, bot_token
-            )
-            if solo_resp.ok:
+            try:
+                solo_resp = _post_review_comment_with_retry(
+                    args.repo, args.pr_number, solo_comment, bot_token
+                )
+            except RequestException as e:
+                print(
+                    f"  [warn] solo comparison comment post failed ({e}) — "
+                    f"continuing to the gating post",
+                    file=sys.stderr,
+                )
+                solo_resp = None
+            if solo_resp is not None and solo_resp.ok:
                 print(f"  Posted solo comparison comment: {solo_resp.json()['html_url']}")
-            else:
+            elif solo_resp is not None:
                 print(
                     f"  [warn] solo comparison comment post failed: "
                     f"{_github_error_message(solo_resp)}",
@@ -1956,7 +2118,16 @@ async def run_review(args):
             )
 
     print(f"\n[5] Posting review comment to PR #{args.pr_number}...")
-    resp = _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
+    try:
+        resp = _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
+    except RequestException as e:
+        print(
+            f"::error::air: review comment POST failed after retries ({e}) — "
+            f"the review was generated (session paid) but could not be posted. "
+            f"Re-run the workflow to repost.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if not resp.ok:
         print(f"Error posting comment: {_github_error_message(resp)}", file=sys.stderr)
         sys.exit(1)
@@ -1982,19 +2153,37 @@ async def run_review(args):
         print("  [info] PR is closed/merged — skipping verdict (GitHub 422s verdicts on those)")
     else:
         request_changes, reason = should_request_changes(review_body)
-        if request_changes:
-            submit_review_verdict(
-                args.repo, args.pr_number, bot_token,
-                event="REQUEST_CHANGES",
-                body=f"Changes requested — {reason}. See review comment above.",
-                commit_id=head_sha,
-            )
-        else:
-            submit_review_verdict(
-                args.repo, args.pr_number, bot_token,
-                event="APPROVE",
-                body="Approved — 0 blockers found. See review comment for medium/low/nit findings.",
-                commit_id=head_sha,
+        # Deterministic conflict-marker gate (CLAUDE.md: "conflict markers =
+        # automatic blocker"). Don't trust the model to have emitted the
+        # blocker — if `git diff --check` or the diff itself shows an
+        # unresolved merge marker, FORCE REQUEST_CHANGES even on an otherwise
+        # clean review body. `diff` and `diff_check_warnings` are in scope here.
+        if not request_changes and has_conflict_markers(diff, diff_check_warnings):
+            request_changes = True
+            reason = "unresolved merge conflict marker(s) in the diff"
+            print("  [gate] conflict markers detected — forcing REQUEST_CHANGES regardless of model verdict", file=sys.stderr)
+        try:
+            if request_changes:
+                submit_review_verdict(
+                    args.repo, args.pr_number, bot_token,
+                    event="REQUEST_CHANGES",
+                    body=f"Changes requested — {reason}. See review comment above.",
+                    commit_id=head_sha,
+                )
+            else:
+                submit_review_verdict(
+                    args.repo, args.pr_number, bot_token,
+                    event="APPROVE",
+                    body="Approved — 0 blockers found. See review comment for medium/low/nit findings.",
+                    commit_id=head_sha,
+                )
+        except RequestException as e:
+            # Comment is posted; the verdict is repairable — the skip-gate
+            # backfill recomputes it from the comment on the next trigger.
+            print(
+                f"  [warn] verdict submission errored ({e}) — comment posted; "
+                f"the next run on this SHA backfills the verdict",
+                file=sys.stderr,
             )
 
     # Epilogue: bump the shared wiki-backed counter and trigger /air:learn if

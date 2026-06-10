@@ -154,6 +154,33 @@ def should_request_changes(review_body: str) -> tuple[bool, str]:
     return False, ""
 
 
+# Open/close conflict markers as ADDED diff lines. We require the 7-char
+# `<<<<<<<` / `>>>>>>>` run (git's marker length) at the start of an added
+# line — these never occur in real source, so precision is ~100%. We do NOT
+# match `=======` (the middle marker): a 7-equals run is common in RST/ASCII
+# headers and would false-positive. The open/close pair is sufficient to
+# detect an unresolved conflict.
+_CONFLICT_MARKER_RE = re.compile(r"^\+(?:<{7}|>{7})", re.MULTILINE)
+
+
+def has_conflict_markers(diff: str = "", diff_check_warnings: str = "") -> bool:
+    """True if the change introduces a merge-conflict marker.
+
+    CLAUDE.md states "conflict markers in the PR diff = automatic blocker."
+    That was only ever an instruction to the model (advisory); a model that
+    missed it could still APPROVE. This is the deterministic detector the
+    verdict gate uses to FORCE REQUEST_CHANGES independent of the model.
+
+    Two signals, OR'd: (1) `git diff --check`'s own "leftover conflict
+    marker" phrase (authoritative, but needs the local clone — present only
+    when precomp ran); (2) a high-precision scan of the raw diff for added
+    open/close marker lines (always available, covers the no-clone path).
+    """
+    if diff_check_warnings and "leftover conflict marker" in diff_check_warnings:
+        return True
+    return bool(diff and _CONFLICT_MARKER_RE.search(diff))
+
+
 # Require a full 40-char SHA. A shorter match would break the strict
 # `prior_sha == head_sha` equality at the skip gate, silently triggering a
 # costly full review instead of no-op.
@@ -268,8 +295,14 @@ def find_prior_review(comments: list[dict], bot_login: str) -> dict | None:
 
 
 def extract_reviewed_at_sha(body: str) -> str | None:
+    # Lower-case the captured SHA: REVIEWED_AT_RE is IGNORECASE (so an
+    # uppercase model-emitted footer still extracts), but the skip gate and
+    # TOCTOU re-check compare `== head_sha` case-sensitively against GitHub's
+    # always-lowercase SHA. Returning the raw (possibly uppercase) match made
+    # an uppercase footer post fine, then MISS the next run's skip gate → a
+    # duplicate full review on an unchanged SHA. Normalize here.
     match = REVIEWED_AT_RE.search(body or "")
-    return match.group(1) if match else None
+    return match.group(1).lower() if match else None
 
 
 # Anti-spoof: compare the `Reviewed at:` footer SHA on a 12-hex-char prefix
@@ -301,30 +334,76 @@ def _extract_review_body(raw_text: str, head_sha: str) -> tuple[str, bool]:
     _flattened = re.sub(r"</?agent-notification\b[^>]*>", "\n", raw_text)
     # Walk every `## Code Review[^\n]*` occurrence NOT preceded by a backtick
     # (inline-code narration). The header need NOT be at start-of-line
-    # (qai-be #635 had narration concatenated on the same line). The next-`## `
-    # heading bound prevents one candidate's body from swallowing downstream
-    # content. Walk candidates in reverse; pick the first whose footer matches.
+    # (qai-be #635 had narration concatenated on the same line), but
+    # LINE-START candidates outrank mid-line ones: a review body that QUOTES
+    # the header string mid-sentence (air PR #143's own review quoted the
+    # jq filter `startswith("## Code Review\n")` inside a finding — preceded
+    # by a quote char, so the backtick lookbehind missed it) must not beat
+    # the real line-start header, or the posted comment starts mid-finding
+    # and loses everything before the quote (observed live, 2026-06-09).
+    # Within a rank, latest-first (a regenerated review supersedes its echo).
+    #
+    # A candidate's bound is the next LINE-START `## Code Review` header (or
+    # EOF) — the true candidate boundary — NOT the next generic `## ` line
+    # and NOT mid-line quoted occurrences. A `## ` line inside the body (a
+    # fenced markdown example quoting a heading) is content; bounding on it
+    # cut the candidate before its footer and converted a fully-billed
+    # review into a run-failed comment (2026-06-09 audit). Markdown-fence
+    # parsing was evaluated and rejected for this: transcript-wide fence
+    # parity is hostile territory (unterminated fences in narration,
+    # four-backtick nesting, quoted diffs toggling parity) — adversarial
+    # review reproduced extraction drops on all three. The header bound +
+    # SHA validation need no fence model: extraction always ENDS at the
+    # matching footer, so an over-wide bound can at worst include
+    # same-message content, and a too-early header can't capture a later
+    # candidate's footer (the bound stops at that candidate's own header).
     _header_re = re.compile(r"(?<!`)## Code Review[^\n]*\n")
-    _next_h2_re = re.compile(r"(?<!`)(?:^|\n)## ")
+    _line_start_header_re = re.compile(r"(?:^|\n)## Code Review[^\n]*\n")
     # NOTE: do NOT add `\b` between the 40-char hex and `[^\n]*`. Word-boundary
     # fails when the SHA is followed by another word char (qai-be #666 round 7:
     # `...936Wiki push failed...` had no boundary between `6` and `W`). The
     # 40-char exact quantifier is the anchor; the 12-char prefix compare below
     # is the validator. `[^\n]*` eats the rest of the line so match end is defined.
-    _footer_re = re.compile(r"\nReviewed at:\s+([0-9a-f]{40})[^\n]*")
+    # Case-insensitive + `\s*` to match REVIEWED_AT_RE (the skip-gate parser):
+    # the two used to disagree on case (`Reviewed At:` passed the gate but
+    # failed extraction) and on the quantifier (`Reviewed at:<sha>` ditto).
+    _footer_re = re.compile(r"\nReviewed at:\s*([0-9a-fA-F]{40})[^\n]*", re.IGNORECASE)
+    _expected_prefix = head_sha.lower()[:_SHA_PREFIX_LEN]
+
+    def _line_start(idx: int) -> bool:
+        return idx == 0 or _flattened[idx - 1] == "\n"
+
     _candidates = []
     for _hm in _header_re.finditer(_flattened):
         _body_start = _hm.end()
-        _next_h2 = _next_h2_re.search(_flattened, _body_start)
-        _bound = _next_h2.start() if _next_h2 else len(_flattened)
-        _fm = _footer_re.search(_flattened, _body_start, _bound)
+        _next_header = _line_start_header_re.search(_flattened, _body_start)
+        _bound = _next_header.start() if _next_header else len(_flattened)
+        # Prefer the first footer whose SHA prefix-matches head_sha — a body
+        # may QUOTE a prior round's footer (any case) before its own; taking
+        # the first match blindly would capture the stale SHA and discard the
+        # candidate. Fall back to the first footer so the mismatch-warning
+        # path below still fires for genuinely-spoofed candidates.
+        _fm = None
+        for _m in _footer_re.finditer(_flattened, _body_start, _bound):
+            if _m.group(1).lower()[:_SHA_PREFIX_LEN] == _expected_prefix:
+                _fm = _m
+                break
+            if _fm is None:
+                _fm = _m
         if _fm is None:
             continue
-        _candidates.append((_hm.start(), _fm.end(), _fm.group(1)))
+        _candidates.append(
+            (_line_start(_hm.start()), _hm.start(), _fm.end(), _fm.group(1))
+        )
+    # Rank: line-start candidates first, then mid-line; latest-first within
+    # each rank (sort is stable; reverse positional order inside rank).
+    _candidates.sort(key=lambda c: (not c[0], -c[1]))
     # Anti-spoof validator (see _SHA_PREFIX_LEN): a poisoned diff can echo
     # `## Code Review` but can't predict the run's head SHA. Prefix equality
     # keeps the security property while tolerating model tail-corruption.
-    for _start, _end, _sha in reversed(_candidates):
+    head_sha = head_sha.lower()
+    for _is_ls, _start, _end, _sha in _candidates:
+        _sha = _sha.lower()
         if _sha[:_SHA_PREFIX_LEN] != head_sha[:_SHA_PREFIX_LEN]:
             print(
                 f"  [warn] discarding `## Code Review` block at offset "
