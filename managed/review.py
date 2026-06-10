@@ -816,23 +816,41 @@ def _diff_touches_ui(post_paths: list[str], diff: str, extra_globs: tuple | list
     return any(_path_is_ui(p) or _path_matches_globs(p, extra_globs) for p in paths)
 
 
+# Thread-pool width for the per-file precomp git calls. Blame/churn run one
+# subprocess per changed file (up to ~80 on big PRs, 15s timeout each) —
+# embarrassingly parallel, and `git blame`/`git log` are read-only.
+PRECOMP_PARALLELISM = 8
+
+
+def _map_files(fn, files: list[str]) -> list:
+    """Run fn(file) across files on a small thread pool, results in INPUT
+    order — so the assembled context block stays byte-identical to the old
+    serial loop (ordering is the only thing concurrency could change)."""
+    if len(files) <= 1:
+        return [fn(f) for f in files]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(PRECOMP_PARALLELISM, len(files))) as pool:
+        return list(pool.map(fn, files))
+
+
 def compute_blame_summaries(repo_dir: str, files: list[str]) -> str:
     """Per-file top-N authors + most-recent commit date.
 
     Output line shape: `<file>: top: <author1> <N1>, <author2> <N2>; latest: <date>`
 
-    Uses `git blame --line-porcelain HEAD -- <file>`, parses the `author`
-    + `author-time` fields, summarizes per file. Skips files where blame
-    fails (binary, deleted, or anything the parser can't handle).
+    Uses `git blame --line-porcelain HEAD -- <file>` (parallel across
+    files, output in input order), parses the `author` + `author-time`
+    fields, summarizes per file. Skips files where blame fails (binary,
+    deleted, or anything the parser can't handle).
     """
     if not repo_dir or not files:
         return ""
     from collections import Counter
-    lines: list[str] = []
-    for path in files:
+
+    def one(path: str) -> str | None:
         raw = _git(repo_dir, "blame", "--line-porcelain", "HEAD", "--", path, timeout=15.0)
         if not raw:
-            continue
+            return None
         authors: Counter[str] = Counter()
         latest_ts = 0
         for line in raw.splitlines():
@@ -845,7 +863,7 @@ def compute_blame_summaries(repo_dir: str, files: list[str]) -> str:
                 except ValueError:
                     pass
         if not authors:
-            continue
+            return None
         top = ", ".join(f"{a} {c}" for a, c in authors.most_common(PRECOMP_BLAME_LINES))
         latest = ""
         if latest_ts > 0:
@@ -855,16 +873,17 @@ def compute_blame_summaries(repo_dir: str, files: list[str]) -> str:
             except (OSError, ValueError):
                 latest = ""
         if latest:
-            lines.append(f"  {path}: top: {top}; latest: {latest}")
-        else:
-            lines.append(f"  {path}: top: {top}")
-    return "\n".join(lines)
+            return f"  {path}: top: {top}; latest: {latest}"
+        return f"  {path}: top: {top}"
+
+    return "\n".join(r for r in _map_files(one, files) if r)
 
 
 def compute_churn_data(repo_dir: str, files: list[str]) -> str:
     """Per-file commit count over the last N months. Flags high-churn files.
 
     Output line shape: `<file>: <N> commits in <M> months [HIGH CHURN]?`
+    Parallel across files, output in input order.
 
     High-churn flag fires at PRECOMP_HIGH_CHURN_THRESHOLD or above —
     these files have more surface area for regressions and warrant
@@ -872,18 +891,19 @@ def compute_churn_data(repo_dir: str, files: list[str]) -> str:
     """
     if not repo_dir or not files:
         return ""
-    lines: list[str] = []
     since = f"{PRECOMP_CHURN_MONTHS} months ago"
-    for path in files:
+
+    def one(path: str) -> str | None:
         raw = _git(repo_dir, "log", "--oneline", f"--since={since}", "--", path, timeout=15.0)
         if not raw:
-            continue
+            return None
         count = len(raw.strip().splitlines())
         if count == 0:
-            continue
+            return None
         flag = " [HIGH CHURN]" if count >= PRECOMP_HIGH_CHURN_THRESHOLD else ""
-        lines.append(f"  {path}: {count} commits in {PRECOMP_CHURN_MONTHS} months{flag}")
-    return "\n".join(lines)
+        return f"  {path}: {count} commits in {PRECOMP_CHURN_MONTHS} months{flag}"
+
+    return "\n".join(r for r in _map_files(one, files) if r)
 
 
 def compute_diff_check_warnings(repo_dir: str, base_ref: str, head_ref: str) -> str:
@@ -1643,6 +1663,46 @@ async def run_review(args):
         diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
         dev_context = ""
 
+    # Codex enablement is resolved BEFORE precomp so the codex session can
+    # launch as a background task and overlap the per-file blame/churn git
+    # calls + store I/O + context build (~1-4 min hidden inside codex's
+    # ≤5-min leg). Everything it needs — mode, diff, prior_sha, meta — is
+    # already resolved here. See the launch site below (after the promote
+    # sibling fetch, which codex's git ops depend on).
+    codex_repo = os.environ.get("AIR_TARGET_REPO", "")
+    # For re-review mode the base is the prior Reviewed-at SHA (from the
+    # review comment body); for full review, it's the PR's base branch SHA
+    # (from meta["base"]).
+    codex_base_sha = (prior_sha if mode == "re-review" else meta["base"]["sha"]) or ""
+    codex_enabled = bool(
+        not args.no_codex
+        and codex_repo
+        and codex_base_sha
+        and shutil.which("codex") is not None
+        and os.environ.get("OPENAI_API_KEY")
+    )
+    if codex_enabled:
+        tiny = _codex_skip_tiny_delta(mode, diff)
+        if tiny is not None:
+            print(
+                f"  codex: skipped — re-review delta {tiny} lines "
+                f"(< {CODEX_RE_REVIEW_MIN_LINES})"
+            )
+            codex_enabled = False
+    codex_task: "asyncio.Task[str] | None" = None
+    t_codex = 0.0
+
+    def _launch_codex() -> "asyncio.Task[str]":
+        # wait_for wraps from launch, so the wall-clock cap is unchanged —
+        # overlap shortens the run, it never extends codex's allowance.
+        print(f"\n[3] codex launched (target-repo={codex_repo}, base={codex_base_sha[:8]}) — overlapping precomp")
+        return asyncio.create_task(
+            asyncio.wait_for(
+                run_codex_session(codex_repo, codex_base_sha),
+                timeout=SESSION_TIMEOUT_SECS,
+            )
+        )
+
     # Client-side pre-computation. Skipped when AIR_TARGET_REPO is unset
     # (e.g. local CLI runs of review.py without the workflow's checkout
     # step). When populated, all four blocks land in the PR Context for
@@ -1673,6 +1733,16 @@ async def run_review(args):
                         f"checkout — precomp/codex context degraded (review diff unaffected)",
                         file=sys.stderr,
                     )
+        # Launch codex NOW so its ≤5-min leg overlaps the per-file
+        # blame/churn git calls + store I/O + context build below. Must
+        # come after the sibling fetch above (codex's git ops need the
+        # prior SHA resolvable). Everything between launch and await is
+        # no-raise by contract (_git swallows failures, store lookups fall
+        # back, build_pr_context is pure formatting), so the task can't be
+        # orphaned by an exception in the overlap window.
+        if codex_enabled and codex_task is None:
+            codex_task = _launch_codex()
+            t_codex = time.monotonic()
         precomp_t0 = time.monotonic()
         precomp_base = prior_sha if mode == "re-review" else f"origin/{meta['base']['ref']}"
         file_statuses, post_paths = compute_file_statuses(target_repo, precomp_base, head_sha)
@@ -1735,44 +1805,27 @@ async def run_review(args):
         if dev_comments:
             print(f"  developer comments since last review: {len(dev_comments)}")
 
-    # Codex: opt-in 5th specialist. Runs sequentially BEFORE the coordinator
-    # session (Pattern B). Sonnet coordinator with codex inside doesn't
-    # parallelize reliably (it serializes bash → specialists, ~13 min wall);
-    # Opus coordinator parallelizes but costs ~2.5× the Sonnet equivalent.
-    # GHA-side codex → coordinator-user-message keeps clean parallelism for
-    # the 4 Claude specialists at the cost of one extra wall-time leg
-    # (codex ≤5 min before coordinator's ~10 min).
-    codex_repo = os.environ.get("AIR_TARGET_REPO", "")
-    # For re-review mode the base is the prior Reviewed-at SHA (from the
-    # review comment body); for full review, it's the PR's base branch SHA
-    # (from meta["base"]).
-    codex_base_sha = (prior_sha if mode == "re-review" else meta["base"]["sha"]) or ""
-    codex_enabled = bool(
-        not args.no_codex
-        and codex_repo
-        and codex_base_sha
-        and shutil.which("codex") is not None
-        and os.environ.get("OPENAI_API_KEY")
-    )
-    if codex_enabled:
-        tiny = _codex_skip_tiny_delta(mode, diff)
-        if tiny is not None:
-            print(
-                f"  codex: skipped — re-review delta {tiny} lines "
-                f"(< {CODEX_RE_REVIEW_MIN_LINES})"
-            )
-            codex_enabled = False
-
+    # Codex: opt-in 5th specialist, launched as a background task at the
+    # top of the precomp block (Pattern B + overlap). Sonnet coordinator
+    # with codex inside doesn't parallelize reliably (it serializes bash →
+    # specialists, ~13 min wall); Opus coordinator parallelizes but costs
+    # ~2.5× the Sonnet equivalent. GHA-side codex → coordinator-user-message
+    # keeps clean parallelism for the 4 Claude specialists, and the overlap
+    # hides the precomp/context-build minutes inside codex's leg. When the
+    # precomp block was skipped (target repo dir missing), launch here —
+    # identical to the old sequential behavior.
     codex_findings = ""
     if codex_enabled:
-        print(f"\n[3] Running codex (target-repo={codex_repo}, base={codex_base_sha[:8]})...")
-        t_codex = time.monotonic()
+        if codex_task is None:
+            codex_task = _launch_codex()
+            t_codex = time.monotonic()
+        overlapped = time.monotonic() - t_codex
         try:
-            codex_findings = await asyncio.wait_for(
-                run_codex_session(codex_repo, codex_base_sha),
-                timeout=SESSION_TIMEOUT_SECS,
+            codex_findings = await codex_task
+            print(
+                f"  codex complete in {time.monotonic() - t_codex:.1f}s "
+                f"({overlapped:.1f}s overlapped with precomp/context build)"
             )
-            print(f"  codex complete in {time.monotonic() - t_codex:.1f}s")
         except asyncio.TimeoutError:
             print(
                 f"  [warn] codex timed out after {SESSION_TIMEOUT_SECS}s — proceeding without it",
