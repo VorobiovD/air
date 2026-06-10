@@ -632,5 +632,58 @@ def test_blame_summaries_escaped_in_pr_context():
     assert "&lt;inject&gt;" in ctx
 
 
+# ---------------------------------------------------------------------------
+# Full-mode coordinator must catch the wall-clock TimeoutError (round-2 audit):
+# uncaught it crashed run_review as a bare traceback after a fully billed
+# session — no run-failed comment, no ::error::. Solo already had the handler;
+# the coordinator path must degrade the same way. SIGTERM (SystemExit) must
+# still propagate so the signal handler's exit code survives.
+# ---------------------------------------------------------------------------
+
+class _FakeAsyncAnthropic:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _coordinator_args():
+    agents = {review.COORDINATOR_AGENT: {"id": "agent_x", "version": 1}}
+    args = types.SimpleNamespace(repo="o/r")
+    meta = {"number": 1, "user": {"login": "dev"}}
+    return dict(
+        agents=agents, env_id="env_x", args=args, checkout={"type": "branch"},
+        bot_token="tok", store_id=None, pr_context="ctx", diff="diff",
+        codex_block="", verifier_task="vt", meta=meta, mode="full",
+        head_sha=HEAD,
+    )
+
+
+def test_coordinator_timeout_degrades_to_failure_reason(monkeypatch):
+    import asyncio as aio
+
+    async def boom(*a, **k):
+        raise aio.TimeoutError()
+
+    monkeypatch.setattr(review, "AsyncAnthropic", _FakeAsyncAnthropic)
+    monkeypatch.setattr(review, "_run_session_with_billing_retry", boom)
+    out, reason = aio.run(review._run_coordinator_session(**_coordinator_args()))
+    assert out == ""
+    assert reason.startswith("TimeoutError")
+
+
+def test_coordinator_systemexit_still_propagates(monkeypatch):
+    import asyncio as aio
+
+    async def sigterm(*a, **k):
+        raise SystemExit(143)
+
+    monkeypatch.setattr(review, "AsyncAnthropic", _FakeAsyncAnthropic)
+    monkeypatch.setattr(review, "_run_session_with_billing_retry", sigterm)
+    with pytest.raises(SystemExit):
+        aio.run(review._run_coordinator_session(**_coordinator_args()))
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

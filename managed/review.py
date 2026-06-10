@@ -1089,6 +1089,19 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
             f"{e.reason}",
             file=sys.stderr,
         )
+    except Exception as e:  # noqa: BLE001
+        # Mirror _run_solo_session: the wall-clock cap raises
+        # asyncio.TimeoutError, which the billing-retry helper does NOT catch.
+        # Uncaught in full mode this surfaced as a bare traceback after a
+        # fully billed ~45-min session — no run-failed comment, no ::error::.
+        # Coerce to the structured-fallback path instead (run-failed comment +
+        # nonzero exit). SIGTERM still propagates: SystemExit is BaseException.
+        coordinator_failure_reason = f"{type(e).__name__}: {e}"
+        coordinator_out = ""
+        print(
+            f"  [warn] coordinator session failed: {coordinator_failure_reason}",
+            file=sys.stderr,
+        )
     return coordinator_out, coordinator_failure_reason
 
 
@@ -1163,11 +1176,11 @@ async def _run_solo_session(
 def _unpack_session_result(result, label: str) -> tuple[str, str]:
     """Coerce an `asyncio.gather(return_exceptions=True)` entry to (out, reason).
 
-    A session helper returns `(out, reason)`; a raised exception (e.g. a
-    coordinator `asyncio.TimeoutError`, which `_run_coordinator_session` does
-    NOT catch — full-mode behavior is preserved by leaving it to propagate
-    there) becomes `("", reason)` so `both` mode never crashes and the other
-    session's result survives.
+    A session helper returns `(out, reason)`; a raised exception becomes
+    `("", reason)` so `both` mode never crashes and the other session's
+    result survives. Both helpers now catch Exception themselves, so this
+    is a last line of defense for BaseException-adjacent escapes (e.g.
+    CancelledError) rather than the primary TimeoutError handler.
     """
     if isinstance(result, BaseException):
         return "", f"{label} session error: {type(result).__name__}: {result}"
