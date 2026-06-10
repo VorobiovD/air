@@ -35,6 +35,11 @@ on:
         required: false
         type: string
         default: 'false'
+      air_ref:
+        description: 'air branch for the driver/prompts checkout (A/B validation of feature branches; default main)'
+        required: false
+        type: string
+        default: 'main'
 
 jobs:
   review:
@@ -52,6 +57,11 @@ jobs:
       closed: ${{ inputs.closed }}
       no_codex: ${{ inputs.no_codex }}
       fresh: ${{ inputs.fresh }}
+      # workflow_dispatch only; review_requested events carry no inputs, and
+      # an explicit empty string would OVERRIDE the reusable default — hence
+      # the || guard. The driver + prompts come from this checkout, so a
+      # feature branch can be validated against a real PR without touching main.
+      air_ref: ${{ inputs.air_ref || 'main' }}
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
