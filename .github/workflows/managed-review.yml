@@ -321,7 +321,12 @@ jobs:
             echo "::warning::air cooldown: comment fetch failed (debounce skipped this run): ${COMMENTS}"
             exit 0
           fi
-          LAST=$(printf '%s' "$COMMENTS" | jq -r '[.[] | select(.body | startswith("## Code Review\n"))] | first | .created_at // empty' 2>/dev/null || true)
+          # Filter on the bot author, mirroring the Python skip gate
+          # (find_prior_review): without it any PR participant could move
+          # the debounce window by posting a "## Code Review"-prefixed
+          # comment (scheduling-only nuisance, but free to close).
+          BOT_LOGIN=$(gh api user --jq .login 2>/dev/null || true)
+          LAST=$(printf '%s' "$COMMENTS" | jq -r --arg bot "$BOT_LOGIN" '[.[] | select((.body | startswith("## Code Review\n")) and ($bot == "" or .user.login == $bot))] | first | .created_at // empty' 2>/dev/null || true)
           if [ -z "$LAST" ]; then
             echo "cooldown: no prior review comment — starting immediately"
             exit 0

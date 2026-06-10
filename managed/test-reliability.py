@@ -542,5 +542,50 @@ def test_drain_reraises_unrelated_typeerror_on_later_pages():
         )
 
 
+def test_quoted_header_string_mid_line_does_not_truncate():
+    """Production occurrence (air PR #143's own review, 2026-06-09): a
+    finding quoting the literal header string mid-sentence — preceded by a
+    quote char, so the backtick lookbehind missed it — anchored extraction
+    and the posted comment started mid-finding, losing everything before
+    the quote (including any Blockers). Line-start candidates must outrank
+    mid-line ones, and the quoted occurrence must not bound the real
+    candidate either."""
+    raw = (
+        "## Code Review\n\n"
+        "### Blockers\n\n**1. real blocker** — details\n\n"
+        "### Low\n\n"
+        "**6. debounce filter** — the jq `[.[] | select(.body | "
+        'startswith("## Code Review\n"))]` has no author filter. '
+        "Any participant can move the window.\n\n"
+        f"Reviewed at: {HEAD}\n"
+    )
+    body, ok = _extract_review_body(raw, HEAD)
+    assert ok is True
+    assert body.startswith("## Code Review")
+    assert "real blocker" in body          # nothing truncated
+    assert "### Blockers" in body
+
+
+def test_regenerated_review_still_picks_latest_line_start():
+    """Two full line-start reviews (regeneration): the LATER one wins —
+    the tiering must preserve last-wins within the line-start rank."""
+    raw = (
+        f"## Code Review\n\nstale draft\n\nReviewed at: {HEAD}\n\n"
+        f"## Code Review\n\ncorrected final\n\nReviewed at: {HEAD}\n"
+    )
+    body, ok = _extract_review_body(raw, HEAD)
+    assert ok is True
+    assert "corrected final" in body
+    assert "stale draft" not in body
+
+
+def test_footer_with_no_space_extracts():
+    """`Reviewed at:<sha>` (no space) passes the skip-gate regex (\\s*) —
+    extraction must agree on the quantifier."""
+    raw = f"## Code Review\n\nbody\n\nReviewed at:{HEAD}\n"
+    body, ok = _extract_review_body(raw, HEAD)
+    assert ok is True
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
