@@ -257,9 +257,9 @@ GitHub Action triggers `python review.py <repo> <pr>`
   ├── Fetches current PR conversation (issue comments + reviews + inline comments) and bot identity
   │     concurrently — humans + other AI bots are surfaced to specialists as <pr-conversation>
   │     so findings can flag overlap with [already raised by @<author>]
-  ├── Optional: runs `codex review --base <sha>` as a subprocess (Pattern B: GHA-side, sequential
-  │     before the coordinator) — output html-escaped, length-capped, and bundled into the
-  │     mounted verifier-task.md (inline fallback: coordinator user message)
+  ├── Optional: runs `codex review --base <sha>` as a subprocess (Pattern B: GHA-side, overlapping
+  │     precomp, completes before the coordinator) — output html-escaped, length-capped, and
+  │     bundled into the mounted verifier-task.md (inline fallback: coordinator user message)
   ├── File-handoff (v1.18.0, EXPERIMENTAL — AIR_FILE_HANDOFF=1, off by default): uploads PR
   │     context, diff, and verifier task via the Files API, mounted at /workspace/context/ with
   │     a short pointer note as the user message. Blocked on the research-preview runtime:
