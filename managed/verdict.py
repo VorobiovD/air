@@ -154,6 +154,33 @@ def should_request_changes(review_body: str) -> tuple[bool, str]:
     return False, ""
 
 
+# Open/close conflict markers as ADDED diff lines. We require the 7-char
+# `<<<<<<<` / `>>>>>>>` run (git's marker length) at the start of an added
+# line — these never occur in real source, so precision is ~100%. We do NOT
+# match `=======` (the middle marker): a 7-equals run is common in RST/ASCII
+# headers and would false-positive. The open/close pair is sufficient to
+# detect an unresolved conflict.
+_CONFLICT_MARKER_RE = re.compile(r"^\+(?:<{7}|>{7})", re.MULTILINE)
+
+
+def has_conflict_markers(diff: str = "", diff_check_warnings: str = "") -> bool:
+    """True if the change introduces a merge-conflict marker.
+
+    CLAUDE.md states "conflict markers in the PR diff = automatic blocker."
+    That was only ever an instruction to the model (advisory); a model that
+    missed it could still APPROVE. This is the deterministic detector the
+    verdict gate uses to FORCE REQUEST_CHANGES independent of the model.
+
+    Two signals, OR'd: (1) `git diff --check`'s own "leftover conflict
+    marker" phrase (authoritative, but needs the local clone — present only
+    when precomp ran); (2) a high-precision scan of the raw diff for added
+    open/close marker lines (always available, covers the no-clone path).
+    """
+    if diff_check_warnings and "leftover conflict marker" in diff_check_warnings:
+        return True
+    return bool(diff and _CONFLICT_MARKER_RE.search(diff))
+
+
 # Require a full 40-char SHA. A shorter match would break the strict
 # `prior_sha == head_sha` equality at the skip gate, silently triggering a
 # costly full review instead of no-op.
@@ -268,8 +295,14 @@ def find_prior_review(comments: list[dict], bot_login: str) -> dict | None:
 
 
 def extract_reviewed_at_sha(body: str) -> str | None:
+    # Lower-case the captured SHA: REVIEWED_AT_RE is IGNORECASE (so an
+    # uppercase model-emitted footer still extracts), but the skip gate and
+    # TOCTOU re-check compare `== head_sha` case-sensitively against GitHub's
+    # always-lowercase SHA. Returning the raw (possibly uppercase) match made
+    # an uppercase footer post fine, then MISS the next run's skip gate → a
+    # duplicate full review on an unchanged SHA. Normalize here.
     match = REVIEWED_AT_RE.search(body or "")
-    return match.group(1) if match else None
+    return match.group(1).lower() if match else None
 
 
 # Anti-spoof: compare the `Reviewed at:` footer SHA on a 12-hex-char prefix

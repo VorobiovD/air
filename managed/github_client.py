@@ -92,7 +92,18 @@ def _gh_request(
                 timeout=timeout, **kwargs,
             )
         except (req.exceptions.ConnectionError, req.exceptions.Timeout) as e:
-            if isinstance(e, req.exceptions.Timeout) and not retry_timeouts:
+            # `retry_timeouts=False` (non-replay-safe POSTs) must NOT retry a
+            # READ timeout — the request was sent and the response was lost, so
+            # the server may have committed it. But a CONNECT timeout (and any
+            # plain ConnectionError) means the connection never established and
+            # nothing was sent — those are safe to retry even for POSTs.
+            # ConnectTimeout subclasses BOTH Timeout and ConnectionError, so we
+            # exclude it explicitly rather than letting the Timeout check eat it.
+            if (
+                not retry_timeouts
+                and isinstance(e, req.exceptions.Timeout)
+                and not isinstance(e, req.exceptions.ConnectTimeout)
+            ):
                 raise
             last_exc = e
             if attempt < retries:
@@ -224,9 +235,13 @@ def submit_review_verdict(
     GitHub rejects self-reviews (PR author == reviewer) with 422.
     Caller is responsible for the own-PR guard.
     """
+    # retry_timeouts=False: POST /reviews is non-idempotent and GitHub does
+    # NOT dedupe reviews — a read-timeout retry would submit a SECOND formal
+    # review. Same replay-safety posture as the comment POST.
     resp = _gh_request(
         "POST", f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews",
         token=token, json={"event": event, "body": body, "commit_id": commit_id},
+        retry_timeouts=False,
     )
     if not resp.ok:
         print(

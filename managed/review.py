@@ -85,6 +85,7 @@ from verdict import (  # noqa: E402,F401 — split modules; re-exported for test
     extract_prior_statuses,
     format_prior_statuses_block,
     should_request_changes,
+    has_conflict_markers,
     REVIEWED_AT_RE,
     _BLOCKERS_SECTION_RE,
     _BLOCKER_ENTRY_RE,
@@ -483,13 +484,22 @@ def _detect_promote_fastpath(
         print(f"  [promote] sibling #{sibling_num} review has no Reviewed-at SHA — full review", file=sys.stderr)
         return None
 
-    inter = fetch_inter_diff(repo, sib_sha, head_sha, token)
+    # fetch_inter_diff returns None on a non-OK response, but _gh_request now
+    # RAISES RequestException after exhausting retries (timeout / connection).
+    # Uncaught, that propagates out of this gate as a bare traceback, breaking
+    # the "fall back to full review at every failing gate" contract. Catch it.
+    try:
+        inter = fetch_inter_diff(repo, sib_sha, head_sha, token)
+    except RequestException as e:
+        print(f"  [promote] compare {sib_sha[:8]}..{head_sha[:8]} errored ({e}) — full review", file=sys.stderr)
+        return None
     if inter is None:
         print(f"  [promote] compare {sib_sha[:8]}..{head_sha[:8]} failed — full review", file=sys.stderr)
         return None
-    # fetch_pr_diff sys.exit(1)s on a non-OK response; here that would break
-    # this function's "fall back to full review at every failing gate" contract
-    # (and a full review can't run without the PR diff either). Catch it and
+    # fetch_pr_diff sys.exit(1)s on a non-OK response AND _gh_request raises
+    # RequestException on retry exhaustion; here either would break this
+    # function's "fall back to full review at every failing gate" contract
+    # (and a full review can't run without the PR diff either). Catch both and
     # fall back to None so a transient diff-endpoint blip doesn't kill the run
     # before the full-review path gets its own chance to fetch + report.
     try:
@@ -502,6 +512,9 @@ def _detect_promote_fastpath(
         if exc.code != 1:
             raise
         print("  [promote] PR diff fetch failed — full review", file=sys.stderr)
+        return None
+    except RequestException as e:
+        print(f"  [promote] PR diff fetch errored ({e}) — full review", file=sys.stderr)
         return None
     inter_lines = _count_diff_changed_lines(inter)
     overlap = 1 - (inter_lines / max(full_lines, 1))
@@ -1528,7 +1541,14 @@ async def run_review(args):
     print(f"  mode: {mode}")
 
     if mode == "re-review":
-        inter_diff = fetch_inter_diff(args.repo, prior_sha, head_sha, bot_token)
+        # fetch_inter_diff returns None on non-OK, but _gh_request raises
+        # RequestException on retry exhaustion — coerce that to None so the
+        # block below falls back to full review instead of crashing.
+        try:
+            inter_diff = fetch_inter_diff(args.repo, prior_sha, head_sha, bot_token)
+        except RequestException as e:
+            print(f"Inter-diff fetch errored ({e}) — falling back to full review.", file=sys.stderr)
+            inter_diff = None
         if inter_diff is None:
             # API error (404 / 5xx / rate limit). We can't tell whether
             # there's code to review, so fall back to full review rather
@@ -2120,6 +2140,15 @@ async def run_review(args):
         print("  [info] PR is closed/merged — skipping verdict (GitHub 422s verdicts on those)")
     else:
         request_changes, reason = should_request_changes(review_body)
+        # Deterministic conflict-marker gate (CLAUDE.md: "conflict markers =
+        # automatic blocker"). Don't trust the model to have emitted the
+        # blocker — if `git diff --check` or the diff itself shows an
+        # unresolved merge marker, FORCE REQUEST_CHANGES even on an otherwise
+        # clean review body. `diff` and `diff_check_warnings` are in scope here.
+        if not request_changes and has_conflict_markers(diff, diff_check_warnings):
+            request_changes = True
+            reason = "unresolved merge conflict marker(s) in the diff"
+            print("  [gate] conflict markers detected — forcing REQUEST_CHANGES regardless of model verdict", file=sys.stderr)
         try:
             if request_changes:
                 submit_review_verdict(

@@ -78,20 +78,26 @@ def build_pr_context(
     # have AIR_TARGET_REPO available. Each section is wrapped in tags
     # the agents can grep for; empty sections are omitted entirely
     # (no `<blame-summaries></blame-summaries>` placeholder).
+    # All four precomp strings are derived from attacker-controlled git data:
+    # blame embeds commit AUTHOR NAMES (`git config user.name "..."` is fully
+    # contributor-controlled), and file statuses / churn / diff-check embed
+    # file PATHS. An unescaped `</blame-summaries>` (etc.) in an author name or
+    # path could close the wrapper and inject a sibling instruction tag. Escape
+    # them, matching the defense-in-depth applied to title/body/prior/codex.
     precomp_blocks = []
     if file_statuses:
-        precomp_blocks.append(f"- File statuses:\n{file_statuses}")
+        precomp_blocks.append(f"- File statuses:\n{html.escape(file_statuses)}")
     if blame_summaries:
         precomp_blocks.append(
-            f"- <blame-summaries>\n{blame_summaries}\n</blame-summaries>"
+            f"- <blame-summaries>\n{html.escape(blame_summaries)}\n</blame-summaries>"
         )
     if churn_data:
         precomp_blocks.append(
-            f"- <churn-data>\n{churn_data}\n</churn-data>"
+            f"- <churn-data>\n{html.escape(churn_data)}\n</churn-data>"
         )
     if diff_check_warnings:
         precomp_blocks.append(
-            f"- Diff-check warnings (whitespace / conflict markers from `git diff --check`):\n{diff_check_warnings}"
+            f"- Diff-check warnings (whitespace / conflict markers from `git diff --check`):\n{html.escape(diff_check_warnings)}"
         )
     precomp_text = "\n".join(precomp_blocks)
     if precomp_text:
