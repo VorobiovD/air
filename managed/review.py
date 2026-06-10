@@ -139,6 +139,18 @@ VERIFIER_AGENT = "air-review-verifier"
 
 COORDINATOR_AGENT = "air-coordinator"
 
+# GA multiagent-roster coordinator (PR6′ migration, opt-in via
+# AIR_MULTIAGENT=1, default off). Same prompt as air-coordinator; the
+# delegation primitive differs — its roster shares /workspace across
+# threads, enabling MODE: WORKSPACE-HANDOFF (the coordinator writes
+# context files ONCE instead of re-emitting them into every delegation).
+# Created by setup.py only when the flag is on; not pinnable.
+COORDINATOR_MA_AGENT = "air-coordinator-ma"
+
+
+def _multiagent_enabled() -> bool:
+    return os.environ.get("AIR_MULTIAGENT", "") in ("1", "true")
+
 # Conditional 6th specialist (UI / business-audience copy + static UX/a11y).
 # Synced as part of SUB_AGENTS so it's always in the coordinator's
 # callable_agents roster, but only DISPATCHED when the diff touches a
@@ -325,6 +337,9 @@ def sync_agents(review_arch: str = "full"):
         # so a full-only run never creates it (and can't be aborted by a
         # solo-agent creation failure on an at-capacity workspace).
         "AIR_REVIEW_MODE": review_arch,
+        # Same conditional-create posture for the multiagent coordinator
+        # (air-coordinator-ma): only synced when the run opts in.
+        "AIR_MULTIAGENT": os.environ.get("AIR_MULTIAGENT", ""),
     }
     result = subprocess.run(
         [sys.executable, str(Path(__file__).parent / "setup.py")],
@@ -1062,17 +1077,15 @@ async def _run_coordinator_session(
     # ~16K output tokens / ~240s the coordinator spends re-emitting the
     # context+diff in TURN 1/2 (ai-relay #216 session audit).
     #
-    # OFF BY DEFAULT: verified 2026-06-03 (air run 26855698173, session
-    # sesn_01BmuyMmoVUP6xeaWWNXW9pM) that callable-agent threads run in
-    # ISOLATED containers on the research-preview runtime — `file` session
-    # resources do not appear in sub-agent thread containers (the verifier
-    # found /workspace/context/ absent while /workspace/repo, a
-    # github_repository resource, was present), and one thread's writes to
-    # /workspace/findings/ are invisible to siblings. Specialists improvise
-    # when their input paths don't exist (simplify hallucinated a fantasy
-    # PR). Re-enable only after the runtime propagates file mounts +
-    # workspace writes to threads — re-verify with a closed-PR dispatch
-    # before flipping any caller.
+    # OFF BY DEFAULT AND EFFECTIVELY DEAD: verified 2026-06-03 (air run
+    # 26855698173) that callable-agent threads run in ISOLATED containers,
+    # and probe 3 (2026-06-11, probe_multiagent_filemount.py) additionally
+    # showed `file` session resources don't materialize at ALL on the
+    # current runtime — not in sub-threads, not even in the PRIMARY thread,
+    # not on plain sessions. Do not flip this flag. The working successor
+    # is AIR_MULTIAGENT's MODE: WORKSPACE-HANDOFF (shared-workspace writes,
+    # probes 1-4), which supersedes this path; the code stays only until
+    # that migration is validated, then both can be removed together.
     handoff_enabled = os.environ.get("AIR_FILE_HANDOFF", "") in ("1", "true")
     handoff_docs = {
         "pr-context.md": pr_context,
@@ -1118,11 +1131,42 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
     # the one session — see managed/api.py for the research-preview header.
     coordinator_out = ""
     coordinator_failure_reason = ""
+    ma_enabled = _multiagent_enabled()
+    coordinator_agent_name = COORDINATOR_MA_AGENT if ma_enabled else COORDINATOR_AGENT
+    if ma_enabled and handoff_enabled:
+        print(
+            "  [warn] AIR_FILE_HANDOFF ignored — AIR_MULTIAGENT supersedes it "
+            "(Files-API mounts don't materialize on this runtime; probe 3, 2026-06-11)",
+            file=sys.stderr,
+        )
+        handoff_enabled = False
     try:
         async with AsyncAnthropic() as client:
             file_resources: list[dict] = []
             handoff_ids: list[str] = []
             coordinator_user_text = ""
+            if ma_enabled:
+                # WORKSPACE-HANDOFF: content embedded once; the coordinator
+                # writes it to the SHARED /workspace in TURN 0 and delegates
+                # short pointers — replacing the per-delegation re-emission
+                # that is full mode's #1 structural cost. git-history stays
+                # inline per coordinator.md's carve-out.
+                print("  multiagent: WORKSPACE-HANDOFF via air-coordinator-ma (AIR_MULTIAGENT=1)")
+                coordinator_user_text = (
+                    "MODE: WORKSPACE-HANDOFF — multiagent shared-workspace "
+                    "run. The full PR context, diff, and verifier task are "
+                    "embedded below. Execute TURN 0 first (write them to "
+                    "/workspace/context/ VERBATIM via quoted heredocs and "
+                    "create /workspace/findings/), then follow your protocol "
+                    "with file-pointer delegations "
+                    "(air-git-history-reviewer: INLINE).\n\n"
+                    f"- Pattern source: {pattern_note}\n"
+                    f"- {ui_scope_line}\n\n"
+                    f"{pr_context}\n\n"
+                    f"<diff>\n{diff}\n</diff>\n\n"
+                    f"{codex_block}\n\n"
+                    f"<verifier-task>\n{verifier_task}\n</verifier-task>"
+                )
             if handoff_enabled:
                 try:
                     file_resources, handoff_ids = await _upload_handoff_files(
@@ -1166,11 +1210,16 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
                 coordinator_out = await _run_session_with_billing_retry(
                     lambda: run_session(
                         client,
-                        agents[COORDINATOR_AGENT]["id"], agents[COORDINATOR_AGENT]["version"],
+                        agents[coordinator_agent_name]["id"],
+                        agents[coordinator_agent_name]["version"],
                         env_id, args.repo, checkout, bot_token,
-                        coordinator_user_text, COORDINATOR_AGENT,
+                        coordinator_user_text, coordinator_agent_name,
                         store_id=store_id,
                         file_resources=file_resources,
+                        # MA sessions: per-thread accounting that excludes
+                        # the primary thread (it idles between turns and
+                        # re-runs — a bare counter drifts; see ThreadTracker).
+                        multiagent_primary=coordinator_agent_name if ma_enabled else None,
                     ),
                     "coordinator",
                 )
@@ -1407,6 +1456,8 @@ async def run_review(args):
         required = SPECIALIST_AGENTS + [VERIFIER_AGENT, COORDINATOR_AGENT, SOLO_AGENT]
     else:
         required = SPECIALIST_AGENTS + [VERIFIER_AGENT, COORDINATOR_AGENT]
+    if _multiagent_enabled() and review_arch != "solo":
+        required = required + [COORDINATOR_MA_AGENT]
     missing = [n for n in required if n not in agents]
     if missing or not env_id:
         print(f"Missing agents: {missing}, env={env_id}. Run setup.py first.", file=sys.stderr)

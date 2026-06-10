@@ -219,6 +219,52 @@ async def _list_events_paged(
     return events
 
 
+class ThreadTracker:
+    """Open-sub-agent-thread accounting for the session drain loop.
+
+    Two runtimes, two event vocabularies, two semantics:
+
+    - callable_agents (research-preview, the default coordinator):
+      `session.thread_created` opens a thread, `session.thread_idle`
+      closes it, threads never re-run. A +/- counter is exact.
+    - multiagent roster (GA, `multiagent_primary` set): threads emit
+      `session.thread_status_running` / `session.thread_status_idle` /
+      `session.thread_status_terminated`, can idle and RE-RUN when the
+      coordinator sends a follow-up, and the PRIMARY thread (the
+      coordinator itself) emits the same lifecycle — so a bare counter
+      drifts. Track per-thread open/closed state keyed by agent name and
+      exclude the primary (probed 2026-06-11: see
+      probe_multiagent_width.py).
+    """
+
+    def __init__(self, multiagent_primary: str | None = None):
+        self.primary = multiagent_primary
+        self._counter = 0          # legacy callable_agents accounting
+        self._open: set[str] = set()  # multiagent per-thread state
+
+    def on_event(self, event_type: str, agent_name: str = "") -> None:
+        if self.primary is None:
+            if event_type == "session.thread_created":
+                self._counter += 1
+            elif event_type == "session.thread_idle":
+                self._counter = max(0, self._counter - 1)
+            return
+        if agent_name == self.primary or not agent_name:
+            return
+        if event_type in ("session.thread_created", "session.thread_status_running"):
+            self._open.add(agent_name)
+        elif event_type in (
+            "session.thread_idle",
+            "session.thread_status_idle",
+            "session.thread_status_terminated",
+        ):
+            self._open.discard(agent_name)
+
+    @property
+    def open_count(self) -> int:
+        return self._counter if self.primary is None else len(self._open)
+
+
 async def run_session(
     client,
     agent_id: str,
@@ -231,6 +277,7 @@ async def run_session(
     label: str,
     store_id: str | None = None,
     file_resources: list[dict] | None = None,
+    multiagent_primary: str | None = None,
 ) -> str:
     """Create a session, send the user prompt, stream events, return collected agent text.
 
@@ -318,12 +365,12 @@ async def run_session(
     # the coordinator's turns while sub-agents are still running — the
     # coordinator's main turn ends, sub-agent threads continue, then the
     # session goes running again when results arrive. The TRUE terminal
-    # is end_turn idle when no sub-agent threads are still open.
-    # `session.thread_created` opens a sub-agent thread (callable_agents
-    # dispatch); `session.thread_idle` closes one. The first run on PR #41
-    # broke on the first intermediate end_turn idle, returned an empty
-    # output, and posted `422 Validation Failed` to GitHub.
-    open_threads = 0
+    # is end_turn idle when no sub-agent threads are still open. The first
+    # run on PR #41 broke on the first intermediate end_turn idle, returned
+    # an empty output, and posted `422 Validation Failed` to GitHub.
+    # ThreadTracker owns the per-runtime accounting (callable_agents
+    # counter vs multiagent per-thread state — see its docstring).
+    threads = ThreadTracker(multiagent_primary)
 
     parts: list[str] = []
     terminated_reason: str | None = None
@@ -376,10 +423,10 @@ async def run_session(
         Reads/mutates closure state:
           - `parts` (list)       — appended via `.append()`, no nonlocal needed
           - `seen_event_ids`     — added via `.add()`, no nonlocal needed
-          - `open_threads` (int) — rebound, requires nonlocal
+          - `threads` (tracker)  — mutated via `.on_event()`, no nonlocal needed
           - `terminated_reason`  — rebound, requires nonlocal
         """
-        nonlocal open_threads, terminated_reason
+        nonlocal terminated_reason
         eid = getattr(event, "id", None)
         if eid:
             if eid in seen_event_ids:
@@ -395,11 +442,8 @@ async def run_session(
                 if text and text.strip() != "[empty message]":
                     parts.append(text)
             return None
-        if t == "session.thread_created":
-            open_threads += 1
-            return None
-        if t == "session.thread_idle":
-            open_threads = max(0, open_threads - 1)
+        if t.startswith("session.thread_"):
+            threads.on_event(t, getattr(event, "agent_name", "") or "")
             return None
         if t == "session.status_idle":
             stop_reason = getattr(event, "stop_reason", None)
@@ -408,7 +452,7 @@ async def run_session(
                 # Transient idle waiting for client-side events; keep going.
                 return None
             if stop_type in TERMINAL_SUCCESS:
-                if open_threads > 0:
+                if threads.open_count > 0:
                     # Intermediate idle — sub-agents still running.
                     return None
                 return "break"
