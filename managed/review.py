@@ -419,7 +419,9 @@ CODEX_RE_REVIEW_MIN_LINES = 20
 CONVERSATION_MAX_ENTRIES = 30
 
 
-async def _start_codex_task(codex_repo: str, codex_base_sha: str) -> tuple["asyncio.Task[str]", float]:
+async def _start_codex_task(
+    codex_repo: str, codex_base_sha: str,
+) -> tuple["asyncio.Task[str]", float, "asyncio.TimerHandle"]:
     """Launch codex as a background task and ensure it has actually started.
 
     `asyncio.create_task` alone is lazy — the coroutine's first step (which
@@ -428,12 +430,15 @@ async def _start_codex_task(codex_repo: str, codex_base_sha: str) -> tuple["asyn
     nesting — on Python ≤3.11 `wait_for` wraps the inner coroutine in its
     own task, so one yield would step only the wrapper), which makes the
     single `await asyncio.sleep(0)` step the session body to its first
-    suspension on every supported Python. The wall-clock cap is applied at
-    the AWAIT site from the launch timestamp returned here — that is why
-    (task, launch_monotonic) come back as a pair: no call site can launch
-    without anchoring the clock the cap is computed from. The overlap
-    window must keep the loop free for the long legs (run them via
-    `asyncio.to_thread`) so the subprocess pipes keep draining.
+    suspension on every supported Python. The wall-clock cap is armed HERE,
+    at launch, as a loop timer that cancels the task — it fires even while
+    the main coroutine sits in `asyncio.to_thread`, so codex can never run
+    past its budget just because the overlap window ran long (cancel
+    reaches run_codex_session's finally, which kills the subprocess). The
+    await site re-checks the same budget from `launch_monotonic` and must
+    `timer.cancel()` when the task completes. The overlap window must keep
+    the loop free for the long legs (run them via `asyncio.to_thread`) so
+    the subprocess pipes keep draining.
     """
     print(
         f"\n[3] codex launched (target-repo={codex_repo}, "
@@ -441,7 +446,8 @@ async def _start_codex_task(codex_repo: str, codex_base_sha: str) -> tuple["asyn
     )
     task = asyncio.create_task(run_codex_session(codex_repo, codex_base_sha))
     await asyncio.sleep(0)
-    return task, time.monotonic()
+    timer = asyncio.get_running_loop().call_later(SESSION_TIMEOUT_SECS, task.cancel)
+    return task, time.monotonic(), timer
 
 
 def _codex_skip_tiny_delta(mode: str, diff: str) -> int | None:
@@ -1718,6 +1724,7 @@ async def run_review(args):
             )
             codex_enabled = False
     codex_task: "asyncio.Task[str] | None" = None
+    codex_timer = None
     t_codex = 0.0
 
     # Client-side pre-computation. Skipped when AIR_TARGET_REPO is unset
@@ -1760,7 +1767,7 @@ async def run_review(args):
         # once its pipe buffer filled. The remaining on-loop tail
         # (build_pr_context and friends) is millisecond-scale formatting.
         if codex_enabled and codex_task is None:
-            codex_task, t_codex = await _start_codex_task(codex_repo, codex_base_sha)
+            codex_task, t_codex, codex_timer = await _start_codex_task(codex_repo, codex_base_sha)
         precomp_t0 = time.monotonic()
         precomp_base = prior_sha if mode == "re-review" else f"origin/{meta['base']['ref']}"
 
@@ -1860,13 +1867,16 @@ async def run_review(args):
     codex_findings = ""
     if codex_enabled:
         if codex_task is None:
-            codex_task, t_codex = await _start_codex_task(codex_repo, codex_base_sha)
+            codex_task, t_codex, codex_timer = await _start_codex_task(codex_repo, codex_base_sha)
         overlapped = time.monotonic() - t_codex
         try:
             # Cap measured FROM LAUNCH: the budget already spent in the
             # overlap window counts against it, so overlapping never
-            # extends codex's allowance. wait_for-on-timeout cancels the
-            # task → run_codex_session's finally kills the subprocess.
+            # extends codex's allowance. The launch-armed loop timer is the
+            # ACTIVE enforcer (it fires even while the main coroutine sits
+            # in to_thread); this wait_for re-checks the same budget at the
+            # await. Either path cancels the task → run_codex_session's
+            # finally kills the subprocess.
             codex_findings = await asyncio.wait_for(
                 codex_task,
                 timeout=max(0.0, SESSION_TIMEOUT_SECS - overlapped),
@@ -1880,6 +1890,19 @@ async def run_review(args):
                 f"  [warn] codex timed out after {SESSION_TIMEOUT_SECS}s — proceeding without it",
                 file=sys.stderr,
             )
+        except asyncio.CancelledError:
+            # codex_task.cancelled() ⇒ the launch-armed watchdog fired
+            # during the overlap window — a timeout, not a shutdown. A
+            # CancelledError with the task NOT cancelled means run_review
+            # itself is being cancelled (SIGTERM / loop shutdown) and must
+            # keep propagating.
+            if not codex_task.cancelled():
+                raise
+            print(
+                f"  [warn] codex hit its {SESSION_TIMEOUT_SECS}s budget during "
+                f"the overlap window — proceeding without it",
+                file=sys.stderr,
+            )
         except SpecialistSessionError as e:
             print(f"  [warn] codex failed: {e.reason} — proceeding without it", file=sys.stderr)
         except Exception as e:
@@ -1887,6 +1910,9 @@ async def run_review(args):
                 f"  [warn] codex error: {type(e).__name__}: {e} — proceeding without it",
                 file=sys.stderr,
             )
+        finally:
+            if codex_timer is not None:
+                codex_timer.cancel()
 
     verifier_task = build_verifier_task(
         mode, args.repo, head_sha, prior_sha, (prior or {}).get("body", ""),
