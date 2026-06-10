@@ -78,6 +78,8 @@ from github_client import (  # noqa: E402,F401 — split modules; re-exported fo
     fetch_pr_reviews,
     fetch_pr_review_comments,
     fetch_inter_diff,
+    count_diff_changed_lines,
+    DIFF_TRUNCATION_MARKER,
 )
 from verdict import (  # noqa: E402,F401 — split modules; re-exported for tests/callers
     count_blockers,
@@ -407,34 +409,32 @@ _PROMOTE_MAX_SIBLING_PAGES = 3
 # codex's wall-time leg + session.
 CODEX_RE_REVIEW_MIN_LINES = 20
 
+# Tail-cap for the <pr-conversation> block (lib default is 100). The block
+# rides in EVERY context copy (~11-13× per review); the lib keeps the
+# NEWEST entries and emits <conv-truncated>, so old resolved threads age
+# out first. Managed-only — the CLI bash path keeps the lib default.
+CONVERSATION_MAX_ENTRIES = 30
+
+# One shared sizing metric for promote overlap, codex-skip, and hygiene
+# stub counts — canonical definition lives next to the hygiene code.
+_count_diff_changed_lines = count_diff_changed_lines
+
 
 def _codex_skip_tiny_delta(mode: str, diff: str) -> int | None:
     """Changed-line count when a re-review delta is too small for codex.
 
     Returns the count (for the decision log) when codex should be skipped,
-    None when it should run. Full reviews always run codex.
+    None when it should run. Full reviews always run codex. A byte-capped
+    diff never skips: real changes may live in the omitted tail, and codex
+    reads the git tree rather than this diff — it's the one lens that can
+    still see them.
     """
     if mode != "re-review":
         return None
+    if DIFF_TRUNCATION_MARKER in (diff or ""):
+        return None
     n = _count_diff_changed_lines(diff)
     return n if n < CODEX_RE_REVIEW_MIN_LINES else None
-
-
-def _count_diff_changed_lines(diff: str) -> int:
-    """Count added/removed lines in a unified diff.
-
-    Counts lines beginning with a single `+` or `-`, excluding the
-    `+++`/`---` file-header lines. Used to size one diff against another
-    for the promote overlap gate — a stable proxy for "how much changed,"
-    not a byte-exact metric.
-    """
-    n = 0
-    for line in (diff or "").splitlines():
-        if line.startswith("+++") or line.startswith("---"):
-            continue
-        if line.startswith("+") or line.startswith("-"):
-            n += 1
-    return n
 
 
 def _detect_promote_fastpath(
@@ -1505,12 +1505,9 @@ async def run_review(args):
     # numbered findings as untrusted-but-unfiltered <conv-comment>s
     # (which the agents are then told to flag duplicates against).
     if bot_login:
-        # Tail-cap: the block rides in EVERY context copy (~11-13× per
-        # review), and the lib keeps the NEWEST entries when capping (with
-        # a <conv-truncated> marker), so old resolved threads age out first.
         pr_conv_block = pr_conversation.build_pr_conversation(
             all_comments, pr_reviews_raw, pr_inline_raw, bot_login,
-            max_entries=30,
+            max_entries=CONVERSATION_MAX_ENTRIES,
         )
     else:
         print(

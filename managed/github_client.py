@@ -258,19 +258,40 @@ def submit_review_verdict(
 # Generated/vendored content travels ~11-13× per review (the coordinator
 # re-emits the diff to every specialist + the verifier, 5-6 of those as
 # Sonnet output) without ever changing a verdict — a lockfile diff is noise
-# to every lens. Stub those file segments to one visible line and hard-cap
-# the total so a pathological PR can't blow out the coordinator context.
+# to every lens. Stub those file segments to one visible line and cap the
+# total so a pathological PR can't blow out the coordinator context.
 # Manifests (package.json, composer.json, ...) stay whole: the security
-# checklist's supply-chain item reads them. Stub lines start with neither
-# `+` nor `-`, so changed-line counts (promote overlap, codex-skip) simply
+# checklist's supply-chain item reads them. Lockfiles are stubbed ONLY when
+# the same directory's manifest also changed in this diff — a lockfile-only
+# change (resolver/integrity swap with no manifest touch) is the
+# supply-chain attack shape and stays fully visible. Stub lines start with
+# neither `+` nor `-`, so changed-line counts (promote overlap, codex-skip)
 # ignore stubbed files on both sides of any ratio. Conflict markers inside
-# a stubbed file are still caught by precomp's `git diff --check` warnings.
+# a stubbed file are caught by precomp's `git diff --check` warnings on
+# checkout-enabled runs (AIR_TARGET_REPO set); checkout-less runs lose that
+# net for stubbed segments — the marker line keeps the path visible.
 DIFF_MAX_BYTES = int(os.environ.get("AIR_DIFF_MAX_BYTES", "500000"))
+# In-diff prefix of the cap marker. review.py keys codex-skip off it: a
+# truncated re-review delta must NOT skip codex (real changes may live in
+# the omitted tail, and codex reads the git tree, not this diff).
+DIFF_TRUNCATION_MARKER = "[air: diff truncated"
+# Headroom reserved for the truncation marker so the returned diff stays
+# within the cap, marker included (paths shown are capped at 5).
+_MARKER_RESERVE_BYTES = 512
 
-_GENERATED_BASENAMES = {
-    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "composer.lock",
-    "Cargo.lock", "poetry.lock", "uv.lock", "go.sum", "Gemfile.lock",
-    "bun.lock", "bun.lockb",
+# Lockfile → the manifest whose same-directory change justifies stubbing.
+_LOCKFILE_MANIFESTS = {
+    "package-lock.json": "package.json",
+    "yarn.lock": "package.json",
+    "pnpm-lock.yaml": "package.json",
+    "bun.lock": "package.json",
+    "bun.lockb": "package.json",
+    "composer.lock": "composer.json",
+    "Cargo.lock": "Cargo.toml",
+    "poetry.lock": "pyproject.toml",
+    "uv.lock": "pyproject.toml",
+    "go.sum": "go.mod",
+    "Gemfile.lock": "Gemfile",
 }
 _GENERATED_SUFFIXES = (".min.js", ".min.css", ".map", ".snap")
 # Whole-segment match only (`dist` matches `pkg/dist/x.js`, not
@@ -283,7 +304,7 @@ def _is_generated_path(path: str) -> bool:
     if not path:
         return False
     basename = path.rsplit("/", 1)[-1]
-    if basename in _GENERATED_BASENAMES:
+    if basename in _LOCKFILE_MANIFESTS:
         return True
     if basename.endswith(_GENERATED_SUFFIXES):
         return True
@@ -296,14 +317,33 @@ def _segment_path(segment: str) -> str:
     return header.rsplit(" b/", 1)[-1] if " b/" in header else ""
 
 
-def _changed_line_count(segment: str) -> int:
+def count_diff_changed_lines(diff: str) -> int:
+    """Count added/removed lines in a unified diff (excl. +++/--- headers).
+
+    The one shared sizing metric: promote overlap, codex-skip, and hygiene
+    stub counts all use this definition (review.py re-exports it)."""
     n = 0
-    for line in segment.splitlines():
+    for line in (diff or "").splitlines():
         if line.startswith("+++") or line.startswith("---"):
             continue
         if line.startswith("+") or line.startswith("-"):
             n += 1
     return n
+
+
+def _stub_decision(path: str, changed_paths: set[str]) -> bool:
+    """Should this generated-classified path actually be stubbed?
+
+    Lockfiles: only when the paired manifest in the SAME directory also
+    changed — dependency-bump noise gets stubbed, a lockfile-only change
+    (the supply-chain evasion shape) stays fully reviewable. All other
+    generated-classified paths are stubbed unconditionally."""
+    basename = path.rsplit("/", 1)[-1]
+    manifest = _LOCKFILE_MANIFESTS.get(basename)
+    if manifest is None:
+        return True
+    prefix = path[: -len(basename)]  # "" at root, "dir/" otherwise
+    return f"{prefix}{manifest}" in changed_paths
 
 
 def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
@@ -317,13 +357,20 @@ def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
         return diff
     budget = DIFF_MAX_BYTES if max_bytes is None else max_bytes
     segments = re.split(r"(?m)^(?=diff --git )", diff)
+    changed_paths = {
+        _segment_path(s) for s in segments if s.startswith("diff --git ")
+    }
     kept: list[str] = []
     for seg in segments:
         path = _segment_path(seg)
-        if not seg.startswith("diff --git ") or not _is_generated_path(path):
+        if (
+            not seg.startswith("diff --git ")
+            or not _is_generated_path(path)
+            or not _stub_decision(path, changed_paths)
+        ):
             kept.append(seg)
             continue
-        n = _changed_line_count(seg)
+        n = count_diff_changed_lines(seg)
         header = seg.splitlines()[0]
         kept.append(
             f"{header}\n[air: {path}: {n} changed lines omitted "
@@ -334,21 +381,24 @@ def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
     if len(result.encode("utf-8", errors="replace")) <= budget:
         return result
 
-    # Truncate at a file boundary: keep whole segments while they fit.
+    # Greedy first-fit at file boundaries: a single oversized segment is
+    # omitted on its own — it must not drag down the (possibly small)
+    # segments after it.
+    limit = max(0, budget - _MARKER_RESERVE_BYTES)
     capped: list[str] = []
     omitted: list[str] = []
     used = 0
     for seg in kept:
         size = len(seg.encode("utf-8", errors="replace"))
-        if used + size <= budget and not omitted:
+        if used + size <= limit:
             capped.append(seg)
             used += size
         else:
             omitted.append(_segment_path(seg) or "(preamble)")
-    shown = ", ".join(omitted[:20])
-    suffix = "" if len(omitted) <= 20 else f", … +{len(omitted) - 20} more"
+    shown = ", ".join(omitted[:5])
+    suffix = "" if len(omitted) <= 5 else f", … +{len(omitted) - 5} more"
     capped.append(
-        f"[air: diff truncated at {budget} bytes — {len(omitted)} file(s) "
+        f"{DIFF_TRUNCATION_MARKER} at {budget} bytes — {len(omitted)} file(s) "
         f"omitted: {shown}{suffix}]\n"
     )
     print(
