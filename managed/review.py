@@ -402,6 +402,24 @@ PROMOTE_OVERLAP_THRESHOLD = 0.80
 _PROMOTE_MAX_SIBLING_PAGES = 3
 
 
+# Codex is an advisory extra pass; below this many changed inter-diff lines
+# a re-review delta is well inside the specialists' easy range and not worth
+# codex's wall-time leg + session.
+CODEX_RE_REVIEW_MIN_LINES = 20
+
+
+def _codex_skip_tiny_delta(mode: str, diff: str) -> int | None:
+    """Changed-line count when a re-review delta is too small for codex.
+
+    Returns the count (for the decision log) when codex should be skipped,
+    None when it should run. Full reviews always run codex.
+    """
+    if mode != "re-review":
+        return None
+    n = _count_diff_changed_lines(diff)
+    return n if n < CODEX_RE_REVIEW_MIN_LINES else None
+
+
 def _count_diff_changed_lines(diff: str) -> int:
     """Count added/removed lines in a unified diff.
 
@@ -1487,8 +1505,12 @@ async def run_review(args):
     # numbered findings as untrusted-but-unfiltered <conv-comment>s
     # (which the agents are then told to flag duplicates against).
     if bot_login:
+        # Tail-cap: the block rides in EVERY context copy (~11-13× per
+        # review), and the lib keeps the NEWEST entries when capping (with
+        # a <conv-truncated> marker), so old resolved threads age out first.
         pr_conv_block = pr_conversation.build_pr_conversation(
-            all_comments, pr_reviews_raw, pr_inline_raw, bot_login
+            all_comments, pr_reviews_raw, pr_inline_raw, bot_login,
+            max_entries=30,
         )
     else:
         print(
@@ -1734,6 +1756,14 @@ async def run_review(args):
         and shutil.which("codex") is not None
         and os.environ.get("OPENAI_API_KEY")
     )
+    if codex_enabled:
+        tiny = _codex_skip_tiny_delta(mode, diff)
+        if tiny is not None:
+            print(
+                f"  codex: skipped — re-review delta {tiny} lines "
+                f"(< {CODEX_RE_REVIEW_MIN_LINES})"
+            )
+            codex_enabled = False
 
     codex_findings = ""
     if codex_enabled:

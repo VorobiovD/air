@@ -5,6 +5,7 @@ into `_gh_headers()`. All HTTP to api.github.com lives here: fetchers,
 pagination, the review-comment POST with its 422 retry, and the formal
 review-verdict POST.
 """
+import os
 import re
 import sys
 import time
@@ -254,6 +255,110 @@ def submit_review_verdict(
     print(f"  Verdict: {event} (commit {commit_id[:8]})")
 
 
+# Generated/vendored content travels ~11-13× per review (the coordinator
+# re-emits the diff to every specialist + the verifier, 5-6 of those as
+# Sonnet output) without ever changing a verdict — a lockfile diff is noise
+# to every lens. Stub those file segments to one visible line and hard-cap
+# the total so a pathological PR can't blow out the coordinator context.
+# Manifests (package.json, composer.json, ...) stay whole: the security
+# checklist's supply-chain item reads them. Stub lines start with neither
+# `+` nor `-`, so changed-line counts (promote overlap, codex-skip) simply
+# ignore stubbed files on both sides of any ratio. Conflict markers inside
+# a stubbed file are still caught by precomp's `git diff --check` warnings.
+DIFF_MAX_BYTES = int(os.environ.get("AIR_DIFF_MAX_BYTES", "500000"))
+
+_GENERATED_BASENAMES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "composer.lock",
+    "Cargo.lock", "poetry.lock", "uv.lock", "go.sum", "Gemfile.lock",
+    "bun.lock", "bun.lockb",
+}
+_GENERATED_SUFFIXES = (".min.js", ".min.css", ".map", ".snap")
+# Whole-segment match only (`dist` matches `pkg/dist/x.js`, not
+# `src/distance.py`). `build/` is deliberately absent — it collides with
+# committed source in too many layouts.
+_GENERATED_SEGMENTS = {"dist", "node_modules", "__snapshots__", "vendor"}
+
+
+def _is_generated_path(path: str) -> bool:
+    if not path:
+        return False
+    basename = path.rsplit("/", 1)[-1]
+    if basename in _GENERATED_BASENAMES:
+        return True
+    if basename.endswith(_GENERATED_SUFFIXES):
+        return True
+    return any(seg in _GENERATED_SEGMENTS for seg in path.split("/")[:-1])
+
+
+def _segment_path(segment: str) -> str:
+    """The b/-side path from a `diff --git a/x b/x` header (rename-safe)."""
+    header = segment.splitlines()[0] if segment else ""
+    return header.rsplit(" b/", 1)[-1] if " b/" in header else ""
+
+
+def _changed_line_count(segment: str) -> int:
+    n = 0
+    for line in segment.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+") or line.startswith("-"):
+            n += 1
+    return n
+
+
+def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
+    """Stub generated-file segments, then enforce the global size cap.
+
+    Both transformations leave an explicit in-diff marker (and a stdout
+    decision-log line), so reviewers — human and agent — can always see
+    what was omitted. Nothing is dropped silently.
+    """
+    if not diff:
+        return diff
+    budget = DIFF_MAX_BYTES if max_bytes is None else max_bytes
+    segments = re.split(r"(?m)^(?=diff --git )", diff)
+    kept: list[str] = []
+    for seg in segments:
+        path = _segment_path(seg)
+        if not seg.startswith("diff --git ") or not _is_generated_path(path):
+            kept.append(seg)
+            continue
+        n = _changed_line_count(seg)
+        header = seg.splitlines()[0]
+        kept.append(
+            f"{header}\n[air: {path}: {n} changed lines omitted "
+            f"(generated/vendored)]\n"
+        )
+        print(f"  diff hygiene: stubbed {path} ({n} changed lines)")
+    result = "".join(kept)
+    if len(result.encode("utf-8", errors="replace")) <= budget:
+        return result
+
+    # Truncate at a file boundary: keep whole segments while they fit.
+    capped: list[str] = []
+    omitted: list[str] = []
+    used = 0
+    for seg in kept:
+        size = len(seg.encode("utf-8", errors="replace"))
+        if used + size <= budget and not omitted:
+            capped.append(seg)
+            used += size
+        else:
+            omitted.append(_segment_path(seg) or "(preamble)")
+    shown = ", ".join(omitted[:20])
+    suffix = "" if len(omitted) <= 20 else f", … +{len(omitted) - 20} more"
+    capped.append(
+        f"[air: diff truncated at {budget} bytes — {len(omitted)} file(s) "
+        f"omitted: {shown}{suffix}]\n"
+    )
+    print(
+        f"  [warn] diff hygiene: {len(omitted)} file segment(s) over the "
+        f"{budget}-byte cap omitted: {shown}{suffix}",
+        file=sys.stderr,
+    )
+    return "".join(capped)
+
+
 def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
     resp = _gh_request(
         "GET", f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
@@ -262,7 +367,7 @@ def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
     if not resp.ok:
         print(f"Error fetching PR diff: {_github_error_message(resp)}", file=sys.stderr)
         sys.exit(1)
-    return resp.text
+    return apply_diff_hygiene(resp.text)
 
 
 def _github_paginate(url: str, token: str, max_pages: int | None = None) -> list[dict]:
@@ -377,4 +482,7 @@ def fetch_inter_diff(
     if not resp.ok:
         print(f"Error fetching inter-diff: {_github_error_message(resp)}", file=sys.stderr)
         return None
-    return resp.text
+    # Same hygiene as fetch_pr_diff — the promote overlap ratio divides one
+    # changed-line count by the other, so both sides must see the same
+    # stubbing or generated churn would skew the gate.
+    return apply_diff_hygiene(resp.text)
