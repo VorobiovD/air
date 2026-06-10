@@ -415,6 +415,7 @@ CODEX_RE_REVIEW_MIN_LINES = 20
 # out first. Managed-only — the CLI bash path keeps the lib default.
 CONVERSATION_MAX_ENTRIES = 30
 
+
 def _codex_skip_tiny_delta(mode: str, diff: str) -> int | None:
     """Changed-line count when a re-review delta is too small for codex.
 

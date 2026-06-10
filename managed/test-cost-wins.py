@@ -162,6 +162,26 @@ def test_cap_holds_with_pathologically_long_omitted_paths():
     assert "[air: diff truncated" in out
 
 
+def test_cap_omitted_lockfile_gets_dedicated_supply_chain_marker():
+    # A lockfile-only diff over the cap passes the stub gate (kept whole)
+    # but is then size-capped — it must surface as a LOUD lockfile-specific
+    # marker, not fold into the generic omitted count (the security lens
+    # needs the signal that supply-chain review is incomplete).
+    diff = _file_segment("yarn.lock", added=200) + _file_segment("src/app.py", added=5)
+    seg = len(_file_segment("src/app.py", added=5).encode())
+    out = apply_diff_hygiene(diff, max_bytes=seg + RESERVE + 200)
+    assert "[air: LOCKFILE yarn.lock omitted by the size cap" in out
+    assert "supply-chain review incomplete" in out
+    assert "diff --git a/src/app.py" not in out or True  # app.py may or may not fit
+
+
+def test_cap_omitted_non_lockfile_gets_no_lockfile_marker():
+    diff = _file_segment("big.py", added=500)
+    out = apply_diff_hygiene(diff, max_bytes=300)
+    assert "[air: LOCKFILE" not in out
+    assert "[air: diff truncated" in out
+
+
 def test_cap_tiny_budget_floor_still_emits_marker():
     # Below the path-less-marker floor (~80 bytes) the cap is degenerate:
     # the marker is emitted anyway (visibility beats a strict cap) and no

@@ -426,10 +426,23 @@ def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
             used += size
         else:
             omitted.append(path or "(preamble)")
+    # A cap-omitted LOCKFILE gets its own loud marker: the stub gate
+    # deliberately kept it whole (lockfile-only = the supply-chain attack
+    # shape), so silently folding it into the generic count would blind
+    # the security lens to exactly the shape the lockfile exception
+    # protects. The dedicated line tells the checklist to flag the gap.
+    lockfile_markers = "".join(
+        f"[air: LOCKFILE {p[-60:]} omitted by the size cap — supply-chain "
+        f"review incomplete; fetch its diff manually]\n"
+        for p in omitted
+        if p.rsplit("/", 1)[-1] in _LOCKFILE_MANIFESTS
+    )
+    used += len(lockfile_markers.encode("utf-8", errors="replace"))
     for n_shown in (5, 4, 3, 2, 1, 0):
         marker = _marker(omitted[:n_shown], len(omitted))
         if used + len(marker.encode("utf-8", errors="replace")) <= budget:
             break
+    capped.append(lockfile_markers)
     capped.append(marker)
     print(
         f"  [warn] diff hygiene: {len(omitted)} file segment(s) over the "
