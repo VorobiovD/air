@@ -424,24 +424,22 @@ async def _start_codex_task(codex_repo: str, codex_base_sha: str) -> tuple["asyn
 
     `asyncio.create_task` alone is lazy — the coroutine's first step (which
     spawns the codex OS subprocess) only runs when the event loop next gets
-    control. The `await asyncio.sleep(0)` yields exactly once so the task
-    runs to its first suspension point before the caller proceeds; the
-    overlap window itself must keep the loop free (run blocking work via
-    `asyncio.to_thread`) so the subprocess pipes keep draining. The
-    `wait_for` timer starts at that first step, so the wall-clock cap runs
-    from launch. Returns (task, launch_monotonic) — coupled in one place so
-    no call site can launch without anchoring the clock.
+    control. The task wraps `run_codex_session` DIRECTLY (no `wait_for`
+    nesting — on Python ≤3.11 `wait_for` wraps the inner coroutine in its
+    own task, so one yield would step only the wrapper), which makes the
+    single `await asyncio.sleep(0)` step the session body to its first
+    suspension on every supported Python. The wall-clock cap is applied at
+    the AWAIT site from the launch timestamp returned here — that is why
+    (task, launch_monotonic) come back as a pair: no call site can launch
+    without anchoring the clock the cap is computed from. The overlap
+    window must keep the loop free for the long legs (run them via
+    `asyncio.to_thread`) so the subprocess pipes keep draining.
     """
     print(
         f"\n[3] codex launched (target-repo={codex_repo}, "
         f"base={codex_base_sha[:8]}) — overlapping precomp"
     )
-    task = asyncio.create_task(
-        asyncio.wait_for(
-            run_codex_session(codex_repo, codex_base_sha),
-            timeout=SESSION_TIMEOUT_SECS,
-        )
-    )
+    task = asyncio.create_task(run_codex_session(codex_repo, codex_base_sha))
     await asyncio.sleep(0)
     return task, time.monotonic()
 
@@ -1755,10 +1753,12 @@ async def run_review(args):
         # Launch codex NOW so its ≤5-min leg overlaps the precomp below.
         # Must come after the sibling fetch above (codex's git ops need
         # the prior SHA resolvable). _start_codex_task yields once so the
-        # subprocess is actually spawned, and precomp runs in a worker
-        # thread (asyncio.to_thread) so the event loop stays free to drain
-        # codex's stdout/stderr pipes for the whole window — a blocked
-        # loop would stall codex once its pipe buffer filled.
+        # subprocess is actually spawned, and the LONG legs of the window
+        # (precomp here, the store lookups below) run in worker threads
+        # via asyncio.to_thread so the event loop stays free to drain
+        # codex's stdout/stderr pipes — a blocked loop would stall codex
+        # once its pipe buffer filled. The remaining on-loop tail
+        # (build_pr_context and friends) is millisecond-scale formatting.
         if codex_enabled and codex_task is None:
             codex_task, t_codex = await _start_codex_task(codex_repo, codex_base_sha)
         precomp_t0 = time.monotonic()
@@ -1797,8 +1797,10 @@ async def run_review(args):
     # store); a repo without one keeps the wiki path end-to-end. Lookup
     # failures fall back to the wiki — never block a review on store plumbing.
     # Resolved BEFORE the ui-copy gate, which reads the store's PROJECT-PROFILE
-    # for repo-declared copy paths.
-    store_id = memory_store.get_store_id(args.repo, flow="review")
+    # for repo-declared copy paths. Off-loop via to_thread: this is a
+    # paginated network call inside the codex overlap window, and the loop
+    # must stay free to drain the codex pipes.
+    store_id = await asyncio.to_thread(memory_store.get_store_id, args.repo, flow="review")
     if store_id:
         print(f"  pattern store: {store_id} (wiki mount skipped)")
 
@@ -1816,7 +1818,9 @@ async def run_review(args):
         ui_in_scope, ui_scope_reason = True, "web markup/i18n/docs"
     else:
         ui_in_scope, ui_scope_reason = False, ""
-        copy_globs = _user_facing_copy_globs(store_id)  # store read only when the web check missed
+        # Store read only when the web check missed; off-loop (network)
+        # so the codex overlap window keeps draining pipes.
+        copy_globs = await asyncio.to_thread(_user_facing_copy_globs, store_id)
         if copy_globs and any(_path_matches_globs(p, copy_globs) for p in changed_paths):
             ui_in_scope, ui_scope_reason = True, "declared copy paths"
     print(f"  ui-copy: {f'in scope ({ui_scope_reason})' if ui_in_scope else 'skipped (no user-facing files)'}")
@@ -1859,7 +1863,14 @@ async def run_review(args):
             codex_task, t_codex = await _start_codex_task(codex_repo, codex_base_sha)
         overlapped = time.monotonic() - t_codex
         try:
-            codex_findings = await codex_task
+            # Cap measured FROM LAUNCH: the budget already spent in the
+            # overlap window counts against it, so overlapping never
+            # extends codex's allowance. wait_for-on-timeout cancels the
+            # task → run_codex_session's finally kills the subprocess.
+            codex_findings = await asyncio.wait_for(
+                codex_task,
+                timeout=max(0.0, SESSION_TIMEOUT_SECS - overlapped),
+            )
             print(
                 f"  codex complete in {time.monotonic() - t_codex:.1f}s "
                 f"(launched {overlapped:.1f}s before this await)"

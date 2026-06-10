@@ -133,22 +133,33 @@ def test_start_codex_task_actually_starts_before_returning(monkeypatch):
 def test_codex_makes_progress_while_main_blocks_in_to_thread(monkeypatch):
     # The overlap contract: with precomp in a worker thread, the event loop
     # stays free, so the codex task progresses to completion DURING the
-    # blocking work — not after it.
+    # blocking work — not after it. Deterministic by construction: the fake
+    # needs exactly ONE further loop iteration after launch, and ANY
+    # to_thread suspension hands the loop those iterations — no wall-clock
+    # margins to race a loaded CI runner.
     import asyncio
-    import time as _t
+    import threading
 
     state = {"finished": False}
+    release = threading.Event()
 
     async def fake_codex(repo, sha):
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
         state["finished"] = True
         return "findings"
+
+    def blocking_precomp():
+        # Wait until the loop has had the chance to run the codex task to
+        # completion (it only needs ready-callback iterations, which the
+        # loop processes while this thread holds main suspended).
+        release.wait(timeout=10)
 
     monkeypatch.setattr(review, "run_codex_session", fake_codex)
 
     async def main():
         task, _ = await review._start_codex_task("/repo", "a" * 40)
-        await asyncio.to_thread(_t.sleep, 0.3)   # stand-in for precomp
+        task.add_done_callback(lambda _t: release.set())
+        await asyncio.to_thread(blocking_precomp)
         finished_during_block = state["finished"]
         return finished_during_block, await task
 
