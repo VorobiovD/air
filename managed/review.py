@@ -1803,9 +1803,56 @@ async def run_review(args):
             agents, env_id, args, checkout, bot_token, store_id,
             pr_context, diff, codex_block, verifier_task,
         )
-        # Solo IS the review — feed it through the shared post-review pipeline
-        # exactly like a coordinator output (extract / post / verdict / learn).
-        coordinator_out, coordinator_failure_reason = solo_out, solo_failure_reason
+        # EXPERIMENT (this branch only): solo runs on Fable 5 and posts as a
+        # labeled, NON-GATING comparison comment — no verdict, no learn, no
+        # pattern writes. The production gating review comes from the full
+        # multi-agent run; this comment exists purely for model comparison.
+        solo_secs = time.monotonic() - t0
+        print(f"  Solo (Fable) session complete in {solo_secs:.1f}s")
+        if not solo_out:
+            print(
+                f"::error::fable-solo experiment: solo session produced no "
+                f"output ({solo_failure_reason})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        exp_body, exp_ok = _extract_review_body(solo_out, head_sha)
+        if not exp_ok:
+            print(
+                "::error::fable-solo experiment: no valid `## Code Review` "
+                "body in solo output — not posting",
+                file=sys.stderr,
+            )
+            print(solo_out[:4000], file=sys.stderr)
+            sys.exit(1)
+        if args.dry_run:
+            print("\n--- fable-solo review (dry run) ---\n")
+            print(exp_body)
+            return
+        # Re-header so the body does NOT start with `## Code Review\n` —
+        # invisible to the cooldown/dedup/re-review detectors (same trick as
+        # both-mode's comparison comment).
+        _, _, exp_rest = exp_body.partition("\n")
+        exp_comment = (
+            "## Code Review (solo — Fable 5 experiment)\n\n"
+            "_Single-agent solo review on `claude-fable-5`, posted for model "
+            "comparison against the multi-agent full review. Non-gating; no "
+            "verdict submitted._\n\n"
+            f"{exp_rest}"
+        )
+        exp_resp = _post_review_comment_with_retry(
+            args.repo, args.pr_number, exp_comment, bot_token
+        )
+        if not exp_resp.ok:
+            print(
+                f"::error::fable-solo experiment: comment post failed: "
+                f"{_github_error_message(exp_resp)}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(f"  Posted Fable solo comparison: {exp_resp.json()['html_url']}")
+        print(f"  [experiment] wall: {solo_secs:.1f}s — compare against the full-mode run on the same SHA")
+        return
 
     coordinator_secs = time.monotonic() - t0
     print(f"  Review session(s) complete in {coordinator_secs:.1f}s")

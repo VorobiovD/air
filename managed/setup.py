@@ -95,6 +95,7 @@ MODEL_ALIASES = {
     "opus": "claude-opus-4-8",
     "sonnet": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5",
+    "fable": "claude-fable-5",
 }
 
 DEFAULT_OPUS = MODEL_ALIASES["opus"]
@@ -451,6 +452,11 @@ def main():
         print(f"[5] Solo reviewer agent — SKIPPED (missing prompt files: {missing_md})", file=sys.stderr)
     else:
         print("[5] Solo reviewer agent (single-session, all lenses)")
+        # EXPERIMENT (this branch only): solo runs on Fable 5 instead of
+        # Opus-fast — comparing the strongest single-agent configuration
+        # against the production multi-agent full review. Fable has no
+        # fast-mode variant, so no speed is passed ($10/$50 per MTok,
+        # 2x Opus 4.8 rates).
         solo = create_or_update_agent(
             name="air-solo-reviewer",
             system=assemble_solo_prompt(),
@@ -460,8 +466,7 @@ def main():
                 "configs": [{"name": t, "enabled": True} for t in ["bash", "read", "grep", "glob"]],
             }],
             existing=agents_by_name.get("air-solo-reviewer"),
-            model=DEFAULT_OPUS,
-            speed="fast",
+            model=MODEL_ALIASES["fable"],
         )
 
     coord_status = "+ coordinator" if coordinator else "(coordinator absent)"
