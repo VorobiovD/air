@@ -99,6 +99,93 @@ def test_empty_inputs():
     assert compute_churn_data("", FILES) == ""
 
 
+# ---------------------------------------------------------------------------
+# S1 — codex overlap orchestration (_start_codex_task)
+# ---------------------------------------------------------------------------
+
+def test_start_codex_task_actually_starts_before_returning(monkeypatch):
+    # create_task alone is lazy: without the yield inside _start_codex_task
+    # the coroutine body (which spawns the codex subprocess) would not run
+    # until the caller's next await — i.e. after all the sync precomp it
+    # was supposed to overlap (the PR #147 blocker).
+    import asyncio
+
+    state = {"started": False}
+
+    async def fake_codex(repo, sha):
+        state["started"] = True
+        return "findings"
+
+    monkeypatch.setattr(review, "run_codex_session", fake_codex)
+
+    async def main():
+        task, t0 = await review._start_codex_task("/repo", "a" * 40)
+        started_at_return = state["started"]
+        out = await task
+        return started_at_return, out, t0
+
+    started_at_return, out, t0 = asyncio.run(main())
+    assert started_at_return is True
+    assert out == "findings"
+    assert t0 > 0
+
+
+def test_codex_makes_progress_while_main_blocks_in_to_thread(monkeypatch):
+    # The overlap contract: with precomp in a worker thread, the event loop
+    # stays free, so the codex task progresses to completion DURING the
+    # blocking work — not after it.
+    import asyncio
+    import time as _t
+
+    state = {"finished": False}
+
+    async def fake_codex(repo, sha):
+        await asyncio.sleep(0.05)
+        state["finished"] = True
+        return "findings"
+
+    monkeypatch.setattr(review, "run_codex_session", fake_codex)
+
+    async def main():
+        task, _ = await review._start_codex_task("/repo", "a" * 40)
+        await asyncio.to_thread(_t.sleep, 0.3)   # stand-in for precomp
+        finished_during_block = state["finished"]
+        return finished_during_block, await task
+
+    finished_during_block, out = asyncio.run(main())
+    assert finished_during_block is True   # progressed while main was blocked
+    assert out == "findings"
+
+
+def test_codex_task_cancel_reaches_coroutine(monkeypatch):
+    # The precomp cancel-guard relies on task.cancel() reaching
+    # run_codex_session (whose finally kills the subprocess).
+    import asyncio
+
+    state = {"cancelled": False}
+
+    async def fake_codex(repo, sha):
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            state["cancelled"] = True
+            raise
+        return "never"
+
+    monkeypatch.setattr(review, "run_codex_session", fake_codex)
+
+    async def main():
+        task, _ = await review._start_codex_task("/repo", "a" * 40)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(main())
+    assert state["cancelled"] is True
+
+
 def test_map_files_preserves_order_under_concurrency():
     # Slow-first workload: with completion-order collection the fast items
     # would come back first; input-order collection must win.

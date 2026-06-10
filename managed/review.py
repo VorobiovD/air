@@ -8,10 +8,13 @@ hands off to a single `air-coordinator` session that dispatches the 4
 specialists in parallel + verifier as `callable_agents` sub-agents
 within one Anthropic session, mirroring the local CLI's architecture.
 
-Codex stays client-side and runs sequentially BEFORE the coordinator
-session — Sonnet coordinator with codex inside doesn't parallelize
-reliably and Opus coordinator costs ~2.5× the Sonnet equivalent. Pattern
-B (GHA-side codex → coordinator user message) keeps clean parallelism.
+Codex stays client-side and completes BEFORE the coordinator session —
+Sonnet coordinator with codex inside doesn't parallelize reliably and
+Opus coordinator costs ~2.5× the Sonnet equivalent. Pattern B (GHA-side
+codex → coordinator user message) keeps clean parallelism. The codex
+subprocess launches as a background task that overlaps the precomp +
+context-build leg (precomp runs in a worker thread so the event loop
+stays free to drain codex's pipes).
 
 Replaces the prior asyncio.gather over 4 specialist sessions + sequential
 verifier session (5 sessions → 1) introduced in v1.7.0; that shape was
@@ -414,6 +417,33 @@ CODEX_RE_REVIEW_MIN_LINES = 20
 # NEWEST entries and emits <conv-truncated>, so old resolved threads age
 # out first. Managed-only — the CLI bash path keeps the lib default.
 CONVERSATION_MAX_ENTRIES = 30
+
+
+async def _start_codex_task(codex_repo: str, codex_base_sha: str) -> tuple["asyncio.Task[str]", float]:
+    """Launch codex as a background task and ensure it has actually started.
+
+    `asyncio.create_task` alone is lazy — the coroutine's first step (which
+    spawns the codex OS subprocess) only runs when the event loop next gets
+    control. The `await asyncio.sleep(0)` yields exactly once so the task
+    runs to its first suspension point before the caller proceeds; the
+    overlap window itself must keep the loop free (run blocking work via
+    `asyncio.to_thread`) so the subprocess pipes keep draining. The
+    `wait_for` timer starts at that first step, so the wall-clock cap runs
+    from launch. Returns (task, launch_monotonic) — coupled in one place so
+    no call site can launch without anchoring the clock.
+    """
+    print(
+        f"\n[3] codex launched (target-repo={codex_repo}, "
+        f"base={codex_base_sha[:8]}) — overlapping precomp"
+    )
+    task = asyncio.create_task(
+        asyncio.wait_for(
+            run_codex_session(codex_repo, codex_base_sha),
+            timeout=SESSION_TIMEOUT_SECS,
+        )
+    )
+    await asyncio.sleep(0)
+    return task, time.monotonic()
 
 
 def _codex_skip_tiny_delta(mode: str, diff: str) -> int | None:
@@ -1692,17 +1722,6 @@ async def run_review(args):
     codex_task: "asyncio.Task[str] | None" = None
     t_codex = 0.0
 
-    def _launch_codex() -> "asyncio.Task[str]":
-        # wait_for wraps from launch, so the wall-clock cap is unchanged —
-        # overlap shortens the run, it never extends codex's allowance.
-        print(f"\n[3] codex launched (target-repo={codex_repo}, base={codex_base_sha[:8]}) — overlapping precomp")
-        return asyncio.create_task(
-            asyncio.wait_for(
-                run_codex_session(codex_repo, codex_base_sha),
-                timeout=SESSION_TIMEOUT_SECS,
-            )
-        )
-
     # Client-side pre-computation. Skipped when AIR_TARGET_REPO is unset
     # (e.g. local CLI runs of review.py without the workflow's checkout
     # step). When populated, all four blocks land in the PR Context for
@@ -1733,22 +1752,42 @@ async def run_review(args):
                         f"checkout — precomp/codex context degraded (review diff unaffected)",
                         file=sys.stderr,
                     )
-        # Launch codex NOW so its ≤5-min leg overlaps the per-file
-        # blame/churn git calls + store I/O + context build below. Must
-        # come after the sibling fetch above (codex's git ops need the
-        # prior SHA resolvable). Everything between launch and await is
-        # no-raise by contract (_git swallows failures, store lookups fall
-        # back, build_pr_context is pure formatting), so the task can't be
-        # orphaned by an exception in the overlap window.
+        # Launch codex NOW so its ≤5-min leg overlaps the precomp below.
+        # Must come after the sibling fetch above (codex's git ops need
+        # the prior SHA resolvable). _start_codex_task yields once so the
+        # subprocess is actually spawned, and precomp runs in a worker
+        # thread (asyncio.to_thread) so the event loop stays free to drain
+        # codex's stdout/stderr pipes for the whole window — a blocked
+        # loop would stall codex once its pipe buffer filled.
         if codex_enabled and codex_task is None:
-            codex_task = _launch_codex()
-            t_codex = time.monotonic()
+            codex_task, t_codex = await _start_codex_task(codex_repo, codex_base_sha)
         precomp_t0 = time.monotonic()
         precomp_base = prior_sha if mode == "re-review" else f"origin/{meta['base']['ref']}"
-        file_statuses, post_paths = compute_file_statuses(target_repo, precomp_base, head_sha)
-        blame_summaries = compute_blame_summaries(target_repo, post_paths)
-        churn_data = compute_churn_data(target_repo, post_paths)
-        diff_check_warnings = compute_diff_check_warnings(target_repo, precomp_base, head_sha)
+
+        def _precomp_all() -> tuple[str, list[str], str, str, str]:
+            statuses, paths = compute_file_statuses(target_repo, precomp_base, head_sha)
+            return (
+                statuses,
+                paths,
+                compute_blame_summaries(target_repo, paths),
+                compute_churn_data(target_repo, paths),
+                compute_diff_check_warnings(target_repo, precomp_base, head_sha),
+            )
+
+        try:
+            (
+                file_statuses, post_paths, blame_summaries, churn_data,
+                diff_check_warnings,
+            ) = await asyncio.to_thread(_precomp_all)
+        except BaseException:
+            # Don't orphan a live codex subprocess if precomp dies (incl.
+            # CancelledError from SIGTERM): cancelling the task triggers
+            # run_codex_session's finally, which kills the process. The
+            # seconds-long sync tail after this block is covered by
+            # asyncio.run's cancel-pending-tasks shutdown.
+            if codex_task is not None and not codex_task.done():
+                codex_task.cancel()
+            raise
         precomp_secs = time.monotonic() - precomp_t0
         precomp_signals = sum(bool(x) for x in (file_statuses, blame_summaries, churn_data, diff_check_warnings))
         print(f"  pre-computation: {precomp_signals}/4 sections populated in {precomp_secs:.1f}s")
@@ -1817,14 +1856,13 @@ async def run_review(args):
     codex_findings = ""
     if codex_enabled:
         if codex_task is None:
-            codex_task = _launch_codex()
-            t_codex = time.monotonic()
+            codex_task, t_codex = await _start_codex_task(codex_repo, codex_base_sha)
         overlapped = time.monotonic() - t_codex
         try:
             codex_findings = await codex_task
             print(
                 f"  codex complete in {time.monotonic() - t_codex:.1f}s "
-                f"({overlapped:.1f}s overlapped with precomp/context build)"
+                f"(launched {overlapped:.1f}s before this await)"
             )
         except asyncio.TimeoutError:
             print(
