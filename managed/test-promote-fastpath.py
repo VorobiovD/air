@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for the promote fast-path — review._detect_promote_fastpath and
-review._count_diff_changed_lines.
+github_client.count_diff_changed_lines.
 
 Pure logic + seam-mocked: no live network. Importing review.py pulls in
 anthropic + requests, so run inside the managed venv:
@@ -10,7 +10,7 @@ anthropic + requests, so run inside the managed venv:
 Also works under pytest. The detector's HTTP seams (_github_paginate,
 fetch_issue_comments, fetch_inter_diff, fetch_pr_diff) are monkeypatched on the
 review module; the pure helpers it composes (find_prior_review,
-extract_reviewed_at_sha, _count_diff_changed_lines) run for real.
+extract_reviewed_at_sha, count_diff_changed_lines) run for real.
 
 Covers: changed-line counting (header exclusion), the 0.80 overlap boundary
 (fires/falls back), the head-prefix gate short-circuiting before any network
@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import review  # noqa: E402
 from review import (  # noqa: E402
-    _count_diff_changed_lines,
+    count_diff_changed_lines,
     _detect_promote_fastpath,
     build_pr_context,
 )
@@ -91,16 +91,16 @@ def _boom(*a, **k):
     raise AssertionError("network seam called when it should not have been")
 
 
-# --- _count_diff_changed_lines ----------------------------------------------
+# --- count_diff_changed_lines ----------------------------------------------
 
 def test_count_excludes_headers_and_context():
-    assert _count_diff_changed_lines(_diff(20, 0)) == 20
-    assert _count_diff_changed_lines(_diff(7, 5)) == 12
+    assert count_diff_changed_lines(_diff(20, 0)) == 20
+    assert count_diff_changed_lines(_diff(7, 5)) == 12
 
 
 def test_count_empty_diff_is_zero():
-    assert _count_diff_changed_lines("") == 0
-    assert _count_diff_changed_lines(None) == 0
+    assert count_diff_changed_lines("") == 0
+    assert count_diff_changed_lines(None) == 0
 
 
 # --- head-prefix gate: no network -------------------------------------------

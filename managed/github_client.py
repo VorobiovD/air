@@ -260,24 +260,28 @@ def submit_review_verdict(
 # Sonnet output) without ever changing a verdict — a lockfile diff is noise
 # to every lens. Stub those file segments to one visible line and cap the
 # total so a pathological PR can't blow out the coordinator context.
-# Manifests (package.json, composer.json, ...) stay whole: the security
-# checklist's supply-chain item reads them. Lockfiles are stubbed ONLY when
-# the same directory's manifest also changed in this diff — a lockfile-only
-# change (resolver/integrity swap with no manifest touch) is the
-# supply-chain attack shape and stays fully visible. Stub lines start with
-# neither `+` nor `-`, so changed-line counts (promote overlap, codex-skip)
-# ignore stubbed files on both sides of any ratio. Conflict markers inside
-# a stubbed file are caught by precomp's `git diff --check` warnings on
-# checkout-enabled runs (AIR_TARGET_REPO set); checkout-less runs lose that
-# net for stubbed segments — the marker line keeps the path visible.
+# Manifests outside vendored dirs (package.json, composer.json, ...) stay
+# whole: the security checklist's supply-chain item reads them. Lockfiles
+# are stubbed ONLY when the same directory's manifest also changed in this
+# diff — a lockfile-only change (resolver/integrity swap with no manifest
+# touch) is the supply-chain attack shape and stays fully visible.
+# Residual, by design: pairing ANY same-dir manifest edit re-enables
+# stubbing of arbitrarily large lockfile churn — but the manifest then
+# surfaces in review and the stub marker carries the changed-line count,
+# so the signal to demand the lockfile is never silent. Stub lines start
+# with neither `+` nor `-`, so changed-line counts (promote overlap,
+# codex-skip) ignore stubbed files on both sides of any ratio. Conflict
+# markers inside a stubbed file are caught by precomp's `git diff --check`
+# warnings on checkout-enabled runs (AIR_TARGET_REPO set); checkout-less
+# runs lose that net for stubbed segments — the marker keeps the path
+# visible.
 DIFF_MAX_BYTES = int(os.environ.get("AIR_DIFF_MAX_BYTES", "500000"))
-# In-diff prefix of the cap marker. review.py keys codex-skip off it: a
-# truncated re-review delta must NOT skip codex (real changes may live in
-# the omitted tail, and codex reads the git tree, not this diff).
+# Cap-marker line prefix. review.py keys codex-skip off it: a truncated
+# re-review delta must NOT skip codex (real changes may live in the
+# omitted tail, and codex reads the git tree, not this diff). Detection is
+# LINE-START anchored at the consumer — diff body lines always start with
+# `+`/`-`/space, so PR content cannot forge a line beginning with this.
 DIFF_TRUNCATION_MARKER = "[air: diff truncated"
-# Headroom reserved for the truncation marker so the returned diff stays
-# within the cap, marker included (paths shown are capped at 5).
-_MARKER_RESERVE_BYTES = 512
 
 # Lockfile → the manifest whose same-directory change justifies stubbing.
 _LOCKFILE_MANIFESTS = {
@@ -346,6 +350,16 @@ def _stub_decision(path: str, changed_paths: set[str]) -> bool:
     return f"{prefix}{manifest}" in changed_paths
 
 
+def _should_stub(path: str, changed_paths: set[str]) -> bool:
+    """The complete stubbing decision — classification AND lockfile pairing.
+
+    Callers outside apply_diff_hygiene must use this, not bare
+    `_is_generated_path` (which says "stubbing candidate", not "stub it":
+    lockfiles classify as generated but only stub when their same-dir
+    manifest also changed)."""
+    return _is_generated_path(path) and _stub_decision(path, changed_paths)
+
+
 def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
     """Stub generated-file segments, then enforce the global size cap.
 
@@ -357,18 +371,16 @@ def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
         return diff
     budget = DIFF_MAX_BYTES if max_bytes is None else max_bytes
     segments = re.split(r"(?m)^(?=diff --git )", diff)
+    paths = [_segment_path(s) for s in segments]
     changed_paths = {
-        _segment_path(s) for s in segments if s.startswith("diff --git ")
+        p for s, p in zip(segments, paths) if s.startswith("diff --git ")
     }
     kept: list[str] = []
-    for seg in segments:
-        path = _segment_path(seg)
-        if (
-            not seg.startswith("diff --git ")
-            or not _is_generated_path(path)
-            or not _stub_decision(path, changed_paths)
-        ):
+    kept_paths: list[str] = []
+    for seg, path in zip(segments, paths):
+        if not seg.startswith("diff --git ") or not _should_stub(path, changed_paths):
             kept.append(seg)
+            kept_paths.append(path)
             continue
         n = count_diff_changed_lines(seg)
         header = seg.splitlines()[0]
@@ -376,34 +388,53 @@ def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
             f"{header}\n[air: {path}: {n} changed lines omitted "
             f"(generated/vendored)]\n"
         )
+        kept_paths.append(path)
         print(f"  diff hygiene: stubbed {path} ({n} changed lines)")
     result = "".join(kept)
     if len(result.encode("utf-8", errors="replace")) <= budget:
         return result
 
+    def _marker(show_paths: list[str], n_omitted: int) -> str:
+        # Paths are tail-truncated to 60 chars so 5 of them can't blow the
+        # budget the marker exists to enforce.
+        shown = ", ".join(p[-60:] for p in show_paths)
+        extra = n_omitted - len(show_paths)
+        suffix = f", … +{extra} more" if extra > 0 else ""
+        named = f": {shown}{suffix}" if show_paths else ""
+        return (
+            f"{DIFF_TRUNCATION_MARKER} at {budget} bytes — "
+            f"{n_omitted} file(s) omitted{named}]\n"
+        )
+
     # Greedy first-fit at file boundaries: a single oversized segment is
     # omitted on its own — it must not drag down the (possibly small)
-    # segments after it.
-    limit = max(0, budget - _MARKER_RESERVE_BYTES)
+    # segments after it. The selection reserves room for the largest
+    # marker we could emit (5 fully-truncated paths), then the marker
+    # shrinks its shown-path list until the whole result fits. Guarantee:
+    # output ≤ budget whenever budget ≥ the path-less marker (~80 bytes);
+    # below that floor the marker is emitted anyway — visibility beats a
+    # degenerate cap.
     capped: list[str] = []
     omitted: list[str] = []
     used = 0
-    for seg in kept:
+    reserve = len(_marker(["x" * 60] * 5, len(kept)).encode("utf-8", errors="replace"))
+    limit = max(0, budget - reserve)
+    for seg, path in zip(kept, kept_paths):
         size = len(seg.encode("utf-8", errors="replace"))
         if used + size <= limit:
             capped.append(seg)
             used += size
         else:
-            omitted.append(_segment_path(seg) or "(preamble)")
-    shown = ", ".join(omitted[:5])
-    suffix = "" if len(omitted) <= 5 else f", … +{len(omitted) - 5} more"
-    capped.append(
-        f"{DIFF_TRUNCATION_MARKER} at {budget} bytes — {len(omitted)} file(s) "
-        f"omitted: {shown}{suffix}]\n"
-    )
+            omitted.append(path or "(preamble)")
+    for n_shown in (5, 4, 3, 2, 1, 0):
+        marker = _marker(omitted[:n_shown], len(omitted))
+        if used + len(marker.encode("utf-8", errors="replace")) <= budget:
+            break
+    capped.append(marker)
     print(
         f"  [warn] diff hygiene: {len(omitted)} file segment(s) over the "
-        f"{budget}-byte cap omitted: {shown}{suffix}",
+        f"{budget}-byte cap omitted: {', '.join(omitted[:5])}"
+        f"{'' if len(omitted) <= 5 else f', … +{len(omitted) - 5} more'}",
         file=sys.stderr,
     )
     return "".join(capped)

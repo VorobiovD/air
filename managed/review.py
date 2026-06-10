@@ -415,11 +415,6 @@ CODEX_RE_REVIEW_MIN_LINES = 20
 # out first. Managed-only — the CLI bash path keeps the lib default.
 CONVERSATION_MAX_ENTRIES = 30
 
-# One shared sizing metric for promote overlap, codex-skip, and hygiene
-# stub counts — canonical definition lives next to the hygiene code.
-_count_diff_changed_lines = count_diff_changed_lines
-
-
 def _codex_skip_tiny_delta(mode: str, diff: str) -> int | None:
     """Changed-line count when a re-review delta is too small for codex.
 
@@ -427,13 +422,18 @@ def _codex_skip_tiny_delta(mode: str, diff: str) -> int | None:
     None when it should run. Full reviews always run codex. A byte-capped
     diff never skips: real changes may live in the omitted tail, and codex
     reads the git tree rather than this diff — it's the one lens that can
-    still see them.
+    still see them. The marker check is LINE-START anchored: diff body
+    lines always begin with `+`/`-`/space, so a PR author cannot forge the
+    marker from file content.
     """
     if mode != "re-review":
         return None
-    if DIFF_TRUNCATION_MARKER in (diff or ""):
+    if any(
+        line.startswith(DIFF_TRUNCATION_MARKER)
+        for line in (diff or "").splitlines()
+    ):
         return None
-    n = _count_diff_changed_lines(diff)
+    n = count_diff_changed_lines(diff)
     return n if n < CODEX_RE_REVIEW_MIN_LINES else None
 
 
@@ -521,7 +521,7 @@ def _detect_promote_fastpath(
     # fall back to None so a transient diff-endpoint blip doesn't kill the run
     # before the full-review path gets its own chance to fetch + report.
     try:
-        full_lines = _count_diff_changed_lines(fetch_pr_diff(repo, pr_number, token))
+        full_lines = count_diff_changed_lines(fetch_pr_diff(repo, pr_number, token))
     except SystemExit as exc:
         # Catch ONLY fetch_pr_diff's own sys.exit(1) (non-OK response). The
         # SIGTERM handler raises sys.exit(143); that must propagate so a CI
@@ -534,7 +534,7 @@ def _detect_promote_fastpath(
     except RequestException as e:
         print(f"  [promote] PR diff fetch errored ({e}) — full review", file=sys.stderr)
         return None
-    inter_lines = _count_diff_changed_lines(inter)
+    inter_lines = count_diff_changed_lines(inter)
     overlap = 1 - (inter_lines / max(full_lines, 1))
     if overlap < PROMOTE_OVERLAP_THRESHOLD:
         # Clamp the displayed percentage: a rebase/merge-commit-inflated

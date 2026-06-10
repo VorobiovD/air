@@ -102,7 +102,7 @@ def test_lockfile_manifest_pairing_is_per_directory():
 def test_stubbed_file_counts_zero_changed_lines():
     diff = _file_segment("assets/app.min.js", added=500)
     out = apply_diff_hygiene(diff)
-    assert review._count_diff_changed_lines(out) == 0
+    assert github_client.count_diff_changed_lines(out) == 0
 
 
 def test_clean_diff_passes_through_byte_identical():
@@ -114,13 +114,15 @@ def test_empty_diff_passthrough():
     assert apply_diff_hygiene("") == ""
 
 
-RESERVE = github_client._MARKER_RESERVE_BYTES
+# Worst-case marker reserve (5 tail-truncated 60-char paths + prose); the
+# impl computes its own exact value — tests just need budget headroom.
+RESERVE = 450
 
 
 def test_cap_truncates_at_file_boundary_with_marker():
     diff = _file_segment("a.py", added=50) + _file_segment("b.py", added=50)
     seg_size = len(_file_segment("a.py", added=50).encode())
-    out = apply_diff_hygiene(diff, max_bytes=seg_size + RESERVE + 10)
+    out = apply_diff_hygiene(diff, max_bytes=seg_size + RESERVE)
     assert "diff --git a/a.py" in out
     assert "+added line 49" in out.split("diff --git a/b.py")[0]  # a.py whole
     assert "[air: diff truncated" in out
@@ -133,7 +135,7 @@ def test_cap_first_fit_keeps_small_file_after_oversized_one():
     small_a = _file_segment("small_a.py", added=5)
     huge = _file_segment("huge_generated.bin", added=2000)
     small_b = _file_segment("small_b.py", added=5)
-    budget = len((small_a + small_b).encode()) + RESERVE + 10
+    budget = len((small_a + small_b).encode()) + RESERVE
     out = apply_diff_hygiene(small_a + huge + small_b, max_bytes=budget)
     assert "diff --git a/small_a.py" in out
     assert "diff --git a/small_b.py" in out           # survives the huge file
@@ -146,6 +148,28 @@ def test_cap_result_stays_within_budget_marker_included():
     budget = 3000
     out = apply_diff_hygiene(diff, max_bytes=budget)
     assert len(out.encode()) <= budget
+
+
+def test_cap_holds_with_pathologically_long_omitted_paths():
+    # 6 omitted files with ~200-char paths: the marker tail-truncates each
+    # shown path to 60 chars and shrinks the shown list until the result
+    # fits — the budget guarantee must survive pathological path lengths.
+    long = "/".join(["deeply"] * 30)
+    diff = "".join(_file_segment(f"{long}/f{i}.py", added=80) for i in range(6))
+    budget = 1000
+    out = apply_diff_hygiene(diff, max_bytes=budget)
+    assert len(out.encode()) <= budget
+    assert "[air: diff truncated" in out
+
+
+def test_cap_tiny_budget_floor_still_emits_marker():
+    # Below the path-less-marker floor (~80 bytes) the cap is degenerate:
+    # the marker is emitted anyway (visibility beats a strict cap) and no
+    # segments survive.
+    diff = _file_segment("a.py", added=50)
+    out = apply_diff_hygiene(diff, max_bytes=10)
+    assert "[air: diff truncated" in out
+    assert "diff --git" not in out
 
 
 def test_cap_not_applied_when_under_budget():
@@ -196,10 +220,25 @@ def test_codex_threshold_boundary():
 
 def test_codex_never_skips_truncated_diff():
     # A byte-capped re-review delta may hide real changes in the omitted
-    # tail — codex reads the git tree, so it must still run.
-    diff = (_file_segment("src/app.py", added=2)
-            + f"{github_client.DIFF_TRUNCATION_MARKER} at 500000 bytes — 3 file(s) omitted: x.py]\n")
-    assert review._codex_skip_tiny_delta("re-review", diff) is None
+    # tail — codex reads the git tree, so it must still run. The truncated
+    # diff comes from apply_diff_hygiene itself (integration, not a
+    # hand-crafted marker).
+    diff = _file_segment("src/app.py", added=2) + _file_segment("big.py", added=500)
+    truncated = apply_diff_hygiene(diff, max_bytes=600)
+    assert "[air: diff truncated" in truncated
+    assert review._codex_skip_tiny_delta("re-review", truncated) is None
+
+
+def test_codex_skip_not_forgeable_from_diff_content():
+    # A PR author adding a line CONTAINING the marker text cannot fake
+    # truncation: body lines start with +/-/space, and the guard is
+    # line-start anchored. The tiny-delta skip must still fire.
+    diff = (
+        "diff --git a/src/app.py b/src/app.py\n"
+        "--- a/src/app.py\n+++ b/src/app.py\n@@ -1,1 +1,2 @@\n context\n"
+        "+# [air: diff truncated at 1 bytes — fake marker in content]\n"
+    )
+    assert review._codex_skip_tiny_delta("re-review", diff) == 1
 
 
 if __name__ == "__main__":
