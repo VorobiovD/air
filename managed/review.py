@@ -78,6 +78,8 @@ from github_client import (  # noqa: E402,F401 — split modules; re-exported fo
     fetch_pr_reviews,
     fetch_pr_review_comments,
     fetch_inter_diff,
+    count_diff_changed_lines,
+    DIFF_TRUNCATION_MARKER,
 )
 from verdict import (  # noqa: E402,F401 — split modules; re-exported for tests/callers
     count_blockers,
@@ -402,21 +404,38 @@ PROMOTE_OVERLAP_THRESHOLD = 0.80
 _PROMOTE_MAX_SIBLING_PAGES = 3
 
 
-def _count_diff_changed_lines(diff: str) -> int:
-    """Count added/removed lines in a unified diff.
+# Codex is an advisory extra pass; below this many changed inter-diff lines
+# a re-review delta is well inside the specialists' easy range and not worth
+# codex's wall-time leg + session.
+CODEX_RE_REVIEW_MIN_LINES = 20
 
-    Counts lines beginning with a single `+` or `-`, excluding the
-    `+++`/`---` file-header lines. Used to size one diff against another
-    for the promote overlap gate — a stable proxy for "how much changed,"
-    not a byte-exact metric.
+# Tail-cap for the <pr-conversation> block (lib default is 100). The block
+# rides in EVERY context copy (~11-13× per review); the lib keeps the
+# NEWEST entries and emits <conv-truncated>, so old resolved threads age
+# out first. Managed-only — the CLI bash path keeps the lib default.
+CONVERSATION_MAX_ENTRIES = 30
+
+
+def _codex_skip_tiny_delta(mode: str, diff: str) -> int | None:
+    """Changed-line count when a re-review delta is too small for codex.
+
+    Returns the count (for the decision log) when codex should be skipped,
+    None when it should run. Full reviews always run codex. A byte-capped
+    diff never skips: real changes may live in the omitted tail, and codex
+    reads the git tree rather than this diff — it's the one lens that can
+    still see them. The marker check is LINE-START anchored: diff body
+    lines always begin with `+`/`-`/space, so a PR author cannot forge the
+    marker from file content.
     """
-    n = 0
-    for line in (diff or "").splitlines():
-        if line.startswith("+++") or line.startswith("---"):
-            continue
-        if line.startswith("+") or line.startswith("-"):
-            n += 1
-    return n
+    if mode != "re-review":
+        return None
+    if any(
+        line.startswith(DIFF_TRUNCATION_MARKER)
+        for line in (diff or "").splitlines()
+    ):
+        return None
+    n = count_diff_changed_lines(diff)
+    return n if n < CODEX_RE_REVIEW_MIN_LINES else None
 
 
 def _detect_promote_fastpath(
@@ -503,7 +522,7 @@ def _detect_promote_fastpath(
     # fall back to None so a transient diff-endpoint blip doesn't kill the run
     # before the full-review path gets its own chance to fetch + report.
     try:
-        full_lines = _count_diff_changed_lines(fetch_pr_diff(repo, pr_number, token))
+        full_lines = count_diff_changed_lines(fetch_pr_diff(repo, pr_number, token))
     except SystemExit as exc:
         # Catch ONLY fetch_pr_diff's own sys.exit(1) (non-OK response). The
         # SIGTERM handler raises sys.exit(143); that must propagate so a CI
@@ -516,7 +535,7 @@ def _detect_promote_fastpath(
     except RequestException as e:
         print(f"  [promote] PR diff fetch errored ({e}) — full review", file=sys.stderr)
         return None
-    inter_lines = _count_diff_changed_lines(inter)
+    inter_lines = count_diff_changed_lines(inter)
     overlap = 1 - (inter_lines / max(full_lines, 1))
     if overlap < PROMOTE_OVERLAP_THRESHOLD:
         # Clamp the displayed percentage: a rebase/merge-commit-inflated
@@ -1488,7 +1507,8 @@ async def run_review(args):
     # (which the agents are then told to flag duplicates against).
     if bot_login:
         pr_conv_block = pr_conversation.build_pr_conversation(
-            all_comments, pr_reviews_raw, pr_inline_raw, bot_login
+            all_comments, pr_reviews_raw, pr_inline_raw, bot_login,
+            max_entries=CONVERSATION_MAX_ENTRIES,
         )
     else:
         print(
@@ -1734,6 +1754,14 @@ async def run_review(args):
         and shutil.which("codex") is not None
         and os.environ.get("OPENAI_API_KEY")
     )
+    if codex_enabled:
+        tiny = _codex_skip_tiny_delta(mode, diff)
+        if tiny is not None:
+            print(
+                f"  codex: skipped — re-review delta {tiny} lines "
+                f"(< {CODEX_RE_REVIEW_MIN_LINES})"
+            )
+            codex_enabled = False
 
     codex_findings = ""
     if codex_enabled:

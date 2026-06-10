@@ -220,6 +220,16 @@ Two ways to turn it on (either one being `true` enables it):
 
 Conservative by construction — any uncertainty (no merged sibling, sibling never reviewed or missing a SHA footer, compare-API failure, <80% overlap) falls back to full review. Enable only on repos that use the `promote/staging-to-main-*` convention. Decision logs print `[promote] …` lines (chosen sibling #, overlap %, fired vs full) to the run log. **v1 limitation:** no periodic full-anchor re-read — a long chain rides re-reviews indefinitely; watch the logs and force a `--fresh` (or disable the flag) if drift accumulates. Backtested on the qai-be/qai-fe Phase-4 promote chain at ~64% cost reduction with zero net-new-finding loss.
 
+### Diff hygiene & cost caps (managed-only)
+
+Three knobs trim per-review context spend. All of them leave **visible markers** — nothing is dropped silently — and none of them changes gating:
+
+- **Generated-file stubbing** (`github_client.apply_diff_hygiene`, applied to both the PR diff and re-review inter-diffs): minified bundles (`*.min.js/css`), sourcemaps, snapshots, `dist/`/`vendor/`/`node_modules/`/`__snapshots__/` segments, and **lockfiles whose same-directory manifest also changed** are replaced by a one-line `[air: <path>: N changed lines omitted (generated/vendored)]` marker. A **lockfile-only** change (resolver/integrity swap with no manifest touch — the supply-chain attack shape) is never stubbed; manifests outside vendored dirs always stay whole. (A lockfile-only diff larger than the byte cap below is still size-capped — it then gets a dedicated `[air: LOCKFILE … supply-chain review incomplete]` marker instead of folding into the generic count, so the security checklist can flag the gap.)
+- **Size cap** — `AIR_DIFF_MAX_BYTES` (env, default 500000): greedy first-fit at file boundaries; the marker tail-truncates shown paths and shrinks until the result fits, so the cap holds marker-included for any budget above the ~80-byte path-less-marker floor. Omitted files are named in the marker + stderr. A truncated re-review delta **never** skips codex (it reads the git tree, not the diff).
+- **Conversation tail-cap** — `CONVERSATION_MAX_ENTRIES` (review.py constant, 30): the `<pr-conversation>` block keeps the newest entries with a `<conv-truncated>` marker. **Codex skip** — `CODEX_RE_REVIEW_MIN_LINES` (constant, 20): re-review deltas under 20 changed lines skip the advisory codex leg with a decision-log line.
+
+**CLI gap (by design):** `/air:review` is unchanged — its bash path fetches diffs via `gh pr diff` and uses `pr_conversation.py`'s default cap (100). The hygiene/caps live in the managed driver only.
+
 ### UI / copy reviewer — covering CLI/TUI copy (`## User-Facing Copy Paths`)
 
 `air-ui-copy-reviewer` dispatches whenever a PR's diff touches a **web** surface (`.tsx/.jsx/.vue/.svelte/.html`, i18n catalogs, user-facing docs) — automatically, no config. For **CLI/TUI products** whose user-facing copy lives in non-markup files (e.g. ai-relay's Python patient/agent message modules), add a `## User-Facing Copy Paths` section to the repo's **PROJECT-PROFILE.md** listing glob patterns, one per `- ` line:
