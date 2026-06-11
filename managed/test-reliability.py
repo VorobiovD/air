@@ -241,21 +241,25 @@ def test_post_review_comment_skips_retry_on_duplicate_hint(monkeypatch):
 # ---------------------------------------------------------------------------
 
 class _FakeEventsPage:
-    def __init__(self, data, has_more=False, last_id=None):
+    """Real page shape (SyncPageCursor, verified live 2026-06-11): `data`
+    plus an opaque `next_page` cursor string (None on the last page).
+    There is no `has_more`/`last_id` — probing for those single-paged
+    every drain."""
+
+    def __init__(self, data, next_page=None):
         self.data = data
-        self.has_more = has_more
-        self.last_id = last_id
+        self.next_page = next_page
 
 
 class _FakeEventsAPI:
-    def __init__(self, pages, supports_after=True):
+    def __init__(self, pages, supports_page=True):
         self._pages = pages
-        self._supports_after = supports_after
+        self._supports_page = supports_page
         self.calls = []
 
     async def list(self, session_id, limit=200, **kwargs):
-        if "after_id" in kwargs and not self._supports_after:
-            raise TypeError("unexpected keyword argument 'after_id'")
+        if "page" in kwargs and not self._supports_page:
+            raise TypeError("unexpected keyword argument 'page'")
         self.calls.append(kwargs)
         return self._pages.pop(0)
 
@@ -267,31 +271,44 @@ class _FakeClient:
         )
 
 
-@pytest.mark.parametrize("supports_after", [True])
-def test_drain_pages_walks_all_pages(supports_after):
+def test_drain_pages_walks_all_pages():
     import asyncio
     api = _FakeEventsAPI([
-        _FakeEventsPage([1, 2], has_more=True, last_id="e2"),
-        _FakeEventsPage([3], has_more=False),
-    ], supports_after=supports_after)
+        _FakeEventsPage([1, 2], next_page="pg_cursor_2"),
+        _FakeEventsPage([3], next_page=None),
+    ])
     events = asyncio.run(
         session_runner._list_events_paged(_FakeClient(api), "sess", label="t")
     )
     assert events == [1, 2, 3]
-    assert api.calls[1].get("after_id") == "e2"
+    assert api.calls[1].get("page") == "pg_cursor_2"
 
 
 def test_drain_pages_falls_back_on_unsupported_cursor():
     """If the SDK rejects the cursor kwarg, fall back to the single page
-    (current behavior) instead of crashing the drain."""
+    (pre-pagination behavior) instead of crashing the drain."""
     import asyncio
     api = _FakeEventsAPI([
-        _FakeEventsPage([1, 2], has_more=True, last_id="e2"),
-    ], supports_after=False)
+        _FakeEventsPage([1, 2], next_page="pg_cursor_2"),
+    ], supports_page=False)
     events = asyncio.run(
         session_runner._list_events_paged(_FakeClient(api), "sess", label="t")
     )
     assert events == [1, 2]
+
+
+def test_drain_pages_warns_at_max_pages(capsys):
+    """A cursor still present at max_pages means trailing events were left
+    behind — that must be loud, never a silent truncation."""
+    import asyncio
+    api = _FakeEventsAPI(
+        [_FakeEventsPage([i], next_page=f"pg_{i}") for i in range(30)]
+    )
+    events = asyncio.run(
+        session_runner._list_events_paged(_FakeClient(api), "sess", label="t")
+    )
+    assert len(events) == 25  # max_pages bound
+    assert "max_pages" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -533,7 +550,7 @@ def test_drain_reraises_unrelated_typeerror_on_later_pages():
         async def list(self, session_id, limit=200, **kwargs):
             self.calls += 1
             if self.calls == 1:
-                return _FakeEventsPage([1], has_more=True, last_id="e1")
+                return _FakeEventsPage([1], next_page="pg_cursor_2")
             raise TypeError("unsupported operand type(s) for +: 'NoneType' and 'int'")
 
     with pytest.raises(TypeError):

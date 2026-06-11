@@ -19,13 +19,24 @@ HEADERS = {
     "content-type": "application/json",
 }
 
+# The GA dialect (what the Python SDK sends). The research-preview dialect
+# accepts a `multiagent` roster on agent CREATE but silently drops it on
+# UPDATE — and its GET never renders the field, so the drop is invisible
+# (verified 2026-06-11 against api.anthropic.com: RP update → roster gone,
+# GA update → roster persists; RP GET shows null either way). Any request
+# that carries `multiagent` must use this header.
+GA_BETA = "managed-agents-2026-04-01"
 
-def get_headers() -> dict:
+
+def get_headers(*, ga: bool = False) -> dict:
     key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not key:
         print("Error: ANTHROPIC_API_KEY not set.", file=sys.stderr)
         sys.exit(1)
-    return {**HEADERS, "x-api-key": key}
+    headers = {**HEADERS, "x-api-key": key}
+    if ga:
+        headers["anthropic-beta"] = GA_BETA
+    return headers
 
 
 def api_error_message(resp: requests.Response) -> str:
@@ -42,6 +53,15 @@ def _paginate(path: str) -> list[dict]:
     (no `has_more` field). Accounts with >20 total agents silently drop
     matches without pagination — e.g. review.py misses `air-simplify` on
     the second page and aborts with a spurious "Missing agents" error.
+
+    CANONICAL CURSOR CONTRACT (all managed-agents list endpoints: agents,
+    environments, session events, memory stores, memories): pages carry an
+    opaque `next_page` token, consumed as the `page` request param. There
+    is NO `has_more` / `last_id` / `starting_after` surface — probing those
+    silently single-pages the walk (that exact bug shipped independently in
+    three places before this note). Client-side mirrors of this contract:
+    `memory_store._paginate` (SDK, sync) and
+    `session_runner._list_events_paged` (SDK, async).
     """
     all_items: list[dict] = []
     cursor: str | None = None

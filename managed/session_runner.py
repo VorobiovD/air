@@ -175,28 +175,33 @@ async def _list_events_paged(
 ) -> list:
     """Fetch a session's events via REST, walking cursor pages.
 
-    A full coordinator run can exceed one 200-event page; the pre-pagination
-    drain read a single page and could miss the final `agent.message`. Page
-    shape is probed defensively (`has_more` / `last_id` / `after_id` are the
-    SDK's standard cursor-page surface): if the SDK rejects the cursor kwarg
-    we keep the first page — the exact pre-pagination behavior — and say so.
-    `max_pages` is a runaway bound, far above any observed session (25 pages
-    = 5,000 events).
+    The events endpoint signals continuation via `next_page` — an opaque
+    cursor string consumed as the `page` request param, the same shape
+    api.py's `_paginate` documents for /agents and /environments. It has
+    NO `has_more`/`last_id` fields, which is what the first version of
+    this helper probed for: that drain silently stopped at page 1
+    (200 events) on every call, and live SSE masked it — until a
+    rate-throttled run went REST-only on a 254-event session and the
+    final `agent.message` (the entire review, correct footer and all)
+    sat on page 2 (air #151 validation, 2026-06-11). If the SDK rejects
+    the `page` kwarg we keep the first page — the pre-pagination
+    behavior — and say so. `max_pages` is a runaway bound, far above any
+    observed session (25 pages = 5,000 events).
     """
     events: list = []
-    after_id = None
+    cursor = None
     for _ in range(max_pages):
         kwargs: dict = {"limit": page_limit}
-        if after_id is not None:
-            kwargs["after_id"] = after_id
+        if cursor is not None:
+            kwargs["page"] = cursor
         try:
             page = await client.beta.sessions.events.list(session_id, **kwargs)
         except TypeError as e:
-            # Only treat this as "SDK lacks cursor kwargs" when the error is
-            # actually about the kwarg — a TypeError raised from inside the
-            # SDK on a later page must surface, not silently truncate the
+            # Only treat this as "SDK lacks the cursor kwarg" when the error
+            # is actually about the kwarg — a TypeError raised from inside
+            # the SDK on a later page must surface, not silently truncate the
             # drain (the exact missed-final-message bug paging exists to fix).
-            if after_id is None or "after_id" not in str(e):
+            if cursor is None or "page" not in str(e):
                 raise
             print(
                 f"  [warn] {label}: SDK rejects events cursor kwargs — "
@@ -206,16 +211,16 @@ async def _list_events_paged(
             break
         page_events = getattr(page, "data", None) or []
         events.extend(page_events)
-        if not getattr(page, "has_more", False):
+        cursor = getattr(page, "next_page", None)
+        if not cursor:
             break
-        after_id = getattr(page, "last_id", None)
-        if after_id is None:
-            print(
-                f"  [warn] {label}: events page reports has_more but no "
-                f"last_id cursor — stopping drain at {len(events)} events",
-                file=sys.stderr,
-            )
-            break
+    else:
+        print(
+            f"  [warn] {label}: events drain stopped at max_pages="
+            f"{max_pages} with a continuation cursor still present — "
+            f"drain may be missing trailing events",
+            file=sys.stderr,
+        )
     return events
 
 
@@ -242,12 +247,13 @@ class ThreadTracker:
         self.label = label
         self._counter = 0          # legacy callable_agents accounting
         self._open: set[str] = set()  # multiagent per-thread state
-        self._ever_opened = False  # any non-primary thread seen yet (MA)
+        self._ever_opened = False  # any sub-agent thread opened (either runtime)
 
     def on_event(self, event_type: str, agent_name: str = "") -> None:
         if self.primary is None:
             if event_type == "session.thread_created":
                 self._counter += 1
+                self._ever_opened = True
             elif event_type == "session.thread_idle":
                 self._counter = max(0, self._counter - 1)
             return
@@ -295,6 +301,19 @@ class ThreadTracker:
         """
         return self.primary is not None and not self._ever_opened
 
+    @property
+    def ever_dispatched(self) -> bool:
+        """True once any sub-agent thread has been observed (both runtimes).
+
+        A coordinator session that completes without EVER opening a
+        sub-agent thread did not run the review pipeline — it improvised a
+        single-agent review (observed twice, 2026-06-11: delegation
+        denied by toolset config, and roster dropped by a
+        research-preview-dialect update). `run_session(require_dispatch=True)`
+        turns that from a silent degradation into a loud run failure.
+        """
+        return self._ever_opened
+
 
 async def run_session(
     client,
@@ -309,6 +328,7 @@ async def run_session(
     store_id: str | None = None,
     file_resources: list[dict] | None = None,
     multiagent_primary: str | None = None,
+    require_dispatch: bool = False,
 ) -> str:
     """Create a session, send the user prompt, stream events, return collected agent text.
 
@@ -779,6 +799,21 @@ async def run_session(
     output = "".join(parts).strip()
     if terminated_reason and not output:
         raise SpecialistSessionError(label, terminated_reason)
+    if require_dispatch and not threads.ever_dispatched:
+        # The session "succeeded" — output and all — but no sub-agent
+        # thread ever opened, so nothing in the output was produced by the
+        # specialist pipeline or checked by the verifier. Posting it would
+        # be the silent solo-improvisation failure (2026-06-11).
+        # The SSE-side awaiting_first_dispatch gate can't catch this: the
+        # REST poller's session-status terminal check (deliberately) ends
+        # the run without consulting thread accounting.
+        raise SpecialistSessionError(
+            label,
+            "session completed without dispatching any sub-agent thread — "
+            "the coordinator improvised an unverified single-agent review "
+            "(delegation toolset or multiagent roster misconfiguration; "
+            "re-run managed/setup.py and check the agent's config)",
+        )
     print(f"  [done] {label}")
     return output
 

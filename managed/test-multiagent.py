@@ -251,5 +251,172 @@ def test_unattributed_event_warns_not_silent(capsys):
     assert "unattributed" in err and "coordinator" in err
 
 
+# ---------------------------------------------------------------------------
+# ever_dispatched — the zero-sub-agent (silent solo-improvisation) detector
+# ---------------------------------------------------------------------------
+
+def test_ever_dispatched_legacy_runtime():
+    t = ThreadTracker()
+    assert t.ever_dispatched is False
+    t.on_event("session.thread_created")
+    assert t.ever_dispatched is True
+    t.on_event("session.thread_idle")
+    assert t.ever_dispatched is True   # latches: closing doesn't un-dispatch
+
+
+def test_ever_dispatched_ma_ignores_primary():
+    t = ThreadTracker(multiagent_primary=review.COORDINATOR_MA_AGENT)
+    t.on_event("session.thread_status_running", review.COORDINATOR_MA_AGENT)
+    assert t.ever_dispatched is False  # the coordinator's own thread is not a dispatch
+    t.on_event("session.thread_status_running", "air-code-reviewer")
+    assert t.ever_dispatched is True
+
+
+# ---------------------------------------------------------------------------
+# run_session(require_dispatch=True) — fail loud when no sub-agent ever ran.
+# Scripted through a fake client on the legacy runtime: a clean end_turn
+# idle with zero thread events is byte-for-byte the qai callable_agents
+# failure shape (create_agent denied → coordinator improvises → "success").
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from session_runner import SpecialistSessionError, run_session  # noqa: E402
+
+
+def _fake_client(events):
+    """Minimal AsyncAnthropic stand-in for run_session's happy SSE path."""
+    class _Stream:
+        def __init__(self, evs):
+            self._it = iter(evs)
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        def __aiter__(self):
+            return self
+        async def __anext__(self):
+            try:
+                return next(self._it)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    async def _create(**kwargs):
+        return SimpleNamespace(id="sesn_test")
+
+    async def _send(sid, events):
+        return None
+
+    async def _stream(sid):
+        return _Stream(events)
+
+    sessions = SimpleNamespace(
+        create=_create,
+        events=SimpleNamespace(send=_send, stream=_stream),
+    )
+    return SimpleNamespace(beta=SimpleNamespace(sessions=sessions))
+
+
+def _msg(text, eid):
+    return SimpleNamespace(
+        id=eid, type="agent.message",
+        content=[SimpleNamespace(text=text)],
+    )
+
+
+def _idle(eid, stop="end_turn"):
+    return SimpleNamespace(
+        id=eid, type="session.status_idle",
+        stop_reason=SimpleNamespace(type=stop),
+    )
+
+
+def _thread(eid, etype):
+    return SimpleNamespace(id=eid, type=etype, agent_name="air-code-reviewer")
+
+
+def _run(events, **kwargs):
+    client = _fake_client(events)
+    return asyncio.run(run_session(
+        client, "agent_x", 1, "env_x", "o/r",
+        {"type": "branch", "name": "main"}, "tok", "go", "coordinator",
+        **kwargs,
+    ))
+
+
+def test_require_dispatch_fails_zero_thread_session():
+    events = [_msg("## Code Review\nimprovised", "e1"), _idle("e2")]
+    with pytest.raises(SpecialistSessionError) as exc:
+        _run(events, require_dispatch=True)
+    assert "without dispatching" in str(exc.value)
+
+
+def test_require_dispatch_passes_with_fanout():
+    events = [
+        _thread("e1", "session.thread_created"),
+        _thread("e2", "session.thread_idle"),
+        _msg("## Code Review\nreal", "e3"),
+        _idle("e4"),
+    ]
+    assert "real" in _run(events, require_dispatch=True)
+
+
+def test_no_require_dispatch_keeps_solo_sessions_working():
+    # Solo / learn / codex sessions legitimately never dispatch sub-agents.
+    events = [_msg("solo output", "e1"), _idle("e2")]
+    assert _run(events) == "solo output"
+
+
+# ---------------------------------------------------------------------------
+# setup.py multiagent persistence — GA dialect + roster verification
+# ---------------------------------------------------------------------------
+
+import api  # noqa: E402
+import setup as setup_mod  # noqa: E402
+
+
+def test_get_headers_ga_swaps_beta_header(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    rp = api.get_headers()  # default: research-preview dialect
+    assert rp["anthropic-beta"] == "managed-agents-2026-04-01-research-preview"
+    assert api.get_headers(ga=True)["anthropic-beta"] == "managed-agents-2026-04-01"
+
+
+def test_verify_roster_aborts_when_dropped(capsys):
+    requested = {"type": "coordinator", "agents": [{"type": "agent", "id": "a", "version": 1}]}
+    with pytest.raises(SystemExit):
+        setup_mod._verify_multiagent_roster("air-coordinator-ma", {"version": 4}, requested)
+    assert "dropped the multiagent roster" in capsys.readouterr().err
+
+
+def test_verify_roster_passes_when_persisted_or_unrequested():
+    roster = {"type": "coordinator", "agents": [{"type": "agent", "id": "a", "version": 1}]}
+    setup_mod._verify_multiagent_roster("x", {"version": 5, "multiagent": roster}, roster)
+    setup_mod._verify_multiagent_roster("x", {"version": 5}, None)  # specialists never request one
+
+
+def test_coordinator_tool_configs_enable_disable_matrix():
+    """Every named tool gets an EXPLICIT config: enabled iff allowlisted.
+    An implicit (missing) entry would inherit the enabled default — the
+    same silent-grant shape the delegation fix exists for, in reverse."""
+    allowed = {"bash", "read", "grep", "glob"}
+    configs = setup_mod.build_coordinator_tool_configs(allowed)
+    assert {c["name"] for c in configs} == set(setup_mod.NAMED_TOOL_VOCABULARY)
+    state = {c["name"]: c["enabled"] for c in configs}
+    assert all(state[t] for t in allowed)
+    assert not any(state[t] for t in set(setup_mod.NAMED_TOOL_VOCABULARY) - allowed)
+
+
+def test_sdk_page_cursor_still_exposes_next_page():
+    """Guard against mock-contract drift: the fakes in these suites model
+    the page as {data, next_page}. If an SDK upgrade renames the cursor
+    field, this fails loudly instead of letting every drain silently
+    single-page again (the exact bug class fixed three times on PR #152)."""
+    from anthropic.pagination import AsyncPageCursor, SyncPageCursor
+    assert "next_page" in SyncPageCursor.model_fields
+    assert "next_page" in AsyncPageCursor.model_fields
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
