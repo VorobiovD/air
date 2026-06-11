@@ -66,6 +66,23 @@ for f in plugins/air/agents/code-reviewer.md \
     || fail "$f missing 'PR conversation duplicate-flagging:' section header"
 done
 
+# Check E: the verdict-gating contract must stay in lockstep between the
+# shared implementation (plugins/air/lib/verdict.py — executed by BOTH the
+# CLI's Step 12 and managed CI) and the pipeline spec (review.md) that
+# instructs the model to emit the shape the parser reads.
+VERDICT_LIB=plugins/air/lib/verdict.py
+REVIEW_MD=plugins/air/commands/review.md
+for status_token in "FIXED" "NOT FIXED" "PARTIALLY FIXED" "DEFERRED" "DISPUTED"; do
+  grep -qF "$status_token" "$REVIEW_MD" \
+    || fail "review.md missing re-review status token '$status_token' (lib/verdict.py parses it)"
+done
+grep -qF 'FIXED|NOT\s+FIXED|PARTIALLY\s+FIXED|DEFERRED|DISPUTED' "$VERDICT_LIB" \
+  || fail "lib/verdict.py status enum changed — update review.md Step 6 + this check together"
+grep -qF 'lib/verdict.py" --decide' "$REVIEW_MD" \
+  || fail "review.md Step 12 no longer routes the verdict through lib/verdict.py --decide"
+grep -qF -- '- **#N** [<severity>] — STATUS' "$REVIEW_MD" \
+  || fail "review.md missing the prior-status entry anchor lib/verdict.py parses"
+
 if [ "$status" -eq 0 ]; then
   printf 'air drift-check: all checks passed.\n'
 fi
