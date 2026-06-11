@@ -918,15 +918,20 @@ Post in TWO steps — an issue comment (for re-review detection in Step 2) AND a
 gh pr comment <number> $REPO_FLAG --body-file $AIR_TMP/review-comment.md
 ```
 
-2. Decide the verdict with the SHARED gating contract — the exact code managed CI runs (`lib/verdict.py`: fresh = any blockers gate; re-review = new blockers OR unfixed/deferred PRIOR BLOCKERS gate, unfixed mediums/lows do NOT). Never re-derive the decision by reading the body yourself:
+2. Decide the verdict with the SHARED gating contract — the exact code managed CI runs (`lib/verdict.py`: fresh = any blockers gate; re-review = new blockers OR unfixed/deferred PRIOR BLOCKERS gate, unfixed mediums/lows do NOT). Never re-derive the decision by reading the body yourself. The `AIR_PLUGIN_ROOT` guard wraps the call — an empty variable must take the fallback branch, not expand to `python3 "/lib/verdict.py"`:
 
 ```bash
-VERDICT_LINE=$("python3" "$AIR_PLUGIN_ROOT/lib/verdict.py" --decide < "$AIR_TMP/review-comment.md")
-VERDICT=${VERDICT_LINE%%$'\t'*}     # "approve" or "request-changes"
-REASON=${VERDICT_LINE#*$'\t'}       # reason text (only set for request-changes)
+if [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/verdict.py" ]; then
+  VERDICT_LINE=$(python3 "$AIR_PLUGIN_ROOT/lib/verdict.py" --decide < "$AIR_TMP/review-comment.md")
+  VERDICT=${VERDICT_LINE%%$'\t'*}     # "approve" or "request-changes"
+  REASON=${VERDICT_LINE#*$'\t'}       # reason text (only set for request-changes)
+else
+  # Fallback: pre-v1.12 rule (0 blockers => approve). Count blockers from the
+  # formatted body yourself and warn that the shared contract was unavailable.
+  echo "warning: AIR_PLUGIN_ROOT unresolved — verdict computed via the pre-v1.12 fallback (bare blocker count)" >&2
+  if [ "<blocker count from Step 10>" = "0" ]; then VERDICT=approve; else VERDICT=request-changes; REASON="blockers found (fallback rule)"; fi
+fi
 ```
-
-If `AIR_PLUGIN_ROOT` is empty (Step 0 could not resolve it), fall back to the pre-v1.12 rule — 0 blockers ⇒ approve, otherwise request-changes — and print a warning that the verdict used the fallback path.
 
 3. Submit the verdict PINNED to the reviewed SHA — `commit_id` ties the approval to `headRefOid` so a push that lands mid-review dismisses it instead of riding a stale approval:
 

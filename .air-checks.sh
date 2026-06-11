@@ -72,7 +72,7 @@ done
 # instructs the model to emit the shape the parser reads.
 VERDICT_LIB=plugins/air/lib/verdict.py
 REVIEW_MD=plugins/air/commands/review.md
-for status_token in "NOT FIXED" "PARTIALLY FIXED" "DEFERRED" "DISPUTED"; do
+for status_token in "FIXED" "NOT FIXED" "PARTIALLY FIXED" "DEFERRED" "DISPUTED"; do
   grep -qF "$status_token" "$REVIEW_MD" \
     || fail "review.md missing re-review status token '$status_token' (lib/verdict.py parses it)"
 done
