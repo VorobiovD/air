@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """One-shot workspace migration for air's pattern memory stores.
 
-Context (2026-06-11): the org is consolidating API usage into the dedicated
-LifeMD workspace; the old workspace (where air's agents/stores live) is
-being de-privileged and the Claude Code workspace removed. Agents and
-environments are STATELESS — setup.py recreates them from the repo on the
-first run with a new key. The per-repo pattern stores are the only stateful
-assets (learned author patterns, severity calibration, accepted patterns);
-keys are workspace-bound and resources are workspace-scoped, so they must
-be COPIED store→store across keys.
+Context: when an org consolidates API usage into a dedicated workspace,
+the old workspace (where air's agents/stores live) gets de-privileged or
+removed. Agents and environments are STATELESS — setup.py recreates them
+from the repo on the first run with a new key. The per-repo pattern stores
+are the only stateful assets (learned author patterns, severity
+calibration, accepted patterns); keys are workspace-bound and resources
+are workspace-scoped, so they must be COPIED store→store across keys.
 
 Usage:
     export AIR_OLD_API_KEY=sk-ant-...   # key in the OLD workspace (source)
-    export AIR_NEW_API_KEY=sk-ant-...   # key in the NEW (LifeMD) workspace
+    export AIR_NEW_API_KEY=sk-ant-...   # key in the NEW workspace (destination)
     python migrate_workspace_stores.py --dry-run   # inventory + plan only
     python migrate_workspace_stores.py             # copy + verify
     python migrate_workspace_stores.py --verify    # re-verify only
@@ -29,24 +28,12 @@ import sys
 
 import anthropic
 
+# Reuse the production pagination helper + beta header rather than keeping
+# a third copy of the next_page/page cursor contract (memory_store.py is
+# the canonical client-side implementation; api.py documents the contract).
+from memory_store import BETA_HEADER, _paginate
+
 PREFIX = "air-patterns "
-
-
-def _paginate(list_fn, **kw):
-    """Exhaust an SDK list endpoint. Memory-store endpoints signal
-    continuation via an opaque `next_page` cursor consumed as the `page`
-    param — NOT `has_more`/`starting_after`; probing those single-pages
-    the walk silently (mirrors `memory_store.py:_paginate`; same cursor
-    bug class as the session-event drain fixed on this PR)."""
-    cursor = None
-    while True:
-        page = list_fn(**kw) if cursor is None else list_fn(page=cursor, **kw)
-        body = page if isinstance(page, dict) else page.model_dump()
-        for item in body.get("data", []):
-            yield item
-        cursor = body.get("next_page")
-        if not cursor:
-            return
 
 
 def _stores(client) -> dict[str, str]:
@@ -87,8 +74,11 @@ def main() -> int:
     if not old_key or (not new_key and not args.dry_run):
         print("Set AIR_OLD_API_KEY (or ANTHROPIC_API_KEY) and AIR_NEW_API_KEY.", file=sys.stderr)
         return 2
-    old = anthropic.Anthropic(api_key=old_key)
-    new = anthropic.Anthropic(api_key=new_key) if new_key else None
+    # Pin the same beta dialect memory_store.py treats as required for
+    # these endpoints — relying on the SDK to auto-attach it is unverified.
+    _beta = {"anthropic-beta": BETA_HEADER}
+    old = anthropic.Anthropic(api_key=old_key, default_headers=_beta)
+    new = anthropic.Anthropic(api_key=new_key, default_headers=_beta) if new_key else None
 
     src = _stores(old)
     print(f"source stores ({len(src)}):")
@@ -142,10 +132,15 @@ def main() -> int:
         if not args.verify:
             existing_dst = _memories(new, dst_id)
             for path, meta in sorted(mems.items()):
-                content = _read(old, src_id, meta["id"])
                 d = existing_dst.get(path)
-                if d and d.get("content_sha256") == meta.get("content_sha256"):
+                src_sha = meta.get("content_sha256")
+                # sha check BEFORE the retrieve: the idempotent re-run hot
+                # path must not fetch content it's about to discard. A None
+                # sha on either side never counts as a match — None == None
+                # would silently skip a copy of unknown content.
+                if d and src_sha is not None and d.get("content_sha256") == src_sha:
                     continue  # already identical (idempotent re-run)
+                content = _read(old, src_id, meta["id"])
                 if d:
                     new.beta.memory_stores.memories.update(
                         d["id"], memory_store_id=dst_id, content=content

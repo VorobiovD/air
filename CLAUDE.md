@@ -58,6 +58,7 @@ managed/                          # Managed Agent (CI automation)
 ├── memory_store.py               # Per-repo pattern memory store: discovery, reads, sha256-preconditioned writes
 ├── pattern_writer.py             # Applies pattern_lifecycle ops to the store after each review
 ├── migrate_wiki_to_store.py      # One-shot wiki → store migration (per-author split, --dry-run)
+├── migrate_workspace_stores.py   # One-shot store → store copy across workspaces (sha256-verified)
 ├── render_store_to_wiki.py       # Deterministic store→wiki mirror render (throttled per-review + on learn)
 ├── test-session.py               # Quick 9-test verification script
 ├── prompts/learn-orchestrator.md # System prompt for cloud learn agent

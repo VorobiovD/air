@@ -396,5 +396,27 @@ def test_verify_roster_passes_when_persisted_or_unrequested():
     setup_mod._verify_multiagent_roster("x", {"version": 5}, None)  # specialists never request one
 
 
+def test_coordinator_tool_configs_enable_disable_matrix():
+    """Every named tool gets an EXPLICIT config: enabled iff allowlisted.
+    An implicit (missing) entry would inherit the enabled default — the
+    same silent-grant shape the delegation fix exists for, in reverse."""
+    allowed = {"bash", "read", "grep", "glob"}
+    configs = setup_mod.build_coordinator_tool_configs(allowed)
+    assert {c["name"] for c in configs} == set(setup_mod.NAMED_TOOL_VOCABULARY)
+    state = {c["name"]: c["enabled"] for c in configs}
+    assert all(state[t] for t in allowed)
+    assert not any(state[t] for t in set(setup_mod.NAMED_TOOL_VOCABULARY) - allowed)
+
+
+def test_sdk_page_cursor_still_exposes_next_page():
+    """Guard against mock-contract drift: the fakes in these suites model
+    the page as {data, next_page}. If an SDK upgrade renames the cursor
+    field, this fails loudly instead of letting every drain silently
+    single-page again (the exact bug class fixed three times on PR #152)."""
+    from anthropic.pagination import AsyncPageCursor, SyncPageCursor
+    assert "next_page" in SyncPageCursor.model_fields
+    assert "next_page" in AsyncPageCursor.model_fields
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

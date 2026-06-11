@@ -53,6 +53,15 @@ def _paginate(path: str) -> list[dict]:
     (no `has_more` field). Accounts with >20 total agents silently drop
     matches without pagination — e.g. review.py misses `air-simplify` on
     the second page and aborts with a spurious "Missing agents" error.
+
+    CANONICAL CURSOR CONTRACT (all managed-agents list endpoints: agents,
+    environments, session events, memory stores, memories): pages carry an
+    opaque `next_page` token, consumed as the `page` request param. There
+    is NO `has_more` / `last_id` / `starting_after` surface — probing those
+    silently single-pages the walk (that exact bug shipped independently in
+    three places before this note). Client-side mirrors of this contract:
+    `memory_store._paginate` (SDK, sync) and
+    `session_runner._list_events_paged` (SDK, async).
     """
     all_items: list[dict] = []
     cursor: str | None = None

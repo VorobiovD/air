@@ -307,8 +307,8 @@ class ThreadTracker:
 
         A coordinator session that completes without EVER opening a
         sub-agent thread did not run the review pipeline — it improvised a
-        single-agent review (observed twice on the LifeMD workspace:
-        delegation denied by toolset config, and roster dropped by a
+        single-agent review (observed twice, 2026-06-11: delegation
+        denied by toolset config, and roster dropped by a
         research-preview-dialect update). `run_session(require_dispatch=True)`
         turns that from a silent degradation into a loud run failure.
         """
@@ -803,7 +803,7 @@ async def run_session(
         # The session "succeeded" — output and all — but no sub-agent
         # thread ever opened, so nothing in the output was produced by the
         # specialist pipeline or checked by the verifier. Posting it would
-        # be the silent solo-improvisation failure (LifeMD, 2026-06-11).
+        # be the silent solo-improvisation failure (2026-06-11).
         # The SSE-side awaiting_first_dispatch gate can't catch this: the
         # REST poller's session-status terminal check (deliberately) ends
         # the run without consulting thread accounting.

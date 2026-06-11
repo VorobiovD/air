@@ -1283,9 +1283,9 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
                         multiagent_primary=coordinator_agent_name if ma_enabled else None,
                         # A coordinator run that never opened a sub-agent
                         # thread improvised an unverified solo review (the
-                        # LifeMD silent-degradation pair: delegation denied
-                        # by toolset; roster dropped by RP-dialect update).
-                        # Fail loud instead of posting it.
+                        # 2026-06-11 silent-degradation pair: delegation
+                        # denied by toolset; roster dropped by RP-dialect
+                        # update). Fail loud instead of posting it.
                         require_dispatch=True,
                     ),
                     "coordinator",

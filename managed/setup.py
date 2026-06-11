@@ -32,6 +32,24 @@ SUB_AGENTS = ["code-reviewer", "simplify", "security-auditor", "git-history-revi
 # low regression risk, and always tracks the latest prompt.
 PINNABLE_AGENTS = [f"air-{n}" for n in SUB_AGENTS] + ["air-coordinator"]
 
+# The API's named agent-toolset config vocabulary. Sub-agent delegation is
+# NOT in it — it's an unnamed capability riding default_config, which is
+# why coordinators default-ENABLE and explicitly disable each named tool
+# outside their frontmatter allowlist. If Anthropic extends the vocabulary,
+# add the new name here: an unlisted named tool gets no explicit disable
+# and is silently granted to the coordinator under the enabled default.
+NAMED_TOOL_VOCABULARY = (
+    "bash", "edit", "glob", "grep", "read", "web_fetch", "web_search", "write",
+)
+
+
+def build_coordinator_tool_configs(allowed: set) -> list[dict]:
+    """Explicit enable/disable for every named tool: enabled iff in the
+    frontmatter allowlist. Paired with default_config {"enabled": True} so
+    the unnamed delegation capability stays alive (see the coordinator
+    blocks in main())."""
+    return [{"name": t, "enabled": t in allowed} for t in NAMED_TOOL_VOCABULARY]
+
 
 def parse_agent_pins() -> dict[str, int]:
     """Parse the AIR_AGENT_VERSIONS env var (JSON map agent-name → version).
@@ -209,7 +227,7 @@ def _verify_multiagent_roster(name: str, data: dict, requested: dict | None) -> 
     A coordinator that lost its roster doesn't error at review time — the
     runtime simply never offers the delegation tool, and the coordinator
     improvises an unverified single-agent review that LOOKS like a normal
-    success (observed 2026-06-11 on the LifeMD workspace). Failing the sync
+    success (observed 2026-06-11 on an enforcing workspace runtime). Failing the sync
     here is the only cheap place to catch it.
     """
     if requested and not data.get("multiagent"):
@@ -441,18 +459,16 @@ def main():
         # agent" — not in the configs[].name vocabulary: bash, edit, glob,
         # grep, read, web_fetch, web_search, write), so it inherits
         # default_config. The specialists' default-deny shape silently
-        # disabled it; the old workspace's runtime build didn't enforce
-        # that, the LifeMD build DOES ("Permission to use create_agent has
+        # disabled it; older workspace runtime builds didn't enforce
+        # that, newer builds DO ("Permission to use create_agent has
         # been denied", 2026-06-11 — the coordinator then improvised an
         # unverified solo review). Construction: default-ENABLE, then
         # explicitly disable everything NOT in the frontmatter allowlist.
         # Same effective named-tool surface as before (bash/read/grep/glob
         # on, edit/write/web off), delegation rides the enabled default.
-        _coord_allowed = set(parse_agent_tools(coordinator_file))
-        coord_tool_configs = [
-            {"name": t, "enabled": t in _coord_allowed}
-            for t in ("bash", "edit", "glob", "grep", "read", "web_fetch", "web_search", "write")
-        ]
+        coord_tool_configs = build_coordinator_tool_configs(
+            set(parse_agent_tools(coordinator_file))
+        )
     if "air-coordinator" in pins:
         # Pinned coordinator: its callable_agents roster is whatever that
         # version recorded at sync time — pin a coordinator version whose
