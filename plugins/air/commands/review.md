@@ -608,7 +608,16 @@ Parse responses referencing finding numbers (e.g. "Finding 3 — fixed", "Findin
    - NOT FIXED — the flagged code is NOT in the inter-diff (unchanged since last review) and no developer response
    - PARTIALLY FIXED — code changed but finding not fully addressed
    - DISPUTED — developer provided reasoning. Include their response and your assessment (agree/disagree)
+   - DEFERRED — developer explicitly punted with a ticket reference (e.g. "tracked as PRM-3686"), OR the carry-forward rule below promotes a repeated NOT FIXED. ONLY acceptable for non-blocker findings; do NOT use this status for findings originally classified as `blocker`.
    - ACCEPTED (pre-existing) — developer confirmed it's pre-existing, consider moving to backlog recommendation
+
+   Render each entry in the posted review as `- **#N** [<severity>] — STATUS — rationale` — the `[severity]` tag carries the PRIOR review's classification and is load-bearing: the Step 12 verdict gate keys on it (only unfixed **blockers** gate; see `lib/verdict.py`). These status enums and the entry anchor are the shared contract with managed mode — `lib/verdict.py` parses exactly this shape.
+
+6.5. **Carry-forward suppression** (only when the PRIOR review was itself a re-review with a `### Previous Findings Status` block — typically round 3+). Extract the prior round's statuses and apply managed's rule verbatim: when you're about to emit NOT FIXED for finding #N AND the prior round also reported NOT FIXED for the same #N AND the severity is NOT `blocker`, instead emit:
+
+   `- **#N** [<severity>] — DEFERRED — carried forward 2+ consecutive rounds without a fix attempt; treating as deferred.`
+
+   Blockers NEVER auto-defer — always remain NOT FIXED. The rule applies only when the prior round said NOT FIXED; if it said PARTIALLY FIXED, FIXED, or DEFERRED, emit your honest classification (a previously-deferred finding still un-fixed stays DEFERRED; a partially/fully fixed one reflects the current state). Pass the prior round's status list (the `- **#N** [severity] — STATUS` lines from `REVIEW_COMMENT_BODY`) into the verifier prompt in Step 8 so it can apply this rule.
 
 7. **Launch agents on new changes only.** In the next step (Parallel Review), pass `$AIR_TMP/inter-diff-<number>.diff` to agents instead of `$AIR_TMP/pr<number>.diff`.** The agents must review the inter-diff, not the full PR diff. If inter-diff is unavailable (cross-repo fallback), pass the full diff but instruct agents: "This is a re-review. Only flag findings in files that changed since <REVIEWED_AT_SHA>: <list of changed files>."
 
@@ -907,23 +916,33 @@ Post in TWO steps — an issue comment (for re-review detection in Step 2) AND a
 ```bash
 # 1. Post the review body as an issue comment (discoverable by Step 2's gh api .../issues/.../comments query)
 gh pr comment <number> $REPO_FLAG --body-file $AIR_TMP/review-comment.md
-
-# 2. Submit the review verdict (approve or request-changes) for branch protection
 ```
 
-If **0 blockers** — approve:
+2. Decide the verdict with the SHARED gating contract — the exact code managed CI runs (`lib/verdict.py`: fresh = any blockers gate; re-review = new blockers OR unfixed/deferred PRIOR BLOCKERS gate, unfixed mediums/lows do NOT). Never re-derive the decision by reading the body yourself:
+
 ```bash
-gh pr review <number> $REPO_FLAG --approve -b "Approved — 0 blockers."
-# GitLab: glab mr approve <number>
+VERDICT_LINE=$("python3" "$AIR_PLUGIN_ROOT/lib/verdict.py" --decide < "$AIR_TMP/review-comment.md")
+VERDICT=${VERDICT_LINE%%$'\t'*}     # "approve" or "request-changes"
+REASON=${VERDICT_LINE#*$'\t'}       # reason text (only set for request-changes)
 ```
 
-If **1+ blockers** — request changes:
+If `AIR_PLUGIN_ROOT` is empty (Step 0 could not resolve it), fall back to the pre-v1.12 rule — 0 blockers ⇒ approve, otherwise request-changes — and print a warning that the verdict used the fallback path.
+
+3. Submit the verdict PINNED to the reviewed SHA — `commit_id` ties the approval to `headRefOid` so a push that lands mid-review dismisses it instead of riding a stale approval:
+
+If `VERDICT` = `approve`:
 ```bash
-gh pr review <number> $REPO_FLAG --request-changes -b "Changes requested — blockers found. See review comment above."
-# GitLab: no --request-changes equivalent. Skip this step — the review comment itself signals changes needed. Do NOT approve.
+gh api repos/<owner>/<repo>/pulls/<number>/reviews -f commit_id="$headRefOid" -f event=APPROVE -f body="Approved — 0 gating findings."
+# GitLab: glab mr approve <number>  (no commit pinning available)
 ```
 
-The issue comment contains the full review body (searchable by Step 2 for re-review detection). The review verdict is a short summary that sets the GitHub approval state for branch protection rules.
+If `VERDICT` = `request-changes`:
+```bash
+gh api repos/<owner>/<repo>/pulls/<number>/reviews -f commit_id="$headRefOid" -f event=REQUEST_CHANGES -f body="Changes requested — $REASON. See review comment above."
+# GitLab: no request-changes equivalent. Skip this step — the review comment itself signals changes needed. Do NOT approve.
+```
+
+The issue comment contains the full review body (searchable by Step 2 for re-review detection). The review verdict is a short summary that sets the GitHub approval state for branch protection rules — computed by the same `should_request_changes()` both modes share, so the CLI and CI can never gate the same body differently.
 
 ## Step 13: Learn + Clean
 

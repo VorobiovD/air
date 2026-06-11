@@ -36,7 +36,8 @@ plugins/air/
 │   ├── meta.py                # /air:learn trigger counter (wiki file or memory-store backend + find-store)
 │   ├── wiki_git.py            # Clone + commit-meta-with-retry (legacy wiki backend)
 │   ├── pattern_lifecycle.py   # Deterministic author-pattern strengthen/clean/decline/archive ops
-│   └── pr_conversation.py     # Merge GitHub PR comments/reviews into <pr-conversation> agent context
+│   ├── pr_conversation.py     # Merge GitHub PR comments/reviews into <pr-conversation> agent context
+│   └── verdict.py             # THE review-gating contract (shared: CLI Step 12 runs it via --decide; managed imports it)
 └── .claude-plugin/
     └── plugin.json      # Plugin metadata (name, version, author)
 
@@ -50,7 +51,7 @@ managed/                          # Managed Agent (CI automation)
 ├── setup.py                      # Creates/updates agents + environment via API
 ├── review.py                     # Client-side driver: orchestrates the review run (launches coordinator, posts)
 ├── github_client.py              # GitHub REST: fetchers, pagination, comment/verdict POSTs
-├── verdict.py                    # Review-body parsing + gating: blocker counts, prior statuses, body extractor
+├── verdict.py                    # Thin shim re-exporting plugins/air/lib/verdict.py (the shared gating contract)
 ├── session_runner.py             # Session lifecycle: run_session, REST drain, billing retry, SIGTERM cleanup
 ├── prompts.py                    # Prompt builders: PR context block + verifier-task templates
 ├── learn.py                      # Triggers wiki/store maintenance sessions (single-agent)

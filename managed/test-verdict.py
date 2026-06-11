@@ -217,5 +217,75 @@ def test_conflict_marker_empty_inputs():
     assert has_conflict_markers("", "") is False
 
 
+# ---------------------------------------------------------------------------
+# Shared-contract CLI surface (lib/verdict.py --decide) — the exact entry
+# point review.md Step 12 invokes, exercised as a real subprocess so the
+# CLI and managed modes provably share one decision implementation.
+# ---------------------------------------------------------------------------
+
+import subprocess
+
+_LIB = str(Path(__file__).parent.parent / "plugins" / "air" / "lib" / "verdict.py")
+
+
+def _decide(body: str) -> str:
+    out = subprocess.run(
+        [sys.executable, _LIB, "--decide"], input=body,
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
+
+
+def test_cli_decide_fresh_blocker_requests_changes():
+    line = _decide("## Code Review\n\n### Blockers\n\n**1. bug** — x\n")
+    assert line.startswith("request-changes\t")
+    assert "blocker" in line
+
+
+def test_cli_decide_clean_body_approves():
+    assert _decide("## Code Review\n\nAll good.\n") == "approve"
+
+
+def test_cli_decide_rereview_unfixed_medium_approves():
+    # The svc-tx #37 class through the CLI entry point: same semantics as
+    # the in-process should_request_changes call managed makes.
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [medium] — NOT FIXED — punted\n")
+    assert _decide(body) == "approve"
+
+
+def test_cli_decide_rereview_unfixed_blocker_gates():
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [blocker] — NOT FIXED — still broken\n")
+    assert _decide(body).startswith("request-changes\t")
+
+
+def test_cli_count_blockers():
+    out = subprocess.run(
+        [sys.executable, _LIB, "--count-blockers"],
+        input="## Code Review\n\n### Blockers\n\n**1. a** — x\n\n**2. b** — y\n",
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.strip() == "2"
+
+
+def test_cli_no_action_is_usage_error():
+    out = subprocess.run(
+        [sys.executable, _LIB], input="", capture_output=True, text=True,
+    )
+    assert out.returncode == 2
+
+
+def test_managed_verdict_resolves_to_the_lib_implementation():
+    # Whatever `import verdict` resolves to on this sys.path (the managed
+    # shim, or the lib directly when plugins/air/lib precedes managed/),
+    # its functions must come from the ONE shared lib file — a stale copy
+    # under managed/ would silently fork the gating contract.
+    import inspect
+    import verdict as resolved
+    src = Path(inspect.getsourcefile(resolved.should_request_changes)).resolve()
+    assert src == Path(_LIB).resolve()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
