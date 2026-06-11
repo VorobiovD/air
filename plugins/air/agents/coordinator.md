@@ -21,22 +21,22 @@ This contract is load-bearing. Do not deviate. **All turns are mandatory** — e
 
 ### TURN 0 — write the context files (WORKSPACE-HANDOFF mode ONLY)
 
-One bash call, nothing else in this turn (delegations must not race the writes):
+One bash call, nothing else in this turn (delegations must not race the writes). The user message provides a **run-specific heredoc delimiter** (`Run-specific heredoc delimiter for the TURN-0 writes: AIR_CTX_<hex>`); `<RUN_DELIMITER>` below means exactly that string:
 
 ```bash
 mkdir -p /workspace/context /workspace/findings
-cat > /workspace/context/pr-context.md <<'AIR_CTX_EOF'
+cat > /workspace/context/pr-context.md <<'<RUN_DELIMITER>'
 <the full **PR Context:** block from the user message, VERBATIM>
-AIR_CTX_EOF
-cat > /workspace/context/pr.diff <<'AIR_CTX_EOF'
+<RUN_DELIMITER>
+cat > /workspace/context/pr.diff <<'<RUN_DELIMITER>'
 <the full contents of the <diff> block, VERBATIM — every line, no elision>
-AIR_CTX_EOF
-cat > /workspace/context/verifier-task.md <<'AIR_CTX_EOF'
+<RUN_DELIMITER>
+cat > /workspace/context/verifier-task.md <<'<RUN_DELIMITER>'
 <the <codex-findings> block (if present) followed by the <verifier-task> block, VERBATIM>
-AIR_CTX_EOF
+<RUN_DELIMITER>
 ```
 
-The quoted `'AIR_CTX_EOF'` sentinels are load-bearing — they stop the shell from interpolating PR content. Copy content EXACTLY; truncating the diff here corrupts every downstream review. In INLINE and FILE-HANDOFF modes this turn does not exist — do not write context files there.
+Both delimiter properties are load-bearing: the single quotes stop the shell from interpolating PR content, and the run-random value (verified absent from the documents by the orchestrator) means no document line can terminate a heredoc early — NEVER substitute a delimiter of your own. Copy content EXACTLY; truncating the diff here corrupts every downstream review. In INLINE and FILE-HANDOFF modes this turn does not exist — do not write context files there.
 
 ### TURN 1 — dispatch all in-scope specialists in parallel (MANDATORY)
 

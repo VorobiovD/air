@@ -237,10 +237,12 @@ class ThreadTracker:
       probe_multiagent_width.py).
     """
 
-    def __init__(self, multiagent_primary: str | None = None):
+    def __init__(self, multiagent_primary: str | None = None, label: str = ""):
         self.primary = multiagent_primary
+        self.label = label
         self._counter = 0          # legacy callable_agents accounting
         self._open: set[str] = set()  # multiagent per-thread state
+        self._ever_opened = False  # any non-primary thread seen yet (MA)
 
     def on_event(self, event_type: str, agent_name: str = "") -> None:
         if self.primary is None:
@@ -249,10 +251,25 @@ class ThreadTracker:
             elif event_type == "session.thread_idle":
                 self._counter = max(0, self._counter - 1)
             return
-        if agent_name == self.primary or not agent_name:
+        if agent_name == self.primary:
+            return
+        if not agent_name:
+            # An unattributed lifecycle event can't be matched to an open
+            # thread — silently dropping a close event would strand its
+            # entry in _open and ride the run to the wall timeout. Surface
+            # it; the count stays untouched (a created without a name never
+            # entered the set either, so the symmetric drop is the least
+            # wrong option, and the REST poller's session-status terminal
+            # check bounds the damage).
+            print(
+                f"  [warn] {self.label or 'session'}: unattributed "
+                f"{event_type} (no agent_name) — thread accounting may drift",
+                file=sys.stderr,
+            )
             return
         if event_type in ("session.thread_created", "session.thread_status_running"):
             self._open.add(agent_name)
+            self._ever_opened = True
         elif event_type in (
             "session.thread_idle",
             "session.thread_status_idle",
@@ -263,6 +280,20 @@ class ThreadTracker:
     @property
     def open_count(self) -> int:
         return self._counter if self.primary is None else len(self._open)
+
+    @property
+    def awaiting_first_dispatch(self) -> bool:
+        """True (MA mode only) until the first sub-agent thread opens.
+
+        Gates the drain loop's terminal-idle break: a WORKSPACE-HANDOFF
+        TURN 0 ends with ZERO sub-threads open, so an inter-turn end_turn
+        idle before the TURN-1 fan-out would otherwise read as terminal and
+        return an empty review (the PR #41 failure class, MA edition). If
+        the coordinator never dispatches at all (protocol violation), the
+        REST poller's session-status terminal check still ends the run —
+        this gate defers only the SSE-side break; it cannot hang the run.
+        """
+        return self.primary is not None and not self._ever_opened
 
 
 async def run_session(
@@ -370,7 +401,7 @@ async def run_session(
     # an empty output, and posted `422 Validation Failed` to GitHub.
     # ThreadTracker owns the per-runtime accounting (callable_agents
     # counter vs multiagent per-thread state — see its docstring).
-    threads = ThreadTracker(multiagent_primary)
+    threads = ThreadTracker(multiagent_primary, label=label)
 
     parts: list[str] = []
     terminated_reason: str | None = None
@@ -452,8 +483,10 @@ async def run_session(
                 # Transient idle waiting for client-side events; keep going.
                 return None
             if stop_type in TERMINAL_SUCCESS:
-                if threads.open_count > 0:
-                    # Intermediate idle — sub-agents still running.
+                if threads.open_count > 0 or threads.awaiting_first_dispatch:
+                    # Intermediate idle — sub-agents still running, or (MA
+                    # WORKSPACE-HANDOFF) the inter-turn idle after TURN 0,
+                    # before the first fan-out.
                     return None
                 return "break"
             terminated_reason = f"idle with stop_reason={stop_type!r}"

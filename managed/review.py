@@ -34,6 +34,7 @@ import html
 import io
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -150,6 +151,77 @@ COORDINATOR_MA_AGENT = "air-coordinator-ma"
 
 def _multiagent_enabled() -> bool:
     return os.environ.get("AIR_MULTIAGENT", "") in ("1", "true")
+
+
+def _required_agents(review_arch: str) -> list[str]:
+    """The agents a run must find synced before any session spend.
+
+    Conditional on the architecture: full needs specialists+verifier+
+    coordinator; solo needs only the solo agent; both needs all. The MA
+    coordinator joins only when AIR_MULTIAGENT is on AND the architecture
+    uses a coordinator at all — solo never does, so the flag can't make a
+    solo run depend on an agent it never sessions."""
+    if review_arch == "solo":
+        return [SOLO_AGENT]
+    required = SPECIALIST_AGENTS + [VERIFIER_AGENT, COORDINATOR_AGENT]
+    if review_arch == "both":
+        required = required + [SOLO_AGENT]
+    if _multiagent_enabled():
+        required = required + [COORDINATOR_MA_AGENT]
+    return required
+
+
+def _mint_heredoc_sentinel(*docs: str) -> str:
+    """A run-random heredoc delimiter guaranteed absent from every doc.
+
+    The TURN-0 workspace writes quote PR-controlled content inside bash
+    heredocs. A FIXED delimiter is a shell-injection primitive: any PR
+    comment containing that exact line terminates the heredoc early and
+    the remaining attacker-controlled lines execute in a container holding
+    the bot token. 128 random bits make the delimiter unguessable, and the
+    containment check below makes collision impossible rather than merely
+    improbable. (Chosen over base64-encoding the docs, which would inflate
+    the one paid TURN-0 emission by ~33%.)
+    """
+    while True:
+        sentinel = f"AIR_CTX_{secrets.token_hex(16)}"
+        if not any(sentinel in (d or "") for d in docs):
+            return sentinel
+
+
+def _workspace_handoff_text(
+    pattern_note: str, ui_scope_line: str, pr_context: str, diff: str,
+    codex_block: str, verifier_task: str,
+) -> str:
+    """The MODE: WORKSPACE-HANDOFF coordinator user message.
+
+    Content blocks embedded once; the coordinator writes them to the shared
+    /workspace in TURN 0 using the run-specific heredoc delimiter minted
+    here, then delegates short file pointers (git-history inline per
+    coordinator.md's carve-out)."""
+    sentinel = _mint_heredoc_sentinel(
+        pattern_note, ui_scope_line, pr_context, diff, codex_block, verifier_task,
+    )
+    return (
+        "MODE: WORKSPACE-HANDOFF — multiagent shared-workspace "
+        "run. The full PR context, diff, and verifier task are "
+        "embedded below. Execute TURN 0 first (write them to "
+        "/workspace/context/ VERBATIM via quoted heredocs and "
+        "create /workspace/findings/), then follow your protocol "
+        "with file-pointer delegations "
+        "(air-git-history-reviewer: INLINE).\n"
+        f"Run-specific heredoc delimiter for the TURN-0 writes: {sentinel} "
+        f"— use EXACTLY this, single-quoted (<<'{sentinel}'), for all three "
+        "files. It is random per run so document content can never "
+        "terminate a heredoc early; do not substitute your own.\n\n"
+        f"- Pattern source: {pattern_note}\n"
+        f"- {ui_scope_line}\n\n"
+        f"{pr_context}\n\n"
+        f"<diff>\n{diff}\n</diff>\n\n"
+        f"{codex_block}\n\n"
+        f"<verifier-task>\n{verifier_task}\n</verifier-task>"
+    )
+
 
 # Conditional 6th specialist (UI / business-audience copy + static UX/a11y).
 # Synced as part of SUB_AGENTS so it's always in the coordinator's
@@ -1152,20 +1224,9 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
                 # that is full mode's #1 structural cost. git-history stays
                 # inline per coordinator.md's carve-out.
                 print("  multiagent: WORKSPACE-HANDOFF via air-coordinator-ma (AIR_MULTIAGENT=1)")
-                coordinator_user_text = (
-                    "MODE: WORKSPACE-HANDOFF — multiagent shared-workspace "
-                    "run. The full PR context, diff, and verifier task are "
-                    "embedded below. Execute TURN 0 first (write them to "
-                    "/workspace/context/ VERBATIM via quoted heredocs and "
-                    "create /workspace/findings/), then follow your protocol "
-                    "with file-pointer delegations "
-                    "(air-git-history-reviewer: INLINE).\n\n"
-                    f"- Pattern source: {pattern_note}\n"
-                    f"- {ui_scope_line}\n\n"
-                    f"{pr_context}\n\n"
-                    f"<diff>\n{diff}\n</diff>\n\n"
-                    f"{codex_block}\n\n"
-                    f"<verifier-task>\n{verifier_task}\n</verifier-task>"
+                coordinator_user_text = _workspace_handoff_text(
+                    pattern_note, ui_scope_line, pr_context, diff,
+                    codex_block, verifier_task,
                 )
             if handoff_enabled:
                 try:
@@ -1446,18 +1507,7 @@ async def run_review(args):
     agents = list_agents()
     env_id = find_environment()
 
-    # Required-agents gate is conditional on the architecture: full needs the
-    # specialists+verifier+coordinator; solo needs only the solo agent; both
-    # needs all. Full-only repos never require air-solo-reviewer, so its
-    # presence/absence can't break the default path.
-    if review_arch == "solo":
-        required = [SOLO_AGENT]
-    elif review_arch == "both":
-        required = SPECIALIST_AGENTS + [VERIFIER_AGENT, COORDINATOR_AGENT, SOLO_AGENT]
-    else:
-        required = SPECIALIST_AGENTS + [VERIFIER_AGENT, COORDINATOR_AGENT]
-    if _multiagent_enabled() and review_arch != "solo":
-        required = required + [COORDINATOR_MA_AGENT]
+    required = _required_agents(review_arch)
     missing = [n for n in required if n not in agents]
     if missing or not env_id:
         print(f"Missing agents: {missing}, env={env_id}. Run setup.py first.", file=sys.stderr)
