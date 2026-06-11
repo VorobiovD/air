@@ -203,6 +203,25 @@ def _normalize_model_field(value) -> dict | None:
     return {"id": value, "speed": "standard"}
 
 
+def _verify_multiagent_roster(name: str, data: dict, requested: dict | None) -> None:
+    """Abort the sync if a requested multiagent roster didn't persist.
+
+    A coordinator that lost its roster doesn't error at review time — the
+    runtime simply never offers the delegation tool, and the coordinator
+    improvises an unverified single-agent review that LOOKS like a normal
+    success (observed 2026-06-11 on the LifeMD workspace). Failing the sync
+    here is the only cheap place to catch it.
+    """
+    if requested and not data.get("multiagent"):
+        print(
+            f"  {name}: API accepted the sync but dropped the multiagent "
+            f"roster (v{data.get('version')}) — a roster-less coordinator "
+            f"silently improvises solo reviews. Aborting.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def create_or_update_agent(
     name: str,
     system: str,
@@ -229,6 +248,12 @@ def create_or_update_agent(
     model_field = {"id": model, "speed": speed} if speed else model
     sent_normalized = _normalize_model_field(model_field)
     existing_normalized = _normalize_model_field(existing.get("model") if existing else None)
+    # `multiagent` only exists in the GA dialect: the research-preview update
+    # endpoint silently drops the roster (and its GET renders the field as
+    # null even when set, hiding the loss). A roster-less coordinator still
+    # "works" — it improvises an unverified solo review with no error — so
+    # the wrong header here is a silent-degradation bug, not a crash.
+    headers = get_headers(ga=multiagent is not None)
 
     if existing:
         body = {"model": model_field, "system": system, "tools": tools, "version": existing["version"]}
@@ -238,11 +263,12 @@ def create_or_update_agent(
             body["multiagent"] = multiagent
         resp = requests.post(
             f"{API_BASE}/agents/{existing['id']}",
-            headers=get_headers(),
+            headers=headers,
             json=body,
         )
         if resp.ok:
             data = resp.json()
+            _verify_multiagent_roster(name, data, multiagent)
             if existing_normalized and existing_normalized != sent_normalized:
                 print(f"  {name}: synced → v{data['version']} (model {existing['model']} → {sent_normalized})")
             else:
@@ -255,11 +281,12 @@ def create_or_update_agent(
             retry_body = {k: v for k, v in body.items() if k != "model"}
             retry = requests.post(
                 f"{API_BASE}/agents/{existing['id']}",
-                headers=get_headers(),
+                headers=headers,
                 json=retry_body,
             )
             if retry.ok:
                 data = retry.json()
+                _verify_multiagent_roster(name, data, multiagent)
                 print(
                     f"  {name}: synced prompt → v{data['version']} "
                     f"(model pinned to {existing.get('model', '?')} — archive the agent via the Anthropic console "
@@ -281,11 +308,12 @@ def create_or_update_agent(
             body["callable_agents"] = callable_agents
         if multiagent:
             body["multiagent"] = multiagent
-        resp = requests.post(f"{API_BASE}/agents", headers=get_headers(), json=body)
+        resp = requests.post(f"{API_BASE}/agents", headers=headers, json=body)
         if not resp.ok:
             print(f"  {name}: creation failed — {api_error_message(resp)}", file=sys.stderr)
             sys.exit(1)
         data = resp.json()
+        _verify_multiagent_roster(name, data, multiagent)
         print(f"  {name}: created → {data['id']} (v{data['version']}, model={sent_normalized})")
         return data
 
@@ -408,8 +436,22 @@ def main():
         # `speed:` field for forward-compatibility if Anthropic adds fast
         # mode to Sonnet or we re-tier the coordinator to Opus later.
         coord_speed = parse_agent_speed(coordinator_file)
+        # COORDINATORS INVERT the specialists' allowlist construction.
+        # Sub-agent delegation is an UNNAMED toolset capability ("create_
+        # agent" — not in the configs[].name vocabulary: bash, edit, glob,
+        # grep, read, web_fetch, web_search, write), so it inherits
+        # default_config. The specialists' default-deny shape silently
+        # disabled it; the old workspace's runtime build didn't enforce
+        # that, the LifeMD build DOES ("Permission to use create_agent has
+        # been denied", 2026-06-11 — the coordinator then improvised an
+        # unverified solo review). Construction: default-ENABLE, then
+        # explicitly disable everything NOT in the frontmatter allowlist.
+        # Same effective named-tool surface as before (bash/read/grep/glob
+        # on, edit/write/web off), delegation rides the enabled default.
+        _coord_allowed = set(parse_agent_tools(coordinator_file))
         coord_tool_configs = [
-            {"name": t, "enabled": True} for t in parse_agent_tools(coordinator_file)
+            {"name": t, "enabled": t in _coord_allowed}
+            for t in ("bash", "edit", "glob", "grep", "read", "web_fetch", "web_search", "write")
         ]
     if "air-coordinator" in pins:
         # Pinned coordinator: its callable_agents roster is whatever that
@@ -436,7 +478,10 @@ def main():
                 system=coord_system,
                 tools=[{
                     "type": "agent_toolset_20260401",
-                    "default_config": {"enabled": False},
+                    # Default-ENABLE so unnamed delegation works; named
+                    # tools outside the frontmatter allowlist are disabled
+                    # explicitly in coord_tool_configs (see above).
+                    "default_config": {"enabled": True},
                     "configs": coord_tool_configs,
                 }],
                 existing=agents_by_name.get("air-coordinator"),
@@ -475,7 +520,9 @@ def main():
             system=coord_system,
             tools=[{
                 "type": "agent_toolset_20260401",
-                "default_config": {"enabled": False},
+                # Default-ENABLE — same rationale as step 4 (unnamed
+                # delegation rides the default; allowlist via disables).
+                "default_config": {"enabled": True},
                 "configs": coord_tool_configs,
             }],
             existing=agents_by_name.get("air-coordinator-ma"),

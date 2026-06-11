@@ -248,6 +248,7 @@ class ThreadTracker:
         if self.primary is None:
             if event_type == "session.thread_created":
                 self._counter += 1
+                self._ever_opened = True
             elif event_type == "session.thread_idle":
                 self._counter = max(0, self._counter - 1)
             return
@@ -295,6 +296,19 @@ class ThreadTracker:
         """
         return self.primary is not None and not self._ever_opened
 
+    @property
+    def ever_dispatched(self) -> bool:
+        """True once any sub-agent thread has been observed (both runtimes).
+
+        A coordinator session that completes without EVER opening a
+        sub-agent thread did not run the review pipeline — it improvised a
+        single-agent review (observed twice on the LifeMD workspace:
+        delegation denied by toolset config, and roster dropped by a
+        research-preview-dialect update). `run_session(require_dispatch=True)`
+        turns that from a silent degradation into a loud run failure.
+        """
+        return self._ever_opened
+
 
 async def run_session(
     client,
@@ -309,6 +323,7 @@ async def run_session(
     store_id: str | None = None,
     file_resources: list[dict] | None = None,
     multiagent_primary: str | None = None,
+    require_dispatch: bool = False,
 ) -> str:
     """Create a session, send the user prompt, stream events, return collected agent text.
 
@@ -779,6 +794,21 @@ async def run_session(
     output = "".join(parts).strip()
     if terminated_reason and not output:
         raise SpecialistSessionError(label, terminated_reason)
+    if require_dispatch and not threads.ever_dispatched:
+        # The session "succeeded" — output and all — but no sub-agent
+        # thread ever opened, so nothing in the output was produced by the
+        # specialist pipeline or checked by the verifier. Posting it would
+        # be the silent solo-improvisation failure (LifeMD, 2026-06-11).
+        # The SSE-side awaiting_first_dispatch gate can't catch this: the
+        # REST poller's session-status terminal check (deliberately) ends
+        # the run without consulting thread accounting.
+        raise SpecialistSessionError(
+            label,
+            "session completed without dispatching any sub-agent thread — "
+            "the coordinator improvised an unverified single-agent review "
+            "(delegation toolset or multiagent roster misconfiguration; "
+            "re-run managed/setup.py and check the agent's config)",
+        )
     print(f"  [done] {label}")
     return output
 
