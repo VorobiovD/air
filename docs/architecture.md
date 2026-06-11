@@ -147,19 +147,27 @@ VorobiovD/air/
 ```
 PR opened (or air-machine requested as reviewer) → GitHub Action → managed/review.py
   │
-  ├── [1] Sync 6 specialist agents + air-coordinator + air-solo-reviewer (setup.py: find by name → create or PATCH)
+  ├── [1] Sync 6 specialist agents + air-coordinator (+ air-solo-reviewer on solo/both runs,
+  │       + air-coordinator-ma on AIR_MULTIAGENT=1 runs) (setup.py: find by name → create or PATCH)
   ├── [2] Fetch PR metadata + diff from GitHub API (via AIR_BOT_TOKEN on the runner)
   ├── [3] Build PR Context block (Python)
   ├── [4] Optional codex pass (Pattern B, GHA-side sequential): `codex review --base <sha>`
   │       output html-escaped + length-capped (prompt-injection blast radius), bundled into
   │       verifier-task.md (file-handoff) or the coordinator user message (inline fallback)
   │
-  ├── [4.5] File-handoff upload (v1.18.0, EXPERIMENTAL — AIR_FILE_HANDOFF=1, off by default):
-  │       PR context, diff, and verifier task + codex findings upload via the Files API and
-  │       mount at /workspace/context/; coordinator user message shrinks to a pointer note.
-  │       BLOCKED on runtime: callable-agent threads run in isolated containers — file
-  │       resources + cross-thread writes don't propagate (verified 2026-06-03). Inline is
-  │       the production shape; upload failure also falls back to inline.
+  ├── [4.5] File-handoff upload (v1.18.0, EXPERIMENTAL — AIR_FILE_HANDOFF=1, off by default;
+  │       DEAD END, do not flip): Files-API mounts don't materialize on the current runtime
+  │       at all (probe 3, 2026-06-11 — not in sub-threads, not in the primary). Superseded
+  │       by the multiagent workspace-handoff below; ignored when AIR_MULTIAGENT is set.
+  │
+  ├── [4.6] Multiagent workspace-handoff (EXPERIMENTAL — AIR_MULTIAGENT=1, off by default):
+  │       step [5] runs through air-coordinator-ma (GA `multiagent` roster — sub-agent
+  │       threads SHARE /workspace, unlike callable_agents). MODE: WORKSPACE-HANDOFF adds a
+  │       TURN 0: one bash call writes pr-context/pr.diff/verifier-task to /workspace/context/
+  │       (run-random heredoc delimiter, verified absent from content) and the delegations
+  │       become short file pointers (git-history stays inline — its tier under-read pointers
+  │       in benchmarking). A/B on 4 PRs (air #146/#147, qai-be #1115, qai-fe #468):
+  │       $1.00–1.77/review vs $3.92–7.73 production inline (≈ −65–80%).
   │
   ├── [5] One air-coordinator session (callable_agents multi-agent runtime, beta header
   │       `managed-agents-2026-04-01-research-preview`):

@@ -209,6 +209,7 @@ def create_or_update_agent(
     tools: list,
     existing: dict | None,
     callable_agents: list | None = None,
+    multiagent: dict | None = None,
     model: str = DEFAULT_OPUS,
     speed: str | None = None,
 ) -> dict:
@@ -233,6 +234,8 @@ def create_or_update_agent(
         body = {"model": model_field, "system": system, "tools": tools, "version": existing["version"]}
         if callable_agents:
             body["callable_agents"] = callable_agents
+        if multiagent:
+            body["multiagent"] = multiagent
         resp = requests.post(
             f"{API_BASE}/agents/{existing['id']}",
             headers=get_headers(),
@@ -276,6 +279,8 @@ def create_or_update_agent(
         body = {"name": name, "model": model_field, "system": system, "tools": tools}
         if callable_agents:
             body["callable_agents"] = callable_agents
+        if multiagent:
+            body["multiagent"] = multiagent
         resp = requests.post(f"{API_BASE}/agents", headers=get_headers(), json=body)
         if not resp.ok:
             print(f"  {name}: creation failed — {api_error_message(resp)}", file=sys.stderr)
@@ -392,6 +397,20 @@ def main():
     # without erroring).
     coordinator_file = AGENTS_DIR / "coordinator.md"
     coordinator: dict | None = None
+    # Shared by steps 4 and 4b (same prompt file, same model/tools — only
+    # the delegation primitive differs). Parsed once.
+    coord_system = coord_model = coord_speed = None
+    coord_tool_configs: list[dict] = []
+    if coordinator_file.exists():
+        coord_system = read_prompt(coordinator_file)
+        coord_model = parse_agent_model(coordinator_file, default=MODEL_ALIASES["sonnet"])
+        # Coordinator is Sonnet today (no fast-mode), but accept the
+        # `speed:` field for forward-compatibility if Anthropic adds fast
+        # mode to Sonnet or we re-tier the coordinator to Opus later.
+        coord_speed = parse_agent_speed(coordinator_file)
+        coord_tool_configs = [
+            {"name": t, "enabled": True} for t in parse_agent_tools(coordinator_file)
+        ]
     if "air-coordinator" in pins:
         # Pinned coordinator: its callable_agents roster is whatever that
         # version recorded at sync time — pin a coordinator version whose
@@ -408,31 +427,68 @@ def main():
                 file=sys.stderr,
             )
         else:
-            system = read_prompt(coordinator_file)
-            tools = parse_agent_tools(coordinator_file)
-            model = parse_agent_model(coordinator_file, default=MODEL_ALIASES["sonnet"])
-            # Coordinator is Sonnet today (no fast-mode), but accept the
-            # `speed:` field for forward-compatibility if Anthropic adds fast
-            # mode to Sonnet or we re-tier the coordinator to Opus later.
-            speed = parse_agent_speed(coordinator_file)
-            tool_configs = [{"name": t, "enabled": True} for t in tools]
             callable_agents = [
                 {"type": "agent", "id": synced[n]["id"], "version": synced[n]["version"]}
                 for n in SUB_AGENTS
             ]
             coordinator = create_or_update_agent(
                 name="air-coordinator",
-                system=system,
+                system=coord_system,
                 tools=[{
                     "type": "agent_toolset_20260401",
                     "default_config": {"enabled": False},
-                    "configs": tool_configs,
+                    "configs": coord_tool_configs,
                 }],
                 existing=agents_by_name.get("air-coordinator"),
                 callable_agents=callable_agents,
-                model=model,
-                speed=speed,
+                model=coord_model,
+                speed=coord_speed,
             )
+
+    # 4b. Multiagent-roster coordinator — the PR6′ migration path, created
+    # ONLY when the run opts in via AIR_MULTIAGENT=1 AND the architecture
+    # actually uses a coordinator (solo mode never does — without the mode
+    # guard, a transient create failure here could sys.exit a solo review
+    # that has no use for this agent). Same posture as the solo agent: a
+    # default run never touches it. Same prompt/tools/model as
+    # air-coordinator; only the delegation primitive differs — a GA
+    # `multiagent` roster whose /workspace is SHARED across threads
+    # (probes 1-4, 2026-06-10/11), which is what enables
+    # MODE: WORKSPACE-HANDOFF. Deliberately NOT pinnable (pin the
+    # specialists + air-coordinator; the MA agent is rebuilt each sync).
+    ma_mode = (
+        os.environ.get("AIR_MULTIAGENT", "") in ("1", "true")
+        and os.environ.get("AIR_REVIEW_MODE", "full") != "solo"
+    )
+    if not ma_mode:
+        print("[4b] Multiagent coordinator — skipped (AIR_MULTIAGENT unset or solo mode)")
+    elif not coordinator_file.exists() or len(synced) < len(SUB_AGENTS):
+        print(
+            "[4b] Multiagent coordinator — SKIPPED (needs coordinator.md + "
+            "all specialists synced)",
+            file=sys.stderr,
+        )
+    else:
+        print("[4b] Multiagent coordinator (GA roster, shared workspace)")
+        create_or_update_agent(
+            name="air-coordinator-ma",
+            system=coord_system,
+            tools=[{
+                "type": "agent_toolset_20260401",
+                "default_config": {"enabled": False},
+                "configs": coord_tool_configs,
+            }],
+            existing=agents_by_name.get("air-coordinator-ma"),
+            multiagent={
+                "type": "coordinator",
+                "agents": [
+                    {"type": "agent", "id": synced[n]["id"], "version": synced[n]["version"]}
+                    for n in SUB_AGENTS
+                ],
+            },
+            model=coord_model,
+            speed=coord_speed,
+        )
 
     # 5. Solo reviewer agent. One agent applying all 6 lenses + self-verify in
     # a single session — the opt-in AIR_REVIEW_MODE=solo|both path in review.py.

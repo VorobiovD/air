@@ -230,6 +230,10 @@ Three knobs trim per-review context spend. All of them leave **visible markers**
 
 **CLI gap (by design):** `/air:review` is unchanged — its bash path fetches diffs via `gh pr diff` and uses `pr_conversation.py`'s default cap (100). The hygiene/caps live in the managed driver only.
 
+### Multiagent workspace-handoff (`AIR_MULTIAGENT=1` — EXPERIMENTAL, off by default)
+
+Runs full mode through `air-coordinator-ma`, a coordinator on the GA `multiagent` roster primitive whose sub-agent threads **share `/workspace`** (the research-preview `callable_agents` threads are isolated). Instead of re-emitting the PR context + diff into every specialist delegation (~60–150K output tokens/review — full mode's #1 structural cost), the coordinator writes them to `/workspace/context/` ONCE (TURN 0) and delegates short file pointers; specialists write findings to `/workspace/findings/` and the verifier reads them there. `air-git-history-reviewer` keeps an inline delegation (its model tier under-read file pointers in benchmarking). The MA agent is created by setup.py only when the flag is on, is not pinnable, and `AIR_FILE_HANDOFF` is ignored while the flag is set (Files-API mounts don't materialize on this runtime — probed). Roll out per-repo only after an A/B against inline full mode on the same PRs.
+
 ### UI / copy reviewer — covering CLI/TUI copy (`## User-Facing Copy Paths`)
 
 `air-ui-copy-reviewer` dispatches whenever a PR's diff touches a **web** surface (`.tsx/.jsx/.vue/.svelte/.html`, i18n catalogs, user-facing docs) — automatically, no config. For **CLI/TUI products** whose user-facing copy lives in non-markup files (e.g. ai-relay's Python patient/agent message modules), add a `## User-Facing Copy Paths` section to the repo's **PROJECT-PROFILE.md** listing glob patterns, one per `- ` line:
