@@ -464,6 +464,13 @@ jobs:
           # variables, so a caller can flip AIR_PROMOTE_FASTPATH=true in
           # Settings → Variables to turn this on with no workflow edit / PR.
           AIR_PROMOTE_FASTPATH: ${{ (inputs.promote_fastpath == 'true' || vars.AIR_PROMOTE_FASTPATH == 'true') && 'true' || 'false' }}
+          # Multiagent workspace-handoff (PR6' migration, EXPERIMENTAL —
+          # default off). Caller repo/org VARIABLE only, same vars
+          # mechanism as above: set AIR_MULTIAGENT=1 in Settings →
+          # Variables to route full mode through air-coordinator-ma
+          # (GA roster, shared /workspace, ≈ −65–80% session cost in the
+          # 2026-06-11 A/B); delete the variable to roll back instantly.
+          AIR_MULTIAGENT: ${{ vars.AIR_MULTIAGENT }}
           # Absolute path to the local checkout. review.py uses it for
           # both `codex review` (when enabled) and client-side
           # pre-computation (blame/churn/file-status/diff-check
