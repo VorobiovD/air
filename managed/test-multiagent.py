@@ -60,7 +60,7 @@ def test_legacy_ignores_ga_event_names():
 
 def test_ma_rename_decrements():
     # The probe-confirmed GA rename: thread_status_idle must close a thread.
-    t = ThreadTracker(multiagent_primary="air-coordinator-ma")
+    t = ThreadTracker(multiagent_primary=review.COORDINATOR_MA_AGENT)
     t.on_event("session.thread_created", "air-code-reviewer")
     assert t.open_count == 1
     t.on_event("session.thread_status_idle", "air-code-reviewer")
@@ -70,18 +70,18 @@ def test_ma_rename_decrements():
 def test_ma_primary_thread_excluded():
     # The coordinator's own thread idles BETWEEN its turns and re-runs; it
     # must never count as an open sub-agent thread.
-    t = ThreadTracker(multiagent_primary="air-coordinator-ma")
-    t.on_event("session.thread_created", "air-coordinator-ma")
-    t.on_event("session.thread_status_running", "air-coordinator-ma")
+    t = ThreadTracker(multiagent_primary=review.COORDINATOR_MA_AGENT)
+    t.on_event("session.thread_created", review.COORDINATOR_MA_AGENT)
+    t.on_event("session.thread_status_running", review.COORDINATOR_MA_AGENT)
     assert t.open_count == 0
-    t.on_event("session.thread_status_idle", "air-coordinator-ma")
+    t.on_event("session.thread_status_idle", review.COORDINATOR_MA_AGENT)
     assert t.open_count == 0
 
 
 def test_ma_rerun_reopens_thread():
     # A roster thread can idle and then RUN AGAIN on a coordinator
     # follow-up — running must re-open it (a +/- counter would drift).
-    t = ThreadTracker(multiagent_primary="air-coordinator-ma")
+    t = ThreadTracker(multiagent_primary=review.COORDINATOR_MA_AGENT)
     t.on_event("session.thread_created", "air-review-verifier")
     t.on_event("session.thread_status_idle", "air-review-verifier")
     assert t.open_count == 0
@@ -94,7 +94,7 @@ def test_ma_rerun_reopens_thread():
 def test_ma_duplicate_idles_do_not_drift():
     # The same thread idling repeatedly must not push the count below the
     # other open threads (set semantics, not arithmetic).
-    t = ThreadTracker(multiagent_primary="air-coordinator-ma")
+    t = ThreadTracker(multiagent_primary=review.COORDINATOR_MA_AGENT)
     t.on_event("session.thread_created", "air-code-reviewer")
     t.on_event("session.thread_created", "air-simplify")
     t.on_event("session.thread_status_idle", "air-simplify")
@@ -103,7 +103,7 @@ def test_ma_duplicate_idles_do_not_drift():
 
 
 def test_ma_terminated_closes_thread():
-    t = ThreadTracker(multiagent_primary="air-coordinator-ma")
+    t = ThreadTracker(multiagent_primary=review.COORDINATOR_MA_AGENT)
     t.on_event("session.thread_created", "air-security-auditor")
     t.on_event("session.thread_status_terminated", "air-security-auditor")
     assert t.open_count == 0
@@ -224,11 +224,11 @@ def test_workspace_text_embeds_noncolliding_sentinel():
 # ---------------------------------------------------------------------------
 
 def test_awaiting_first_dispatch_gates_until_fanout():
-    t = ThreadTracker(multiagent_primary="air-coordinator-ma")
+    t = ThreadTracker(multiagent_primary=review.COORDINATOR_MA_AGENT)
     # TURN 0: only the primary has lifecycle events; an end_turn idle here
     # must NOT read as terminal (open_count is 0 but nothing dispatched).
-    t.on_event("session.thread_created", "air-coordinator-ma")
-    t.on_event("session.thread_status_idle", "air-coordinator-ma")
+    t.on_event("session.thread_created", review.COORDINATOR_MA_AGENT)
+    t.on_event("session.thread_status_idle", review.COORDINATOR_MA_AGENT)
     assert t.open_count == 0
     assert t.awaiting_first_dispatch is True
     # TURN 1 fan-out flips the gate permanently.
@@ -245,7 +245,7 @@ def test_legacy_mode_never_awaits_dispatch():
 
 
 def test_unattributed_event_warns_not_silent(capsys):
-    t = ThreadTracker(multiagent_primary="air-coordinator-ma", label="coordinator")
+    t = ThreadTracker(multiagent_primary=review.COORDINATOR_MA_AGENT, label="coordinator")
     t.on_event("session.thread_status_idle", "")
     err = capsys.readouterr().err
     assert "unattributed" in err and "coordinator" in err
