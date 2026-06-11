@@ -219,6 +219,31 @@ def test_diff_touches_ui_web_unaffected_by_globs():
     assert _diff_touches_ui(["src/App.tsx"], "", ["agent-core/agents/*.py"]) is True
 
 
+def test_diff_touches_ui_truncated_diff_no_checkout_fails_open():
+    # A byte-cap-omitted segment has no `+++ b/` header; with no precomp
+    # paths to fall back on, an omitted UI file would be invisible to both
+    # signals — fail open.
+    from github_client import DIFF_TRUNCATION_MARKER
+    diff = (
+        "diff --git a/svc/handler.py b/svc/handler.py\n"
+        "+++ b/svc/handler.py\n+x = 1\n"
+        f"{DIFF_TRUNCATION_MARKER} at 500000 bytes — 2 file(s) omitted: src/App.tsx]\n"
+    )
+    assert _diff_touches_ui([], diff, ()) is True
+
+
+def test_diff_touches_ui_truncated_diff_with_checkout_uses_paths():
+    # With precomp paths present (uncapped, from git), the path list is
+    # authoritative — truncation alone must not force the UI agent.
+    from github_client import DIFF_TRUNCATION_MARKER
+    diff = (
+        "diff --git a/svc/handler.py b/svc/handler.py\n"
+        "+++ b/svc/handler.py\n+x = 1\n"
+        f"{DIFF_TRUNCATION_MARKER} at 500000 bytes — 1 file(s) omitted: big.py]\n"
+    )
+    assert _diff_touches_ui(["svc/handler.py", "big.py"], diff, ()) is False
+
+
 # --- solo includes the UI lens ----------------------------------------------
 
 def test_solo_prompt_includes_ui_lens():

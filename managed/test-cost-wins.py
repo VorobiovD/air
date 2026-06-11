@@ -172,7 +172,6 @@ def test_cap_omitted_lockfile_gets_dedicated_supply_chain_marker():
     out = apply_diff_hygiene(diff, max_bytes=seg + RESERVE + 200)
     assert "[air: LOCKFILE yarn.lock omitted by the size cap" in out
     assert "supply-chain review incomplete" in out
-    assert "diff --git a/src/app.py" not in out or True  # app.py may or may not fit
 
 
 def test_cap_omitted_non_lockfile_gets_no_lockfile_marker():

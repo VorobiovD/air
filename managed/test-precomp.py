@@ -119,7 +119,7 @@ def test_start_codex_task_actually_starts_before_returning(monkeypatch):
     monkeypatch.setattr(review, "run_codex_session", fake_codex)
 
     async def main():
-        task, t0, timer = await review._start_codex_task("/repo", "a" * 40)
+        task, t0, timer, _fired = await review._start_codex_task("/repo", "a" * 40)
         timer.cancel()
         started_at_return = state["started"]
         out = await task
@@ -158,7 +158,7 @@ def test_codex_makes_progress_while_main_blocks_in_to_thread(monkeypatch):
     monkeypatch.setattr(review, "run_codex_session", fake_codex)
 
     async def main():
-        task, _, timer = await review._start_codex_task("/repo", "a" * 40)
+        task, _, timer, _fired = await review._start_codex_task("/repo", "a" * 40)
         timer.cancel()
         task.add_done_callback(lambda _t: release.set())
         await asyncio.to_thread(blocking_precomp)
@@ -188,7 +188,7 @@ def test_codex_task_cancel_reaches_coroutine(monkeypatch):
     monkeypatch.setattr(review, "run_codex_session", fake_codex)
 
     async def main():
-        task, _, timer = await review._start_codex_task("/repo", "a" * 40)
+        task, _, timer, _fired = await review._start_codex_task("/repo", "a" * 40)
         timer.cancel()
         task.cancel()
         try:
@@ -215,19 +215,47 @@ def test_watchdog_cancels_codex_during_blocked_overlap_window(monkeypatch):
     monkeypatch.setattr(review, "SESSION_TIMEOUT_SECS", 0.05)
 
     async def main():
-        task, _, timer = await review._start_codex_task("/repo", "a" * 40)
+        task, _, timer, fired = await review._start_codex_task("/repo", "a" * 40)
         await asyncio.to_thread(_t.sleep, 0.3)   # overlap window > budget
-        cancelled_during_window = task.cancelled() or task.cancelling() > 0
+        fired_during_window = fired()
         try:
             await task
         except asyncio.CancelledError:
             pass
         timer.cancel()
-        return cancelled_during_window, task.cancelled()
+        return fired_during_window, fired()
 
     during, final = asyncio.run(main())
-    assert during is True    # the timer fired while main was blocked
+    assert during is True    # the watchdog fired while main was blocked
     assert final is True
+
+
+def test_watchdog_flag_distinguishes_external_cancel(monkeypatch):
+    # SIGTERM/shutdown also leaves codex_task.cancelled() True (wait_for
+    # cancels the inner task before propagating), so the await-site handler
+    # keys on the watchdog's OWN flag: an external cancel must leave it
+    # False, or shutdown would be misread as a codex timeout and swallowed.
+    import asyncio
+
+    async def slow_codex(repo, sha):
+        await asyncio.sleep(30)
+        return "never"
+
+    monkeypatch.setattr(review, "run_codex_session", slow_codex)
+
+    async def main():
+        task, _, timer, fired = await review._start_codex_task("/repo", "a" * 40)
+        task.cancel()   # external cancellation, not the watchdog
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        timer.cancel()
+        return fired(), task.cancelled()
+
+    fired, cancelled = asyncio.run(main())
+    assert cancelled is True    # task state can't tell the difference...
+    assert fired is False       # ...the flag can
 
 
 def test_map_files_preserves_order_under_concurrency():
