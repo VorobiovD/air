@@ -33,17 +33,20 @@ PREFIX = "air-patterns "
 
 
 def _paginate(list_fn, **kw):
+    """Exhaust an SDK list endpoint. Memory-store endpoints signal
+    continuation via an opaque `next_page` cursor consumed as the `page`
+    param — NOT `has_more`/`starting_after`; probing those single-pages
+    the walk silently (mirrors `memory_store.py:_paginate`; same cursor
+    bug class as the session-event drain fixed on this PR)."""
     cursor = None
     while True:
-        page = list_fn(**kw) if cursor is None else list_fn(starting_after=cursor, **kw)
-        data = page.get("data", []) if isinstance(page, dict) else page.data
-        for item in data:
-            yield item if isinstance(item, dict) else item.model_dump()
-        has_more = page.get("has_more") if isinstance(page, dict) else getattr(page, "has_more", False)
-        if not has_more or not data:
+        page = list_fn(**kw) if cursor is None else list_fn(page=cursor, **kw)
+        body = page if isinstance(page, dict) else page.model_dump()
+        for item in body.get("data", []):
+            yield item
+        cursor = body.get("next_page")
+        if not cursor:
             return
-        last = data[-1]
-        cursor = last["id"] if isinstance(last, dict) else last.id
 
 
 def _stores(client) -> dict[str, str]:
@@ -111,8 +114,11 @@ def main() -> int:
         return 0
 
     failures = 0
+    # `dst_existing` (fetched once above — `new` is always set past the
+    # dry-run return) covers every pre-existing store; newly-created ones
+    # get their id from the create response. No per-store re-fetch.
     for name, src_id, mems in plans:
-        dst_id = _stores(new).get(name)
+        dst_id = dst_existing.get(name)
         if dst_id is None and not args.verify:
             store = new.beta.memory_stores.create(
                 name=name,

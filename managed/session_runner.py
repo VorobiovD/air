@@ -247,7 +247,7 @@ class ThreadTracker:
         self.label = label
         self._counter = 0          # legacy callable_agents accounting
         self._open: set[str] = set()  # multiagent per-thread state
-        self._ever_opened = False  # any non-primary thread seen yet (MA)
+        self._ever_opened = False  # any sub-agent thread opened (either runtime)
 
     def on_event(self, event_type: str, agent_name: str = "") -> None:
         if self.primary is None:
