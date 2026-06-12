@@ -7,18 +7,24 @@
 # keeps a stale (existing-but-expired) PAT and its next review fails auth
 # silently, which is why partial rotation exits non-zero.
 #
-# Setup (once): put it on your PATH as a short command —
-#   cp scripts/rotate-air-pat.sh ~/.local/bin/air-rotate && chmod +x ~/.local/bin/air-rotate
-#   (no ~/.local/bin on PATH? use ~/bin, or: alias air-rotate='/abs/path/rotate-air-pat.sh')
+# One-time setup:
+#   1. gh auth login
+#   2. cp scripts/rotate-air-pat.sh ~/.local/bin/air-rotate && chmod +x ~/.local/bin/air-rotate
+#      (no ~/.local/bin on PATH? use ~/bin, or: alias air-rotate='/abs/path/rotate-air-pat.sh')
+#   3. Create the PAT (classic, scope `repo`, Expiration → 7 days):
+#      https://github.com/settings/tokens/new?scopes=repo&description=air-review
+#   4. Authorize SSO (required to reach the thecvlb repos):
+#      https://github.com/settings/tokens → Configure SSO next to air-review → Authorize thecvlb.
 #
-# Weekly:
-#   1. Create a new 7-day fine-grained PAT — resource owner thecvlb, the four
-#      air-review repos, permissions Pull requests: RW, Contents: RO, Checks: RW.
-#      https://github.com/settings/personal-access-tokens/new
-#   2. Run:  air-rotate                  # auto-detects your <STEM>_PAT from your gh login
+# Each week:
+#   1. Regenerate: https://github.com/settings/tokens → air-review → Regenerate token, 7 days, copy.
+#   2. Re-authorize SSO — it does NOT survive a regenerate: same token → Configure SSO → Authorize.
+#      (Forget this and the token still authenticates but can't reach thecvlb —
+#      the preflight below catches it before any secret is overwritten.)
+#   3. Run:  air-rotate                  # auto-detects your <STEM>_PAT from your gh login
 #            air-rotate CHRISTINA_PAT    # …or pass it explicitly (ai-relay-only reviewers)
 #            air-rotate AIR_BOT_TOKEN VorobiovD/air   # bot-PAT flow: explicit name + repos
-#   3. Paste the PAT at the prompt, press Enter. Done — all repos updated.
+#      Paste the PAT at the prompt, press Enter — four ✓ and done.
 #
 # The PAT is read with `read -rs` (single line, silent): it never appears in
 # argv/shell history AND is not echoed to the screen as you paste it.
@@ -63,7 +69,17 @@ printf '\n' >&2
 # whose token it is, catching the wrong-account paste.
 PAT_LOGIN=$(GH_TOKEN="$PAT" gh api user --jq '.login' 2>/dev/null) \
   || { echo "new PAT failed GET /user preflight — nothing updated" >&2; exit 1; }
-echo "new PAT authenticates as '${PAT_LOGIN}' → updating ${SECRET} on: ${REPOS[*]}" >&2
+# Second preflight, the weekly gotcha: SSO authorization does NOT survive a
+# token regenerate, and an un-authorized token still passes GET /user — it
+# just can't see the org's repos. Verify real access against the first fleet
+# repo before distributing.
+GH_TOKEN="$PAT" gh api "repos/${REPOS[0]}" --jq .full_name >/dev/null 2>&1 || {
+  echo "new PAT authenticates as '${PAT_LOGIN}' but cannot reach ${REPOS[0]} — " >&2
+  echo "almost certainly SSO not (re-)authorized: https://github.com/settings/tokens" >&2
+  echo "→ Configure SSO next to the token → Authorize, then re-run. Nothing updated." >&2
+  exit 1
+}
+echo "new PAT authenticates as '${PAT_LOGIN}' (org access ✓) → updating ${SECRET} on: ${REPOS[*]}" >&2
 
 ok=0
 for r in "${REPOS[@]}"; do
