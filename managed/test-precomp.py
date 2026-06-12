@@ -107,7 +107,31 @@ def test_non_utf8_file_does_not_kill_precomp(fixture_repo):
     assert "binary.dat:" in out
     assert "alpha.py:" in out
     churn = compute_churn_data(fixture_repo, ["binary.dat", "alpha.py"])
-    assert isinstance(churn, str)  # must not raise
+    assert "binary.dat:" in churn  # summarized, not merely survived
+
+
+def test_non_utf8_line_does_not_kill_diff_check(fixture_repo):
+    """Symmetric site: `git diff --check` quotes the OFFENDING line —
+    a text file whose whitespace-error line carries a non-UTF-8 byte
+    reaches the decoder through this path, not blame's."""
+    from review import compute_diff_check_warnings
+    repo = Path(fixture_repo)
+    (repo / "messy.txt").write_bytes(b"bad\x90line with trailing space \n")
+    subprocess.run(
+        ["git", "add", "."], cwd=repo, check=True, capture_output=True,
+        env={"GIT_AUTHOR_NAME": "alice", "GIT_AUTHOR_EMAIL": "a@x",
+             "GIT_COMMITTER_NAME": "alice", "GIT_COMMITTER_EMAIL": "a@x",
+             "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(repo)},
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "messy"], cwd=repo, check=True, capture_output=True,
+        env={"GIT_AUTHOR_NAME": "alice", "GIT_AUTHOR_EMAIL": "a@x",
+             "GIT_COMMITTER_NAME": "alice", "GIT_COMMITTER_EMAIL": "a@x",
+             "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(repo)},
+    )
+    out = compute_diff_check_warnings(fixture_repo, "HEAD~1", "HEAD")
+    assert isinstance(out, str)          # must not raise
+    assert "messy.txt" in out            # the warning itself survived decoding
 
 
 def test_empty_inputs():

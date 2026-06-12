@@ -754,9 +754,10 @@ def _git(repo_dir: str, *args: str, timeout: float = 30.0) -> str:
     lines — one non-UTF-8 byte in a PR's file (0x90, production
     2026-06-12) raised UnicodeDecodeError inside subprocess.run, a
     ValueError the except below never caught, and the whole review died
-    as a bare traceback. Replacement chars only ever land in content
-    lines; the header lines this module parses (author / author-time /
-    numstat paths) are ASCII.
+    as a bare traceback. Replacement chars may appear in author names
+    and raw content lines; the parsed PREFIXES ("author ",
+    "author-time ") and the numeric author-time value are always ASCII
+    and unaffected, so parsing stays correct either way.
     """
     try:
         result = subprocess.run(
