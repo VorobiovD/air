@@ -1717,7 +1717,14 @@ async def run_review(args):
     # fetch failure, render "none" rather than risk emitting our own
     # numbered findings as untrusted-but-unfiltered <conv-comment>s
     # (which the agents are then told to flag duplicates against).
-    if bot_login:
+    if os.environ.get("AIR_BENCH_NO_CONVERSATION") == "1":
+        # EXPERIMENT BRANCH ONLY (never merge): replay benchmarks re-review
+        # PRs whose threads now contain the banked production reviews —
+        # feeding those to the bench arm would let it crib the answers.
+        print("  [bench] conversation block suppressed (AIR_BENCH_NO_CONVERSATION=1)",
+              file=sys.stderr)
+        pr_conv_block = "none"
+    elif bot_login:
         pr_conv_block = pr_conversation.build_pr_conversation(
             all_comments, pr_reviews_raw, pr_inline_raw, bot_login,
             max_entries=CONVERSATION_MAX_ENTRIES,
