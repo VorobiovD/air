@@ -1553,6 +1553,15 @@ async def run_review(args):
     meta = fetch_pr_metadata(args.repo, args.pr_number, bot_token)
     head_sha = meta["head"]["sha"]
 
+    # EXPERIMENT BRANCH ONLY (never merge): replay the PR as of a historical
+    # head — the SHA a banked production review saw — so a bench arm reviews
+    # the same code, not the post-fix final head. Requires the matching base
+    # SHA (for merge-committed PRs: the merge commit's first parent).
+    _bench_sha = os.environ.get("AIR_BENCH_HEAD_SHA", "")
+    if _bench_sha:
+        print(f"  [bench] replaying PR as of {_bench_sha[:8]} (AIR_BENCH_HEAD_SHA)")
+        meta["head"]["sha"] = head_sha = _bench_sha
+
     # State gate: refuse to review closed/merged PRs by default. Reachable
     # via manual CLI invocation or `workflow_dispatch` with `closed: false`
     # against a merged PR, OR via `pull_request: synchronize` that races
@@ -1859,7 +1868,15 @@ async def run_review(args):
                 dev_comments = filter_comments_after(all_comments, prior["id"])
                 dev_context = format_developer_responses(dev_comments)
     else:
-        diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
+        if _bench_sha:
+            _bench_base = os.environ["AIR_BENCH_BASE_SHA"]
+            diff = fetch_inter_diff(args.repo, _bench_base, _bench_sha, bot_token)
+            if diff is None:
+                print(f"::error::bench compare {_bench_base[:8]}...{_bench_sha[:8]} failed", file=sys.stderr)
+                sys.exit(1)
+            print(f"  [bench] diff = compare {_bench_base[:8]}...{_bench_sha[:8]} ({len(diff)} bytes)")
+        else:
+            diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
         dev_context = ""
 
     # Codex enablement is resolved BEFORE precomp so the codex session can
