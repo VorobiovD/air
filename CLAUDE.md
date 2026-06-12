@@ -43,6 +43,9 @@ plugins/air/
 
 .air-checks.sh           # Opt-in per-repo drift checks (consumed by the hook above)
 
+scripts/
+└── rotate-air-pat.sh    # Fleet-wide bot-PAT rotation (preflight + fan-out to all caller repos)
+
 .claude-plugin/
 └── marketplace.json     # Marketplace distribution definition
 

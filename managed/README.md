@@ -150,6 +150,9 @@ gh variable set AIR_PAT_MAP --repo <owner>/<repo> \
 # 2. Each reviewer sets their own per-repo secret <STEM>_PAT (CARLOS_PAT, ADAM_PAT, ...)
 #    = a fine-grained PAT (Pull requests: RW, Contents: RO, Checks: RW).
 #    Corporate PATs are capped at 7-day expiry -> rotate weekly; per-repo only.
+#    Rotation fan-out: scripts/rotate-air-pat.sh updates the secret across the
+#    whole fleet in one pass (preflights the token, reads it from stdin —
+#    updating only one repo leaves the others on the stale PAT until they fail).
 ```
 
 **Why a stem map (not bare `<LOGIN>_PAT`):** GHA expressions have no `upper()` and secret names allow only `[A-Za-z0-9_]`, so a raw login like `christinacephus-md` can't be a secret name and `caguilaron` won't match `CAGUILARON_PAT`. The `resolve` job decouples the login from the secret name and keeps the lookup off the unambiguous `needs` context.
