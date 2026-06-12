@@ -60,6 +60,7 @@ VorobiovD/air/
 │   ├── pattern_writer.py             Applies pattern_lifecycle ops to the store post-review
 │   ├── migrate_wiki_to_store.py      One-shot wiki → store migration (per-author split, --dry-run)
 │   ├── render_store_to_wiki.py       Deterministic store→wiki mirror render (inverse of migrate split; throttled per-review + on learn)
+│   ├── salvage_review.py             Drain a finished orphaned session, post its review ($0 — job-cancel recovery)
 │   ├── test-session.py               9-test verification (repo, auth, blame, comment, wiki)
 │   ├── test-learn.py                 Wiki clone/push verification
 │   ├── test-render.py                Render round-trip / overflow-inverse unit tests (pure, no API)

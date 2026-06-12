@@ -34,6 +34,10 @@ def fixture_repo(tmp_path_factory):
     git("init", "-q")
     for name in ("zeta.py", "alpha.py", "mid.py"):
         (repo / name).write_text(f"# {name}\nline2\nline3\n")
+    # Non-UTF-8 content (latin-1 0x90 byte, the 2026-06-12 production crash):
+    # `git blame --line-porcelain` echoes content lines raw, and strict
+    # decoding turned ONE such file into a whole-review-killing traceback.
+    (repo / "binary.dat").write_bytes(b"header\x90\x90garbage\nline2\n")
     git("add", ".")
     git("commit", "-q", "-m", "initial")
     (repo / "alpha.py").write_text("# alpha.py\nchanged\nline3\n")
@@ -91,6 +95,43 @@ def test_failed_file_skipped_not_crashing(fixture_repo):
     out = compute_blame_summaries(fixture_repo, ["nonexistent.py", "alpha.py"])
     assert "nonexistent.py" not in out
     assert "alpha.py:" in out
+
+
+def test_non_utf8_file_does_not_kill_precomp(fixture_repo):
+    """Production 2026-06-12: one file with a 0x90 byte raised
+    UnicodeDecodeError inside subprocess.run (a ValueError the catch-all
+    never caught) and the entire review died pre-session as a bare
+    traceback. Blame must survive the file AND still summarize it (its
+    porcelain headers are ASCII; only content lines carry garbage)."""
+    out = compute_blame_summaries(fixture_repo, ["binary.dat", "alpha.py"])
+    assert "binary.dat:" in out
+    assert "alpha.py:" in out
+    churn = compute_churn_data(fixture_repo, ["binary.dat", "alpha.py"])
+    assert "binary.dat:" in churn  # summarized, not merely survived
+
+
+def test_non_utf8_line_does_not_kill_diff_check(fixture_repo):
+    """Symmetric site: `git diff --check` quotes the OFFENDING line —
+    a text file whose whitespace-error line carries a non-UTF-8 byte
+    reaches the decoder through this path, not blame's."""
+    from review import compute_diff_check_warnings
+    repo = Path(fixture_repo)
+    (repo / "messy.txt").write_bytes(b"bad\x90line with trailing space \n")
+    subprocess.run(
+        ["git", "add", "."], cwd=repo, check=True, capture_output=True,
+        env={"GIT_AUTHOR_NAME": "alice", "GIT_AUTHOR_EMAIL": "a@x",
+             "GIT_COMMITTER_NAME": "alice", "GIT_COMMITTER_EMAIL": "a@x",
+             "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(repo)},
+    )
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "messy"], cwd=repo, check=True, capture_output=True,
+        env={"GIT_AUTHOR_NAME": "alice", "GIT_AUTHOR_EMAIL": "a@x",
+             "GIT_COMMITTER_NAME": "alice", "GIT_COMMITTER_EMAIL": "a@x",
+             "PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(repo)},
+    )
+    out = compute_diff_check_warnings(fixture_repo, "HEAD~1", "HEAD")
+    assert isinstance(out, str)          # must not raise
+    assert "messy.txt" in out            # the warning itself survived decoding
 
 
 def test_empty_inputs():
