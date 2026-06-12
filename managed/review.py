@@ -748,13 +748,23 @@ def _git(repo_dir: str, *args: str, timeout: float = 30.0) -> str:
     on large files, and the runner's clone may be partial in unexpected
     ways. Catch everything and degrade gracefully so the review still
     runs; agents fall back to live investigation.
+
+    Decoding is explicit utf-8 with errors="replace": `text=True` decodes
+    STRICTLY, and `git blame --line-porcelain` echoes raw file CONTENT
+    lines — one non-UTF-8 byte in a PR's file (0x90, production
+    2026-06-12) raised UnicodeDecodeError inside subprocess.run, a
+    ValueError the except below never caught, and the whole review died
+    as a bare traceback. Replacement chars only ever land in content
+    lines; the header lines this module parses (author / author-time /
+    numstat paths) are ASCII.
     """
     try:
         result = subprocess.run(
             ["git", "-C", repo_dir, *args],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return ""
     if result.returncode != 0:
         return ""
@@ -1084,9 +1094,12 @@ def compute_diff_check_warnings(repo_dir: str, base_ref: str, head_ref: str) -> 
     try:
         result = subprocess.run(
             ["git", "-C", repo_dir, "diff", "--check", f"{base_ref}..{head_ref}"],
-            capture_output=True, text=True, timeout=30.0,
+            capture_output=True, timeout=30.0,
+            # `diff --check` quotes the offending CONTENT lines — same
+            # non-UTF-8 exposure as _git's blame (see its docstring).
+            encoding="utf-8", errors="replace",
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return ""
     return result.stdout.strip()
 

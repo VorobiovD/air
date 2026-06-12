@@ -34,6 +34,10 @@ def fixture_repo(tmp_path_factory):
     git("init", "-q")
     for name in ("zeta.py", "alpha.py", "mid.py"):
         (repo / name).write_text(f"# {name}\nline2\nline3\n")
+    # Non-UTF-8 content (latin-1 0x90 byte, the 2026-06-12 production crash):
+    # `git blame --line-porcelain` echoes content lines raw, and strict
+    # decoding turned ONE such file into a whole-review-killing traceback.
+    (repo / "binary.dat").write_bytes(b"header\x90\x90garbage\nline2\n")
     git("add", ".")
     git("commit", "-q", "-m", "initial")
     (repo / "alpha.py").write_text("# alpha.py\nchanged\nline3\n")
@@ -91,6 +95,19 @@ def test_failed_file_skipped_not_crashing(fixture_repo):
     out = compute_blame_summaries(fixture_repo, ["nonexistent.py", "alpha.py"])
     assert "nonexistent.py" not in out
     assert "alpha.py:" in out
+
+
+def test_non_utf8_file_does_not_kill_precomp(fixture_repo):
+    """Production 2026-06-12: one file with a 0x90 byte raised
+    UnicodeDecodeError inside subprocess.run (a ValueError the catch-all
+    never caught) and the entire review died pre-session as a bare
+    traceback. Blame must survive the file AND still summarize it (its
+    porcelain headers are ASCII; only content lines carry garbage)."""
+    out = compute_blame_summaries(fixture_repo, ["binary.dat", "alpha.py"])
+    assert "binary.dat:" in out
+    assert "alpha.py:" in out
+    churn = compute_churn_data(fixture_repo, ["binary.dat", "alpha.py"])
+    assert isinstance(churn, str)  # must not raise
 
 
 def test_empty_inputs():
