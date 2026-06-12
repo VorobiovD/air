@@ -1,68 +1,84 @@
 #!/usr/bin/env bash
-# Rotate the air bot PAT across the WHOLE fleet in one command.
+# rotate-air-pat.sh — push your freshly-created PAT to every air-review repo at once.
 #
-# The PAT lives as a secret on the air repo AND on every caller repo that
-# passes it into managed-review.yml. Updating only one copy is an ops
-# outage waiting to happen: the other repos keep reviewing with the stale
-# PAT until it expires and their runs start failing (corporate fine-grained
-# PATs are commonly capped at 7-day expiry). This script preflights the new
-# token, then fans the update out to every repo in one pass.
+# Corporate policy caps PATs at 7 days, so each reviewer rotates weekly. GitHub
+# makes you *create* the fine-grained PAT in the UI (can't be automated), but
+# *distributing* it to all the repos is one command — this script. A missed repo
+# keeps a stale (existing-but-expired) PAT and its next review fails auth
+# silently, which is why partial rotation exits non-zero.
 #
-# Usage:
-#   ./scripts/rotate-air-pat.sh                          # default fleet, AIR_BOT_TOKEN
-#   ./scripts/rotate-air-pat.sh owner/r1 owner/r2        # explicit repo list
-#   ./scripts/rotate-air-pat.sh --secret-name ADAM_PAT owner/r1
-#                                                        # per-reviewer PAT variant
-#   AIR_FLEET="o/r1 o/r2" ./scripts/rotate-air-pat.sh    # fleet override via env
+# Setup (once): put it on your PATH as a short command —
+#   cp scripts/rotate-air-pat.sh ~/.local/bin/air-rotate && chmod +x ~/.local/bin/air-rotate
+#   (no ~/.local/bin on PATH? use ~/bin, or: alias air-rotate='/abs/path/rotate-air-pat.sh')
 #
-# The token is read from stdin or an interactive hidden prompt — NEVER from
-# argv (argv leaks into shell history and process listings).
+# Weekly:
+#   1. Create a new 7-day fine-grained PAT — resource owner thecvlb, the four
+#      air-review repos, permissions Pull requests: RW, Contents: RO, Checks: RW.
+#      https://github.com/settings/personal-access-tokens/new
+#   2. Run:  air-rotate                  # auto-detects your <STEM>_PAT from your gh login
+#            air-rotate CHRISTINA_PAT    # …or pass it explicitly (ai-relay-only reviewers)
+#            air-rotate AIR_BOT_TOKEN VorobiovD/air   # bot-PAT flow: explicit name + repos
+#   3. Paste the PAT at the prompt, press Enter. Done — all repos updated.
+#
+# The PAT is read with `read -rs` (single line, silent): it never appears in
+# argv/shell history AND is not echoed to the screen as you paste it.
+# This is the multi-reviewer model's per-repo secret: <LOGIN>_PAT in each repo,
+# each owned by that reviewer. (Corporate PATs never go in the personal/public
+# air repo — those repos hold only the reusable workflow code.)
 set -euo pipefail
 
-SECRET_NAME="AIR_BOT_TOKEN"
-DEFAULT_FLEET="VorobiovD/air thecvlb/qai-be thecvlb/qai-fe thecvlb/ai-relay thecvlb/svc-transcribe"
-
-REPOS=()
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --secret-name) SECRET_NAME="$2"; shift 2 ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    -*) echo "error: unknown flag $1" >&2; exit 2 ;;
-    *) REPOS+=("$1"); shift ;;
-  esac
-done
-if [ ${#REPOS[@]} -eq 0 ]; then
-  # shellcheck disable=SC2206 # intentional word-splitting of the repo list
-  REPOS=(${AIR_FLEET:-$DEFAULT_FLEET})
-fi
-
-if [ -t 0 ]; then
-  printf 'Paste the new PAT (input hidden): ' >&2
-  read -rs TOKEN
-  echo >&2
+# Secret name: pass it explicitly, or omit to auto-detect from your gh login via
+# the AIR_PAT_MAP allowlist on svc-transcribe (caguilaron→CARLOS_PAT, VorobiovD→
+# DIMA_PAT, …). Uses gh's built-in jq, so no external jq needed for this part.
+if [ -n "${1:-}" ]; then
+  SECRET="$1"
+  shift
 else
-  TOKEN=$(cat)
+  LOGIN=$(gh api user --jq '.login' 2>/dev/null) \
+    || { echo "gh not authenticated — run 'gh auth login', or pass your secret name: rotate-air-pat.sh CARLOS_PAT" >&2; exit 1; }
+  STEM=$(gh api "repos/thecvlb/svc-transcribe/actions/variables/AIR_PAT_MAP" \
+           --jq ".value | fromjson | .[\"${LOGIN}\"] // empty" 2>/dev/null || true)
+  [ -n "$STEM" ] || { echo "couldn't auto-detect a PAT stem for '$LOGIN' in AIR_PAT_MAP — pass it explicitly, e.g. rotate-air-pat.sh CHRISTINA_PAT" >&2; exit 1; }
+  SECRET="${STEM}_PAT"
+  echo "Detected you as '$LOGIN' → rotating ${SECRET}" >&2
 fi
-TOKEN=${TOKEN//[$'\r\n']/}
-[ -n "$TOKEN" ] || { echo "error: empty token — nothing updated" >&2; exit 1; }
 
-# Preflight: the token must authenticate BEFORE it overwrites anything.
-# A mis-pasted token that fails here leaves every repo on the old (working)
-# secret instead of bricking the fleet.
-LOGIN=$(GH_TOKEN="$TOKEN" gh api user --jq .login 2>/dev/null) || {
-  echo "error: token failed GET /user preflight — nothing updated" >&2
-  exit 1
-}
-echo "token owner: $LOGIN" >&2
-echo "updating secret $SECRET_NAME on: ${REPOS[*]}" >&2
+# Repos whose air-review bot runs under per-reviewer PATs. Extra args (after the
+# secret name) or AIR_FLEET override the list — the AIR_BOT_TOKEN flow passes
+# the repos that hold the bot copy explicitly.
+if [ $# -gt 0 ]; then
+  REPOS=("$@")
+else
+  # shellcheck disable=SC2206 # intentional word-splitting of the env override
+  REPOS=(${AIR_FLEET:-thecvlb/svc-transcribe thecvlb/qai-be thecvlb/qai-fe thecvlb/ai-relay})
+fi
 
-status=0
-for repo in "${REPOS[@]}"; do
-  if printf '%s' "$TOKEN" | gh secret set "$SECRET_NAME" --repo "$repo"; then
-    echo "  $repo: $SECRET_NAME updated" >&2
+read -rsp "Paste new 7-day PAT for ${SECRET} (then press Enter): " PAT
+printf '\n' >&2
+[ -n "$PAT" ] || { echo "no PAT provided — aborting" >&2; exit 1; }
+
+# Preflight the PASTED token before it overwrites anything: a mis-paste (wrong
+# clipboard, truncated copy) must leave every repo on the old, still-working
+# PAT — not get distributed and fail auth at the next review. Also surfaces
+# whose token it is, catching the wrong-account paste.
+PAT_LOGIN=$(GH_TOKEN="$PAT" gh api user --jq '.login' 2>/dev/null) \
+  || { echo "new PAT failed GET /user preflight — nothing updated" >&2; exit 1; }
+echo "new PAT authenticates as '${PAT_LOGIN}' → updating ${SECRET} on: ${REPOS[*]}" >&2
+
+ok=0
+for r in "${REPOS[@]}"; do
+  # Capture stderr (don't discard it) so a real failure — auth expiry, network,
+  # org policy blocking the secret name — is shown, not guessed at.
+  if err=$(printf '%s' "$PAT" | gh secret set "$SECRET" --repo "$r" 2>&1); then
+    echo "  ✓ $r"
+    ok=$((ok + 1))
   else
-    echo "  $repo: FAILED — update manually before the old PAT expires" >&2
-    status=1
+    echo "  ✗ $r — ${err:-unknown error}" >&2
   fi
 done
-exit $status
+unset PAT
+echo "Rotated ${SECRET} across ${ok}/${#REPOS[@]} repos."
+# A missed repo keeps a stale (existing-but-expired) PAT — and the workflow's
+# `|| AIR_BOT_TOKEN` fallback does NOT fire on an existing secret, so that repo's
+# next review fails auth silently. Make a partial rotation a loud non-zero exit.
+[ "$ok" -eq "${#REPOS[@]}" ] || { echo "WARNING: partial rotation — fix the repos above and re-run." >&2; exit 1; }
