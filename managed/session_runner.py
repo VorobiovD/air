@@ -5,6 +5,7 @@ Extracted verbatim from review.py (module split).
 """
 import asyncio
 import atexit
+import os
 import signal
 import sys
 import threading
@@ -224,6 +225,21 @@ async def _list_events_paged(
     return events
 
 
+def build_session_metadata(repo: str, pr_number=None, kind: str = "") -> dict:
+    """Attribution metadata for sessions.create — the console and usage
+    exports surface it, so per-repo/per-PR billing no longer requires
+    parsing session titles. Values must be strings (API contract);
+    empties are dropped so absent context never serializes as ''.
+    """
+    meta = {
+        "repo": repo,
+        "pr": str(pr_number) if pr_number is not None else "",
+        "kind": kind,
+        "ci_run": os.environ.get("GITHUB_RUN_ID", ""),
+    }
+    return {k: v for k, v in meta.items() if v}
+
+
 class ThreadTracker:
     """Open-sub-agent-thread accounting for the session drain loop.
 
@@ -329,6 +345,7 @@ async def run_session(
     file_resources: list[dict] | None = None,
     multiagent_primary: str | None = None,
     require_dispatch: bool = False,
+    metadata: dict | None = None,
 ) -> str:
     """Create a session, send the user prompt, stream events, return collected agent text.
 
@@ -389,12 +406,16 @@ async def run_session(
         resources.extend(file_resources)
 
     session = None
+    create_kwargs: dict = {}
+    if metadata:
+        create_kwargs["metadata"] = metadata
     try:
         session = await client.beta.sessions.create(
             agent={"type": "agent", "id": agent_id, "version": agent_version},
             environment_id=env_id,
             title=f"{label} — {repo}",
             resources=resources,
+            **create_kwargs,
         )
     finally:
         if session is not None:

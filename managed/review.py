@@ -122,6 +122,7 @@ from session_runner import (  # noqa: E402,F401 — split modules; re-exported f
     BILLING_RETRY_PREFLIGHT_SECS,
     run_session,
     _run_session_with_billing_retry,
+    build_session_metadata,
 )
 from prompts import (  # noqa: E402,F401 — split modules; re-exported for tests/callers
     build_pr_context,
@@ -1287,6 +1288,9 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
                         # denied by toolset; roster dropped by RP-dialect
                         # update). Fail loud instead of posting it.
                         require_dispatch=True,
+                        metadata=build_session_metadata(
+                            args.repo, args.pr_number, kind="review-coordinator",
+                        ),
                     ),
                     "coordinator",
                 )
@@ -1385,6 +1389,9 @@ async def _run_solo_session(
                     solo_user_text, SOLO_AGENT,
                     store_id=store_id,
                     file_resources=None,
+                    metadata=build_session_metadata(
+                        args.repo, args.pr_number, kind="review-solo",
+                    ),
                 ),
                 "solo",
             )
@@ -2714,6 +2721,12 @@ def _billing_preflight() -> None:
 
 
 def main():
+    # CI log streams interleave stdout and stderr; piped stdout is
+    # block-buffered, so decision-log prints lag minutes behind stderr —
+    # or vanish entirely on truncation/SIGKILL. Line-buffer it so the
+    # decision trail ([launch]/[promote]/mode lines) is real-time.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description="Trigger an air review for a PR (single multi-agent coordinator)")
     parser.add_argument("repo", help="owner/repo (e.g., myorg/myrepo)")
     parser.add_argument("pr_number", type=int, help="PR number to review")
