@@ -132,7 +132,7 @@
 ### Features
 
 * **managed:** fail loud on run-failed outcomes + billing canary preflight ([#87](https://github.com/VorobiovD/air/issues/87)) ([4a54613](https://github.com/VorobiovD/air/commit/4a546133e272722a1d2905a6bb0a9052616ef384))
-* **managed:** per-repo memory-store pattern backend — svc-transcribe pilot ([#90](https://github.com/VorobiovD/air/issues/90)) ([e729dca](https://github.com/VorobiovD/air/commit/e729dca039f2cef9ef99b2baa3844761283ccc34))
+* **managed:** per-repo memory-store pattern backend — repo-D pilot ([#90](https://github.com/VorobiovD/air/issues/90)) ([e729dca](https://github.com/VorobiovD/air/commit/e729dca039f2cef9ef99b2baa3844761283ccc34))
 * **review:** cross-PR awareness + session-efficiency guidance ([#80](https://github.com/VorobiovD/air/issues/80)) ([108089d](https://github.com/VorobiovD/air/commit/108089d5c69333d4120c9ae5bf7f3b5a5886f3bf))
 
 

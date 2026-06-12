@@ -288,7 +288,7 @@ When a finding describes a **rule or pattern category** (e.g. "remove inline PR 
 
 For each finding **still classified `fixed` after Step 5d** (5d can downgrade to `partially fixed` — operate on post-5d status) that is **rule-class** (not a single-locus bug), before formatting the response:
 
-1. **Derive a category-broad regex** from the rule, broader than the literal token cited. The regex must cover every shape the category can take, not just the cited form. Example: finding cites "`@Carlos PR #726 L12`" → derive `(?:\(#\d+\)|(?:@\w+\s+)?(?:PR|MR)\s*#\s*\d+)` so it matches `@Carlos PR #726`, bare `(#726)`, and `MR !726` — all in the same shape family. Don't grep for the literal string.
+1. **Derive a category-broad regex** from the rule, broader than the literal token cited. The regex must cover every shape the category can take, not just the cited form. Example: finding cites "`@alice PR #726 L12`" → derive `(?:\(#\d+\)|(?:@\w+\s+)?(?:PR|MR)\s*#\s*\d+)` so it matches `@alice PR #726`, bare `(#726)`, and `MR !726` — all in the same shape family. Don't grep for the literal string.
 2. **Grep added lines in the respond diff**:
    ```bash
    grep -nE '^\+[^+]' "$AIR_TMP/respond-diff.diff" | grep -E '<category_regex>'

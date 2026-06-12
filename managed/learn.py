@@ -22,6 +22,7 @@ from pathlib import Path
 import requests as req
 
 from api import API_BASE, get_headers, list_agents, find_environment, api_error_message
+from session_runner import build_session_metadata
 from setup import MODEL_ALIASES, create_or_update_agent
 
 
@@ -51,6 +52,10 @@ def sync_learn_agent():
 
 
 def main():
+    # Same rationale as review.py: piped stdout is block-buffered and the
+    # decision trail must not lag stderr or vanish on truncation.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description="Trigger wiki cleanup + history regeneration")
     parser.add_argument("repo", help="owner/repo")
     parser.add_argument("--history-only", action="store_true", help="Only regenerate REVIEW-HISTORY.md")
@@ -123,6 +128,7 @@ def main():
         environment_id=env_id,
         title=f"Learn — {args.repo}",
         resources=resources,
+        metadata=build_session_metadata(args.repo, kind="learn"),
     )
     print(f"  Session: {session.id}")
 

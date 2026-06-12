@@ -46,7 +46,7 @@ def _count_gating_unfixed(review_body: str) -> int:
       emitting `[blocker] — DEFERRED` despite the prompt's instruction).
     - NOT FIXED / PARTIALLY FIXED: gates only if severity is `blocker`.
       Medium/low/nit unfixed entries surface as warnings in the comment
-      body but no longer flip the verdict — see svc-transcribe #37 for
+      body but no longer flip the verdict — see repo-D #37 for
       the production case where one medium-severity test-coverage
       recommendation kept a PR red across 13 consecutive re-reviews
       while the developer intentionally deferred it to a follow-up.
@@ -88,7 +88,7 @@ def extract_prior_statuses(prior_body: str) -> list[tuple[int, str, str]]:
     review already reported `NOT FIXED` for the same finding, the
     verifier promotes it to `DEFERRED` (for non-blocker severities) so
     a non-actionable recommendation doesn't keep gating the PR. See
-    svc-transcribe #37 finding #2: 13 consecutive `NOT FIXED` rounds on
+    repo-D #37 finding #2: 13 consecutive `NOT FIXED` rounds on
     a medium-severity test-coverage recommendation that the developer
     intentionally deferred to a follow-up.
 
@@ -228,7 +228,7 @@ _BLOCKER_ENTRY_RE = re.compile(r"^\*\*\d+\.", re.MULTILINE)
 #   forbids it but the gate enforces independently).
 # - New blockers under `#### Blockers`: always gate (existing behavior).
 #
-# Why blocker-only: svc-transcribe #37 spent 13 consecutive re-review
+# Why blocker-only: repo-D #37 spent 13 consecutive re-review
 # rounds in CHANGES_REQUESTED state because one medium-severity test-
 # coverage recommendation was repeatedly NOT FIXED. The developer had
 # fixed every blocker and was intentionally deferring tests to a
@@ -314,7 +314,7 @@ def extract_reviewed_at_sha(body: str) -> str | None:
 
 # Anti-spoof: compare the `Reviewed at:` footer SHA on a 12-hex-char prefix
 # (48 bits — unguessable for spoofing) rather than full 40-char equality, which
-# proved too strict (models occasionally corrupt the SHA tail; svc-transcribe
+# proved too strict (models occasionally corrupt the SHA tail; repo-D
 # #84). Named here, alongside the function that enforces it.
 _SHA_PREFIX_LEN = 12
 
@@ -341,7 +341,7 @@ def _extract_review_body(raw_text: str, head_sha: str) -> tuple[str, bool]:
     _flattened = re.sub(r"</?agent-notification\b[^>]*>", "\n", raw_text)
     # Walk every `## Code Review[^\n]*` occurrence NOT preceded by a backtick
     # (inline-code narration). The header need NOT be at start-of-line
-    # (qai-be #635 had narration concatenated on the same line), but
+    # (repo-A #635 had narration concatenated on the same line), but
     # LINE-START candidates outrank mid-line ones: a review body that QUOTES
     # the header string mid-sentence (air PR #143's own review quoted the
     # jq filter `startswith("## Code Review\n")` inside a finding — preceded
@@ -367,7 +367,7 @@ def _extract_review_body(raw_text: str, head_sha: str) -> tuple[str, bool]:
     _header_re = re.compile(r"(?<!`)## Code Review[^\n]*\n")
     _line_start_header_re = re.compile(r"(?:^|\n)## Code Review[^\n]*\n")
     # NOTE: do NOT add `\b` between the 40-char hex and `[^\n]*`. Word-boundary
-    # fails when the SHA is followed by another word char (qai-be #666 round 7:
+    # fails when the SHA is followed by another word char (repo-A #666 round 7:
     # `...936Wiki push failed...` had no boundary between `6` and `W`). The
     # 40-char exact quantifier is the anchor; the 12-char prefix compare below
     # is the validator. `[^\n]*` eats the rest of the line so match end is defined.

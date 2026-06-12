@@ -275,7 +275,7 @@ def test_ever_dispatched_ma_ignores_primary():
 # ---------------------------------------------------------------------------
 # run_session(require_dispatch=True) — fail loud when no sub-agent ever ran.
 # Scripted through a fake client on the legacy runtime: a clean end_turn
-# idle with zero thread events is byte-for-byte the qai callable_agents
+# idle with zero thread events is byte-for-byte the production callable_agents
 # failure shape (create_agent denied → coordinator improvises → "success").
 # ---------------------------------------------------------------------------
 
@@ -285,8 +285,9 @@ from types import SimpleNamespace  # noqa: E402
 from session_runner import SpecialistSessionError, run_session  # noqa: E402
 
 
-def _fake_client(events):
-    """Minimal AsyncAnthropic stand-in for run_session's happy SSE path."""
+def _fake_client(events, create_calls=None):
+    """Minimal AsyncAnthropic stand-in for run_session's happy SSE path.
+    Pass a list as `create_calls` to capture sessions.create kwargs."""
     class _Stream:
         def __init__(self, evs):
             self._it = iter(evs)
@@ -303,6 +304,8 @@ def _fake_client(events):
                 raise StopAsyncIteration
 
     async def _create(**kwargs):
+        if create_calls is not None:
+            create_calls.append(kwargs)
         return SimpleNamespace(id="sesn_test")
 
     async def _send(sid, events):
@@ -366,6 +369,43 @@ def test_no_require_dispatch_keeps_solo_sessions_working():
     # Solo / learn / codex sessions legitimately never dispatch sub-agents.
     events = [_msg("solo output", "e1"), _idle("e2")]
     assert _run(events) == "solo output"
+
+
+# ---------------------------------------------------------------------------
+# Session attribution metadata (C8)
+# ---------------------------------------------------------------------------
+
+from session_runner import build_session_metadata  # noqa: E402
+
+
+def test_session_metadata_strings_and_empties(monkeypatch):
+    monkeypatch.setenv("GITHUB_RUN_ID", "12345")
+    meta = build_session_metadata("o/r", 42, kind="review-coordinator")
+    assert meta == {"repo": "o/r", "pr": "42", "kind": "review-coordinator", "ci_run": "12345"}
+    assert all(isinstance(v, str) for v in meta.values())
+    # Absent context never serializes as '' (the API stores what it's given).
+    monkeypatch.delenv("GITHUB_RUN_ID", raising=False)
+    assert build_session_metadata("o/r") == {"repo": "o/r"}
+
+
+def test_run_session_passes_metadata_to_create():
+    calls = []
+    events = [_msg("out", "e1"), _idle("e2")]
+    client = _fake_client(events, create_calls=calls)
+    asyncio.run(run_session(
+        client, "agent_x", 1, "env_x", "o/r",
+        {"type": "branch", "name": "main"}, "tok", "go", "coordinator",
+        metadata={"repo": "o/r", "pr": "7"},
+    ))
+    assert calls[0]["metadata"] == {"repo": "o/r", "pr": "7"}
+    # And omitted entirely when not provided — never an empty dict.
+    calls.clear()
+    client = _fake_client(events, create_calls=calls)
+    asyncio.run(run_session(
+        client, "agent_x", 1, "env_x", "o/r",
+        {"type": "branch", "name": "main"}, "tok", "go", "coordinator",
+    ))
+    assert "metadata" not in calls[0]
 
 
 # ---------------------------------------------------------------------------

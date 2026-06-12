@@ -377,7 +377,7 @@ Rules (surgical — NOT a blanket truncation, NOT append-only):
 - ADD genuinely new terms. PRESERVE the full term set + each term's source; drop only terms no longer referenced anywhere.
 - STRIP the header to the title + a single `Last updated: <date>, HEAD <sha>` line. Delete any accumulated "Nth cleanup pass / since the previous pass / new terms this pass" preamble (global anti-bloat rule).
 
-Surgical, not blanket: qai-be's glossary reached 261KB mostly from an 18KB header essay + entries padded with PR-by-PR history — strip those and the governance-bearing rows for the same ~300 terms fit comfortably, without losing a rule or gotcha.
+Surgical, not blanket: repo-A's glossary reached 261KB mostly from an 18KB header essay + entries padded with PR-by-PR history — strip those and the governance-bearing rows for the same ~300 terms fit comfortably, without losing a rule or gotcha.
 
 ```markdown
 # Project Glossary — Domain Terms

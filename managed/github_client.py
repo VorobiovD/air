@@ -154,7 +154,7 @@ def _post_review_comment_with_retry(
     a happy-path 422 caused by, say, a too-long-body containing PR
     code snippets doesn't leak that snippet to CI logs.
 
-    svc-transcribe #37 hit a 422 cascade (run 25368789413, 2026-05-05):
+    repo-D #37 hit a 422 cascade (run 25368789413, 2026-05-05):
     the prior fallback path posted near-duplicate content and GitHub
     rejected with 422; without diagnostic capture, the operator had no
     idea why.

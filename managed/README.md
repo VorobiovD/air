@@ -76,7 +76,7 @@ jobs:
       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
 ```
 
-**Variant C — multi-reviewer (post under the requested reviewer's identity):** the review posts as whichever teammate was requested as reviewer, using *their* PAT. air's contract is unchanged — it still receives exactly one `AIR_BOT_TOKEN` and derives the identity from it at runtime. Selection happens entirely caller-side: a `resolve` job maps the requested login → a friendly secret **stem** via one repo variable `AIR_PAT_MAP`, and only that one PAT is passed (no `secrets: inherit`). Reference implementation: **thecvlb/svc-transcribe PR #88**.
+**Variant C — multi-reviewer (advanced, optional):** most teams should stop at Variant A or B — one dedicated bot account, one `AIR_BOT_TOKEN`. This variant exists for teams that want reviews attributed to the individual requested reviewer: the review posts under whichever teammate was requested, using *their* PAT. air's contract is unchanged — it still receives exactly one `AIR_BOT_TOKEN` and derives the identity from it at runtime. Selection happens entirely caller-side: a `resolve` job maps the requested login → a friendly secret **stem** via one repo variable `AIR_PAT_MAP`, and only that one PAT is passed (no `secrets: inherit`).
 
 ```yaml
 name: air review
@@ -98,9 +98,6 @@ on:
         required: false
         type: string
         default: 'true'
-
-# DEFERRED (match svc-transcribe): do NOT SHA-pin the air ref yet (#89) and
-# do NOT add expected_reviewer yet (#90) — land them as additive follow-ups.
 
 jobs:
   # Map the requested reviewer's login -> friendly PAT stem via the
@@ -145,14 +142,16 @@ Setup for Variant C:
 ```bash
 # 1. The allowlist + login->stem map (keys = logins, values = friendly stems):
 gh variable set AIR_PAT_MAP --repo <owner>/<repo> \
-  --body '{"caguilaron":"CARLOS","adamdanielsnavarro":"ADAM","VorobiovD":"DIMA"}'
+  --body '{"alice":"ALICE","bob-smith":"BOB"}'
 
-# 2. Each reviewer sets their own per-repo secret <STEM>_PAT (CARLOS_PAT, ADAM_PAT, ...)
-#    = a fine-grained PAT (Pull requests: RW, Contents: RO, Checks: RW).
-#    Corporate PATs are capped at 7-day expiry -> rotate weekly; per-repo only.
+# 2. Each reviewer sets their own per-repo secret <STEM>_PAT (ALICE_PAT, BOB_PAT, ...)
+#    = a PAT scoped to the repos (Pull requests: RW, Contents: RO, Checks: RW).
+#    If your org caps PAT lifetimes, each reviewer refreshes their own secret
+#    on that cadence — on EVERY repo that holds a copy (a repo left on the old
+#    PAT fails auth silently at its next review).
 ```
 
-**Why a stem map (not bare `<LOGIN>_PAT`):** GHA expressions have no `upper()` and secret names allow only `[A-Za-z0-9_]`, so a raw login like `christinacephus-md` can't be a secret name and `caguilaron` won't match `CAGUILARON_PAT`. The `resolve` job decouples the login from the secret name and keeps the lookup off the unambiguous `needs` context.
+**Why a stem map (not bare `<LOGIN>_PAT`):** GHA expressions have no `upper()` and secret names allow only `[A-Za-z0-9_]`, so a raw login like `bob-smith` can't be a secret name and `alice` won't match `ALICE_PAT`. The `resolve` job decouples the login from the secret name and keeps the lookup off the unambiguous `needs` context.
 
 **Behavioral note:** air keys prior-review detection, the pre-post dedup, and the re-review FIXED/NOT-FIXED delta on the token owner's login. A review posted under one reviewer's identity is *not* seen as "prior" by a run under a different reviewer's token on the same PR — that run posts a **fresh** review, not a delta. This is intentional (each requested reviewer keeps an independent thread); the cooldown debounce is any-author, so burst-coalescing still works across reviewers.
 
@@ -194,7 +193,7 @@ The `workflow_dispatch` trigger lets you review any PR on-demand from the Action
 Optional `review_mode` input (default `full`) selects the review architecture:
 
 - **`full`** (default) — the 6-agent coordinator. Byte-identical to leaving it unset.
-- **`solo`** — ONE `air-solo-reviewer` agent applies all 6 lenses + self-verifies + folds Codex in a single session (the UI/copy lens self-scopes on non-UI diffs). Benchmarked at ~$2–4 / ~7 min vs full's ~$10 / ~25 min (qai-be #994). Its prompt is assembled at sync from the 6 specialist prompts (zero-drift; no standalone file; the agent is created only when a run uses solo/both) and is not pinnable. **Solo posts the same `APPROVE`/`REQUEST_CHANGES` verdict as full** (it can gate/approve), but **⚠️ is NOT gate-safe** — a single agent downgrades blocker *severity* (it can APPROVE a PR whose real blocker it rated medium), so that verdict is not a trustworthy hard gate. Enable only where a single agent's verdict is acceptable. (Pattern learning: store-backed repos still strengthen author patterns post-review; legacy-wiki repos skip per-review reinforcement — only `/air:learn` cleanup runs.)
+- **`solo`** — ONE `air-solo-reviewer` agent applies all 6 lenses + self-verifies + folds Codex in a single session (the UI/copy lens self-scopes on non-UI diffs). Benchmarked at ~$2–4 / ~7 min vs full's ~$10 / ~25 min (repo-A #994). Its prompt is assembled at sync from the 6 specialist prompts (zero-drift; no standalone file; the agent is created only when a run uses solo/both) and is not pinnable. **Solo posts the same `APPROVE`/`REQUEST_CHANGES` verdict as full** (it can gate/approve), but **⚠️ is NOT gate-safe** — a single agent downgrades blocker *severity* (it can APPROVE a PR whose real blocker it rated medium), so that verdict is not a trustworthy hard gate. Enable only where a single agent's verdict is acceptable. (Pattern learning: store-backed repos still strengthen author patterns post-review; legacy-wiki repos skip per-review reinforcement — only `/air:learn` cleanup runs.)
 - **`both`** — runs full AND solo **concurrently** (wall-clock ≈ the slower of the two, not the sum). The **full** review gates as usual and drives the verdict/learn; the solo review posts alongside as a separate, non-blocking `## Code Review (solo — experimental)` comment for comparison (testing). A solo failure never affects the gating coordinator review.
 
 ```yaml
@@ -218,7 +217,7 @@ Two ways to turn it on (either one being `true` enables it):
 
 …or — **with no caller workflow change at all** — set a repository (or organization) **variable** `AIR_PROMOTE_FASTPATH=true` on the **caller** repo (Settings → Secrets and variables → Actions → Variables). `vars` in a reusable workflow resolves to the *caller's* repo + org variables, so the reusable `managed-review.yml` reads it directly. Flip the variable to `false` (or delete it) to disable instantly — no PR either way. An **org-level** variable is a single fleet-wide switch.
 
-Conservative by construction — any uncertainty (no merged sibling, sibling never reviewed or missing a SHA footer, compare-API failure, <80% overlap) falls back to full review. Enable only on repos that use the `promote/staging-to-main-*` convention. Decision logs print `[promote] …` lines (chosen sibling #, overlap %, fired vs full) to the run log. **v1 limitation:** no periodic full-anchor re-read — a long chain rides re-reviews indefinitely; watch the logs and force a `--fresh` (or disable the flag) if drift accumulates. Backtested on the qai-be/qai-fe Phase-4 promote chain at ~64% cost reduction with zero net-new-finding loss.
+Conservative by construction — any uncertainty (no merged sibling, sibling never reviewed or missing a SHA footer, compare-API failure, <80% overlap) falls back to full review. Enable only on repos that use the `promote/staging-to-main-*` convention. Decision logs print `[promote] …` lines (chosen sibling #, overlap %, fired vs full) to the run log. **v1 limitation:** no periodic full-anchor re-read — a long chain rides re-reviews indefinitely; watch the logs and force a `--fresh` (or disable the flag) if drift accumulates. Backtested on the repo-A/repo-B Phase-4 promote chain at ~64% cost reduction with zero net-new-finding loss.
 
 ### Diff hygiene & cost caps (managed-only)
 
@@ -232,7 +231,7 @@ Three knobs trim per-review context spend. All of them leave **visible markers**
 
 ### Multiagent workspace-handoff (`AIR_MULTIAGENT=1` — EXPERIMENTAL, off by default)
 
-Runs full mode through `air-coordinator-ma`, a coordinator on the GA `multiagent` roster primitive whose sub-agent threads **share `/workspace`** (the research-preview `callable_agents` threads are isolated). Instead of re-emitting the PR context + diff into every specialist delegation (~60–150K output tokens/review — full mode's #1 structural cost), the coordinator writes them to `/workspace/context/` ONCE (TURN 0) and delegates short file pointers; specialists write findings to `/workspace/findings/` and the verifier reads them there. `air-git-history-reviewer` keeps an inline delegation (its model tier under-read file pointers in benchmarking). The MA agent is created by setup.py only when the flag is on, is not pinnable, and `AIR_FILE_HANDOFF` is ignored while the flag is set (Files-API mounts don't materialize on this runtime — probed). A/B complete (2026-06-11, 4 PRs across air + qai): $1.00–1.77/review vs $3.92–7.73 production inline (≈ −65–80%), wall ~9–14 min vs ~12–25, quality held.
+Runs full mode through `air-coordinator-ma`, a coordinator on the GA `multiagent` roster primitive whose sub-agent threads **share `/workspace`** (the research-preview `callable_agents` threads are isolated). Instead of re-emitting the PR context + diff into every specialist delegation (~60–150K output tokens/review — full mode's #1 structural cost), the coordinator writes them to `/workspace/context/` ONCE (TURN 0) and delegates short file pointers; specialists write findings to `/workspace/findings/` and the verifier reads them there. `air-git-history-reviewer` keeps an inline delegation (its model tier under-read file pointers in benchmarking). The MA agent is created by setup.py only when the flag is on, is not pinnable, and `AIR_FILE_HANDOFF` is ignored while the flag is set (Files-API mounts don't materialize on this runtime — probed). A/B complete (2026-06-11, 4 PRs across air + the work repos): $1.00–1.77/review vs $3.92–7.73 production inline (≈ −65–80%), wall ~9–14 min vs ~12–25, quality held.
 
 **Enable per-repo with no workflow edit** — same caller-variable mechanism as `AIR_REVIEW_MODE`: set a repository (or org) **variable** `AIR_MULTIAGENT=1` on the caller repo (Settings → Secrets and variables → Actions → Variables); `managed-review.yml` passes it through to the driver. Delete the variable to roll back instantly. Roll out one repo at a time, dogfooding on the air repo first.
 
@@ -240,7 +239,7 @@ Runs full mode through `air-coordinator-ma`, a coordinator on the GA `multiagent
 
 ### UI / copy reviewer — covering CLI/TUI copy (`## User-Facing Copy Paths`)
 
-`air-ui-copy-reviewer` dispatches whenever a PR's diff touches a **web** surface (`.tsx/.jsx/.vue/.svelte/.html`, i18n catalogs, user-facing docs) — automatically, no config. For **CLI/TUI products** whose user-facing copy lives in non-markup files (e.g. ai-relay's Python patient/agent message modules), add a `## User-Facing Copy Paths` section to the repo's **PROJECT-PROFILE.md** listing glob patterns, one per `- ` line:
+`air-ui-copy-reviewer` dispatches whenever a PR's diff touches a **web** surface (`.tsx/.jsx/.vue/.svelte/.html`, i18n catalogs, user-facing docs) — automatically, no config. For **CLI/TUI products** whose user-facing copy lives in non-markup files (e.g. repo-C's Python patient/agent message modules), add a `## User-Facing Copy Paths` section to the repo's **PROJECT-PROFILE.md** listing glob patterns, one per `- ` line:
 
 ```markdown
 ## User-Facing Copy Paths

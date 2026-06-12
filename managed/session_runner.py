@@ -5,6 +5,7 @@ Extracted verbatim from review.py (module split).
 """
 import asyncio
 import atexit
+import os
 import signal
 import sys
 import threading
@@ -112,8 +113,8 @@ SESSION_TIMEOUT_SECS = 600
 # ONE session. Empirical wall times observed so far:
 #   - PR #40 (~3K lines):   ~10 min
 #   - PR #41 (5648 lines):  24 min
-#   - qai-be #593 (~3.5K):  28 min 13 sec   ← timed out our 1680s cap
-# qai-be #593 finished server-side just 13s past the 1680s ceiling, with
+#   - repo-A #593 (~3.5K):  28 min 13 sec   ← timed out our 1680s cap
+# repo-A #593 finished server-side just 13s past the 1680s ceiling, with
 # the full review present in the final agent.message — but our Python
 # wait_for() had already raised TimeoutError, sending an interrupt that
 # crossed the wire as the session was naturally idling. Wall time is
@@ -157,7 +158,7 @@ _BILLING_REASON_HINTS: tuple[str, ...] = (
 # billed. So re-attempting a FAST billing failure is ~free and usually
 # succeeds. Hard guard: only retry when the failed attempt died fast (preflight
 # window) — a billing_error that surfaces AFTER the session did real work
-# (mid-session: cache-written context / specialist output, e.g. qai-fe
+# (mid-session: cache-written context / specialist output, e.g. repo-B
 # 2026-06-03 ~9 min in) must NOT be retried, or we re-spend that work. Non-
 # billing failures never retry.
 BILLING_RETRY_MAX_ATTEMPTS = 3        # 1 initial + 2 retries
@@ -222,6 +223,26 @@ async def _list_events_paged(
             file=sys.stderr,
         )
     return events
+
+
+def build_session_metadata(repo: str, pr_number=None, kind: str = "") -> dict:
+    """Attribution metadata for sessions.create, so per-repo/per-PR billing
+    can be split without parsing session titles (the API stores it; usage
+    surfaces are catching up). Values must be strings (API contract).
+    `repo` is the primary attribution key and is kept unconditionally —
+    a caller bug passing '' should show up as visibly-empty attribution,
+    not as a silently absent key. Optional fields are dropped when absent
+    so missing context never serializes as ''.
+    """
+    meta = {"repo": repo}
+    if pr_number is not None:
+        meta["pr"] = str(pr_number)
+    if kind:
+        meta["kind"] = kind
+    ci_run = os.environ.get("GITHUB_RUN_ID", "")
+    if ci_run:
+        meta["ci_run"] = ci_run
+    return meta
 
 
 class ThreadTracker:
@@ -329,6 +350,7 @@ async def run_session(
     file_resources: list[dict] | None = None,
     multiagent_primary: str | None = None,
     require_dispatch: bool = False,
+    metadata: dict | None = None,
 ) -> str:
     """Create a session, send the user prompt, stream events, return collected agent text.
 
@@ -395,6 +417,7 @@ async def run_session(
             environment_id=env_id,
             title=f"{label} — {repo}",
             resources=resources,
+            **({"metadata": metadata} if metadata else {}),
         )
     finally:
         if session is not None:
@@ -428,10 +451,10 @@ async def run_session(
     # SSE / REST events backend can lag in EITHER direction relative to the
     # other:
     #
-    # 1. SSE delivery delay (qai-be #635, 2026-04 era): REST commits
+    # 1. SSE delivery delay (repo-A #635, 2026-04 era): REST commits
     #    `session.status_idle` and the trailing final `agent.message` minutes
     #    before our SSE stream consumer receives them.
-    # 2. REST delivery delay (qai-be #666, svc-tx #39, 2026-05-05 era): SSE
+    # 2. REST delivery delay (repo-A #666, svc-tx #39, 2026-05-05 era): SSE
     #    goes quiet ahead of `events.list` having the final coordinator
     #    `agent.message` on cache-heavy runs that complete in ~SSE_QUIET_S.
     #
@@ -710,7 +733,7 @@ async def run_session(
 
             # Thread-stall visibility (every ~3rd poll): a specialist
             # parked on one long tool call shows as running with a stale
-            # updated_at — the ai-relay #216 session lost ~10 min to a
+            # updated_at — the repo-C #216 session lost ~10 min to a
             # silent grep timeout with zero operator signal. Diagnostic
             # only; the prompt-side `timeout 30` guidance attacks the
             # root cause. Best-effort: thread listing failures never
