@@ -76,7 +76,7 @@ jobs:
       AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
 ```
 
-**Variant C — multi-reviewer (post under the requested reviewer's identity):** the review posts as whichever teammate was requested as reviewer, using *their* PAT. air's contract is unchanged — it still receives exactly one `AIR_BOT_TOKEN` and derives the identity from it at runtime. Selection happens entirely caller-side: a `resolve` job maps the requested login → a friendly secret **stem** via one repo variable `AIR_PAT_MAP`, and only that one PAT is passed (no `secrets: inherit`). Reference implementation: **thecvlb/svc-transcribe PR #88**.
+**Variant C — multi-reviewer (advanced, optional):** most teams should stop at Variant A or B — one dedicated bot account, one `AIR_BOT_TOKEN`. This variant exists for teams that want reviews attributed to the individual requested reviewer: the review posts under whichever teammate was requested, using *their* PAT. air's contract is unchanged — it still receives exactly one `AIR_BOT_TOKEN` and derives the identity from it at runtime. Selection happens entirely caller-side: a `resolve` job maps the requested login → a friendly secret **stem** via one repo variable `AIR_PAT_MAP`, and only that one PAT is passed (no `secrets: inherit`).
 
 ```yaml
 name: air review
@@ -98,9 +98,6 @@ on:
         required: false
         type: string
         default: 'true'
-
-# DEFERRED (match svc-transcribe): do NOT SHA-pin the air ref yet (#89) and
-# do NOT add expected_reviewer yet (#90) — land them as additive follow-ups.
 
 jobs:
   # Map the requested reviewer's login -> friendly PAT stem via the
@@ -145,14 +142,16 @@ Setup for Variant C:
 ```bash
 # 1. The allowlist + login->stem map (keys = logins, values = friendly stems):
 gh variable set AIR_PAT_MAP --repo <owner>/<repo> \
-  --body '{"caguilaron":"CARLOS","adamdanielsnavarro":"ADAM","VorobiovD":"DIMA"}'
+  --body '{"alice":"ALICE","bob-smith":"BOB"}'
 
-# 2. Each reviewer sets their own per-repo secret <STEM>_PAT (CARLOS_PAT, ADAM_PAT, ...)
-#    = a fine-grained PAT (Pull requests: RW, Contents: RO, Checks: RW).
-#    Corporate PATs are capped at 7-day expiry -> rotate weekly; per-repo only.
+# 2. Each reviewer sets their own per-repo secret <STEM>_PAT (ALICE_PAT, BOB_PAT, ...)
+#    = a PAT scoped to the repos (Pull requests: RW, Contents: RO, Checks: RW).
+#    If your org caps PAT lifetimes, each reviewer refreshes their own secret
+#    on that cadence — on EVERY repo that holds a copy (a repo left on the old
+#    PAT fails auth silently at its next review).
 ```
 
-**Why a stem map (not bare `<LOGIN>_PAT`):** GHA expressions have no `upper()` and secret names allow only `[A-Za-z0-9_]`, so a raw login like `christinacephus-md` can't be a secret name and `caguilaron` won't match `CAGUILARON_PAT`. The `resolve` job decouples the login from the secret name and keeps the lookup off the unambiguous `needs` context.
+**Why a stem map (not bare `<LOGIN>_PAT`):** GHA expressions have no `upper()` and secret names allow only `[A-Za-z0-9_]`, so a raw login like `bob-smith` can't be a secret name and `alice` won't match `ALICE_PAT`. The `resolve` job decouples the login from the secret name and keeps the lookup off the unambiguous `needs` context.
 
 **Behavioral note:** air keys prior-review detection, the pre-post dedup, and the re-review FIXED/NOT-FIXED delta on the token owner's login. A review posted under one reviewer's identity is *not* seen as "prior" by a run under a different reviewer's token on the same PR — that run posts a **fresh** review, not a delta. This is intentional (each requested reviewer keeps an independent thread); the cooldown debounce is any-author, so burst-coalescing still works across reviewers.
 

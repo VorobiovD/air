@@ -87,7 +87,7 @@ The "wiki split" top-backlog item (40-60% of session input tokens) shipped as a 
 
 ### D. Multi-reviewer PAT model — SHIPPED on callers (+ an ops gap)
 Caller workflows resolve the **requested reviewer's** `<STEM>_PAT` from an `AIR_PAT_MAP` repo variable (`secrets[format('{0}_PAT', stem)] || AIR_BOT_TOKEN`), with the **`expected_reviewer` assertion** (v1.20.0 #116) closing the trust seam. Live on qai-be/qai-fe; **ai-relay ported 2026-06-05** (PR #228, was on the legacy bare-`AIR_BOT_TOKEN` caller).
-**OPS GAP (caused a 2-day ai-relay outage):** the weekly `rotate-air-pat.sh` fan-out refreshes the per-reviewer `<STEM>_PAT` secrets but **NOT `AIR_BOT_TOKEN`**, and **intermittently skips ai-relay entirely** — ai-relay's `AIR_BOT_TOKEN` went stale (06-03→06-05, every review 403'd at checkout), and `ADAM_PAT` landed on the other 3 repos 06-05 but not ai-relay. **Fix to track:** add `thecvlb/ai-relay` to the fan-out for all `<STEM>_PAT` + refresh its `AIR_BOT_TOKEN`; until then only `DIMA_PAT` works on ai-relay and other reviewers spend-then-fail. Cheap detector: a lone-stale `AIR_BOT_TOKEN` `updated_at` vs the fleet.
+**OPS GAP (caused a 2-day ai-relay outage):** the weekly `rotate-air-pat.sh` fan-out refreshes the per-reviewer `<STEM>_PAT` secrets but **NOT `AIR_BOT_TOKEN`**, and **intermittently skips ai-relay entirely** — ai-relay's `AIR_BOT_TOKEN` went stale (06-03→06-05, every review 403'd at checkout), and the rotated `<STEM>_PAT`s landed on the other 3 repos 06-05 but not ai-relay. **Fix to track:** add ai-relay to the fan-out for all `<STEM>_PAT` + refresh its `AIR_BOT_TOKEN`; until then only one reviewer's PAT works on ai-relay and the others spend-then-fail. Cheap detector: a lone-stale `AIR_BOT_TOKEN` `updated_at` vs the fleet.
 
 ### E. Reliability + ops (v1.16.0–v1.20.0)
 Fail-loud on run-failed outcomes + **billing canary preflight** (v1.17.0 #87 — billing exhaustion no longer leaves CI silently green); cooldown debounce + respond-driven re-request (v1.16.0 #86); inline-MODE default + Codex bwrap fix (v1.19.x); pre-post dedup against double-triggered runs (#109). The 06-03→06-05 ai-relay 403s cost **$0** (failed at git-checkout, before any session) — confirms the preflight ordering.
@@ -135,7 +135,7 @@ PR #635 received 9 reviews over 2 days. Comment sizes converged but not monotoni
 | Stale-coordinator regurgitation | 0 in last 7d | v1.12.3/v1.12.4 mitigations holding |
 | Billing exhaustion | 2026-05-22 (air key, 11d invisible) + 2026-06-02 (org key, ~4h, 3 repos) | run-failed comment posts but job stayed green → fail-loud + billing canary preflight shipped post-1.16.0 |
 | **SSE-quiet / coordinator dispatch latency** | 3+ in 3d (2026-05-19→21) | see "coordinator dispatch latency" below |
-| **ai-relay stale-token outage** | 06-03→06-05 (every ai-relay review 403'd at git-checkout) | rotation fan-out skipped ai-relay AND never refreshes `AIR_BOT_TOKEN` → stale token. Fixed by porting ai-relay to the multi-PAT caller (PR #228, uses fresh `DIMA_PAT`); fan-out gap itself still OPEN — see §Since-v1.13.0 D. Cost: $0 (failed pre-session) |
+| **ai-relay stale-token outage** | 06-03→06-05 (every ai-relay review 403'd at git-checkout) | rotation fan-out skipped ai-relay AND never refreshes `AIR_BOT_TOKEN` → stale token. Fixed by porting ai-relay to the multi-PAT caller (PR #228, uses a freshly rotated `<STEM>_PAT`); fan-out gap itself still OPEN — see §Since-v1.13.0 D. Cost: $0 (failed pre-session) |
 
 ### 2026-06-02 session-efficiency analysis (ai-relay #216 re-review)
 
@@ -162,7 +162,7 @@ Decision rationale: the bar is a gate Sonnet must *clear* (demonstrate zero miss
 
 **Declined (caching math):** file-handoff's INPUT-side rationale — content enters the reader's context either way; only saves coordinator replay at 0.1× cache-read rates (pennies). (The OUTPUT-side rationale — the coordinator re-typing 16K tokens per run — is what PR B shipped on.) System-prompt trimming / shared-skill extraction — cache-written once per thread, marginal. Checklist-from-file — the read tool loads the same tokens. Skip-specialists-on-small-diffs — declined on policy ("a 1-line PR can have a blocker" is a core design rule), and the cited session's own shell+docs PR is where the security auditor had found the supply-chain gap one round earlier.
 
-**Verify after thecvlb/ai-relay#220 (pin bump):** Codex was silently absent in the session (`bwrap: loopback` sandbox error on the runner) — ai-relay reviews run 4-reviewer until the pin lands on v1.16.0; if the error persists, open a bug.
+**Verify after ai-relay #220 (pin bump):** Codex was silently absent in the session (`bwrap: loopback` sandbox error on the runner) — ai-relay reviews run 4-reviewer until the pin lands on v1.16.0; if the error persists, open a bug.
 
 ### Selective context retrieval + observability (HIGHEST cost lever — 3 tracks)
 
@@ -330,8 +330,8 @@ Three small fixes derived from the 2026-05-19/20/21 audit. All client-side patch
 **Source:** `air-improvements-plan.md §3.2 J + §4 Phase 4`
 
 ### Item N — Self-hosted sandbox for PHI repos (••••, conditional)
-**Why:** If any LifeMD/qai repo carries PHI in diffs, running on self-hosted sandbox means diff never traverses Anthropic infra. Required for HIPAA-adjacent workloads.
-**Open question** (`plan §6 Q2`): does any LifeMD repo currently routed through air carry PHI in diffs?
+**Why:** If any fleet repo carries regulated data (e.g. PHI) in diffs, running on self-hosted sandbox means the diff never traverses Anthropic infra. Required for HIPAA-adjacent workloads.
+**Open question** (`plan §6 Q2`): does any repo currently routed through air carry such data in diffs?
 **Source:** `air-improvements-plan.md §3.3 N + §4 Phase 4`
 
 ---
