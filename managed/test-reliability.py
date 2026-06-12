@@ -704,3 +704,75 @@ def test_coordinator_systemexit_still_propagates(monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------------------
+# Shutdown: interrupt-before-unwind (the 2026-06-12 canceled-run gap)
+# ---------------------------------------------------------------------------
+
+def test_signal_handler_interrupts_before_exit(monkeypatch):
+    """CI cancel gives ~10s before SIGKILL; the interrupt POST must happen
+    INSIDE the handler, not after asyncio teardown (which ate the whole
+    grace window on the real cancel — zero interrupt events landed)."""
+    sent = []
+
+    class _FakeEvents:
+        def send(self, sid, events):
+            sent.append((sid, events[0]["type"]))
+
+    class _FakeClient:
+        def __init__(self, **kw):
+            self.beta = types.SimpleNamespace(
+                sessions=types.SimpleNamespace(events=_FakeEvents())
+            )
+
+    monkeypatch.setattr(session_runner, "Anthropic", _FakeClient)
+    monkeypatch.setattr(session_runner, "_shutdown_started", False)
+    session_runner.LIVE_SESSIONS.clear()
+    session_runner.LIVE_SESSIONS.add("sesn_orphan")
+    try:
+        with pytest.raises(SystemExit) as exc:
+            session_runner._shutdown_signal_handler(15, None)
+        assert exc.value.code == 143
+        assert sent == [("sesn_orphan", "user.interrupt")]
+    finally:
+        session_runner.LIVE_SESSIONS.clear()
+        session_runner._shutdown_started = False
+
+
+def test_second_signal_skips_straight_to_exit(monkeypatch):
+    """The cancel sequence delivers SIGTERM while the SIGINT handler may
+    still be POSTing — the second signal must not re-enter the interrupt."""
+    calls = []
+    monkeypatch.setattr(
+        session_runner, "_interrupt_live_sessions_sync",
+        lambda **kw: calls.append(1),
+    )
+    monkeypatch.setattr(session_runner, "_shutdown_started", True)
+    with pytest.raises(SystemExit):
+        session_runner._shutdown_signal_handler(2, None)
+    assert calls == []
+    session_runner._shutdown_started = False
+
+
+# ---------------------------------------------------------------------------
+# Salvage: orphaned-session review recovery
+# ---------------------------------------------------------------------------
+
+def test_salvage_collects_agent_text_like_run_session():
+    import salvage_review
+
+    def _msg(txt):
+        return types.SimpleNamespace(
+            type="agent.message",
+            content=[types.SimpleNamespace(text=txt)],
+        )
+
+    events = [
+        types.SimpleNamespace(type="session.status_running"),
+        _msg("part one "),
+        _msg("[empty message]"),
+        types.SimpleNamespace(type="agent.tool_use"),
+        _msg("part two"),
+    ]
+    assert salvage_review._collect_agent_text(events) == "part one part two"

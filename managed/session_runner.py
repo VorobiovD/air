@@ -36,70 +36,102 @@ LIVE_SESSIONS: set[str] = set()
 INTERRUPT_EVENT = {"type": "user.interrupt"}
 
 
-def _interrupt_live_sessions_sync() -> None:
+def _interrupt_live_sessions_sync(
+    timeout_s: float = 10.0, join_budget_s: float = 12.0,
+) -> None:
     """Best-effort sync interrupt of any still-tracked sessions.
 
-    Registered via atexit in main(). Uses the sync Anthropic client because
-    atexit runs after the asyncio loop has been torn down.
+    Called from the signal handler (tight budgets — see
+    `_shutdown_signal_handler`) and registered via atexit in main() as the
+    second chance (idempotent: successful interrupts discard from
+    LIVE_SESSIONS). Uses the sync Anthropic client because atexit runs
+    after the asyncio loop has been torn down.
     """
     if not LIVE_SESSIONS:
         return
     sids = list(LIVE_SESSIONS)
     print(f"  [shutdown] interrupting {len(sids)} live session(s)", file=sys.stderr)
     # Tight per-request timeout + no retries so a slow/unreachable API can't
-    # block atexit for minutes while the CI runner's grace window ticks down
-    # to SIGKILL. Parallelize via raw daemon threads — ThreadPoolExecutor
+    # block shutdown for minutes while the CI runner's grace window ticks
+    # down to SIGKILL. Parallelize via raw daemon threads — ThreadPoolExecutor
     # refuses to schedule work during interpreter shutdown (atexit fires
     # after concurrent.futures' own shutdown hook), so a pool.map() here
     # raises "cannot schedule new futures after interpreter shutdown".
-    client = Anthropic(timeout=10.0, max_retries=0)
+    client = Anthropic(timeout=timeout_s, max_retries=0)
 
     def _interrupt_one(sid: str) -> None:
         try:
             client.beta.sessions.events.send(sid, events=[INTERRUPT_EVENT])
             LIVE_SESSIONS.discard(sid)
+            print(f"  [shutdown] interrupted {sid}", file=sys.stderr)
         except Exception as e:
             print(f"  [shutdown] interrupt failed for {sid}: {e}", file=sys.stderr)
 
     threads = [threading.Thread(target=_interrupt_one, args=(sid,), daemon=True) for sid in sids]
     for t in threads:
         t.start()
-    # Bound total wait to the per-request timeout — slow tails shouldn't
-    # starve CI's SIGKILL grace. Each interrupt itself has timeout=10.0, so
-    # after ~12s any surviving thread is either making progress or wedged;
-    # we give up rather than block shutdown.
-    deadline = time.monotonic() + 12.0
+    # Bound total wait — slow tails shouldn't starve CI's SIGKILL grace;
+    # past the budget any surviving thread is either making progress or
+    # wedged, and we give up rather than block shutdown.
+    deadline = time.monotonic() + join_budget_s
     for t in threads:
         remaining = max(0.0, deadline - time.monotonic())
         t.join(timeout=remaining)
 
 
+_shutdown_started = False
+
+
+def _shutdown_signal_handler(signum, _frame):
+    """Interrupt the live sessions FIRST, then unwind.
+
+    GitHub Actions cancellation sends SIGINT, waits ~7.5s, sends SIGTERM,
+    waits ~2.5s, then SIGKILLs. The previous design put the interrupt
+    POSTs at the END of the teardown chain (SystemExit → asyncio/SSE
+    cleanup → atexit) — and on a real cancel (a promote review, 2026-06-12)
+    the teardown ate the whole grace window: SIGKILL landed with ZERO
+    interrupt events delivered, and the orphaned session burned ~$5 to
+    completion server-side. Firing the interrupt synchronously inside the
+    handler spends the grace window on the only thing that matters.
+
+    A second signal while the first is mid-interrupt skips straight to
+    exit (the cancel sequence delivers SIGTERM while the SIGINT handler
+    may still be POSTing).
+    """
+    global _shutdown_started
+    if not _shutdown_started:
+        _shutdown_started = True
+        _interrupt_live_sessions_sync(timeout_s=4.0, join_budget_s=5.0)
+    sys.exit(128 + signum)
+
+
 def _install_shutdown_handlers() -> None:
     """Register shutdown hygiene. Called from main() — not at import time —
-    so test harnesses and other importers don't inherit the SIGTERM handler
+    so test harnesses and other importers don't inherit the signal handlers
     or atexit registration.
 
     Design:
-    - SIGTERM (CI job kill): install a handler that raises SystemExit, which
-      lets asyncio cancel pending tasks and run their finally blocks.
-      Without a handler, Python's default terminates the process without
-      running atexit, leaving every session orphaned.
-    - SIGINT (Ctrl-C): do NOT override — Python's default raises
-      KeyboardInterrupt which asyncio already converts to CancelledError,
-      propagating through `async with stream_cm` cleanup paths.
-    - atexit fires after asyncio shuts down and is our last-resort sync
-      cleanup for anything that leaked past async teardown.
+    - SIGTERM / SIGHUP: interrupt live sessions in-handler (see
+      `_shutdown_signal_handler`), then SystemExit so asyncio cancels
+      pending tasks and runs their finally blocks.
+    - SIGINT: overridden ONLY in CI (GITHUB_ACTIONS set) — it's the FIRST
+      signal a job cancel sends, and catching it buys the full ~10s grace
+      window. Locally we keep Python's default Ctrl-C (KeyboardInterrupt)
+      semantics, which asyncio converts to CancelledError through the
+      `async with stream_cm` cleanup paths.
+    - atexit remains the idempotent second chance for anything that leaked
+      past the handler (non-signal exits, sessions registered after the
+      first signal).
     """
     atexit.register(_interrupt_live_sessions_sync)
 
-    def _sigterm_to_systemexit(signum, _frame):
-        sys.exit(128 + signum)
-
-    signal.signal(signal.SIGTERM, _sigterm_to_systemexit)
+    signal.signal(signal.SIGTERM, _shutdown_signal_handler)
     # SIGHUP covers parent-shell death and some container stop sequences.
     # Guarded for Windows (no SIGHUP on that platform).
     if hasattr(signal, "SIGHUP"):
-        signal.signal(signal.SIGHUP, _sigterm_to_systemexit)
+        signal.signal(signal.SIGHUP, _shutdown_signal_handler)
+    if os.environ.get("GITHUB_ACTIONS"):
+        signal.signal(signal.SIGINT, _shutdown_signal_handler)
 
 
 # Per-session cap so one hung stream can't stall the whole review until the

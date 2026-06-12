@@ -60,6 +60,7 @@ managed/                          # Managed Agent (CI automation)
 ├── migrate_wiki_to_store.py      # One-shot wiki → store migration (per-author split, --dry-run)
 ├── migrate_workspace_stores.py   # One-shot store → store copy across workspaces (sha256-verified)
 ├── render_store_to_wiki.py       # Deterministic store→wiki mirror render (throttled per-review + on learn)
+├── salvage_review.py             # Drain a finished orphaned session and post its review ($0 — e.g. after a job cancel)
 ├── test-session.py               # Quick 9-test verification script
 ├── prompts/learn-orchestrator.md # System prompt for cloud learn agent
 │                                 # (review orchestrator.md deleted in v1.7.0 — review.py orchestrates client-side)
