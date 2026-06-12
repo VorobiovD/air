@@ -387,8 +387,9 @@ def _pinned_entry(full_name: str, pin: int, agents_by_name: dict) -> dict:
 
 def main():
     # Line-buffer piped stdout (same rationale as review.py): sync output
-    # is consumed by review.py's subprocess pipe and CI logs — block
-    # buffering reorders it against stderr and loses it on truncation.
+    # is flushed to the same CI stream as review.py (subprocess.run with
+    # inherited stdout, no PIPE) — block buffering reorders it against
+    # stderr and loses it on truncation.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     print("Syncing air agents...\n")

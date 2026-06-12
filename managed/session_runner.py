@@ -226,18 +226,23 @@ async def _list_events_paged(
 
 
 def build_session_metadata(repo: str, pr_number=None, kind: str = "") -> dict:
-    """Attribution metadata for sessions.create — the console and usage
-    exports surface it, so per-repo/per-PR billing no longer requires
-    parsing session titles. Values must be strings (API contract);
-    empties are dropped so absent context never serializes as ''.
+    """Attribution metadata for sessions.create, so per-repo/per-PR billing
+    can be split without parsing session titles (the API stores it; usage
+    surfaces are catching up). Values must be strings (API contract).
+    `repo` is the primary attribution key and is kept unconditionally —
+    a caller bug passing '' should show up as visibly-empty attribution,
+    not as a silently absent key. Optional fields are dropped when absent
+    so missing context never serializes as ''.
     """
-    meta = {
-        "repo": repo,
-        "pr": str(pr_number) if pr_number is not None else "",
-        "kind": kind,
-        "ci_run": os.environ.get("GITHUB_RUN_ID", ""),
-    }
-    return {k: v for k, v in meta.items() if v}
+    meta = {"repo": repo}
+    if pr_number is not None:
+        meta["pr"] = str(pr_number)
+    if kind:
+        meta["kind"] = kind
+    ci_run = os.environ.get("GITHUB_RUN_ID", "")
+    if ci_run:
+        meta["ci_run"] = ci_run
+    return meta
 
 
 class ThreadTracker:
@@ -406,16 +411,13 @@ async def run_session(
         resources.extend(file_resources)
 
     session = None
-    create_kwargs: dict = {}
-    if metadata:
-        create_kwargs["metadata"] = metadata
     try:
         session = await client.beta.sessions.create(
             agent={"type": "agent", "id": agent_id, "version": agent_version},
             environment_id=env_id,
             title=f"{label} — {repo}",
             resources=resources,
-            **create_kwargs,
+            **({"metadata": metadata} if metadata else {}),
         )
     finally:
         if session is not None:

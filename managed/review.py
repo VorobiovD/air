@@ -2724,7 +2724,8 @@ def main():
     # CI log streams interleave stdout and stderr; piped stdout is
     # block-buffered, so decision-log prints lag minutes behind stderr —
     # or vanish entirely on truncation/SIGKILL. Line-buffer it so the
-    # decision trail ([launch]/[promote]/mode lines) is real-time.
+    # decision trail ([launch]/mode lines; [promote] already goes to
+    # stderr) is real-time.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     parser = argparse.ArgumentParser(description="Trigger an air review for a PR (single multi-agent coordinator)")
