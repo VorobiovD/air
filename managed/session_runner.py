@@ -123,6 +123,12 @@ def _install_shutdown_handlers() -> None:
       past the handler (non-signal exits, sessions registered after the
       first signal).
     """
+    # Re-arm the one-shot interrupt guard: a harness that catches
+    # SystemExit and re-installs handlers must get a fresh shot, or
+    # sessions registered after a first signal would never be interrupted.
+    global _shutdown_started
+    _shutdown_started = False
+
     atexit.register(_interrupt_live_sessions_sync)
 
     signal.signal(signal.SIGTERM, _shutdown_signal_handler)
@@ -160,6 +166,14 @@ SESSION_TIMEOUT_SECS = 600
 # SIGKILLs the runner (a SIGKILL leaves the coordinator orphan-running
 # and burning tokens until its own server-side idle).
 COORDINATOR_TIMEOUT_SECS = 2700
+
+# Session.status values that indicate the session is finished (no more
+# events will arrive). `idle` is the happy path; `terminated` and `error`
+# cover the documented failure shapes from `_process_event`'s SSE-side
+# handling. `requires_action` is intermediate and treated as still-running.
+# Module-scoped: shared by run_session's REST poller and salvage_review's
+# finished-orphan guard.
+TERMINAL_SESSION_STATUSES = frozenset({"idle", "terminated", "error"})
 
 
 class SpecialistSessionError(Exception):
@@ -510,13 +524,6 @@ async def run_session(
     # exit run_session before the wrapper could enforce the wall timeout.
     POLL_INTERVAL_S = 30.0
     POLL_BUDGET_S = COORDINATOR_TIMEOUT_SECS * 0.9
-    # Session.status values that indicate the session is finished (no more
-    # events will arrive). `idle` is the happy path; `terminated` and
-    # `error` cover the documented failure shapes from `_process_event`'s
-    # SSE-side handling (lines that handle `session.status_terminated`
-    # and `session.error` events). `requires_action` is intermediate and
-    # treated as still-running.
-    TERMINAL_SESSION_STATUSES = frozenset({"idle", "terminated", "error"})
     seen_event_ids: set[str] = set()
 
     def _process_event(event) -> str | None:

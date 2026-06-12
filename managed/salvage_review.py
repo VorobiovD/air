@@ -36,9 +36,13 @@ from github_client import (  # noqa: E402
     _post_review_comment_with_retry,
     submit_review_verdict,
 )
+from session_runner import TERMINAL_SESSION_STATUSES  # noqa: E402
 from verdict import _extract_review_body, should_request_changes  # noqa: E402
 
-COORDINATOR_TITLES = ("air-coordinator", "air-coordinator-ma")
+# Exact coordinator labels (title shape: "{label} — {repo}"). Anchored
+# match — a prefix tuple was redundant ("air-coordinator-ma…" already
+# startswith "air-coordinator") and unanchored against future agents.
+COORDINATOR_LABELS = frozenset({"air-coordinator", "air-coordinator-ma"})
 
 
 def _collect_agent_text(events) -> str:
@@ -69,18 +73,34 @@ def _drain_events(client, session_id: str) -> list:
         cursor = getattr(page, "next_page", None)
         if not cursor:
             break
+    else:
+        print(f"  [warn] event drain stopped at the 50-page cap with a "
+              f"continuation cursor still present ({len(events)} events) — "
+              f"the final review message may be missing", file=sys.stderr)
     return events
 
 
-def _find_newest_coordinator_session(client, repo: str) -> str | None:
-    """Newest coordinator session titled for this repo (titles are
-    '{label} — {repo}'; sessions list newest-first)."""
-    suffix = f"— {repo}"
+def _find_newest_coordinator_session(client, repo: str, pr_number: int) -> str | None:
+    """Newest coordinator session for this repo — PR-scoped when possible.
+
+    Titles are '{label} — {repo}' (no PR number), so on a repo with
+    concurrent reviews a title match alone can pick the wrong session.
+    Sessions created since v1.30 carry metadata.pr (build_session_metadata);
+    prefer an exact metadata match, fall back to the newest title match for
+    pre-metadata sessions (the downstream footer-SHA validation still
+    rejects a wrong pick — this just makes the right pick likelier)."""
+    suffix = f" — {repo}"
+    title_match = None
     for s in client.beta.sessions.list(limit=50).data:
         title = getattr(s, "title", "") or ""
-        if title.endswith(suffix) and title.startswith(COORDINATOR_TITLES):
+        if not (title.endswith(suffix) and title[: -len(suffix)] in COORDINATOR_LABELS):
+            continue
+        meta = getattr(s, "metadata", None) or {}
+        if isinstance(meta, dict) and meta.get("pr") == str(pr_number):
             return s.id
-    return None
+        if title_match is None:
+            title_match = s.id
+    return title_match
 
 
 def main() -> int:
@@ -97,7 +117,7 @@ def main() -> int:
         return 2
 
     client = Anthropic()
-    sid = args.session_id or _find_newest_coordinator_session(client, args.repo)
+    sid = args.session_id or _find_newest_coordinator_session(client, args.repo, args.pr_number)
     if not sid:
         print(f"no coordinator session found titled for {args.repo}", file=sys.stderr)
         return 1
@@ -106,9 +126,10 @@ def main() -> int:
     session = client.beta.sessions.retrieve(sid)
     status = getattr(session, "status", "?")
     print(f"session status: {status}")
-    if status == "running":
-        print("session is still RUNNING — salvage targets finished orphans; "
-              "wait for idle (or interrupt it first).", file=sys.stderr)
+    if status not in TERMINAL_SESSION_STATUSES:
+        print(f"session status {status!r} is not terminal — salvage targets "
+              "finished orphans; wait for idle (or interrupt it first).",
+              file=sys.stderr)
         return 1
 
     meta = fetch_pr_metadata(args.repo, args.pr_number, bot_token)
@@ -146,11 +167,21 @@ def main() -> int:
         return 1
     print("review comment posted")
     if pr_state == "open":
-        submit_review_verdict(args.repo, args.pr_number, bot_token, verdict, "", head_sha)
-        print(f"verdict submitted: {verdict} @ {head_sha[:8]}")
+        # GitHub 422s a REQUEST_CHANGES review with an empty body (APPROVE
+        # accepts one) — always send a short body so the gating verdict
+        # can't silently fail.
+        submit_review_verdict(
+            args.repo, args.pr_number, bot_token, verdict,
+            "Salvaged review — see the review comment above.", head_sha,
+        )
+        print(f"verdict POST attempted: {verdict} @ {head_sha[:8]} "
+              f"(a failure would be logged as [warn] above)")
     else:
         print(f"PR is {pr_state} — verdict skipped (GitHub rejects verdicts on closed PRs)")
     print("NOTE: pattern learning + learn counter skipped (salvage is post-only).")
+    print("NOTE: the conflict-marker verdict backstop and own-PR guard are NOT\n"
+          "applied here (no diff fetch) — if the PR may contain unresolved\n"
+          "conflict markers, eyeball the dry-run body before --post.")
     return 0
 
 

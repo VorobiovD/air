@@ -751,8 +751,7 @@ def test_second_signal_skips_straight_to_exit(monkeypatch):
     monkeypatch.setattr(session_runner, "_shutdown_started", True)
     with pytest.raises(SystemExit):
         session_runner._shutdown_signal_handler(2, None)
-    assert calls == []
-    session_runner._shutdown_started = False
+    assert calls == []  # monkeypatch restores the flag on teardown
 
 
 # ---------------------------------------------------------------------------
@@ -776,3 +775,24 @@ def test_salvage_collects_agent_text_like_run_session():
         _msg("part two"),
     ]
     assert salvage_review._collect_agent_text(events) == "part one part two"
+
+
+def test_sigint_registered_only_in_ci(monkeypatch):
+    """CI cancel sends SIGINT first — the handler must own it there, while
+    local runs keep Python's default Ctrl-C semantics."""
+    import signal as _signal
+    registered = {}
+    monkeypatch.setattr(
+        session_runner.signal, "signal",
+        lambda num, fn: registered.setdefault(num, fn),
+    )
+    monkeypatch.setattr(session_runner.atexit, "register", lambda fn: None)
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    session_runner._install_shutdown_handlers()
+    assert _signal.SIGINT not in registered
+
+    registered.clear()
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    session_runner._install_shutdown_handlers()
+    assert registered[_signal.SIGINT] is session_runner._shutdown_signal_handler
