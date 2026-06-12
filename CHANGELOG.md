@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.30.0](https://github.com/VorobiovD/air/compare/v1.29.0...v1.30.0) (2026-06-12)
+
+
+### Features
+
+* **ci:** pass AIR_MULTIAGENT caller variable through to the driver ([#150](https://github.com/VorobiovD/air/issues/150)) ([d5f77ed](https://github.com/VorobiovD/air/commit/d5f77edbfb6c81be2dbe00677824852f7fa7abfe))
+* **managed:** diff hygiene, conversation tail-cap, codex skip on tiny deltas ([#146](https://github.com/VorobiovD/air/issues/146)) ([69571a4](https://github.com/VorobiovD/air/commit/69571a486b34b3d81524e0e92b615c87a5d0c873))
+* **managed:** multiagent workspace-handoff behind AIR_MULTIAGENT (PR6') ([#148](https://github.com/VorobiovD/air/issues/148)) ([84da727](https://github.com/VorobiovD/air/commit/84da727928a21d43df6185aeff99181ea18cf7d9))
+* **managed:** overlap codex with precomp + parallel blame/churn ([#147](https://github.com/VorobiovD/air/issues/147)) ([53f73cf](https://github.com/VorobiovD/air/commit/53f73cff0a1e77ca91fa8e4cede902b67f4f9409))
+* one verdict-gating contract for CLI and managed (PR5) ([#151](https://github.com/VorobiovD/air/issues/151)) ([06bde91](https://github.com/VorobiovD/air/commit/06bde913470bed572529bf6d36dc6c3f00a1bbbc))
+
+
+### Bug Fixes
+
+* **managed:** A/B-surfaced fixes — watchdog attribution, capped-overlap guard, UI fail-open ([#149](https://github.com/VorobiovD/air/issues/149)) ([abe3420](https://github.com/VorobiovD/air/commit/abe3420b1e559391178833bf75abeae04ced14f4))
+* **managed:** GitHub I/O discipline, fence-aware extraction, verdict backfill ([#143](https://github.com/VorobiovD/air/issues/143)) ([e48024d](https://github.com/VorobiovD/air/commit/e48024de49a601dab299411374f106b54dec3388))
+* **managed:** incident fixes — non-UTF-8 crash, interrupt-on-cancel, orphan salvage ([#155](https://github.com/VorobiovD/air/issues/155)) ([e562d70](https://github.com/VorobiovD/air/commit/e562d70118d69c4f11893022a667d5d7148a7930))
+* **managed:** keep coordinator delegation alive on enforcing runtimes ([#152](https://github.com/VorobiovD/air/issues/152)) ([1f2ad12](https://github.com/VorobiovD/air/commit/1f2ad12a4f1678c61bea85fa385c840ac0bb037c))
+* **managed:** real-time decision logs + session attribution; org-clean docs ([#154](https://github.com/VorobiovD/air/issues/154)) ([c622ecc](https://github.com/VorobiovD/air/commit/c622ecc0cefbb87a859d2f61b88695d08478e1b9))
+
 ## [1.29.0](https://github.com/VorobiovD/air/compare/v1.28.1...v1.29.0) (2026-06-08)
 
 
