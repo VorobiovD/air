@@ -101,7 +101,7 @@ def test_rereview_unfixed_prior_blocker_gates():
 
 
 def test_rereview_unfixed_medium_does_NOT_gate():
-    # The svc-transcribe #37 case: a deferred medium must not keep the PR red.
+    # The repo-D #37 case: a deferred medium must not keep the PR red.
     body = (
         "## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
         "- **#1** [medium] — NOT FIXED — author punted to follow-up\n"

@@ -93,7 +93,7 @@ def _byte_chunks(lines: list[str], cap: int) -> list[list[str]]:
 
     Byte-bounded, not line-count-bounded: a fixed line count (the old
     `range(…, 800)`) silently produced >100KB memories when lines were
-    long — qai-be's 261KB glossary spilled a single 167KB overflow file
+    long — repo-A's 261KB glossary spilled a single 167KB overflow file
     that the API rejects. A single line longer than cap goes in its own
     chunk (still oversized, but unavoidable without splitting mid-line;
     such lines are pathological and flagged by the caller)."""

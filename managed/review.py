@@ -761,7 +761,7 @@ def _git(repo_dir: str, *args: str, timeout: float = 30.0) -> str:
     return result.stdout
 
 
-# Pre-comp caps. Bigger PRs make pre-comp expensive (60-file qai-be runs
+# Pre-comp caps. Bigger PRs make pre-comp expensive (60-file repo-A runs
 # would do 60 git-blame calls); cap to changed-file limit and skip
 # anything beyond. Specialists fall back to live blame on overflow files.
 PRECOMP_FILE_LIMIT = 40
@@ -890,7 +890,7 @@ def _path_matches_globs(path: str, globs: tuple | list) -> bool:
 
 # PROJECT-PROFILE section header that lists repo-declared user-facing copy
 # paths (one `- <glob>` per line) — the opt-in that extends the web-only gate
-# to a repo's CLI/TUI copy modules (e.g. ai-relay's Python patient/agent copy).
+# to a repo's CLI/TUI copy modules (e.g. repo-C's Python patient/agent copy).
 _COPY_PATHS_HEADER_RE = re.compile(r"^#{1,6}\s+User-Facing Copy Paths\s*$", re.IGNORECASE | re.MULTILINE)
 
 
@@ -1148,7 +1148,7 @@ async def _run_coordinator_session(
     # input docs ride into the session as mounted Files-API resources, and
     # the coordinator user message shrinks to a pointer note. Targets the
     # ~16K output tokens / ~240s the coordinator spends re-emitting the
-    # context+diff in TURN 1/2 (ai-relay #216 session audit).
+    # context+diff in TURN 1/2 (repo-C #216 session audit).
     #
     # OFF BY DEFAULT AND EFFECTIVELY DEAD: verified 2026-06-03 (air run
     # 26855698173) that callable-agent threads run in ISOLATED containers,
@@ -2180,7 +2180,7 @@ async def run_review(args):
 
     if not review_extracted:
         # Diagnostic dump — log the actual coordinator output so we can
-        # see WHY the SHA-validation refused it. svc-transcribe #39 (the
+        # see WHY the SHA-validation refused it. repo-D #39 (the
         # fresh-PR retry of #37) hit the same 92.4s failure on a fresh
         # mode (no `prior_review_body`), refuting the regurgitation
         # hypothesis. Without seeing what the coordinator actually
@@ -2241,7 +2241,7 @@ async def run_review(args):
         #
         # 1. Billing exhausted: `terminated_reason` from `run_session`
         #    contains the Anthropic SDK's `BetaManagedAgentsBillingError`
-        #    repr — observed on a real svc-transcribe run when the repo's
+        #    repr — observed on a real repo-D run when the repo's
         #    `ANTHROPIC_API_KEY` ran out of credits. The error message also
         #    embeds the literal phrase "credit balance is too low".
         # 2. Other coordinator failures (run_session raised for non-billing
@@ -2360,7 +2360,7 @@ async def run_review(args):
     # together on one push — can spawn two runs for the same head SHA, and the
     # job-level concurrency group doesn't reliably collapse same-second
     # siblings (both can begin before either is cancelled). Without this check
-    # both runs post a full review on the same commit (observed on ai-relay
+    # both runs post a full review on the same commit (observed on repo-C
     # #219: two `## Code Review (Re-review)` comments at one SHA, ~30 min
     # apart). Re-fetch now and skip posting if a bot review for THIS head SHA
     # already exists — a concurrent run beat us to it while we were busy.
@@ -2457,7 +2457,7 @@ async def run_review(args):
     # affect the protection state — that's a separate API call (POST
     # /pulls/{n}/reviews). The CLI plugin (commands/review.md Step 12)
     # has always done both; managed mode used to skip the verdict, so
-    # qai-be #595 stayed at REVIEW_REQUIRED with 0 blockers — operator
+    # repo-A #595 stayed at REVIEW_REQUIRED with 0 blockers — operator
     # had to approve manually. Skip the verdict only when the bot IS the
     # PR author (GitHub 422s self-review) or the PR is closed/merged
     # (state-gate above already caught --closed=false; if we're here on
@@ -2656,7 +2656,7 @@ def _run_learn_sync(air_root: Path, repo: str) -> None:
     stays elevated and the next review retriggers it.
 
     Output handling: capture and re-emit so the failure mode "learn.py
-    exited 1" surfaces an actionable reason (qai-be #635 — diagnostics
+    exited 1" surfaces an actionable reason (repo-A #635 — diagnostics
     invisible until log archive with direct streaming); stdout streams
     through immediately, stderr dumps only on failure.
     """
@@ -2687,7 +2687,7 @@ def _billing_preflight() -> None:
     """1-token ping (well under a cent) before any session spawns.
 
     A dry ANTHROPIC_API_KEY otherwise surfaces mid-coordinator-session
-    AFTER real spend — qai-be #969 burned a full partial session over
+    AFTER real spend — repo-A #969 burned a full partial session over
     28 minutes before dying to the 2026-06-02 exhaustion. With the
     canary, a billing-dead key fails the job red at near-zero cost, and
     retries during a dry spell stay free; after a top-up the canary

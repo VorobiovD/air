@@ -81,7 +81,7 @@ def test_path_mdx_is_markup_regardless_of_dir():
 
 def test_path_internal_docs_excluded():
     # Bare docs/**.md is internal eng material (specs/plans/ADRs) — must NOT
-    # trigger the copy reviewer. Regression for ai-relay #231 (billing-tool
+    # trigger the copy reviewer. Regression for repo-C #231 (billing-tool
     # docs/). (.mdx differs — see test_path_mdx_is_markup_regardless_of_dir.)
     for p in ("docs/architecture.md", "docs/specs/design.md", "docs/adr/0001.md",
               "gcp/functions/apis/billing-tool/docs/superpowers/plans/2026-06-07-fix.md"):
@@ -195,7 +195,7 @@ def test_user_facing_copy_globs_read_error_returns_empty():
 
 def test_path_matches_globs_greedy_and_excludes():
     globs = ["agent-core/agents/*.py", "**/messages/*.py"]
-    assert _path_matches_globs("agent-core/agents/clinical/intake.py", globs)  # * greedy across /
+    assert _path_matches_globs("agent-core/agents/support/intake.py", globs)  # * greedy across /
     assert _path_matches_globs("src/messages/welcome.py", globs)
     assert not _path_matches_globs("agent-core/handlers/db.py", globs)         # not under a glob
     assert not _path_matches_globs("REVIEW.md", globs)                         # exclude still wins

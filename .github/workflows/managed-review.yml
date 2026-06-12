@@ -114,7 +114,7 @@ on:
           Anthropic, so `air_ref` MUST point at the same air branch the
           caller's `uses:` line pins. Otherwise setup.py reads main's
           frontmatter and silently reverts any model-tier changes that
-          exist only on the feature branch (qai-be benchmark surfaced
+          exist only on the feature branch (repo-A benchmark surfaced
           this when `uses: ...managed-review.yml@feat/...` ran setup.py
           against main's frontmatter and resynced specialists from the
           test tier back to production tier).
@@ -141,7 +141,7 @@ on:
         description: |
           Optional identity assertion for the multi-reviewer PAT model.
           Pass the GitHub LOGIN of the human requested as reviewer (e.g.
-          'caguilaron') — NOT the friendly secret stem. Before any review
+          'alice') — NOT the friendly secret stem. Before any review
           spend, review.py resolves the AIR_BOT_TOKEN owner (GET /user) and
           fails loud (::error::, exit 1) unless it equals this login
           (case-insensitive) — catching a wrong PAT pasted into a reviewer's
@@ -199,7 +199,7 @@ jobs:
     # several commits in quick succession (typing nits, fixing CI), the
     # earlier reviews get cancelled and only the most recent push runs
     # to completion. Without this, every push fires a fresh ~30-min
-    # review even if the next push lands 2 minutes later — svc-transcribe
+    # review even if the next push lands 2 minutes later — repo-D
     # #37 logged 14 sequential reviews on what could have been 5-6.
     #
     # Group keyed on (repository, PR number) so cross-repo callers and
@@ -231,7 +231,7 @@ jobs:
     # Budget: codex (≤10 min, SESSION_TIMEOUT_SECS) + coordinator (≤45 min,
     # COORDINATOR_TIMEOUT_SECS = 2700s) + learn epilogue (~3-5 min when
     # the wiki-counter threshold fires) = 58-60 min worst case. 60 min
-    # was tight after qai-be #593 hit 28m13s on a re-review (~3.5K lines)
+    # was tight after repo-A #593 hit 28m13s on a re-review (~3.5K lines)
     # and the coordinator gradient with 1680s left no margin. 75 min
     # gave ~15 min of headroom for slow wiki clones, rebase-retry on
     # the wiki push, and learn-side specialist sessions. The cooldown
@@ -360,7 +360,7 @@ jobs:
 
       # `actions/checkout@v4` defaults to the default branch when
       # `repository:` is set to a different repo than the caller's. For
-      # cross-repo benchmarking (e.g., qai-be → air@feature-branch) the
+      # cross-repo benchmarking (e.g., repo-A → air@feature-branch) the
       # caller must pass `air_ref` as an input so setup.py reads agent
       # frontmatter from the SAME air ref that the reusable workflow
       # was loaded from — otherwise setup.py syncs main's frontmatter
@@ -402,7 +402,7 @@ jobs:
           # already authenticates with AIR_BOT_TOKEN; mirror it here so
           # the docblock's "the reusable workflow authenticates via
           # AIR_BOT_TOKEN" promise is true at every checkout site.
-          # Diagnosed against qai-be PR #593 — every bot-review run
+          # Diagnosed against repo-A PR #593 — every bot-review run
           # failed identically here regardless of which PAT was in
           # AIR_BOT_TOKEN, because this step never read it.
           token: ${{ secrets.AIR_BOT_TOKEN }}

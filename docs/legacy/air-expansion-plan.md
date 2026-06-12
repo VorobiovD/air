@@ -1,6 +1,6 @@
 > ⚠️ **Superseded — see [`docs/improvement-roadmap.md`](../improvement-roadmap.md).**
 >
-> This document has been folded into the master roadmap. Preserved here for historical reference (three-phase team-rollout narrative + original Cowork integration plan). New planning happens in the master file. Phase 1 (Managed Agent + GitHub Action) shipped 2026-04; Cowork follow-through tracked in [`docs/external-commitments.md`](../external-commitments.md).
+> This document has been folded into the master roadmap. Preserved here for historical reference (three-phase team-rollout narrative + original Cowork integration plan). New planning happens in the master file. Phase 1 (Managed Agent + GitHub Action) shipped 2026-04; Cowork follow-through tracked internally.
 
 # air — Expansion Plan: Managed Agents, Cowork, and Team Rollout
 

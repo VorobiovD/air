@@ -275,7 +275,7 @@ def test_ever_dispatched_ma_ignores_primary():
 # ---------------------------------------------------------------------------
 # run_session(require_dispatch=True) — fail loud when no sub-agent ever ran.
 # Scripted through a fake client on the legacy runtime: a clean end_turn
-# idle with zero thread events is byte-for-byte the qai callable_agents
+# idle with zero thread events is byte-for-byte the production callable_agents
 # failure shape (create_agent denied → coordinator improvises → "success").
 # ---------------------------------------------------------------------------
 
