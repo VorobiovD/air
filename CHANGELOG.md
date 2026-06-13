@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.31.0](https://github.com/VorobiovD/air/compare/v1.30.0...v1.31.0) (2026-06-13)
+
+
+### Features
+
+* CLI solo mode — one Fable agent, six lenses, advisory-first ([#156](https://github.com/VorobiovD/air/issues/156)) ([3e68c26](https://github.com/VorobiovD/air/commit/3e68c2616078c253ef2c2148d2a464ff80b65a0c))
+
 ## [1.30.0](https://github.com/VorobiovD/air/compare/v1.29.0...v1.30.0) (2026-06-12)
 
 

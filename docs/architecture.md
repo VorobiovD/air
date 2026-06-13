@@ -1,6 +1,6 @@
 # air — Architecture, Decisions, and Roadmap
 
-**Version:** 1.30.0 <!-- x-release-please-version -->
+**Version:** 1.31.0 <!-- x-release-please-version -->
 
 ---
 
