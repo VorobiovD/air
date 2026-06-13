@@ -25,7 +25,13 @@ from api import API_BASE, HEADERS, get_headers, api_error_message, list_agents
 AGENTS_DIR = Path(__file__).parent.parent / "plugins" / "air" / "agents"
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 
-SUB_AGENTS = ["code-reviewer", "simplify", "security-auditor", "git-history-reviewer", "ui-copy-reviewer", "review-verifier"]
+# The solo prompt assembly and the canonical specialist roster live in the
+# shared plugin lib (the CLI's `/air:review --solo` consumes the same
+# assembly — one implementation, two paths, like lib/verdict.py).
+_AIR_LIB_DIR = Path(__file__).resolve().parent.parent / "plugins" / "air" / "lib"
+if str(_AIR_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_AIR_LIB_DIR))
+from solo_prompt import SUB_AGENTS, assemble_solo_prompt  # noqa: E402,F401
 
 # Agent names accepted in AIR_AGENT_VERSIONS pins (the review roster).
 # air-learner is deliberately NOT pinnable — learn is wiki maintenance,
@@ -152,35 +158,6 @@ def read_prompt(path: Path) -> str:
     """Read a markdown prompt file, stripping YAML frontmatter."""
     _, body = _split_frontmatter(path)
     return body
-
-
-# Preamble for the assembled solo-reviewer prompt. Mirrors the proven
-# managed/experiments/arch_bench.py _system_prompt(): one agent applies all
-# lenses + self-verifies in a single session (the opt-in AIR_REVIEW_MODE=solo
-# path in review.py), instead of the coordinator's fan-out.
-SOLO_PREAMBLE = (
-    "You are a thorough code reviewer applying the review lenses below, then "
-    "self-verifying your findings (drop false positives / below-60 confidence). "
-    "You are reviewing ALONE in a single session — there is no separate verifier "
-    "pass, so the verifier lens applies to your OWN findings in real time. Output "
-    "exactly the `## Code Review` format the lenses describe, including the "
-    "`Reviewed at: <head_sha>` footer.\n"
-)
-
-
-def assemble_solo_prompt() -> str:
-    """Merge the 6 specialist prompts into one solo-reviewer system prompt.
-
-    Assembled at sync time from the SAME `agents/*.md` files the specialists
-    use (frontmatter-stripped, each under a `===== LENS: <name> =====`
-    delimiter, behind SOLO_PREAMBLE) → zero drift, no 6th prompt to maintain.
-    Faithful port of arch_bench.py `_system_prompt()`.
-    """
-    parts = [SOLO_PREAMBLE]
-    for name in SUB_AGENTS:
-        body = read_prompt(AGENTS_DIR / f"{name}.md")
-        parts.append(f"\n\n===== LENS: {name} =====\n{body}")
-    return "".join(parts)
 
 
 def parse_agent_tools(path: Path) -> list[str]:
