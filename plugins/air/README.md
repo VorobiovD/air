@@ -50,6 +50,7 @@ Two commands become available: `/air:review` and `/air:learn`. To enable auto-up
 /air:review 123 --closed               # Review a closed/merged PR (post-merge audit, pattern backfill)
 /air:review --dry-run                  # Print to console, don't post online
 /air:review --no-codex                 # Skip Codex review pass
+/air:review --solo                     # One Fable agent, all six lenses, self-verified — fast, $0 API
 /air:review https://github.com/org/repo/pull/45        # Cross-repo review (GitHub)
 /air:review https://gitlab.com/group/project/-/merge_requests/45  # Cross-repo review (GitLab)
 ```

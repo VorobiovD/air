@@ -82,7 +82,11 @@ Extract from `$ARGUMENTS`:
 - **--full**: review the ENTIRE codebase (all committed files). Generates a diff from empty tree to HEAD. For first-time audits of new repos, small projects, or full codebase security reviews. Review output to console only (never posts a PR comment). Wiki learning still runs normally.
 - **--closed**: allow review of closed/merged PRs. Default is to refuse (Step 5 pre-flight) to avoid wasting tokens on PRs nobody's looking at. Opt-in for legitimate cases: post-merge audit, wiki-pattern backfill from historical PRs, or dogfooding without opening a new PR. Step 12 skips the approve / request-changes verdict ONLY when state is CLOSED or MERGED (GitHub 422s verdicts on those); `--closed` on an OPEN PR posts verdicts normally. The review comment always posts.
 - **--no-codex**: skip the Codex review pass. By default Codex runs if available.
+- **--solo**: single-agent review — ONE Fable-powered agent applies all six lenses + self-verifies in one pass (~3–7 min agent time, $0 API spend — runs on your Claude Code subscription) instead of the parallel specialist team + verifier. **Advisory by default** (comment only, no verdict); add `--gate` to post the APPROVE/REQUEST_CHANGES verdict via `lib/verdict.py` — blocker-class validation showed single-agent severity calibration holds blockers only ~half the time, so gating is an explicit opt-in. Fresh full-PR reviews only (no re-review delta, no Codex). Flow: `commands/review-solo.md`.
 - **--dry-run**: print to console, don't post. Works with all modes including `--respond`.
+- **--gate**: (only with `--solo`) post the APPROVE/REQUEST_CHANGES verdict in addition to the comment. Without it, `--solo` is advisory-only.
+
+If `--solo` is present, **reject if combined with `--self`, `--full`, `--respond`, `--rewrite`, or `--re-review`** — solo v1 is a fresh-review flow. Print "--solo supports fresh PR reviews only (combine with --fresh/--closed/--dry-run)." and STOP. `--solo` implies `--no-codex`. Continue through Steps 2–5 as normal; the flow diverts at Step 6.
 
 If `--closed` is present, **reject if combined with `--self`, `--full`, or `--respond`** — those modes divert away from the PR-review flow (Step 5 / Step 12) where `--closed` is honored, so combining them is a silent no-op. Print "--closed only applies to PR review mode. Drop --self / --full / --respond, or drop --closed." and STOP. This check must run BEFORE the `--full` and `--self` flow-diverters below, otherwise those branches short-circuit past the guard.
 
@@ -554,6 +558,8 @@ All data comes from Step 4 — no additional API calls.
    - If user confirms: proceed with review.
 
 ## Step 6: Re-review Mode (if --re-review or auto-detected)
+
+**`--solo` diverts here:** skip Steps 6–11 entirely and follow `commands/review-solo.md` (one Fable agent, all lenses, self-verified); it returns to Steps 12–13. If Step 2 auto-detected a re-review, `--solo` still performs a full fresh review and posts a NEW comment.
 
 **`--rewrite` does NOT enter this step.** `--rewrite` is a fresh full review that replaces the existing comment — it only needs the comment ID for the PATCH in Step 12. If `--rewrite` was passed, skip Step 6 entirely and proceed to Step 7 with the full PR diff. The comment ID fetch happens in Step 12.
 

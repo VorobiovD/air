@@ -448,6 +448,19 @@ def test_coordinator_tool_configs_enable_disable_matrix():
     assert not any(state[t] for t in set(setup_mod.NAMED_TOOL_VOCABULARY) - allowed)
 
 
+def test_solo_prompt_resolves_to_the_shared_lib():
+    """setup.py's solo assembly IS plugins/air/lib/solo_prompt.py — the same
+    prompt the CLI's --solo flow runs. One implementation, two paths (the
+    lib/verdict.py pattern); a managed-local copy would silently drift."""
+    import inspect
+    src = inspect.getsourcefile(setup_mod.assemble_solo_prompt)
+    assert src and src.endswith("plugins/air/lib/solo_prompt.py")
+    prompt = setup_mod.assemble_solo_prompt()
+    assert prompt.startswith("You are a thorough code reviewer")
+    for lens in setup_mod.SUB_AGENTS:
+        assert f"===== LENS: {lens} =====" in prompt
+
+
 def test_sdk_page_cursor_still_exposes_next_page():
     """Guard against mock-contract drift: the fakes in these suites model
     the page as {data, next_page}. If an SDK upgrade renames the cursor
