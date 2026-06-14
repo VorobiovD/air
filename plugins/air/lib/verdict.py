@@ -252,9 +252,9 @@ _SEVERITY_ALT = r"blocker|medium|low|nit"
 _PRIOR_STATUS_RE = re.compile(
     r"^-\s+\*\*#(\d+)\*\*"
     rf"(?:\s*\[({_SEVERITY_ALT})\])?"
-    r"\s+—\s+"
-    rf"({_STATUS_ALT})\b",
-    re.MULTILINE | re.IGNORECASE,
+    r"\s+—\s+\*{0,2}"   # tolerate a `**`-bolded status (`— **FIXED**`) the
+    rf"({_STATUS_ALT})\b",  # verifier sometimes emits — else it reads as absent
+    re.MULTILINE | re.IGNORECASE,  # and a real FIXED gets falsely resurrected
 )
 
 
@@ -451,19 +451,27 @@ def _extract_review_body(raw_text: str, head_sha: str) -> tuple[str, bool]:
 # — the same move `has_conflict_markers` made (an advisory prompt rule becomes
 # an enforced gate rule).
 #
-# Spine = finding-NUMBER identity, FULL STOP. The `### Previous Findings Status`
-# lines carry NO line anchor (anchors exist only on freshly-introduced findings,
-# see build_verifier_task), and the only `**N.**` anchors in a re-review body
-# belong to NEW findings whose numbers RESTART at 1 and collide with carried #N.
-# So a prior finding's severity + existence is an attribute of its #N — carried
-# forward verbatim, NEVER re-opened by line evidence (any such join cross-wires;
-# see build_carry_forward_ledger). The guards can ONLY ever make the gate
-# STRICTER on prior findings; they can never un-gate.
+# Spine = finding-NUMBER identity. A prior finding's severity + existence is an
+# attribute of its #N, carried forward verbatim. Line evidence is used ONLY
+# where it's provably safe (see build_carry_forward_ledger for the full rule):
 #
-# `parse_changed_lines` / `finding_changed` / `ChangedIndex` below are CORRECT,
-# general diff utilities but are NOT wired into the ledger today — they are
-# reserved for a future v2 that threads a STABLE per-finding anchor across
-# rounds (the only way line evidence becomes safe for carried findings).
+#   - ROUND 3+ (prior is a re-review): NEVER use line evidence. Carried `#N`
+#     lines have no anchor, and the body's only `**N.**` anchors belong to NEW
+#     findings whose numbers RESTART at 1 and collide with carried #N — any join
+#     cross-wires. Pure number-identity (INDETERMINATE → PIN).
+#   - ROUND 2 (prior is a FRESH review): line evidence IS used. A fresh body's
+#     `**N.**` findings are its only findings (no collision), and their anchors
+#     sit at round-1's SHA (== the inter-diff OLD side), so `finding_changed`
+#     exactly distinguishes a real fix (CHANGED → honor FIXED) from a fake one
+#     (UNCHANGED → rewrite to NOT FIXED). This is what keeps the common case from
+#     over-gating every genuine fix.
+#
+# Net: the guards can make the gate STRICTER on a finding that did NOT change,
+# and HONOR a finding that demonstrably DID — but they can never un-gate (a fix
+# is honored only with positive `-`-line proof on round-1's own anchor).
+# `parse_changed_lines` / `finding_changed` / `ChangedIndex` power the round-2
+# path; cross-round line tracking for round 3+ remains a v2 (needs a stable
+# per-finding anchor that survives the per-round renumbering).
 # ---------------------------------------------------------------------------
 
 # Mirror of managed/github_client.py diff-hygiene markers. verdict.py is the
@@ -487,25 +495,34 @@ def _max_severity(a: str, b: str) -> str:
 
 
 class ChangedIndex:
-    """What the inter-diff changed, parsed once. `changed_old` holds OLD-side
-    line numbers of removed/modified lines — PRECISE `-` lines only. Pure
-    insertions don't touch existing flagged lines, and under-marking CHANGED
-    over-PINS (the safe direction), so we never over-mark a context line as
-    changed (which would wrongly authorize a FIXED retirement)."""
+    """What the inter-diff changed, parsed once.
 
-    __slots__ = ("present", "changed_old", "renames", "touched_by_rename",
-                 "stubbed", "truncated")
+    `changed_old` holds OLD-side line numbers of PRECISE `-` lines (removals/
+    modifications). `hunk_old` holds every OLD-side line a hunk SPANS (the
+    `@@ -start,count` window, context included). `finding_changed` keys on
+    `hunk_old`, not `changed_old`: a real fix is frequently ADDITIVE (insert a
+    guard above the flagged line, refactor the enclosing function), so the
+    finding's own anchor line is often a context line inside the edited hunk
+    rather than a `-` line itself — `changed_old` alone misses those and
+    over-gates genuine fixes (measured ~50% false REQUEST_CHANGES on real
+    round-2 re-reviews). `hunk_old` = "the dev edited this finding's region",
+    which is the right honor-a-fix signal. `changed_old` is kept for tests and
+    a possible finer-grained v2."""
+
+    __slots__ = ("present", "changed_old", "hunk_old", "renames",
+                 "touched_by_rename", "stubbed", "truncated")
 
     def __init__(self):
         self.present: set = set()
         self.changed_old: dict = {}
+        self.hunk_old: dict = {}
         self.renames: dict = {}
         self.touched_by_rename: set = set()
         self.stubbed: set = set()
         self.truncated = False
 
 
-_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@")
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@")
 _RENAME_HEADER_RE = re.compile(r"^rename (?:from|to) ", re.MULTILINE)
 
 
@@ -539,12 +556,18 @@ def parse_changed_lines(diff: str) -> ChangedIndex:
             idx.stubbed.add(new_path)
             continue
         changed = idx.changed_old.setdefault(old_path, set())
+        spanned = idx.hunk_old.setdefault(old_path, set())
         old_ptr = 0
         in_hunk = False
         for ln in seg.splitlines()[1:]:
             hm = _HUNK_RE.match(ln)
             if hm:
                 old_ptr = int(hm.group(1))
+                # The hunk's declared OLD-side window (context included): a fix
+                # that edits anywhere in the region containing the finding marks
+                # it CHANGED, so additive/refactor fixes are honored, not gated.
+                _count = int(hm.group(2)) if hm.group(2) else 1
+                spanned.update(range(old_ptr, old_ptr + max(_count, 1)))
                 in_hunk = True
                 continue
             if not in_hunk:
@@ -576,8 +599,10 @@ def finding_changed(loc, index: ChangedIndex) -> str:
         # finding either way (closes the cap-padding bypass without needing to
         # parse the truncation marker's unreliable path list).
         return UNCHANGED
-    changed = index.changed_old.get(file, set())
-    return CHANGED if any(n in changed for n in range(start, end + 1)) else UNCHANGED
+    # CHANGED iff the finding's span falls inside ANY edited hunk's old-side
+    # window — "the dev edited this finding's region" (honors additive fixes).
+    spanned = index.hunk_old.get(file, set())
+    return CHANGED if any(n in spanned for n in range(start, end + 1)) else UNCHANGED
 
 
 # A FRESH review numbers its findings sequentially across severity sections as
@@ -633,6 +658,40 @@ def extract_fresh_findings(body: str) -> list:
     return out
 
 
+_BLOB_ANCHOR_RE = re.compile(r"/blob/([0-9a-fA-F]+)/(\S+?)#L(\d+)(?:-L(\d+))?")
+
+
+def extract_fresh_finding_locations(body: str, base_sha: str) -> dict:
+    """`{num: (file, start, end)}` from a FRESH body's `**N.**` finding anchors,
+    SHA-prefix-validated against `base_sha`.
+
+    SAFE on a fresh body (the round-2 path ONLY): a fresh review has no
+    `### Previous Findings Status` block, so its `**N.**` entries are the only
+    findings — there is no carried-`#N`-vs-new-`**N.**` number collision that
+    makes line evidence unsafe on a re-review body. Used to honor a REAL fix
+    (a round-1 finding whose code actually moved in the round1→round2 inter-diff)
+    instead of over-gating it. The fresh findings' anchors sit at round-1's SHA,
+    which IS `base_sha` and the inter-diff's OLD side (round-1 is an ancestor of
+    round-2 on the same branch, so the three-dot compare's OLD side == round-1),
+    so `finding_changed`'s old-side line test is exact."""
+    out: dict = {}
+    if not body or not base_sha:
+        return out
+    prefix = base_sha.lower()[:_SHA_PREFIX_LEN]
+    nums = list(_FRESH_FINDING_RE.finditer(body))
+    for i, nm in enumerate(nums):
+        num = int(nm.group(1))
+        seg_end = nums[i + 1].start() if i + 1 < len(nums) else len(body)
+        for am in _BLOB_ANCHOR_RE.finditer(body, nm.end(), seg_end):
+            if am.group(1).lower()[:_SHA_PREFIX_LEN] != prefix:
+                continue
+            s = int(am.group(3))
+            e = int(am.group(4)) if am.group(4) else s
+            out[num] = (am.group(2), s, e)
+            break
+    return out
+
+
 class LedgerEntry:
     __slots__ = ("num", "prior_severity", "prior_status", "location", "change")
 
@@ -646,33 +705,47 @@ class LedgerEntry:
 
 def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
                                *, sibling: bool = False) -> list:
-    """One LedgerEntry per prior finding, keyed on #N, ALWAYS number-identity
-    (`change=INDETERMINATE`).
+    """One LedgerEntry per prior finding, keyed on #N. The change-state depends
+    on which round we're carrying from — and that distinction is load-bearing:
 
-    Carried findings (`### Previous Findings Status`) have NO line anchor of
-    their own. The only `**N.**` anchors in a re-review body belong to that
-    round's NEW findings — whose numbers RESTART at 1 and therefore COLLIDE with
-    carried `#N` (verified on real chains). Joining the two on the bare integer
-    would cross-wire a carried blocker to an unrelated finding's diff state and
-    could mark it CHANGED → un-pinned, defeating the whole guarantee. So line
-    evidence is deliberately NOT used here: carried pinning is purely by number,
-    matching CLAUDE.md's documented "pin by number not line — over-conservative."
-    (`parse_changed_lines` / `finding_changed` are retained for a future v2 that
-    carries a STABLE per-finding anchor; `inter_diff` / `base_sha` stay in the
-    signature for that v2 and for call-site stability — both are unused today.)
+    ROUND 3+ (prior is itself a re-review, has a `### Previous Findings Status`
+    block) → PURE number-identity (`change=INDETERMINATE`, no line evidence).
+    Carried `#N` lines have no anchor of their own, and the only `**N.**` anchors
+    in such a body belong to that round's NEW findings — whose numbers RESTART at
+    1 and COLLIDE with carried `#N`. Joining the two on the bare integer would
+    cross-wire a carried blocker to an unrelated finding's diff state and could
+    mark it CHANGED → un-pinned (the bug the dogfood review caught). So here line
+    evidence is unsafe and deliberately unused.
 
-    Falls back to the prior body's FRESH findings when it has no status block —
-    the round-1 → round-2 transition (the first and most common re-review),
-    previously an empty-ledger no-op. `sibling=True` (promote fast-path: a
-    different PR's tree) skips the fresh fallback and pins only an existing
-    status block by number. Empty list when there's nothing to carry → no-op."""
+    ROUND 2 (prior is a FRESH review, NO status block) → line evidence IS used,
+    and IS safe: a fresh review's `**N.**` findings are its only findings, so
+    there's no carried-vs-new collision, and their anchors sit at round-1's SHA
+    (== `base_sha` == the inter-diff's OLD side, since round-1 is an ancestor of
+    round-2). So `finding_changed` precisely tells a REAL fix (the finding's code
+    moved → CHANGED → honor a `FIXED`) from a fake one (UNCHANGED → rewrite to
+    NOT FIXED). Without this the first (and most common) re-review over-gated
+    every genuine fix — measured at ~70% false REQUEST_CHANGES on live fleet
+    re-reviews before this path existed.
+
+    `sibling=True` (promote fast-path, a different PR's tree) → number-identity,
+    no fresh fallback. Empty list when there's nothing to carry → no-op."""
     triples = extract_prior_statuses(prior_body)
-    if not triples and not sibling:
-        triples = extract_fresh_findings(prior_body)
-    if not triples:
+    if triples or sibling:
+        # Round 3+ (carried status block) or promote sibling: number-identity.
+        return [LedgerEntry(num, sev, status, None, INDETERMINATE)
+                for num, sev, status in triples]
+    # Round 2: fresh prior — line evidence is safe and honors real fixes.
+    fresh = extract_fresh_findings(prior_body)
+    if not fresh:
         return []
-    return [LedgerEntry(num, sev, status, None, INDETERMINATE)
-            for num, sev, status in triples]
+    locs = extract_fresh_finding_locations(prior_body, base_sha or "")
+    index = parse_changed_lines(inter_diff or "")
+    ledger = []
+    for num, sev, status in fresh:
+        loc = locs.get(num)
+        change = finding_changed(loc, index) if loc else INDETERMINATE
+        ledger.append(LedgerEntry(num, sev, status, loc, change))
+    return ledger
 
 
 # Same shape/enums as _PRIOR_STATUS_RE but with a trailing-tail capture so the
@@ -684,9 +757,9 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
 _PRIOR_STATUS_LINE_RE = re.compile(
     r"^-\s+\*\*#(\d+)\*\*"
     rf"(?:\s*\[({_SEVERITY_ALT})\])?"
-    r"\s+—\s+"
-    rf"({_STATUS_ALT})\b"
-    r"(.*)$",
+    r"\s+—\s+\*{0,2}"   # tolerate `— **FIXED**` (see _PRIOR_STATUS_RE); a
+    rf"({_STATUS_ALT})\b"   # trailing `**` falls into the tail and is stripped
+    r"(.*)$",               # in _rewrite so the rewritten line stays canonical
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -749,7 +822,10 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
         seen.add(num)
         emitted_sev = (m.group(2) or "blocker").lower()
         status = re.sub(r"\s+", " ", m.group(3).upper()).strip()
-        tail = m.group(4)
+        # Drop a `**` left over from a bolded status (`— **FIXED**`) — the
+        # leading `**` was consumed by the regex, the trailing one lands here;
+        # strip it so the rewritten line is canonical `— STATUS — rationale`.
+        tail = re.sub(r"^\*{0,2}", "", m.group(4))
         if entry.change == CHANGED:
             new_sev = emitted_sev                       # re-rating authorized
         else:
