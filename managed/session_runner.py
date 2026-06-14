@@ -500,7 +500,7 @@ async def run_session(
     # 1. SSE delivery delay (repo-A #635, 2026-04 era): REST commits
     #    `session.status_idle` and the trailing final `agent.message` minutes
     #    before our SSE stream consumer receives them.
-    # 2. REST delivery delay (repo-A #666, svc-tx #39, 2026-05-05 era): SSE
+    # 2. REST delivery delay (repo-A #666, repo-D #39, 2026-05-05 era): SSE
     #    goes quiet ahead of `events.list` having the final coordinator
     #    `agent.message` on cache-heavy runs that complete in ~SSE_QUIET_S.
     #

@@ -41,14 +41,14 @@ _Last updated: 2026-06-14 (post-v1.32.0 — the deterministic re-review severity
 | v1.12.0 | SSE delivery latency mitigation — REST events fallback at 90s quiet timeout | #49 | Caps stuck-stream tail latency |
 | v1.12.0 | Extractor narration anchor `(?<!\`)## Code Review` + learn.py stderr capture | #49 | Fixes repo-A #635 narration leak |
 | v1.12.0 | Re-review gate narrowed to blocker-only (mediums = warnings) | #51 | repo-D #37 — would have flipped all 13 CHANGES_REQUESTED rounds to APPROVED |
-| v1.12.0 | Carry-forward suppression — auto-DEFER 2nd consecutive NOT FIXED on non-blockers | #51 | Eliminates perpetual-loop pattern (svc-tx #37 finding #2: 13 NOT FIXED rounds in a row) |
+| v1.12.0 | Carry-forward suppression — auto-DEFER 2nd consecutive NOT FIXED on non-blockers | #51 | Eliminates perpetual-loop pattern (repo-D #37 finding #2: 13 NOT FIXED rounds in a row) |
 | v1.12.0 | Workflow concurrency — `cancel-in-progress: true` | #51 | Prevents overlapping reviews; latest push runs to completion |
 | v1.12.0 | Legacy missing-severity default flipped to `blocker` | #51 | Pre-v1.12 prior bodies keep gating instead of silently un-gating |
 | v1.12.1 | Structured `## air review (run failed)` fallback comment + 422 retry on review post | #54 | Replaces 422 cascade with actionable signal |
 | v1.12.2 | Debug log of `coordinator_out[:2000]` on SHA-mismatch | #57 | Diagnostic instrumentation that confirmed the SSE/REST race hypothesis |
 | v1.12.3 | SSE/REST race fix: retry drain on eventually-consistent events (per-attempt delta tracking) | #61 | repo-A #635-style failures (~92s coordinator + REST lag) recover |
 | v1.12.4 | REST polling until session terminal — handles SSE stream-close mid-session | #62 | repo-A #666 went from 92s empty-output to 1432s + real review |
-| v1.12.5 | Billing-aware structured-fallback (`BetaManagedAgentsBillingError`) | #64 | svc-tx billing exhaustion → actionable comment instead of stack trace |
+| v1.12.5 | Billing-aware structured-fallback (`BetaManagedAgentsBillingError`) | #64 | repo-D billing exhaustion → actionable comment instead of stack trace |
 | v1.12.6 | Footer-regex word-boundary trap fixed | #67 | repo-A #666 round 7 verifier output recovered: `\b` failed when 40-hex SHA followed by `Wiki` (both `\w`) |
 | **v1.13.0** | **5 prompt additions** — exposure escalation (verifier), CLAUDE.md gotcha grep + paired-doc drift + gate-output symmetry (code-reviewer), category-symmetric respond gate (review-respond) | #70 | Captures new failure classes from repo-C #153 + repo-A HIPAA cross-patient leak + repo-A #732 respond cycle |
 | v1.14.0 | Fast-mode Opus on code-reviewer + security-auditor (B1/Item E); security-audit FAIL-only 4-col table (drop PASS/FAIL clutter) | #74, #77, #78 | ~2× faster generation on the two heaviest agents at zero prompt cost (fast premium unbilled on managed) |
@@ -204,13 +204,13 @@ Examples:
 
 ### Coordinator regurgitation hypothesis (from repo-D #37 — historical)
 
-After three reproductions on svc-tx #37 (15+ re-review rounds on same PR) and failed cache-bust:
+After three reproductions on repo-D #37 (15+ re-review rounds on same PR) and failed cache-bust:
 
 **Hypothesis:** The coordinator regurgitates `prior_review_body` from its user-message context instead of dispatching specialists. 92.5s wall is enough for ~one model turn — not the 3-turn protocol. Coordinator likely "recognizes" the heavy prior-PR-specific body and short-circuits TURN 1, emitting TURN 3 that copies the prior body including its prior-SHA footer.
 
 Supporting evidence:
 - Coordinator wall on failures: 92.4s, 92.5s, 92.5s (highly consistent, ~one model turn)
-- Failures PR-specific: only svc-tx #37 hit it
+- Failures PR-specific: only repo-D #37 hit it
 - `Reviewed at:` SHA in broken outputs always matches most recent prior bot review's SHA
 - Cache-bust commits DID NOT recover — rules out Anthropic prefix-cache
 - PR-restart workaround (close + reopen identical branch as fresh PR, removing re-review codepath) DID recover
@@ -349,7 +349,7 @@ Sorted by **value × evidence × cost-to-ship**. Each has a concrete trigger.
 1. Debug logging (v1.12.2 shipped) — first 1000 chars of `coordinator_out` on SHA-mismatch
 2. **Detection + retry mechanic** (NOT yet shipped) — if first coordinator returns in <300s AND output footer SHA matches `prior_sha`, retry the coordinator session WITHOUT `prior_review_body` (degrades to fresh-review codepath for retry). Tradeoff: loses FIXED/NOT-FIXED classification — acceptable.
 **Alternative rejected:** strengthening verifier_task prompt with imperative SHA instruction — won't help if coordinator isn't reaching verifier in regurgitation mode (92.5s isn't enough for 4-specialist + verifier dispatch).
-**Evidence:** 3 production failures on svc-tx #37 (runs 25367689850, 25368789413, 25369351035), all at ~92.5s, all with prior-SHA footer. Cache-bust failed; PR-restart succeeded.
+**Evidence:** 3 production failures on repo-D #37 (runs 25367689850, 25368789413, 25369351035), all at ~92.5s, all with prior-SHA footer. Cache-bust failed; PR-restart succeeded.
 
 ### P0 — Live progress flush (~1 day)
 **Problem:** stdout is block-buffered; users can't tell if a 30-min run is making progress or hung. Today this gets confused with actual hangs.
@@ -521,7 +521,7 @@ A single PR with 14 review rounds, 13 consecutive CHANGES_REQUESTED, and an even
 
 5. **Coordinator wall-time is a stale-cache signal.** A 92s coordinator run on a real PR is impossibly fast (typical 1500-2400s). When run is short AND output unusable, almost certainly a cached prior-thread response.
 
-6. **"Cached output" was the wrong frame.** Cache-bust commit (whitespace change to README) DID NOT recover svc-tx #37. Coordinator returned same 92.5s + prior-SHA output on next run with different prefix. Rules out Anthropic prefix-cache; points at model-behavior issue (regurgitating `prior_review_body`).
+6. **"Cached output" was the wrong frame.** Cache-bust commit (whitespace change to README) DID NOT recover repo-D #37. Coordinator returned same 92.5s + prior-SHA output on next run with different prefix. Rules out Anthropic prefix-cache; points at model-behavior issue (regurgitating `prior_review_body`).
 
 7. **PR-restart is a valid escape hatch.** On long re-review chains where coordinator has degraded, closing the failing PR and reopening from same branch as fresh PR avoids re-review codepath. Workaround loses comment history but recovers merge path. Worth documenting in bot's run-failed comment so users have a path forward.
 

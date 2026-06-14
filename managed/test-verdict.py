@@ -78,7 +78,7 @@ def test_fresh_no_blockers_approves():
 
 
 # ---------------------------------------------------------------------------
-# should_request_changes — re-review (the svc-tx #37 class)
+# should_request_changes — re-review (the repo-D #37 class)
 # ---------------------------------------------------------------------------
 
 def test_rereview_new_blocker_gates():
@@ -247,7 +247,7 @@ def test_cli_decide_clean_body_approves():
 
 
 def test_cli_decide_rereview_unfixed_medium_approves():
-    # The svc-tx #37 class through the CLI entry point: same semantics as
+    # The repo-D #37 class through the CLI entry point: same semantics as
     # the in-process should_request_changes call managed makes.
     body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
             "- **#1** [medium] — NOT FIXED — punted\n")
@@ -580,7 +580,7 @@ def test_fixed_on_changed_is_honored():
 
 
 def test_nonblocker_deferred_unchanged_kept():
-    # svc-tx #37: an intentionally-deferred medium on unchanged code stays
+    # repo-D #37: an intentionally-deferred medium on unchanged code stays
     # DEFERRED and does not gate.
     body = _rr_body("- **#1** [medium] — DEFERRED — carried 2+ rounds")
     out, _ = pin_and_resurrect(body, [_ledger_entry(1, "medium", "DEFERRED")])
