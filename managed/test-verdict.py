@@ -287,5 +287,347 @@ def test_managed_verdict_resolves_to_the_lib_implementation():
     assert src == Path(_LIB).resolve()
 
 
+# ---------------------------------------------------------------------------
+# PR 7 — re-review severity-pinning + narrow deferred-findings ledger.
+# The deterministic spine: parse_changed_lines / finding_changed /
+# extract_prior_finding_locations / build_carry_forward_ledger /
+# pin_and_resurrect. These make severity carry-forward + finding-persistence
+# a HARD gate guarantee; a regression here silently un-gates a drifted blocker
+# or lets a finding be hidden across re-review rounds.
+# ---------------------------------------------------------------------------
+from verdict import (  # noqa: E402
+    parse_changed_lines,
+    finding_changed,
+    extract_prior_finding_locations,
+    build_carry_forward_ledger,
+    pin_and_resurrect,
+    LedgerEntry,
+    CHANGED, UNCHANGED, INDETERMINATE,
+    _PRIOR_STATUS_RE,
+    extract_prior_statuses,
+)
+
+# A diff that modifies foo.py L50, inserts into mid.py (pure insertion), and
+# renames bar.py -> baz.py.
+_DIFF = """diff --git a/foo.py b/foo.py
+index 111..222 100644
+--- a/foo.py
++++ b/foo.py
+@@ -48,4 +48,4 @@ def f():
+ ctx48
+ ctx49
+-old50
++new50
+ ctx51
+diff --git a/mid.py b/mid.py
+index 333..444 100644
+--- a/mid.py
++++ b/mid.py
+@@ -10,2 +10,3 @@ def g():
+ ctx10
++inserted11
+ ctx11
+diff --git a/bar.py b/baz.py
+similarity index 90%
+rename from bar.py
+rename to baz.py
+"""
+
+
+def test_parse_changed_lines_precise_minus_only():
+    idx = parse_changed_lines(_DIFF)
+    assert idx.present >= {"foo.py", "mid.py", "bar.py", "baz.py"}
+    # only the removed/modified OLD line is marked changed
+    assert idx.changed_old["foo.py"] == {50}
+    # a pure insertion marks NO old line changed (under-mark = over-pin = safe)
+    assert idx.changed_old.get("mid.py", set()) == set()
+    assert idx.renames == {"bar.py": "baz.py"}
+    assert idx.touched_by_rename == {"bar.py", "baz.py"}
+
+
+def test_parse_changed_lines_multi_hunk_offset():
+    diff = (
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+        "@@ -10,3 +10,4 @@\n ctx10\n+ins\n ctx11\n ctx12\n"
+        "@@ -200,3 +201,3 @@\n ctx200\n-old201\n+new201\n ctx202\n"
+    )
+    idx = parse_changed_lines(diff)
+    # first hunk is a pure insertion (no old line changed); second deletes 201
+    assert idx.changed_old["x.py"] == {201}
+
+
+def test_parse_changed_lines_stub_and_truncation():
+    diff = (
+        "diff --git a/pkg/dist/b.js b/pkg/dist/b.js\n"
+        "[air: pkg/dist/b.js: 9000 changed lines omitted (generated/vendored)]\n"
+        "diff --git a/keep.py b/keep.py\n--- a/keep.py\n+++ b/keep.py\n"
+        "@@ -1,1 +1,1 @@\n-a\n+b\n"
+        "[air: diff truncated at 500000 bytes — 3 file(s) omitted: big.bin]\n"
+    )
+    idx = parse_changed_lines(diff)
+    assert "pkg/dist/b.js" in idx.stubbed
+    assert idx.changed_old.get("pkg/dist/b.js", set()) == set()  # stub has no hunks
+    assert idx.changed_old["keep.py"] == {1}
+    assert idx.truncated is True
+
+
+def test_finding_changed_matrix():
+    idx = parse_changed_lines(_DIFF)
+    assert finding_changed(("foo.py", 50, 50), idx) == CHANGED       # modified line
+    assert finding_changed(("foo.py", 48, 48), idx) == UNCHANGED     # context above
+    assert finding_changed(("foo.py", 48, 52), idx) == CHANGED       # span includes 50
+    assert finding_changed(("mid.py", 10, 11), idx) == UNCHANGED     # pure insertion nearby
+    assert finding_changed(("bar.py", 5, 5), idx) == CHANGED         # renamed file
+    assert finding_changed(("other.py", 1, 1), idx) == UNCHANGED     # absent → pin
+    assert finding_changed(None, idx) == INDETERMINATE               # no location
+
+
+def test_finding_changed_offset_oracle():
+    # A finding far below a small edit must read UNCHANGED — OLD-side coords
+    # are immune to the line-number shift the +1 insertion causes downstream.
+    diff = ("diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+            "@@ -10,2 +10,3 @@\n ctx10\n+ins\n ctx11\n")
+    idx = parse_changed_lines(diff)
+    assert finding_changed(("x.py", 500, 500), idx) == UNCHANGED
+    # stubbed file → INDETERMINATE (pins, never reads as unchanged)
+    sidx = parse_changed_lines(
+        "diff --git a/v/x.min.js b/v/x.min.js\n"
+        "[air: v/x.min.js: 1 changed lines omitted (generated/vendored)]\n"
+    )
+    assert finding_changed(("v/x.min.js", 1, 1), sidx) == INDETERMINATE
+
+
+def test_extract_prior_finding_locations():
+    body = (
+        "## Code Review\n\n### Blockers\n\n**1. SQLi**\n\n"
+        "[`db.py#L50`](https://github.com/o/r/blob/abcdef0123456789aa/db.py#L50) — bad\n\n"
+        "### Medium\n\n**2. perf**\n\n"
+        "[`q.py#L10-L15`](https://github.com/o/r/blob/abcdef0123456789aa/q.py#L10-L15) — slow\n\n"
+        "Reviewed at: abcdef0123456789aaaaaaaaaaaaaaaaaaaaaaaa\n"
+    )
+    locs = extract_prior_finding_locations(body, "abcdef0123456789aaaa")
+    assert locs == {1: ("db.py", 50, 50), 2: ("q.py", 10, 15)}
+    # stale/mismatched base SHA → all anchors discarded
+    assert extract_prior_finding_locations(body, "999999999999") == {}
+    # a body with no anchors (carried-forward status lines only) → empty
+    assert extract_prior_finding_locations(
+        "### Previous Findings Status\n- **#1** [blocker] — NOT FIXED — x\n", "abcdef0123456789aa"
+    ) == {}
+
+
+# --- pin_and_resurrect: the gate-critical behaviors ---
+
+def _ledger_entry(num, sev, status, *, change=INDETERMINATE, loc=None):
+    return LedgerEntry(num, sev, status, loc, change)
+
+
+def _rr_body(*status_lines):
+    return ("## Code Review (Re-review)\n\n_Re-reviewed._\n\n"
+            "### Previous Findings Status\n\n" + "\n".join(status_lines) +
+            "\n\nReviewed at: abc\n")
+
+
+def _gates(body):
+    return should_request_changes(body)[0]
+
+
+def test_pin_reverts_severity_downgrade_on_unchanged():
+    body = _rr_body("- **#1** [medium] — NOT FIXED — looks minor")
+    out, log = pin_and_resurrect(body, [_ledger_entry(1, "blocker", "NOT FIXED")])
+    assert "[blocker]" in out and _gates(out)
+    assert any("#1 severity medium->blocker" in l for l in log)
+
+
+def test_pin_preserves_verifier_escalation_on_unchanged():
+    # medium→blocker escalation on an unchanged line must STAY blocker (max),
+    # never get reverted down — the guard provably can't un-gate.
+    body = _rr_body("- **#1** [blocker] — NOT FIXED — actually severe")
+    out, _ = pin_and_resurrect(body, [_ledger_entry(1, "medium", "NOT FIXED")])
+    assert "[blocker]" in out and _gates(out)
+
+
+def test_pin_leaves_severity_on_changed():
+    e = _ledger_entry(1, "blocker", "NOT FIXED", change=CHANGED, loc=("f.py", 10, 10))
+    body = _rr_body("- **#1** [medium] — NOT FIXED — genuinely reduced")
+    out, _ = pin_and_resurrect(body, [e])
+    assert "[medium]" in out and not _gates(out)  # re-rating authorized by CHANGED
+
+
+def test_resurrect_silently_dropped_blocker_no_anchor():
+    # THE headline case: a carried-forward blocker (no anchor) omitted by the
+    # verifier is resurrected and gates.
+    body = _rr_body("- **#2** [low] — FIXED — done")
+    out, log = pin_and_resurrect(
+        body, [_ledger_entry(1, "blocker", "NOT FIXED"), _ledger_entry(2, "low", "NOT FIXED")]
+    )
+    assert "**#1**" in out and _gates(out)
+    assert any("#1 resurrected" in l for l in log)
+
+
+def test_fixed_on_unchanged_rewritten_to_not_fixed():
+    body = _rr_body("- **#1** [blocker] — FIXED — supposedly fixed")
+    out, _ = pin_and_resurrect(body, [_ledger_entry(1, "blocker", "NOT FIXED")])
+    assert "NOT FIXED" in out and _gates(out)
+
+
+def test_fixed_on_changed_is_honored():
+    e = _ledger_entry(1, "blocker", "NOT FIXED", change=CHANGED, loc=("f.py", 10, 10))
+    body = _rr_body("- **#1** [blocker] — FIXED — really fixed at L10")
+    out, _ = pin_and_resurrect(body, [e])
+    assert not _gates(out)
+
+
+def test_nonblocker_deferred_unchanged_kept():
+    # svc-tx #37: an intentionally-deferred medium on unchanged code stays
+    # DEFERRED and does not gate.
+    body = _rr_body("- **#1** [medium] — DEFERRED — carried 2+ rounds")
+    out, _ = pin_and_resurrect(body, [_ledger_entry(1, "medium", "DEFERRED")])
+    assert "DEFERRED" in out and not _gates(out)
+
+
+def test_blocker_deferred_rewritten_to_not_fixed():
+    body = _rr_body("- **#1** [blocker] — DEFERRED — punting")
+    out, _ = pin_and_resurrect(body, [_ledger_entry(1, "blocker", "NOT FIXED")])
+    assert "NOT FIXED" in out and _gates(out)
+
+
+def test_deferred_on_changed_rewritten():
+    e = _ledger_entry(1, "medium", "NOT FIXED", change=CHANGED, loc=("f.py", 10, 10))
+    body = _rr_body("- **#1** [medium] — DEFERRED — carried")
+    out, _ = pin_and_resurrect(body, [e])
+    assert "NOT FIXED" in out  # code moved → re-evaluate, no free defer
+
+
+def test_disputed_reclassification_stands():
+    body = _rr_body("- **#1** [blocker] — DISPUTED — pre-existing, out of scope")
+    out, _ = pin_and_resurrect(body, [_ledger_entry(1, "blocker", "NOT FIXED")])
+    assert "DISPUTED" in out and not _gates(out)  # no false-positive lock-in
+
+
+def test_empty_ledger_is_verbatim_noop():
+    body = "## Code Review\n\n### Blockers\n\n**1. x**\n\nReviewed at: abc\n"
+    out, log = pin_and_resurrect(body, [])
+    assert out == body and log == []
+
+
+def test_sibling_ledger_is_number_identity_only():
+    # promote fast-path: prior body is a different PR's tree; anchors must NOT
+    # be line-mapped. A prior blocker still pins by #N.
+    prior = (
+        "## Code Review\n\n### Blockers\n\n**1. x**\n\n"
+        "[`a.py#L9`](https://github.com/o/r/blob/deadbeef0000/a.py#L9) — y\n\n"
+        "### Previous Findings Status\n\n- **#1** [blocker] — NOT FIXED — x\n\n"
+        "Reviewed at: deadbeef0000000000000000000000000000beef\n"
+    )
+    ledger = build_carry_forward_ledger(prior, _DIFF, "deadbeef0000", sibling=True)
+    assert all(e.change == INDETERMINATE for e in ledger)
+
+
+def test_pin_roundtrip_reparses_under_status_re():
+    # Every rewritten/resurrected line must re-parse to the intended
+    # (num, sev, status) under the FROZEN _PRIOR_STATUS_RE — or the gate
+    # counter silently stops seeing it.
+    body = _rr_body(
+        "- **#1** [medium] — NOT FIXED — drifted down",
+        "- **#3** [low] — DEFERRED — fine",
+    )
+    out, _ = pin_and_resurrect(
+        body,
+        [_ledger_entry(1, "blocker", "NOT FIXED"),
+         _ledger_entry(2, "blocker", "NOT FIXED"),   # missing → resurrected
+         _ledger_entry(3, "low", "DEFERRED")],
+    )
+    parsed = {num: (sev, status) for num, sev, status in extract_prior_statuses(out)}
+    assert parsed[1] == ("blocker", "NOT FIXED")     # repinned
+    assert parsed[2] == ("blocker", "NOT FIXED")     # resurrected
+    assert parsed[3] == ("low", "DEFERRED")          # untouched non-blocker
+
+
+def test_ledger_realistic_multiround_fixture():
+    # Build the prior body through the ACTUAL verifier_task template so a
+    # finding ages into an anchorless `Previous Findings Status` line — the
+    # real shape, not a hand-built anchored status line.
+    from prompts import build_verifier_task
+    base = "1" * 40
+    tmpl = build_verifier_task("re-review", "o/r", "2" * 40, base, "")
+    assert "Previous Findings Status" in tmpl  # template renders the section
+    # A prior re-review body carrying a blocker NOT FIXED with no anchor:
+    prior = _rr_body("- **#1** [blocker] — NOT FIXED — auth check missing")
+    ledger = build_carry_forward_ledger(prior, "", base)
+    assert len(ledger) == 1 and ledger[0].change == INDETERMINATE
+    # verifier drops it on the next round → resurrected + gates
+    nxt = _rr_body("- **#2** [low] — FIXED — typo")
+    out, _ = pin_and_resurrect(nxt, ledger)
+    assert "**#1**" in out and _gates(out)
+
+
+# --- CLI --pin parity (the shared contract, exercised as a subprocess) ---
+
+def _run_pin(body, prior=None, inter=None, base="", extra=()):
+    import tempfile, os
+    args = [sys.executable, _LIB, "--pin"]
+    tmp = []
+    for flag, content in (("--prior-body", prior), ("--inter-diff", inter)):
+        if content is not None:
+            f = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
+            f.write(content); f.close(); tmp.append(f.name)
+            args += [flag, f.name]
+    if base:
+        args += ["--base-sha", base]
+    try:
+        r = subprocess.run(args, input=body, capture_output=True, text=True)
+        return r.stdout
+    finally:
+        for p in tmp:
+            os.unlink(p)
+
+
+def test_cli_pin_matches_in_process():
+    body = _rr_body("- **#1** [medium] — NOT FIXED — drifted")
+    prior = _rr_body("- **#1** [blocker] — NOT FIXED — orig")
+    cli = _run_pin(body, prior=prior, inter="", base="abc")
+    ledger = build_carry_forward_ledger(prior, "", "abc")
+    in_proc, _ = pin_and_resurrect(body, ledger)
+    assert cli == in_proc
+    assert "[blocker]" in cli  # the pin actually fired through the CLI
+
+
+def test_cli_pin_noop_without_inputs():
+    body = _rr_body("- **#1** [medium] — NOT FIXED — x")
+    assert _run_pin(body) == body  # no --prior-body/--inter-diff → verbatim
+
+
+def test_cli_two_call_flow_matches_one_call_decide():
+    # The CLI re-review path is TWO subprocesses: Step 11.5 `--pin` rewrites the
+    # posted body, then Step 12's plain `--decide` (no ledger args) gates the
+    # already-pinned body. That MUST equal the one-call
+    # `--decide --prior-body --inter-diff` path (pin-then-decide in a single
+    # process), which is what managed's in-process
+    # pin_and_resurrect -> should_request_changes does. A blocker drifted down to
+    # medium on UNCHANGED code has to gate identically through both flows, or the
+    # CLI silently loses the carry-forward guarantee managed enforces.
+    import tempfile, os
+    body = _rr_body("- **#1** [medium] — NOT FIXED — drifted down")
+    prior = _rr_body("- **#1** [blocker] — NOT FIXED — orig blocker")
+    # Two-call CLI flow.
+    two_call = _decide(_run_pin(body, prior=prior, inter="", base="abc"))
+    # One-call managed-style flow.
+    tmp = []
+    try:
+        for content in (prior, ""):
+            f = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
+            f.write(content); f.close(); tmp.append(f.name)
+        one_call = subprocess.run(
+            [sys.executable, _LIB, "--decide",
+             "--prior-body", tmp[0], "--inter-diff", tmp[1], "--base-sha", "abc"],
+            input=body, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    finally:
+        for p in tmp:
+            os.unlink(p)
+    assert two_call == one_call
+    assert two_call.startswith("request-changes\t")  # the repinned blocker gates
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
