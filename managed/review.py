@@ -107,6 +107,8 @@ from verdict import (  # noqa: E402,F401 — split modules; re-exported for test
     extract_reviewed_at_sha,
     _SHA_PREFIX_LEN,
     _extract_review_body,
+    build_carry_forward_ledger,
+    pin_and_resurrect,
 )
 from session_runner import (  # noqa: E402,F401 — split modules; re-exported for tests/callers
     LIVE_SESSIONS,
@@ -152,6 +154,15 @@ COORDINATOR_MA_AGENT = "air-coordinator-ma"
 
 def _multiagent_enabled() -> bool:
     return os.environ.get("AIR_MULTIAGENT", "") in ("1", "true")
+
+
+def _ledger_pin_enabled() -> bool:
+    # PR 7 re-review severity-pin + finding resurrection. Default ON;
+    # AIR_LEDGER_PIN=0/false is the instant kill switch (caller/org variable,
+    # no deploy). Read once; gates BOTH halves together — the advisory prompt
+    # ledger block AND the deterministic pin_and_resurrect guard — so there's
+    # never a half-on state.
+    return os.environ.get("AIR_LEDGER_PIN", "1").strip().lower() not in ("0", "false", "no")
 
 
 def _required_agents(review_arch: str) -> list[str]:
@@ -1869,6 +1880,18 @@ async def run_review(args):
         diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
         dev_context = ""
 
+    # PR 7: build the carry-forward ledger ONCE, here, where the inter-diff
+    # (`diff` in re-review mode) + the prior body + prior_sha are all resolved.
+    # Re-review only; `sibling=True` on the promote fast-path (the prior is a
+    # different PR's tree, so line evidence is discarded — number-identity pin
+    # only). Kill switch / fresh mode → empty ledger → every consumer no-op.
+    carry_forward_ledger = []
+    if mode == "re-review" and _ledger_pin_enabled():
+        carry_forward_ledger = build_carry_forward_ledger(
+            (prior or {}).get("body", ""), diff, prior_sha or "",
+            sibling=(promote_sibling_pr is not None),
+        )
+
     # Codex enablement is resolved BEFORE precomp so the codex session can
     # launch as a background task and overlap the per-file blame/churn git
     # calls + store I/O + context build (~1-4 min hidden inside codex's
@@ -2092,6 +2115,7 @@ async def run_review(args):
 
     verifier_task = build_verifier_task(
         mode, args.repo, head_sha, prior_sha, (prior or {}).get("body", ""),
+        ledger=carry_forward_ledger,
     )
 
     # Coordinator inputs: PR Context + diff + codex findings + verifier task.
@@ -2191,6 +2215,17 @@ async def run_review(args):
     # See _extract_review_body for the segmentation + anti-spoof rationale.
     # (Shared by full/solo here and by the `both`-mode solo comment below.)
     review_body, review_extracted = _extract_review_body(coordinator_out, head_sha)
+
+    # PR 7: the deterministic guard. ONLY on a successfully-extracted re-review
+    # body (a run-failed fallback below has no status block — never pin/
+    # resurrect into it). Pins prior severities to max(prior, emitted) on
+    # unchanged code, rewrites illegitimate retirements, and resurrects any
+    # silently-dropped prior finding — BEFORE posting (2454) and the gate
+    # (2487), so the posted comment and the verdict both reflect it.
+    if review_extracted and carry_forward_ledger:
+        review_body, _pin_log = pin_and_resurrect(review_body, carry_forward_ledger)
+        for _line in _pin_log:
+            print(f"  {_line}")
 
     if not review_extracted:
         # Diagnostic dump — log the actual coordinator output so we can

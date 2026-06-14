@@ -220,6 +220,18 @@ Two ways to turn it on (either one being `true` enables it):
 
 Conservative by construction — any uncertainty (no merged sibling, sibling never reviewed or missing a SHA footer, compare-API failure, <80% overlap) falls back to full review. Enable only on repos that use the `promote/staging-to-main-*` convention. Decision logs print `[promote] …` lines (chosen sibling #, overlap %, fired vs full) to the run log. **v1 limitation:** no periodic full-anchor re-read — a long chain rides re-reviews indefinitely; watch the logs and force a `--fresh` (or disable the flag) if drift accumulates. Backtested on the repo-A/repo-B Phase-4 promote chain at ~64% cost reduction with zero net-new-finding loss.
 
+### Re-review severity-pin + deferred-findings ledger (`AIR_LEDGER_PIN` — default ON)
+
+On a re-review the verifier re-judges every prior finding from scratch, which lets a prior `blocker` on code that **didn't change** drift back to `medium` (silently un-gating it), or a prior finding be dropped entirely. This guard makes severity carry-forward and finding-persistence a **hard, deterministic** guarantee — the shared gating contract in `plugins/air/lib/verdict.py` (so managed CI and the CLI enforce it identically). On by default; set the caller/org **variable** `AIR_LEDGER_PIN=0` (or `false`/`no`) to disable instantly with no workflow edit — it fails closed, so disabling only removes the guard, never breaks a review.
+
+How it works: after the verifier responds, `review.py` builds a `build_carry_forward_ledger(prior_body, inter_diff, base_sha)` off the **three-dot** inter-diff (`sibling=True` on promote fast-path → number-identity only), then `pin_and_resurrect(review_body, ledger)` rewrites the posted body before `should_request_changes` gates it. Because carried-forward `### Previous Findings Status` lines have **no line anchor**, the guard keys on **finding-NUMBER identity**; line evidence (when a `/blob/<sha>/…#L` anchor is recoverable) only opportunistically authorizes re-rating. Rules:
+
+- A prior finding whose lines are `UNCHANGED` or `INDETERMINATE` keeps `max(prior, emitted)` severity — reverts a downgrade, preserves a genuine escalation, so the gate can only ever get **stricter**.
+- A fake `FIXED`/`DEFERRED` on unchanged code is rewritten to `NOT FIXED`; a `blocker` never auto-defers; `DISPUTED`/`FALSE POSITIVE`/`PRE-EXISTING` stay valid evidence-bearing exits.
+- Any prior `#N` silently absent from the emitted block is **resurrected** as `NOT FIXED` at its prior severity — a vanished blocker gates regardless of anchor recoverability.
+
+Decision logs print `[pin]`/`[ledger]` lines (which `#N`s were pinned, re-rated, or resurrected). The CLI mirrors this in `review.md` Step 11.5 (it generates a separate three-dot ledger diff and pipes the body through `verdict.py --pin` before Step 12's `--decide`). **Limits:** carried findings pin by number, not line (deliberately over-conservative — a fully-fixed-but-unmarked finding stays `NOT FIXED` until cleared via `DISPUTED`/human override); the CLI inter-diff is un-hygiened (a generated file reads `CHANGED` → never a false pin); GitLab `/-/blob/` anchors fall to number-identity.
+
 ### Diff hygiene & cost caps (managed-only)
 
 Three knobs trim per-review context spend. All of them leave **visible markers** — nothing is dropped silently — and none of them changes gating:

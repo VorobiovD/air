@@ -471,6 +471,12 @@ jobs:
           # (GA roster, shared /workspace, ≈ −65–80% session cost in the
           # 2026-06-11 A/B); delete the variable to roll back instantly.
           AIR_MULTIAGENT: ${{ vars.AIR_MULTIAGENT }}
+          # Re-review severity-pin + deferred-findings ledger. Default ON
+          # (review.py treats unset/empty as enabled); set a caller repo/org
+          # VARIABLE AIR_LEDGER_PIN=0 in Settings → Variables to disable the
+          # deterministic carry-forward guard fleet-lessly. Fails closed, so
+          # disabling only removes the guard — it never breaks a review.
+          AIR_LEDGER_PIN: ${{ vars.AIR_LEDGER_PIN }}
           # Absolute path to the local checkout. review.py uses it for
           # both `codex review` (when enabled) and client-side
           # pre-computation (blame/churn/file-status/diff-check

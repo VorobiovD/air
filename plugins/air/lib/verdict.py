@@ -239,11 +239,21 @@ _BLOCKER_ENTRY_RE = re.compile(r"^\*\*\d+\.", re.MULTILINE)
 # Capture groups (1-indexed): 1=finding-number, 2=severity (or None),
 # 3=status. Both `_count_gating_unfixed` and `extract_prior_statuses`
 # read this regex — keep one pattern, both call sites in lockstep.
+# Shared status/severity alternation fragments — the FROZEN gate enum. BOTH
+# _PRIOR_STATUS_RE (the parse/gate contract) and _PRIOR_STATUS_LINE_RE (the
+# rewrite sibling, defined far below) build their groups from these, so a status
+# can never be added to one regex but silently missed by the other — the drift
+# footgun that would let a new status escape rewrite+`seen` and get a finding
+# spuriously resurrected. The literal status alternation lives here (Check E and
+# a cross-regex test both pin it). Editing the enum is editing the gate contract.
+_STATUS_ALT = r"FIXED|NOT\s+FIXED|PARTIALLY\s+FIXED|DEFERRED|DISPUTED"
+_SEVERITY_ALT = r"blocker|medium|low|nit"
+
 _PRIOR_STATUS_RE = re.compile(
     r"^-\s+\*\*#(\d+)\*\*"
-    r"(?:\s*\[(blocker|medium|low|nit)\])?"
+    rf"(?:\s*\[({_SEVERITY_ALT})\])?"
     r"\s+—\s+"
-    r"(FIXED|NOT\s+FIXED|PARTIALLY\s+FIXED|DEFERRED|DISPUTED)\b",
+    rf"({_STATUS_ALT})\b",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -431,6 +441,322 @@ def _extract_review_body(raw_text: str, head_sha: str) -> tuple[str, bool]:
     return "", False
 
 
+# ---------------------------------------------------------------------------
+# PR 7 — Re-review severity-pinning + narrow deferred-findings ledger.
+#
+# On re-review the verifier re-judges every prior finding from scratch, so a
+# prior finding whose code DID NOT change can drift to a different severity
+# (silently un-gating a real blocker) or vanish entirely. These deterministic
+# guards make severity carry-forward and finding-persistence a HARD guarantee
+# — the same move `has_conflict_markers` made (an advisory prompt rule becomes
+# an enforced gate rule).
+#
+# Spine = finding-NUMBER identity. The `### Previous Findings Status` lines
+# carry NO line anchor (anchors exist only on freshly-introduced findings, see
+# build_verifier_task), so a prior finding's severity + existence is an
+# attribute of its #N — carried forward verbatim, and re-opened for re-rating
+# / retirement ONLY on positive proof its code changed in the inter-diff.
+# Absent proof of change → pin. The guards can ONLY ever make the gate
+# STRICTER on prior findings; they can never un-gate.
+# ---------------------------------------------------------------------------
+
+# Mirror of managed/github_client.py diff-hygiene markers. verdict.py is the
+# shared lib (managed imports IT, never the reverse), so the marker strings
+# are duplicated here with this note rather than imported. A test pins the
+# stub shape; if the markers change in github_client, update these too.
+_DIFF_TRUNCATION_MARKER = "[air: diff truncated"
+_DIFF_STUB_RE = re.compile(
+    r"^\[air: .* changed lines omitted \(generated/vendored\)\]", re.MULTILINE
+)
+
+CHANGED, UNCHANGED, INDETERMINATE = "CHANGED", "UNCHANGED", "INDETERMINATE"
+
+# Severity ordering for the pin. Unknown/missing ranks as blocker (3) —
+# conservative, matching the missing-tag default elsewhere in this module.
+_SEVERITY_RANK = {"nit": 0, "low": 1, "medium": 2, "blocker": 3}
+
+
+def _max_severity(a: str, b: str) -> str:
+    return a if _SEVERITY_RANK.get(a, 3) >= _SEVERITY_RANK.get(b, 3) else b
+
+
+class ChangedIndex:
+    """What the inter-diff changed, parsed once. `changed_old` holds OLD-side
+    line numbers of removed/modified lines — PRECISE `-` lines only. Pure
+    insertions don't touch existing flagged lines, and under-marking CHANGED
+    over-PINS (the safe direction), so we never over-mark a context line as
+    changed (which would wrongly authorize a FIXED retirement)."""
+
+    __slots__ = ("present", "changed_old", "renames", "touched_by_rename",
+                 "stubbed", "truncated")
+
+    def __init__(self):
+        self.present: set = set()
+        self.changed_old: dict = {}
+        self.renames: dict = {}
+        self.touched_by_rename: set = set()
+        self.stubbed: set = set()
+        self.truncated = False
+
+
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@")
+_RENAME_HEADER_RE = re.compile(r"^rename (?:from|to) ", re.MULTILINE)
+
+
+def parse_changed_lines(diff: str) -> ChangedIndex:
+    """Parse a unified inter-diff into a ChangedIndex (old+new side aware,
+    rename / hygiene-stub / truncation aware). Pure stdlib; same segment-split
+    primitive as github_client.apply_diff_hygiene."""
+    idx = ChangedIndex()
+    if not diff:
+        return idx
+    if any(ln.startswith(_DIFF_TRUNCATION_MARKER) for ln in diff.splitlines()):
+        idx.truncated = True
+    for seg in re.split(r"(?m)^(?=diff --git )", diff):
+        if not seg.startswith("diff --git "):
+            continue
+        header = seg.splitlines()[0]
+        # "diff --git a/<old> b/<new>" — rsplit on " b/" mirrors
+        # github_client._segment_path; old side from the leading "a/".
+        new_path = header.rsplit(" b/", 1)[-1] if " b/" in header else ""
+        _om = re.match(r"^diff --git a/(.*) b/", header)
+        old_path = _om.group(1) if _om else new_path
+        for p in (old_path, new_path):
+            if p and p != "/dev/null":
+                idx.present.add(p)
+        if (_RENAME_HEADER_RE.search(seg) or old_path != new_path) and old_path and new_path:
+            idx.renames[old_path] = new_path
+            idx.touched_by_rename.add(old_path)
+            idx.touched_by_rename.add(new_path)
+        if _DIFF_STUB_RE.search(seg):
+            idx.stubbed.add(old_path)
+            idx.stubbed.add(new_path)
+            continue
+        changed = idx.changed_old.setdefault(old_path, set())
+        old_ptr = 0
+        in_hunk = False
+        for ln in seg.splitlines()[1:]:
+            hm = _HUNK_RE.match(ln)
+            if hm:
+                old_ptr = int(hm.group(1))
+                in_hunk = True
+                continue
+            if not in_hunk:
+                continue
+            if ln.startswith("-"):
+                changed.add(old_ptr)
+                old_ptr += 1
+            elif ln.startswith("+") or ln.startswith("\\"):
+                pass  # new-side insertion / "\ No newline" — old side unchanged
+            else:
+                old_ptr += 1  # context advances the old-side counter
+    return idx
+
+
+def finding_changed(loc, index: ChangedIndex) -> str:
+    """Tristate: did this finding's code change enough to authorize re-rating
+    / retirement? Default UNCHANGED (pin-preserving). loc is (file, start, end)
+    in OLD-side (prior-reviewed-SHA) coordinates, or None."""
+    if not loc:
+        return INDETERMINATE
+    file, start, end = loc
+    if file in index.touched_by_rename:
+        return CHANGED                  # a moved file always re-opens the question
+    if file in index.stubbed:
+        return INDETERMINATE            # generated/vendored stub hides real lines
+    if file not in index.present:
+        # File untouched by the inter-diff, OR cap-omitted (absent segment) —
+        # both PIN. Suppression still needs CHANGED, so this can't hide a
+        # finding either way (closes the cap-padding bypass without needing to
+        # parse the truncation marker's unreliable path list).
+        return UNCHANGED
+    changed = index.changed_old.get(file, set())
+    return CHANGED if any(n in changed for n in range(start, end + 1)) else UNCHANGED
+
+
+# Anchor on freshly-introduced findings only: `**N. ...` then a
+# `[`<file>#L<s>`](https://.../blob/<sha>/<file>#L<s>(-L<e>)?)` link. Carried-
+# forward findings have no anchor — they fall to number-identity pinning.
+_FINDING_NUM_RE = re.compile(r"^\*\*(\d+)\.", re.MULTILINE)
+_BLOB_ANCHOR_RE = re.compile(r"/blob/([0-9a-fA-F]+)/(\S+?)#L(\d+)(?:-L(\d+))?")
+
+
+def extract_prior_finding_locations(body: str, base_sha: str) -> dict:
+    """Opportunistic {finding_num: (file, start, end)} from a prior body's
+    NEW-finding anchors. Requires the blob SHA to 12-char-prefix-match
+    base_sha (the inter-diff base), discarding stale/quoted anchors. Returns
+    only the (usually few) findings introduced in the prior round; everything
+    older has no anchor → absent → number-identity pin."""
+    out: dict = {}
+    if not body or not base_sha:
+        return out
+    prefix = base_sha.lower()[:_SHA_PREFIX_LEN]
+    nums = list(_FINDING_NUM_RE.finditer(body))
+    for i, nm in enumerate(nums):
+        num = int(nm.group(1))
+        seg_end = nums[i + 1].start() if i + 1 < len(nums) else len(body)
+        for am in _BLOB_ANCHOR_RE.finditer(body, nm.end(), seg_end):
+            if am.group(1).lower()[:_SHA_PREFIX_LEN] != prefix:
+                continue
+            s = int(am.group(3))
+            e = int(am.group(4)) if am.group(4) else s
+            out[num] = (am.group(2), s, e)
+            break
+    return out
+
+
+class LedgerEntry:
+    __slots__ = ("num", "prior_severity", "prior_status", "location", "change")
+
+    def __init__(self, num, prior_severity, prior_status, location, change):
+        self.num = num
+        self.prior_severity = prior_severity
+        self.prior_status = prior_status
+        self.location = location
+        self.change = change
+
+
+def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
+                               *, sibling: bool = False) -> list:
+    """One LedgerEntry per prior finding (keyed on #N from
+    extract_prior_statuses — anchorless-safe). `sibling=True` (promote
+    fast-path: prior is a different PR's tree) forces every entry to
+    number-identity-only (INDETERMINATE), discarding line evidence. Empty
+    list in fresh mode → all consumers no-op."""
+    triples = extract_prior_statuses(prior_body)
+    if not triples:
+        return []
+    locations = {} if sibling else extract_prior_finding_locations(prior_body, base_sha or "")
+    index = parse_changed_lines(inter_diff or "")
+    ledger = []
+    for num, sev, status in triples:
+        loc = locations.get(num)
+        change = INDETERMINATE if (sibling or loc is None) else finding_changed(loc, index)
+        ledger.append(LedgerEntry(num, sev, status, loc, change))
+    return ledger
+
+
+# Same shape/enums as _PRIOR_STATUS_RE but with a trailing-tail capture so the
+# rationale survives a rewrite. _PRIOR_STATUS_RE stays frozen (the gate/parse
+# contract); this is the rewrite-only sibling. Both build their severity/status
+# groups from the SHARED `_SEVERITY_ALT`/`_STATUS_ALT` fragments so they can
+# never drift apart on the enum (PR7 review #8 — a status added to the gate
+# regex but missed here would escape rewrite+`seen` and spuriously resurrect).
+_PRIOR_STATUS_LINE_RE = re.compile(
+    r"^-\s+\*\*#(\d+)\*\*"
+    rf"(?:\s*\[({_SEVERITY_ALT})\])?"
+    r"\s+—\s+"
+    rf"({_STATUS_ALT})\b"
+    r"(.*)$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def _section_end(body: str, from_idx: int) -> int:
+    # Stop at the next markdown header OR the `Reviewed at:` footer line,
+    # whichever comes first. The footer is not a header, so without it
+    # resurrected entries would be appended AFTER the footer when `Previous
+    # Findings Status` is the last section — gating still works (the status
+    # regex is MULTILINE) but the posted comment reads as malformed, with the
+    # timestamp stranded mid-section (PR7 review #6).
+    m = re.search(r"^(?:#{2,4}\s|Reviewed at:)", body[from_idx:], re.MULTILINE)
+    return from_idx + m.start() if m else len(body)
+
+
+def _ensure_rereview_shape(body: str, log: list, resurrected: list) -> str:
+    """Guarantee the `## Code Review (Re-review)` header + a `### Previous
+    Findings Status` section (so should_request_changes takes the re-review
+    branch and counts these), and append any resurrected lines into it."""
+    if not _REREVIEW_HEADER_RE.search(body):
+        new = re.sub(r"^##\s+Code Review\b[^\n]*", "## Code Review (Re-review)",
+                     body, count=1, flags=re.MULTILINE)
+        if new != body:
+            log.append("[pin] repaired header -> ## Code Review (Re-review)")
+            body = new
+    if not resurrected:
+        return body
+    block = "\n".join(resurrected)
+    sec = re.search(r"^###\s+Previous Findings Status\s*$", body, re.MULTILINE)
+    if sec:
+        at = _section_end(body, sec.end())
+        return body[:at].rstrip("\n") + "\n" + block + "\n\n" + body[at:]
+    hdr = _REREVIEW_HEADER_RE.search(body)
+    log.append("[ledger] created Previous Findings Status section for resurrected findings")
+    if hdr:
+        nl = body.find("\n", hdr.end())
+        nl = len(body) if nl == -1 else nl + 1
+        return body[:nl] + "\n### Previous Findings Status\n\n" + block + "\n" + body[nl:]
+    return body.rstrip("\n") + "\n\n### Previous Findings Status\n\n" + block + "\n"
+
+
+def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
+    """The hard guard. Given the emitted re-review body + the ledger:
+    pin each prior finding's severity to max(prior, emitted) unless its code
+    CHANGED; rewrite illegitimate retirements (FIXED/DEFERRED on non-CHANGED,
+    blocker-DEFERRED) to NOT FIXED at pinned severity; and resurrect any prior
+    finding silently dropped from the status block. Returns (body, log_lines).
+    No-op (returns body verbatim) when ledger is empty."""
+    if not ledger:
+        return review_body, []
+    by_num = {e.num: e for e in ledger}
+    log: list = []
+    seen: set = set()
+
+    def _rewrite(m):
+        num = int(m.group(1))
+        entry = by_num.get(num)
+        if not entry:
+            return m.group(0)
+        seen.add(num)
+        emitted_sev = (m.group(2) or "blocker").lower()
+        status = re.sub(r"\s+", " ", m.group(3).upper()).strip()
+        tail = m.group(4)
+        if entry.change == CHANGED:
+            new_sev = emitted_sev                       # re-rating authorized
+        else:
+            new_sev = _max_severity(entry.prior_severity, emitted_sev)
+            if new_sev != emitted_sev:
+                log.append(f"[pin] #{num} severity {emitted_sev}->{new_sev} "
+                           f"(pinned to prior; change={entry.change})")
+        new_status = status
+        # FIXED on non-CHANGED code is the hide-a-finding rewrite — but only
+        # ENFORCE it for gate-relevant severities (medium+). Severity is already
+        # pinned to max(prior, emitted) above, so a laundered blocker can't hide
+        # behind a low/nit tag; a genuinely low/nit finding never gates, so
+        # trusting its explicit FIXED just avoids needless re-open noise on long
+        # chains. (Resurrection of a SILENTLY-dropped finding is unaffected — an
+        # absent finding is suspicious regardless of severity; only an explicit
+        # FIXED is trusted here.)
+        if status == "FIXED" and entry.change != CHANGED and _SEVERITY_RANK.get(new_sev, 3) >= 2:
+            new_status = "NOT FIXED"
+            log.append(f"[pin] #{num} FIXED->NOT FIXED (no code change; change={entry.change})")
+        elif status == "DEFERRED":
+            if new_sev == "blocker":
+                new_status = "NOT FIXED"
+                log.append(f"[pin] #{num} blocker DEFERRED->NOT FIXED")
+            elif entry.change == CHANGED:
+                new_status = "NOT FIXED"
+                log.append(f"[pin] #{num} DEFERRED->NOT FIXED (code changed; re-evaluate)")
+        return f"- **#{num}** [{new_sev}] — {new_status}{tail}"
+
+    body = _PRIOR_STATUS_LINE_RE.sub(_rewrite, review_body)
+
+    # Resurrect prior findings silently dropped from the status block — keyed
+    # on PRESENCE, anchor-independent (FIXED/DISPUTED last round = legitimately
+    # closed, not resurrected).
+    resurrected = []
+    for e in ledger:
+        if e.num in seen or e.prior_status in ("FIXED", "DISPUTED"):
+            continue
+        resurrected.append(
+            f"- **#{e.num}** [{e.prior_severity}] — NOT FIXED — "
+            f"[air: re-inserted — prior finding absent from this re-review; pinned from prior round]"
+        )
+        log.append(f"[ledger] #{e.num} resurrected [{e.prior_severity}] NOT FIXED (silently dropped)")
+
+    return _ensure_rereview_shape(body, log, resurrected), log
+
+
 def _main(argv: list[str]) -> int:
     """CLI surface for review.md Step 12 — the SAME decision code managed runs.
 
@@ -458,15 +784,46 @@ def _main(argv: list[str]) -> int:
         "--count-blockers", action="store_true",
         help="Read a review body on stdin; print the blocker count.",
     )
+    parser.add_argument(
+        "--pin", action="store_true",
+        help="Read a re-review body on stdin; apply the deterministic severity-"
+             "pin + ledger resurrection (needs --prior-body/--inter-diff/--base-"
+             "sha) and print the corrected body on stdout, [pin]/[ledger] log on "
+             "stderr. No-op (body verbatim) without the ledger inputs.",
+    )
+    parser.add_argument("--prior-body", help="Path to the prior review body (re-review ledger input).")
+    parser.add_argument("--inter-diff", help="Path to the inter-diff (re-review ledger input).")
+    parser.add_argument("--base-sha", default="", help="Prior-reviewed SHA (inter-diff base) for anchor validation.")
     args = parser.parse_args(argv)
-    if not (args.decide or args.count_blockers):
+    if not (args.decide or args.count_blockers or args.pin):
         parser.print_usage(sys.stderr)
         return 2
     body = sys.stdin.read()
+
+    # Build + apply the re-review ledger when the inputs are supplied (CLI
+    # Step 11.5 / parity tests). Absent inputs → byte-identical to pre-PR7.
+    def _maybe_pin(b: str) -> str:
+        if not (args.prior_body and args.inter_diff):
+            return b
+        try:
+            prior = Path(args.prior_body).read_text()
+            inter = Path(args.inter_diff).read_text()
+        except OSError as exc:
+            print(f"  [warn] ledger inputs unreadable ({exc}); skipping pin", file=sys.stderr)
+            return b
+        ledger = build_carry_forward_ledger(prior, inter, args.base_sha)
+        pinned, log = pin_and_resurrect(b, ledger)
+        for line in log:
+            print(f"  {line}", file=sys.stderr)
+        return pinned
+
+    if args.pin:
+        sys.stdout.write(_maybe_pin(body))
+        return 0
     if args.count_blockers:
         print(count_blockers(body))
         return 0
-    request_changes, reason = should_request_changes(body)
+    request_changes, reason = should_request_changes(_maybe_pin(body))
     print(f"request-changes\t{reason}" if request_changes else "approve")
     return 0
 

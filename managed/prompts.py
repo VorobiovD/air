@@ -175,8 +175,37 @@ classification (mark DISPUTED with their rationale)."""
     return header + rereview
 
 
+def _render_carry_forward_ledger(ledger) -> str:
+    """Advisory `<carry-forward-ledger>` block for the re-review verifier.
+
+    Lists the prior findings the orchestrator will PIN deterministically
+    (severity carried forward, existence preserved) — i.e. every ledger entry
+    whose code did NOT change. Advisory only: the hard guarantee is
+    `pin_and_resurrect` in lib/verdict.py, applied after the session. Empty
+    string when nothing is pinned (fresh mode, or every prior finding's lines
+    moved)."""
+    pinned = [e for e in (ledger or []) if getattr(e, "change", "") != "CHANGED"]
+    if not pinned:
+        return ""
+    lines = "\n".join(f"  - #{e.num} [{e.prior_severity}]" for e in pinned)
+    return (
+        "\n<carry-forward-ledger>\n"
+        "These prior findings are PINNED — severity + existence carried forward "
+        "verbatim (the orchestrator re-asserts this deterministically after you "
+        "respond, so don't fight it). A pinned finding may become FIXED ONLY if "
+        "the inter-diff actually changed its lines; otherwise keep its prior "
+        "severity and emit NOT FIXED / PARTIALLY FIXED. DISPUTED / FALSE "
+        "POSITIVE / PRE-EXISTING remain valid evidence-bearing exits. Re-rate "
+        "severity ONLY for prior findings NOT listed here (their lines were "
+        "touched). Never silently drop a listed finding.\n"
+        f"{lines}\n"
+        "</carry-forward-ledger>\n"
+    )
+
+
 def build_verifier_task(
     mode: str, repo: str, head_sha: str, prior_sha: str | None, prior_body: str,
+    ledger=None,
 ) -> str:
     """Build the verifier_task template — coordinator forwards this verbatim
     to the verifier sub-agent in TURN 2, after appending all 4 specialist
@@ -188,6 +217,7 @@ def build_verifier_task(
         prior_statuses_block = format_prior_statuses_block(
             prior_body
         )
+        ledger_block = _render_carry_forward_ledger(ledger)
         # Carry-forward rule renders only when the prior body actually
         # contained a `Previous Findings Status` block — typically round
         # 3+ on PRs that follow the standard review-then-re-review
@@ -203,7 +233,10 @@ def build_verifier_task(
                 f"the IMMEDIATELY PRIOR re-review (one round ago). When "
                 f"you're about to emit a status of NOT FIXED for finding "
                 f"#N AND the prior round also reported NOT FIXED for the "
-                f"same #N AND the severity is NOT `blocker`, instead emit:\n\n"
+                f"same #N AND the severity is NOT `blocker` AND the finding's "
+                f"lines are UNCHANGED in the inter-diff (a finding whose code "
+                f"actually moved must be re-evaluated, not deferred), instead "
+                f"emit:\n\n"
                 f"  - **#N** [<severity>] — DEFERRED — carried forward "
                 f"{CARRY_FORWARD_THRESHOLD}+ consecutive rounds without a "
                 f"fix attempt; treating as deferred.\n\n"
@@ -250,7 +283,7 @@ For each prior finding, choose ONE status:
 - NOT FIXED — code unchanged, finding still applies.
 {deferred_bullet}
 - DISPUTED — author pushed back with rationale you accept.
-{carry_forward_rule}
+{ledger_block}{carry_forward_rule}
 Verify each finding per your system prompt and drop FALSE POSITIVE /
 below-threshold entries. Consolidate classifications across specialists —
 if specialists disagree, prefer the one that cites evidence from the
@@ -275,7 +308,9 @@ For each prior finding, emit one line in this shape:
 Where `<severity>` is the original severity from the prior review (one of
 `blocker`, `medium`, `low`, `nit`) — copy it from the prior review's
 section heading where finding #N originally appeared. The orchestrator
-parses these tags to gate APPROVE/REQUEST_CHANGES on un-addressed
+RE-PINS these severities deterministically after you respond (a prior
+finding whose code didn't change keeps its severity no matter what you
+emit), then parses the tags to gate APPROVE/REQUEST_CHANGES on un-addressed
 `blocker` prior findings only. Medium / low / nit prior findings left
 NOT FIXED or PARTIALLY FIXED appear in the body as recommendations but
 do not block merge — the developer can fix later or punt with a follow-

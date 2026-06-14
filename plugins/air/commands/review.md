@@ -619,11 +619,13 @@ Parse responses referencing finding numbers (e.g. "Finding 3 — fixed", "Findin
 
    Render each entry in the posted review as `- **#N** [<severity>] — STATUS — rationale` — the `[severity]` tag carries the PRIOR review's classification and is load-bearing: the Step 12 verdict gate keys on it (only unfixed **blockers** gate; see `lib/verdict.py`). These status enums and the entry anchor are the shared contract with managed mode — `lib/verdict.py` parses exactly this shape.
 
-6.5. **Carry-forward suppression** (only when the PRIOR review was itself a re-review with a `### Previous Findings Status` block — typically round 3+). Extract the prior round's statuses and apply managed's rule verbatim: when you're about to emit NOT FIXED for finding #N AND the prior round also reported NOT FIXED for the same #N AND the severity is NOT `blocker`, instead emit:
+   **Severity carries forward verbatim, and Step 11.5 enforces it deterministically.** For any prior finding whose code did NOT change in the inter-diff, keep its prior `[severity]` exactly — do not re-rate it. **A prior finding may become FIXED only if the inter-diff actually changed its lines**; never mark an unchanged finding FIXED, and a `blocker` never auto-defers. DISPUTED / FALSE POSITIVE / PRE-EXISTING stay valid evidence-bearing exits on any change-state. This is advisory at this step — Step 11.5 re-pins these severities (reverting any downgrade you emit on unchanged code, preserving any escalation) and resurrects any prior finding silently dropped, BEFORE the body is posted and BEFORE Step 12 decides. So the gate can only ever become stricter, never more lenient, than what you write here.
+
+6.5. **Carry-forward suppression** (only when the PRIOR review was itself a re-review with a `### Previous Findings Status` block — typically round 3+). Extract the prior round's statuses and apply managed's rule verbatim: when you're about to emit NOT FIXED for finding #N AND the prior round also reported NOT FIXED for the same #N AND the severity is NOT `blocker` AND the finding's lines are UNCHANGED in the inter-diff (a finding whose code actually moved must be re-evaluated, not deferred), instead emit:
 
    `- **#N** [<severity>] — DEFERRED — carried forward 2+ consecutive rounds without a fix attempt; treating as deferred.`
 
-   Blockers NEVER auto-defer — always remain NOT FIXED. The rule applies only when the prior round said NOT FIXED; if it said PARTIALLY FIXED, FIXED, or DEFERRED, emit your honest classification (a previously-deferred finding still un-fixed stays DEFERRED; a partially/fully fixed one reflects the current state). Pass the prior round's status list (the `- **#N** [severity] — STATUS` lines from `REVIEW_COMMENT_BODY`) into the verifier prompt in Step 8 so it can apply this rule.
+   Blockers NEVER auto-defer — always remain NOT FIXED. The rule applies only when the prior round said NOT FIXED; if it said PARTIALLY FIXED, FIXED, or DEFERRED, emit your honest classification (a previously-deferred finding still un-fixed stays DEFERRED; a partially/fully fixed one reflects the current state). Pass the prior round's status list (the `- **#N** [severity] — STATUS` lines from `REVIEW_COMMENT_BODY`) into the verifier prompt in Step 8 so it can apply this rule. This is advisory; Step 11.5 re-pins severity and re-asserts every prior finding's existence deterministically regardless of what the agents emit here.
 
 7. **Launch agents on new changes only.** In the next step (Parallel Review), pass `$AIR_TMP/inter-diff-<number>.diff` to agents instead of `$AIR_TMP/pr<number>.diff`.** The agents must review the inter-diff, not the full PR diff. If inter-diff is unavailable (cross-repo fallback), pass the full diff but instruct agents: "This is a re-review. Only flag findings in files that changed since <REVIEWED_AT_SHA>: <list of changed files>."
 
@@ -889,6 +891,57 @@ Rules:
 - Related PRs section last (after Strengths). Unnumbered, does NOT count toward the findings total. Include ONLY when `RELATED_PRS` is not "none"; omit entirely otherwise. Lead with same-region conflicts, then same-file overlaps; keep each line to the file, the sibling PR (#N + title), the collision type, and a one-line coordination note (suggested merge order, or a cross-link to a reference implementation).
 - Footer count excludes pre-existing (e.g. "8 findings for this PR" even if 10 total with 2 pre-existing)
 - Empty severity sections are omitted entirely
+
+## Step 11.5: Deterministic severity-pin + ledger (re-review only)
+
+This is the CLI half of the shared carry-forward guarantee (`lib/verdict.py:pin_and_resurrect`) that managed enforces in `review.py`. It rewrites `$AIR_TMP/review-comment.md` **in place** so the POSTED comment carries the pinned severities and any resurrected prior findings; Step 12's existing `--decide` then gates on the already-pinned body. Because the pin can only HOLD or RAISE a prior finding's severity and RE-INSERT a dropped one, the verdict can only become stricter — never more lenient — than the un-pinned body.
+
+**Run only on a re-review** (Step 6 ran — `--re-review` or auto-detected). **Skip entirely** — degrade to a clean no-op, never block — for any non-re-review mode (`--fresh` / `--rewrite` / `--self` / `--full` / `--solo` / `--respond`) and whenever the guarantee can't be computed: no prior comment body, no `REVIEWED_AT_SHA`, or the cross-repo fallback (Step 6 step 4) where the local SHA range is unavailable. It runs BEFORE Step 12, so a `--dry-run` print also reflects the pinned body.
+
+Disabled by `AIR_LEDGER_PIN=0` (the same kill switch managed reads) — if set, skip this step.
+
+1. Write the PRIOR review body to a file (the ledger's prior-state input). **Fetch the exact comment Step 2/6 already selected, by its `REVIEW_COMMENT_ID`** — do NOT re-run a `startswith('## Code Review')` scan here. A fresh unscoped scan that takes `prior[-1]` is a spoofable control-plane sink: anyone who can comment on the PR could post a later `## Code Review`-prefixed body and win the selection, poisoning the deterministic gate (pre-mark blockers `FIXED`, or inject `[blocker] — NOT FIXED` lines). Keying on the ID Step 2/6 resolved means the ledger uses the *same* prior body the rest of the re-review is built on — no second, divergent selection. (Hardening the shared Step 2/6/12 selectors to bot-identity scoping is a separate, repo-wide follow-up.) Fetch by ID straight to the file — comment bodies contain newlines/control chars that corrupt in shell vars, so never echo the cached `REVIEW_COMMENT_BODY`:
+```bash
+if [ -n "${REVIEW_COMMENT_ID:-}" ]; then
+  gh api repos/<owner>/<repo>/issues/comments/$REVIEW_COMMENT_ID --jq '.body' \
+    > $AIR_TMP/prior-body-<number>.md 2>/dev/null
+fi
+```
+If `REVIEW_COMMENT_ID` is unset or the file is empty (no prior comment), skip Step 11.5 — there is nothing to pin against.
+
+2. Generate the **three-dot** ledger inter-diff. This deliberately differs from Step 6's two-dot review diff: the ledger's CHANGED/UNCHANGED determination must match managed's exactly, and managed computes it from GitHub's three-dot compare (`<base>...<head>`). Three-dot here aligns the CLI ledger's "what moved" map with managed's; the agents still review the two-dot diff from Step 6 (unchanged — only the ledger uses this diff):
+```bash
+git diff <REVIEWED_AT_SHA>...<headRefOid> > $AIR_TMP/ledger-diff-<number>.diff 2>/dev/null
+```
+If this fails or produces nothing (cross-repo fallback, SHA not local): skip Step 11.5. Print "Step 11.5: ledger inter-diff unavailable — severity-pin skipped (no-op)." Number-identity pinning still needs both the prior body AND a parseable diff, so a missing diff is a clean no-op (the un-pinned body posts; the verdict is computed the pre-PR7 way).
+
+3. Pipe the formatted body through `verdict.py --pin`, inside the same `$AIR_PLUGIN_ROOT` guard Step 12 uses (an empty variable must take the no-op branch, not expand to `python3 "/lib/verdict.py"`). Redirect stdout straight to a file (no command substitution — that strips the trailing newline and would break byte-parity with the parser); `mv` over the original only on success. **A non-zero exit must fail LOUD**, not silently revert to the un-pinned body — otherwise the "HARD deterministic guarantee" would silently degrade to advisory-only and Step 12 would gate on un-pinned content with no signal. Distinguish that failure from the clean disabled/missing-input skip:
+```bash
+if [ "${AIR_LEDGER_PIN:-1}" != "0" ] \
+   && [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/verdict.py" ] \
+   && [ -s "$AIR_TMP/prior-body-<number>.md" ] && [ -s "$AIR_TMP/ledger-diff-<number>.diff" ]; then
+  if python3 "$AIR_PLUGIN_ROOT/lib/verdict.py" --pin \
+       --prior-body "$AIR_TMP/prior-body-<number>.md" \
+       --inter-diff "$AIR_TMP/ledger-diff-<number>.diff" \
+       --base-sha "<REVIEWED_AT_SHA>" \
+       < "$AIR_TMP/review-comment.md" \
+       > "$AIR_TMP/review-comment.pinned.md" 2> "$AIR_TMP/pin-log-<number>.txt"; then
+    mv "$AIR_TMP/review-comment.pinned.md" "$AIR_TMP/review-comment.md"
+    # Surface the [pin]/[ledger] log lines to the operator console (mirrors
+    # managed's stderr prints; never in the PR comment).
+    [ -s "$AIR_TMP/pin-log-<number>.txt" ] && cat "$AIR_TMP/pin-log-<number>.txt" >&2
+  else
+    # Pin crashed (non-zero exit). Do NOT post the un-pinned body silently —
+    # the carry-forward guarantee would be lost with no operator signal.
+    echo "Step 11.5: WARNING — severity-pin FAILED (non-zero exit); the carry-forward guarantee is NOT applied this run — Step 12 will gate on the UN-PINNED body. See pin-log:" >&2
+    cat "$AIR_TMP/pin-log-<number>.txt" >&2
+  fi
+else
+  echo "Step 11.5: severity-pin skipped (no-op) — disabled, or missing plugin root / prior body / ledger diff." >&2
+fi
+```
+
+The pinned body is now what Step 12 posts AND what Step 12's `--decide` gates on. Do NOT pass the ledger inputs to Step 12's `--decide` — the body is already pinned here, and re-pinning a pinned body is a no-op but a needless second parse.
 
 ## Step 12: Post
 

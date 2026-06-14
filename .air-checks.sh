@@ -82,6 +82,16 @@ grep -qF 'lib/verdict.py" --decide' "$REVIEW_MD" \
   || fail "review.md Step 12 no longer routes the verdict through lib/verdict.py --decide"
 grep -qF -- '- **#N** [<severity>] — STATUS' "$REVIEW_MD" \
   || fail "review.md missing the prior-status entry anchor lib/verdict.py parses"
+# PR 7: the re-review severity-pin + ledger guard. The deterministic functions
+# must stay in the shared lib, and review.md's Step 11.5 must route the
+# re-review body through `--pin` before the Step 12 `--decide` — or the CLI
+# silently loses the carry-forward guarantee managed enforces.
+for fn in parse_changed_lines finding_changed build_carry_forward_ledger pin_and_resurrect; do
+  grep -qF "def $fn(" "$VERDICT_LIB" \
+    || fail "lib/verdict.py missing PR7 guard fn '$fn' (re-review severity-pin contract)"
+done
+grep -qF 'lib/verdict.py" --pin' "$REVIEW_MD" \
+  || fail "review.md Step 11.5 no longer routes the re-review body through lib/verdict.py --pin"
 
 if [ "$status" -eq 0 ]; then
   printf 'air drift-check: all checks passed.\n'
