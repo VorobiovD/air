@@ -30,9 +30,10 @@ VorobiovD/air/
 │   │   ├── review-verifier.md         False positive filter, confidence scoring, 6 verdicts
 │   │   └── coordinator.md             Managed-mode delegator (fans out specialists, assembles output)
 │   ├── commands/                   ← CLI-only orchestration
-│   │   ├── review.md                 13-step pipeline (~1080 lines, core orchestration)
+│   │   ├── review.md                 13-step pipeline (~1170 lines, core orchestration)
 │   │   ├── review-self.md            Self-review flow (--self mode, extracted)
 │   │   ├── review-respond.md         Respond flow (--respond mode, extracted)
+│   │   ├── review-solo.md            Solo flow (--solo mode — one Fable agent, all lenses, --gate-capable)
 │   │   ├── learn.md                  Wiki maintenance + KAIROS history
 │   │   └── platform-gitlab.md       GitLab CLI/API mappings
 │   ├── hooks/                      ← CLI-only pre-commit drift check (v1.6.0+)
@@ -43,7 +44,9 @@ VorobiovD/air/
 │   │   ├── meta.py                   `.air-meta.json` read/write + /air:learn trigger threshold
 │   │   ├── wiki_git.py               clone + commit-meta-with-retry helpers
 │   │   ├── pattern_lifecycle.py       Deterministic author-pattern lifecycle ops
-│   │   └── pr_conversation.py         Merge GitHub PR comments/reviews into `<pr-conversation>` agent context
+│   │   ├── pr_conversation.py         Merge GitHub PR comments/reviews into `<pr-conversation>` agent context
+│   │   ├── solo_prompt.py             THE solo-prompt assembly (`assemble_solo_prompt`; CLI `--solo` runs it, managed setup.py imports it)
+│   │   └── verdict.py                 THE shared gating contract: blocker/prior-status parse, body extractor, re-review severity-pin + ledger (build_carry_forward_ledger, pin_and_resurrect, extract_fresh_findings, finding_changed)
 │   └── .claude-plugin/
 │       └── plugin.json             Plugin manifest (version source of truth)
 │
@@ -52,19 +55,18 @@ VorobiovD/air/
 │   ├── setup.py                      Creates/updates 6 specialists + air-coordinator + air-solo-reviewer via API
 │   ├── review.py                     Client-side driver — orchestrates the run (coordinator session launch, gating, epilogue)
 │   ├── github_client.py              GitHub REST: fetchers, pagination, comment/verdict POSTs
-│   ├── verdict.py                    Review-body parsing + gating (blocker counts, prior statuses, body extractor) + re-review severity-pin/ledger (build_carry_forward_ledger + pin_and_resurrect, number-identity)
+│   ├── verdict.py                    Thin re-export shim of plugins/air/lib/verdict.py (the shared gating contract + re-review severity-pin/ledger — implementation lives in lib/)
 │   ├── session_runner.py             Session lifecycle: run_session, REST drain, billing retry, SIGTERM cleanup
 │   ├── prompts.py                    Prompt builders: PR context block + verifier-task templates
 │   ├── learn.py                      Triggers wiki maintenance sessions (single-agent)
 │   ├── memory_store.py               Per-repo pattern store: discovery, reads, sha256-preconditioned writes
 │   ├── pattern_writer.py             Applies pattern_lifecycle ops to the store post-review
 │   ├── migrate_wiki_to_store.py      One-shot wiki → store migration (per-author split, --dry-run)
+│   ├── migrate_workspace_stores.py   One-shot store → store copy across workspaces (sha256-verified)
 │   ├── render_store_to_wiki.py       Deterministic store→wiki mirror render (inverse of migrate split; throttled per-review + on learn)
 │   ├── salvage_review.py             Drain a finished orphaned session, post its review ($0 — job-cancel recovery)
 │   ├── test-session.py               9-test verification (repo, auth, blame, comment, wiki)
-│   ├── test-learn.py                 Wiki clone/push verification
-│   ├── test-render.py                Render round-trip / overflow-inverse unit tests (pure, no API)
-│   ├── test-parallel.py              Smoke test for parallel sub-agent execution (detects Research Preview access)
+│   ├── test-*.py                     Offline unit suites (pure, no API): test-verdict (gating + re-review ledger), test-reliability (extraction + HTTP), test-extract, test-precomp, test-cost-wins, test-multiagent, test-promote-fastpath, test-ui-scope, test-render, test-learn, test-parallel
 │   ├── prompts/
 │   │   └── learn-orchestrator.md     Learn pipeline for cloud (review orchestrator.md deleted in v1.7.0 — replaced by review.py)
 │   └── requirements.txt             anthropic>=0.93.0, requests>=2.28.0
@@ -189,7 +191,7 @@ PR opened (or air-machine requested as reviewer) → GitHub Action → managed/r
 
 The Python driver does upstream prep (fetch PR data, state gates, build context, optionally run codex), then hands off to a single **`air-coordinator` session** that dispatches the specialists in parallel + verifier as `callable_agents` sub-agents within one Anthropic session — mirroring the local CLI's Claude Code orchestrator. This replaced v1.7's client-side `asyncio.gather` over 5 separate sessions once Anthropic granted research-preview access for `callable_agents` on 2026-04-25 (beta header `managed-agents-2026-04-01-research-preview`).
 
-**Review-architecture axis (`AIR_REVIEW_MODE` / `review_mode` input / `review.py --mode`):** `full` (default) runs the coordinator above; `solo` replaces step [5] with ONE `air-solo-reviewer` session (its system prompt assembled at sync from the 6 specialist `.md` files — `setup.py:assemble_solo_prompt()`, zero-drift, no standalone file; the agent is created only when a run uses solo/both), which applies all lenses + self-verifies + folds Codex in one pass (~$2–4 / ~7 min vs ~$10 / ~25 min on repo-A #994); `both` runs the coordinator AND the solo session **concurrently** (wall-clock ≈ the slower of the two — keeps it inside the GHA cap; a solo failure can't take down the gating coordinator review), with the coordinator review gating + driving the verdict/learn and the solo review posted alongside as a non-gating `## Code Review (solo — experimental)` comment for comparison. Solo posts the same `APPROVE`/`REQUEST_CHANGES` verdict as full (it can gate/approve), but is **not gate-safe** — it downgrades blocker severity, so that verdict isn't a trustworthy hard gate; enable only where a single agent's verdict is acceptable. Default is `full`. Managed-only — the CLI runs its agents locally and has no solo equivalent. `air-solo-reviewer` is not pinnable. The required-agents gate is conditional on the mode (full-only repos never require the solo agent).
+**Review-architecture axis (`AIR_REVIEW_MODE` / `review_mode` input / `review.py --mode`):** `full` (default) runs the coordinator above; `solo` replaces step [5] with ONE `air-solo-reviewer` session (its system prompt assembled at sync from the 6 specialist `.md` files — `solo_prompt.py:assemble_solo_prompt()` (imported by setup.py), zero-drift, no standalone file; the agent is created only when a run uses solo/both), which applies all lenses + self-verifies + folds Codex in one pass (~$2–4 / ~7 min vs ~$10 / ~25 min on repo-A #994); `both` runs the coordinator AND the solo session **concurrently** (wall-clock ≈ the slower of the two — keeps it inside the GHA cap; a solo failure can't take down the gating coordinator review), with the coordinator review gating + driving the verdict/learn and the solo review posted alongside as a non-gating `## Code Review (solo — experimental)` comment for comparison. Solo posts the same `APPROVE`/`REQUEST_CHANGES` verdict as full (it can gate/approve), but is **not gate-safe** — it downgrades blocker severity, so that verdict isn't a trustworthy hard gate; enable only where a single agent's verdict is acceptable. Default is `full`. The `both` mode is managed-only; the CLI has its own `--solo` (v1.31.0, `commands/review-solo.md`) — the SAME assembled prompt run as ONE Fable agent via the user's Claude Code subscription ($0 API spend), advisory by default (`--solo --gate` opts into gating). `air-solo-reviewer` is not pinnable. The required-agents gate is conditional on the mode (full-only repos never require the solo agent).
 
 ---
 
@@ -415,7 +417,7 @@ Cost ranges span Sonnet-rate (floor) to Opus-rate (ceiling) bounds — sub-agent
 - `github_repository` resource only clones the PR branch — base branch must be fetched separately (`git fetch origin main`).
 
 **CLI Plugin:**
-- review.md sits at ~1080 lines (--self and --respond already extracted to separate files; it has regrown past the 879-line post-extraction low as features landed). Still long; further extraction planned.
+- review.md sits at ~1170 lines (--self and --respond already extracted to separate files; it has regrown past the 879-line post-extraction low as features landed — Step 11.5 and the re-review ledger wiring among them). Still long; further extraction planned.
 - Subagents CANNOT spawn other subagents (Claude Code hard limit, nesting depth = 1).
 - Plugin auto-update unreliable — marketplace pulls repo but doesn't always re-install to cache.
 - Auto-trigger for /air:learn sometimes skipped due to prompt length (mitigated with >>> markers and explicit RETURN in Step 13).
@@ -428,7 +430,7 @@ Cost ranges span Sonnet-rate (floor) to Opus-rate (ceiling) bounds — sub-agent
 
 ## CLI Orchestrator Research
 
-Subagents cannot nest in Claude Code — only the main session can use the Agent tool. The current architecture (review.md as orchestrator → Agent tool → sub-agents) is the correct pattern. Inconsistency comes from review.md being too long (1276 lines), not from wrong architecture.
+Subagents cannot nest in Claude Code — only the main session can use the Agent tool. The current architecture (review.md as orchestrator → Agent tool → sub-agents) is the correct pattern. Inconsistency comes from review.md being too long (~1170 lines), not from wrong architecture.
 
 **Fix:** Slim review.md to ~300 lines by extracting verbose sections (format rules, wiki learning protocol, resistance levels, author pattern lifecycle) into reference files. Same architecture, less prompt bloat, more consistent execution.
 
@@ -461,7 +463,7 @@ Subagents cannot nest in Claude Code — only the main session can use the Agent
 | **Done** | Auto-trigger visibility | 0.5 day | Reliability | v1.4.0 — markers + explicit RETURN |
 | **Done** | Respond --dry-run | 0.5 day | Preview | v1.4.0 |
 | **High** | Reduce orchestrator duplication | 1 day | Maintenance burden | |
-| **High** | Further slim review.md (~1080 → ~300) | 1 day | CLI consistency | Extract verbose sections to reference file |
+| **High** | Further slim review.md (~1170 → ~300) | 1 day | CLI consistency | Extract verbose sections to reference file |
 | **Medium** | GitLab in managed agent | 2-3 days | Platform coverage | |
 | **Medium** | Wiki push reliability | 1 day | Sandbox timeout handling | |
 | **Low** | Codex in managed agent | 1 day | Second model opinion | |

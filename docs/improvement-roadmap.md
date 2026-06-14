@@ -11,13 +11,13 @@
 
 **External commitments** tracked separately (internal notes).
 
-_Last updated: 2026-06-09 (post-v1.29.0 — promote fast-path + caller-variable toggle, the UI/business-audience copy reviewer (6th specialist) with CLI/TUI-copy coverage, $0 auth preflight, and the `AIR_REVIEW_MODE` caller variable. Earlier arc, post-v1.22.0: memory-store migration complete fleet-wide, deterministic wiki-mirror render, solo/both review mode, multi-reviewer PAT model). See "Since v1.13.0" below for the delivery summary._
+_Last updated: 2026-06-14 (post-v1.32.0 — the deterministic re-review severity-pin + deferred-findings ledger (number-identity round-3+, hunk-level round-2 line evidence, `AIR_LEDGER_PIN` kill switch) + the multiagent-output truncation fix; CLI solo mode (`--solo`); managed diff hygiene + cost caps. Earlier arc, post-v1.22.0: promote fast-path, the UI/business-audience copy reviewer (6th specialist) with CLI/TUI-copy coverage, $0 auth preflight, `AIR_REVIEW_MODE` caller variable, memory-store migration complete fleet-wide). See "Since v1.13.0" below for the delivery summary._
 
 ---
 
 ## TL;DR
 
-**Current shipped:** v1.29.0 (2026-06-08). The arc since v1.22.0: the **promote fast-path** (delta-review sibling promotes, opt-in via a caller variable — v1.25/v1.26), the **UI / business-audience copy reviewer** (6th specialist, team request — v1.27, extended to CLI/TUI copy v1.28), **$0 auth preflight** (v1.23), and the **`AIR_REVIEW_MODE` caller variable** (v1.29 — flip full/solo/both from Settings). The earlier arc since v1.13.0: the **memory-store migration is complete fleet-wide** (all 4 repos store-backed), which addressed the dominant cache-read cost lever; **solo/both review mode** ships the cheaper-review experiment; the **multi-reviewer PAT model** is live on all callers. Full delivery list in the Shipped table and "Since v1.13.0 — delivered + active" below.
+**Current shipped:** v1.32.0 (2026-06-14) — the **deterministic re-review severity-pin + deferred-findings ledger** (closes re-review's #1 failure mode: a prior blocker on unchanged code can no longer silently drift to medium or be dropped; never un-gates), the multiagent-output **truncation fix**, **CLI solo mode** (`--solo`), and managed **diff hygiene + cost caps**. The arc since v1.22.0: the **promote fast-path** (delta-review sibling promotes, opt-in via a caller variable — v1.25/v1.26), the **UI / business-audience copy reviewer** (6th specialist, team request — v1.27, extended to CLI/TUI copy v1.28), **$0 auth preflight** (v1.23), and the **`AIR_REVIEW_MODE` caller variable** (v1.29 — flip full/solo/both from Settings). The earlier arc since v1.13.0: the **memory-store migration is complete fleet-wide** (all 4 repos store-backed), which addressed the dominant cache-read cost lever; **solo/both review mode** ships the cheaper-review experiment; the **multi-reviewer PAT model** is live on all callers. Full delivery list in the Shipped table and "Since v1.13.0 — delivered + active" below.
 
 **Active fronts (where attention goes next):**
 1. **Solo/both routing decision** — the routing call is still open (full for initial/large, solo for re-review/small). **Caveat found 2026-06-08:** `both` had been silently NOT running on the work-repo callers (they forced `review_mode: || 'full'`), so no comparison data was actually collected; v1.29.0 (#138) made `review_mode` resolve from the `AIR_REVIEW_MODE` caller variable, and `both` is now set on repo-A + repo-B — collection starts now (revert by deleting the variable after the window). Solo is ~3× cheaper/faster but NOT gate-safe on substantial PRs (severity downgrade observed). See §Since-v1.13.0 C.
@@ -41,14 +41,14 @@ _Last updated: 2026-06-09 (post-v1.29.0 — promote fast-path + caller-variable 
 | v1.12.0 | SSE delivery latency mitigation — REST events fallback at 90s quiet timeout | #49 | Caps stuck-stream tail latency |
 | v1.12.0 | Extractor narration anchor `(?<!\`)## Code Review` + learn.py stderr capture | #49 | Fixes repo-A #635 narration leak |
 | v1.12.0 | Re-review gate narrowed to blocker-only (mediums = warnings) | #51 | repo-D #37 — would have flipped all 13 CHANGES_REQUESTED rounds to APPROVED |
-| v1.12.0 | Carry-forward suppression — auto-DEFER 2nd consecutive NOT FIXED on non-blockers | #51 | Eliminates perpetual-loop pattern (svc-tx #37 finding #2: 13 NOT FIXED rounds in a row) |
+| v1.12.0 | Carry-forward suppression — auto-DEFER 2nd consecutive NOT FIXED on non-blockers | #51 | Eliminates perpetual-loop pattern (repo-D #37 finding #2: 13 NOT FIXED rounds in a row) |
 | v1.12.0 | Workflow concurrency — `cancel-in-progress: true` | #51 | Prevents overlapping reviews; latest push runs to completion |
 | v1.12.0 | Legacy missing-severity default flipped to `blocker` | #51 | Pre-v1.12 prior bodies keep gating instead of silently un-gating |
 | v1.12.1 | Structured `## air review (run failed)` fallback comment + 422 retry on review post | #54 | Replaces 422 cascade with actionable signal |
 | v1.12.2 | Debug log of `coordinator_out[:2000]` on SHA-mismatch | #57 | Diagnostic instrumentation that confirmed the SSE/REST race hypothesis |
 | v1.12.3 | SSE/REST race fix: retry drain on eventually-consistent events (per-attempt delta tracking) | #61 | repo-A #635-style failures (~92s coordinator + REST lag) recover |
 | v1.12.4 | REST polling until session terminal — handles SSE stream-close mid-session | #62 | repo-A #666 went from 92s empty-output to 1432s + real review |
-| v1.12.5 | Billing-aware structured-fallback (`BetaManagedAgentsBillingError`) | #64 | svc-tx billing exhaustion → actionable comment instead of stack trace |
+| v1.12.5 | Billing-aware structured-fallback (`BetaManagedAgentsBillingError`) | #64 | repo-D billing exhaustion → actionable comment instead of stack trace |
 | v1.12.6 | Footer-regex word-boundary trap fixed | #67 | repo-A #666 round 7 verifier output recovered: `\b` failed when 40-hex SHA followed by `Wiki` (both `\w`) |
 | **v1.13.0** | **5 prompt additions** — exposure escalation (verifier), CLAUDE.md gotcha grep + paired-doc drift + gate-output symmetry (code-reviewer), category-symmetric respond gate (review-respond) | #70 | Captures new failure classes from repo-C #153 + repo-A HIPAA cross-patient leak + repo-A #732 respond cycle |
 | v1.14.0 | Fast-mode Opus on code-reviewer + security-auditor (B1/Item E); security-audit FAIL-only 4-col table (drop PASS/FAIL clutter) | #74, #77, #78 | ~2× faster generation on the two heaviest agents at zero prompt cost (fast premium unbilled on managed) |
@@ -69,6 +69,9 @@ _Last updated: 2026-06-09 (post-v1.29.0 — promote fast-path + caller-variable 
 | v1.28.0 | ui-copy reviewer extends to **CLI/TUI copy** via a PROJECT-PROFILE `## User-Facing Copy Paths` opt-in | #134 | Covers non-web patient/agent copy (repo-C system prompts) while keeping backend PRs $0 |
 | v1.28.1 | ui-copy dispatch gate no longer treats internal `docs/` as user-facing (narrowed to help/content/faq) | #136 | Removes false dispatch on eng-doc PRs |
 | **v1.29.0** | `review_mode` resolvable from a caller **`AIR_REVIEW_MODE` variable** (variable wins over input) | #138 | Lets a caller flip full/solo/both from Settings — fixed `both` silently never running on the work repos (callers forced `\|\| 'full'`) |
+| v1.30.0 | **Managed diff hygiene + cost caps** (generated/vendored stubbing, `AIR_DIFF_MAX_BYTES`, conversation tail-cap, codex-skip on tiny re-review deltas); `AIR_MULTIAGENT` caller-variable passthrough | #146, #150 | Trims per-review context spend with visible markers (no silent drops); per-repo multiagent enable |
+| v1.31.0 | **CLI solo mode** (`/air:review --solo`) — the SAME assembled 6-lens prompt run as ONE Fable agent via the user's subscription ($0 API); advisory by default, `--solo --gate` opts into gating | #156 | Brings the solo experiment to the CLI; verifier-anchored full pipeline stays the gating standard |
+| **v1.32.0** | **Deterministic re-review severity-pin + deferred-findings ledger** (`build_carry_forward_ledger` + `pin_and_resurrect`, single-sourced in `lib/verdict.py`; both managed + CLI Step 11.5; kill switch `AIR_LEDGER_PIN`). Round 3+ pins by number-identity; round-2 uses hunk-level line evidence to honor real fixes. Also: multiagent-output truncation fix (`session_runner` `"\n".join`) | #158, #161, #162, #160 | Makes re-review severity carry-forward + finding-persistence a HARD deterministic guarantee — closes re-review's #1 failure mode (a prior blocker on unchanged code drifting to medium, or a finding silently dropped); never un-gates. Live-fleet: round-2 over-gating 70%→~10% |
 
 ---
 
@@ -201,13 +204,13 @@ Examples:
 
 ### Coordinator regurgitation hypothesis (from repo-D #37 — historical)
 
-After three reproductions on svc-tx #37 (15+ re-review rounds on same PR) and failed cache-bust:
+After three reproductions on repo-D #37 (15+ re-review rounds on same PR) and failed cache-bust:
 
 **Hypothesis:** The coordinator regurgitates `prior_review_body` from its user-message context instead of dispatching specialists. 92.5s wall is enough for ~one model turn — not the 3-turn protocol. Coordinator likely "recognizes" the heavy prior-PR-specific body and short-circuits TURN 1, emitting TURN 3 that copies the prior body including its prior-SHA footer.
 
 Supporting evidence:
 - Coordinator wall on failures: 92.4s, 92.5s, 92.5s (highly consistent, ~one model turn)
-- Failures PR-specific: only svc-tx #37 hit it
+- Failures PR-specific: only repo-D #37 hit it
 - `Reviewed at:` SHA in broken outputs always matches most recent prior bot review's SHA
 - Cache-bust commits DID NOT recover — rules out Anthropic prefix-cache
 - PR-restart workaround (close + reopen identical branch as fresh PR, removing re-review codepath) DID recover
@@ -346,7 +349,7 @@ Sorted by **value × evidence × cost-to-ship**. Each has a concrete trigger.
 1. Debug logging (v1.12.2 shipped) — first 1000 chars of `coordinator_out` on SHA-mismatch
 2. **Detection + retry mechanic** (NOT yet shipped) — if first coordinator returns in <300s AND output footer SHA matches `prior_sha`, retry the coordinator session WITHOUT `prior_review_body` (degrades to fresh-review codepath for retry). Tradeoff: loses FIXED/NOT-FIXED classification — acceptable.
 **Alternative rejected:** strengthening verifier_task prompt with imperative SHA instruction — won't help if coordinator isn't reaching verifier in regurgitation mode (92.5s isn't enough for 4-specialist + verifier dispatch).
-**Evidence:** 3 production failures on svc-tx #37 (runs 25367689850, 25368789413, 25369351035), all at ~92.5s, all with prior-SHA footer. Cache-bust failed; PR-restart succeeded.
+**Evidence:** 3 production failures on repo-D #37 (runs 25367689850, 25368789413, 25369351035), all at ~92.5s, all with prior-SHA footer. Cache-bust failed; PR-restart succeeded.
 
 ### P0 — Live progress flush (~1 day)
 **Problem:** stdout is block-buffered; users can't tell if a 30-min run is making progress or hung. Today this gets confused with actual hangs.
@@ -518,7 +521,7 @@ A single PR with 14 review rounds, 13 consecutive CHANGES_REQUESTED, and an even
 
 5. **Coordinator wall-time is a stale-cache signal.** A 92s coordinator run on a real PR is impossibly fast (typical 1500-2400s). When run is short AND output unusable, almost certainly a cached prior-thread response.
 
-6. **"Cached output" was the wrong frame.** Cache-bust commit (whitespace change to README) DID NOT recover svc-tx #37. Coordinator returned same 92.5s + prior-SHA output on next run with different prefix. Rules out Anthropic prefix-cache; points at model-behavior issue (regurgitating `prior_review_body`).
+6. **"Cached output" was the wrong frame.** Cache-bust commit (whitespace change to README) DID NOT recover repo-D #37. Coordinator returned same 92.5s + prior-SHA output on next run with different prefix. Rules out Anthropic prefix-cache; points at model-behavior issue (regurgitating `prior_review_body`).
 
 7. **PR-restart is a valid escape hatch.** On long re-review chains where coordinator has degraded, closing the failing PR and reopening from same branch as fresh PR avoids re-review codepath. Workaround loses comment history but recovers merge path. Worth documenting in bot's run-failed comment so users have a path forward.
 

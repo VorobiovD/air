@@ -6,7 +6,7 @@
 [![GitHub](https://img.shields.io/badge/GitHub-supported-black.svg)](https://github.com)
 [![GitLab](https://img.shields.io/badge/GitLab-supported-orange.svg)](https://gitlab.com)
 
-> **New in 1.8.0:** managed-agent orphan-session cleanup, auto-detect re-review mode with developer-response context, `--closed` opt-in for closed/merged PRs, `workflow_dispatch` for on-demand reviews. See [plugin README — What's New](plugins/air/README.md#whats-new-in-v180).
+> **New in 1.32.0:** deterministic re-review severity-pin + deferred-findings ledger — a prior blocker on code that didn't change can't silently drift to medium or be dropped (kill switch `AIR_LEDGER_PIN`); CLI solo mode (`--solo`); managed diff hygiene + cost caps. See the [improvement roadmap](docs/improvement-roadmap.md) for the full version history.
 
 ## Why
 
@@ -48,6 +48,7 @@ Two commands become available: `/air:review` and `/air:learn`. To enable auto-up
 /air:review --fresh                    # Full review from scratch, new comment
 /air:review --rewrite                  # Full review, edit existing comment in place
 /air:review --respond                  # Reply to review: classify findings + self-check + push
+/air:review --solo                     # One agent, all 6 lenses, via your subscription ($0 API); advisory — add --gate to gate
 /air:review --respond --dry-run        # Preview response without posting
 /air:review --full                     # Review entire codebase (first-time audit)
 /air:review 123 --closed               # Review a closed/merged PR (post-merge audit, pattern backfill)
@@ -73,6 +74,8 @@ After posting a review, developers can respond to findings by number:
 - `#8 — pre-existing, not from this PR` → classified separately, not dropped
 
 Re-review generates an inter-diff (only changes since last review) so agents focus on what's new.
+
+A deterministic **severity-pin + deferred-findings ledger** guards the re-review gate: a prior `blocker` on code that didn't change can't silently drift to a lower severity or be dropped — the gate can only ever get stricter, never un-gate. It's on by default; set `AIR_LEDGER_PIN=0` (or `false`/`no`) to disable.
 
 ### Respond Mode
 

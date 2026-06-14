@@ -212,9 +212,14 @@ Patterns are stored on the repo's wiki (GitHub or GitLab) for legacy repos. **St
 - **Every team member's reviews contribute** automatically
 - **Repo-specific** — each repo's patterns stay in that repo's wiki
 
-Two files:
-- **REVIEW.md** — curated patterns: author tendencies, service-specific gotchas, common findings, accepted patterns. Updated incrementally after each review.
+Primary wiki pages (per repo):
+- **REVIEW.md** — curated patterns: author tendencies, service-specific gotchas, common findings. Updated incrementally after each review.
 - **REVIEW-HISTORY.md** — analytical data auto-generated from PR comment history. Finding frequency tables, file hot spots, author trends, timeline. Regenerated periodically.
+- **PROJECT-PROFILE.md** / **GLOSSARY.md** — project characteristics + domain terms (generated on first run).
+- **ACCEPTED-PATTERNS.md** — verified false positives / accepted explanations (the suppression store).
+- **SEVERITY-CALIBRATION.md** — per-repo severity tuning.
+
+(Store-backed repos keep these in a per-repo Anthropic memory store; the git wiki is then a deterministically-rendered mirror.)
 
 ### Auto-trigger Cleanup
 
@@ -231,7 +236,7 @@ When developers dispute findings during re-review, the pipeline evaluates their 
 - **Code quality** (MEDIUM resistance) — accepted if the developer explains the design tradeoff
 - **Style/nits** (LOW resistance) — team conventions respected readily
 
-Accepted explanations are added to an `Accepted Patterns` section in the wiki. Future reviews check this section and won't re-flag the same pattern.
+Accepted explanations are added to **ACCEPTED-PATTERNS.md** (a dedicated wiki page). Future reviews check it and won't re-flag the same pattern.
 
 ## Better Reviews with Your Context
 
@@ -324,6 +329,10 @@ Each `/air:learn` run (periodic, every 15 reviews or 14 days):
 - **Not executable:** if `.air-checks.sh` exists but isn't `chmod +x`, the hook prints a nudge and falls back to built-ins so you still get protection while you finish reviewing the auto-generated script.
 
 See `.air-checks.sh` in the air repo itself for a real-world extension example (version consistency from built-ins + air-specific convention-enforcement greps).
+
+## What's New in v1.32.0
+
+**Deterministic re-review severity-pin + deferred-findings ledger.** On a re-review, a prior `blocker` on code that didn't change can no longer silently drift to a lower severity or be dropped — a deterministic guard in the shared gating contract (`lib/verdict.py`) carries severity + finding-existence forward so the gate can only ever get *stricter*, never un-gate. Round 3+ pins by finding-number identity; the first re-review (round 2) uses hunk-level line evidence to honor genuine fixes. On by default; kill switch `AIR_LEDGER_PIN=0`. Also shipped recently: **CLI solo mode** (`/air:review --solo` — one agent, all six lenses, via your subscription at $0 API), and managed **diff hygiene + cost caps**. See the [improvement roadmap](../../docs/improvement-roadmap.md) for the full version history.
 
 ## What's New in v1.8.0
 
