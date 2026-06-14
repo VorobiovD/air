@@ -289,16 +289,17 @@ def test_managed_verdict_resolves_to_the_lib_implementation():
 
 # ---------------------------------------------------------------------------
 # PR 7 — re-review severity-pinning + narrow deferred-findings ledger.
-# The deterministic spine: parse_changed_lines / finding_changed /
-# extract_prior_finding_locations / build_carry_forward_ledger /
-# pin_and_resurrect. These make severity carry-forward + finding-persistence
-# a HARD gate guarantee; a regression here silently un-gates a drifted blocker
-# or lets a finding be hidden across re-review rounds.
+# The deterministic spine: build_carry_forward_ledger (pure number-identity) +
+# pin_and_resurrect. These make severity carry-forward + finding-persistence a
+# HARD gate guarantee; a regression here silently un-gates a drifted blocker or
+# lets a finding be hidden across re-review rounds. parse_changed_lines /
+# finding_changed are retained (reserved for a v2 stable-anchor path) and tested
+# below, but are NOT wired into the ledger — carried findings pin by number only.
 # ---------------------------------------------------------------------------
 from verdict import (  # noqa: E402
     parse_changed_lines,
     finding_changed,
-    extract_prior_finding_locations,
+    extract_fresh_findings,
     build_carry_forward_ledger,
     pin_and_resurrect,
     LedgerEntry,
@@ -397,22 +398,69 @@ def test_finding_changed_offset_oracle():
     assert finding_changed(("v/x.min.js", 1, 1), sidx) == INDETERMINATE
 
 
-def test_extract_prior_finding_locations():
+def test_extract_fresh_findings():
+    # A FRESH review body: severity comes from the enclosing section; Security
+    # Audit / Pre-existing / Strengths carry no gating severity and are skipped.
     body = (
-        "## Code Review\n\n### Blockers\n\n**1. SQLi**\n\n"
-        "[`db.py#L50`](https://github.com/o/r/blob/abcdef0123456789aa/db.py#L50) — bad\n\n"
-        "### Medium\n\n**2. perf**\n\n"
-        "[`q.py#L10-L15`](https://github.com/o/r/blob/abcdef0123456789aa/q.py#L10-L15) — slow\n\n"
-        "Reviewed at: abcdef0123456789aaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "## Code Review\n\nsummary\n\n### Security Audit: 30/31\n\n"
+        "### Blockers\n\n**1. SQLi**\n\n[`db.py#L50`] — bad\n\n"
+        "### Medium\n\n**2. perf**\n\n[`q.py#L10`] — slow\n\n"
+        "### Nits\n\n**3. typo**\n\n[`r.py#L1`] — minor\n\n"
+        "### Pre-existing Issues\n\n**4. legacy thing**\n\n[`old.py#L9`] — pre\n\n"
+        "### Strengths\n\n- good tests\n\nReviewed at: aaaa\n"
     )
-    locs = extract_prior_finding_locations(body, "abcdef0123456789aaaa")
-    assert locs == {1: ("db.py", 50, 50), 2: ("q.py", 10, 15)}
-    # stale/mismatched base SHA → all anchors discarded
-    assert extract_prior_finding_locations(body, "999999999999") == {}
-    # a body with no anchors (carried-forward status lines only) → empty
-    assert extract_prior_finding_locations(
-        "### Previous Findings Status\n- **#1** [blocker] — NOT FIXED — x\n", "abcdef0123456789aa"
-    ) == {}
+    fresh = extract_fresh_findings(body)
+    assert fresh == [(1, "blocker", "NOT FIXED"), (2, "medium", "NOT FIXED"),
+                     (3, "nit", "NOT FIXED")]  # #4 (pre-existing) skipped
+    # A re-review body (has a status block) is never passed here in practice;
+    # an empty body is a clean [].
+    assert extract_fresh_findings("") == []
+
+
+def test_round_two_fresh_prior_builds_nonempty_ledger():
+    # PR7 review #3 regression: a round-1 FRESH prior (no status block) must
+    # still produce a ledger so the FIRST re-review is guarded. Previously this
+    # returned [] (empty ledger → pin no-op → round-2 unprotected).
+    prior_fresh = (
+        "## Code Review\n\nsummary\n\n### Blockers\n\n**1. real blocker**\n\n"
+        "[`a.py#L5`] — x\n\n### Medium\n\n**2. perf**\n\n[`b.py#L9`] — y\n\n"
+        "Reviewed at: aaaa\n"
+    )
+    led = build_carry_forward_ledger(prior_fresh, "", "aaaa")
+    assert [(e.num, e.prior_severity, e.change) for e in led] == [
+        (1, "blocker", INDETERMINATE), (2, "medium", INDETERMINATE)]
+    # round-2 emitted body downgrades the blocker to low+FIXED on unchanged code
+    # → pin must restore blocker NOT FIXED and gate.
+    emitted = _rr_body("- **#1** [low] — FIXED — claims fixed",
+                       "- **#2** [low] — NOT FIXED — x")
+    pinned, log = pin_and_resurrect(emitted, led)
+    assert "[blocker]" in pinned and _gates(pinned)
+    assert any("#1 severity low->blocker" in l for l in log)
+
+
+def test_carried_finding_never_cross_wired_to_colliding_new_anchor():
+    # PR7 review #1 regression (the un-gate): a re-review prior body carries
+    # blocker #1 in its status block AND introduces a NEW finding **1.** whose
+    # line IS in the inter-diff. The carried #1's number must NOT resolve to the
+    # new finding's anchor and get marked CHANGED — it must stay INDETERMINATE
+    # (pinned) so a real carried blocker can never be silently un-gated.
+    prior = (
+        "## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+        "- **#1** [blocker] — NOT FIXED — carried blocker\n\n"
+        "### New Findings (introduced since last review)\n\n"
+        "**1. unrelated new thing**\n\n"
+        "[`app.py#L10`](https://github.com/o/r/blob/a1cdd87d3d00/app.py#L10) — x\n\n"
+        "Reviewed at: a1cdd87d3d00000000000000000000000000beef\n"
+    )
+    # The new finding's line (app.py:10) is changed in the inter-diff.
+    diff = ("diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
+            "@@ -10,1 +10,1 @@\n-old\n+new\n")
+    led = build_carry_forward_ledger(prior, diff, "a1cdd87d3d00")
+    assert all(e.change == INDETERMINATE for e in led)  # NOT CHANGED → pinned
+    # And it still gates: a downgrade on the carried blocker is reverted.
+    emitted = _rr_body("- **#1** [medium] — FIXED — drifted + fake-fixed")
+    pinned, _ = pin_and_resurrect(emitted, led)
+    assert "[blocker]" in pinned and _gates(pinned)
 
 
 # --- pin_and_resurrect: the gate-critical behaviors ---
@@ -510,17 +558,23 @@ def test_empty_ledger_is_verbatim_noop():
     assert out == body and log == []
 
 
-def test_sibling_ledger_is_number_identity_only():
-    # promote fast-path: prior body is a different PR's tree; anchors must NOT
-    # be line-mapped. A prior blocker still pins by #N.
+def test_ledger_is_always_number_identity_sibling_or_not():
+    # Carried findings pin by #N only — line evidence is NEVER consulted (sibling
+    # or not), so a `**N.**` anchor + colliding `- **#N**` status line in the
+    # SAME body can't cross-wire. The old test only checked sibling=True, which
+    # masked the sibling=False cross-wire (PR7 review #1); assert BOTH here.
     prior = (
-        "## Code Review\n\n### Blockers\n\n**1. x**\n\n"
-        "[`a.py#L9`](https://github.com/o/r/blob/deadbeef0000/a.py#L9) — y\n\n"
-        "### Previous Findings Status\n\n- **#1** [blocker] — NOT FIXED — x\n\n"
+        "## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+        "- **#1** [blocker] — NOT FIXED — carried\n\n"
+        "### New Findings (introduced since last review)\n\n**1. new**\n\n"
+        "[`foo.py#L50`](https://github.com/o/r/blob/deadbeef0000/foo.py#L50) — y\n\n"
         "Reviewed at: deadbeef0000000000000000000000000000beef\n"
     )
-    ledger = build_carry_forward_ledger(prior, _DIFF, "deadbeef0000", sibling=True)
-    assert all(e.change == INDETERMINATE for e in ledger)
+    # _DIFF changes foo.py L50 — the NEW finding's line. A line-evidence join
+    # would mark carried #1 CHANGED here; number-identity must keep it pinned.
+    for sib in (False, True):
+        ledger = build_carry_forward_ledger(prior, _DIFF, "deadbeef0000", sibling=sib)
+        assert all(e.change == INDETERMINATE for e in ledger), f"sibling={sib}"
 
 
 def test_pin_roundtrip_reparses_under_status_re():

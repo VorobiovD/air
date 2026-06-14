@@ -451,13 +451,19 @@ def _extract_review_body(raw_text: str, head_sha: str) -> tuple[str, bool]:
 # — the same move `has_conflict_markers` made (an advisory prompt rule becomes
 # an enforced gate rule).
 #
-# Spine = finding-NUMBER identity. The `### Previous Findings Status` lines
-# carry NO line anchor (anchors exist only on freshly-introduced findings, see
-# build_verifier_task), so a prior finding's severity + existence is an
-# attribute of its #N — carried forward verbatim, and re-opened for re-rating
-# / retirement ONLY on positive proof its code changed in the inter-diff.
-# Absent proof of change → pin. The guards can ONLY ever make the gate
+# Spine = finding-NUMBER identity, FULL STOP. The `### Previous Findings Status`
+# lines carry NO line anchor (anchors exist only on freshly-introduced findings,
+# see build_verifier_task), and the only `**N.**` anchors in a re-review body
+# belong to NEW findings whose numbers RESTART at 1 and collide with carried #N.
+# So a prior finding's severity + existence is an attribute of its #N — carried
+# forward verbatim, NEVER re-opened by line evidence (any such join cross-wires;
+# see build_carry_forward_ledger). The guards can ONLY ever make the gate
 # STRICTER on prior findings; they can never un-gate.
+#
+# `parse_changed_lines` / `finding_changed` / `ChangedIndex` below are CORRECT,
+# general diff utilities but are NOT wired into the ledger today — they are
+# reserved for a future v2 that threads a STABLE per-finding anchor across
+# rounds (the only way line evidence becomes safe for carried findings).
 # ---------------------------------------------------------------------------
 
 # Mirror of managed/github_client.py diff-hygiene markers. verdict.py is the
@@ -574,34 +580,56 @@ def finding_changed(loc, index: ChangedIndex) -> str:
     return CHANGED if any(n in changed for n in range(start, end + 1)) else UNCHANGED
 
 
-# Anchor on freshly-introduced findings only: `**N. ...` then a
-# `[`<file>#L<s>`](https://.../blob/<sha>/<file>#L<s>(-L<e>)?)` link. Carried-
-# forward findings have no anchor — they fall to number-identity pinning.
-_FINDING_NUM_RE = re.compile(r"^\*\*(\d+)\.", re.MULTILINE)
-_BLOB_ANCHOR_RE = re.compile(r"/blob/([0-9a-fA-F]+)/(\S+?)#L(\d+)(?:-L(\d+))?")
+# A FRESH review numbers its findings sequentially across severity sections as
+# `**N. title**`, and round-1's numbers are carried forward STABLY into later
+# rounds' `### Previous Findings Status` block (verified on real chains). The
+# `\s` after the dot keeps this from matching a carried `- **#N** [sev]` status
+# line (which starts with `- `, never `**N. `).
+_FRESH_FINDING_RE = re.compile(r"^\*\*(\d+)\.\s", re.MULTILINE)
+_SECTION_HEADER_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
 
 
-def extract_prior_finding_locations(body: str, base_sha: str) -> dict:
-    """Opportunistic {finding_num: (file, start, end)} from a prior body's
-    NEW-finding anchors. Requires the blob SHA to 12-char-prefix-match
-    base_sha (the inter-diff base), discarding stale/quoted anchors. Returns
-    only the (usually few) findings introduced in the prior round; everything
-    older has no anchor → absent → number-identity pin."""
-    out: dict = {}
-    if not body or not base_sha:
-        return out
-    prefix = base_sha.lower()[:_SHA_PREFIX_LEN]
-    nums = list(_FINDING_NUM_RE.finditer(body))
-    for i, nm in enumerate(nums):
-        num = int(nm.group(1))
-        seg_end = nums[i + 1].start() if i + 1 < len(nums) else len(body)
-        for am in _BLOB_ANCHOR_RE.finditer(body, nm.end(), seg_end):
-            if am.group(1).lower()[:_SHA_PREFIX_LEN] != prefix:
-                continue
-            s = int(am.group(3))
-            e = int(am.group(4)) if am.group(4) else s
-            out[num] = (am.group(2), s, e)
-            break
+def _section_severity(name: str):
+    """Map a `### <Section>` header to a gating severity, or None for sections
+    whose `**N.**` entries don't carry one — Security Audit / Pre-existing /
+    Strengths / Related PRs are skipped by extract_fresh_findings (non-gating)."""
+    n = name.strip().lower()
+    for prefix, sev in (("blocker", "blocker"), ("medium", "medium"),
+                        ("low", "low"), ("nit", "nit")):
+        if n.startswith(prefix):
+            return sev
+    return None
+
+
+def extract_fresh_findings(body: str) -> list:
+    """Enumerate a FRESH review body's findings as `(num, severity, "NOT FIXED")`,
+    severity taken from the enclosing `### <severity>` section.
+
+    This is what closes the round-1 → round-2 gap: a fresh prior body has NO
+    `### Previous Findings Status` block, so `extract_prior_statuses` returns []
+    and — before this — the FIRST (and most common) re-review built an empty
+    ledger and skipped the pin entirely. Numbers are sequential across sections
+    and match the next round's carried `#N`. Pre-existing / Strengths /
+    Security-Audit / Related-PRs sections carry no gating severity and are
+    skipped. Only ever called on a fresh body (no status block), so it never
+    sees the carried-vs-new number collision that afflicts a re-review body."""
+    if not body:
+        return []
+    headers = [
+        (m.start(), _section_severity(m.group(1)))
+        for m in _SECTION_HEADER_RE.finditer(body)
+    ]
+    out = []
+    for fm in _FRESH_FINDING_RE.finditer(body):
+        pos = fm.start()
+        sev = None
+        for hpos, hsev in headers:
+            if hpos >= pos:
+                break
+            sev = hsev
+        if sev is None:
+            continue
+        out.append((int(fm.group(1)), sev, "NOT FIXED"))
     return out
 
 
@@ -618,22 +646,33 @@ class LedgerEntry:
 
 def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
                                *, sibling: bool = False) -> list:
-    """One LedgerEntry per prior finding (keyed on #N from
-    extract_prior_statuses — anchorless-safe). `sibling=True` (promote
-    fast-path: prior is a different PR's tree) forces every entry to
-    number-identity-only (INDETERMINATE), discarding line evidence. Empty
-    list in fresh mode → all consumers no-op."""
+    """One LedgerEntry per prior finding, keyed on #N, ALWAYS number-identity
+    (`change=INDETERMINATE`).
+
+    Carried findings (`### Previous Findings Status`) have NO line anchor of
+    their own. The only `**N.**` anchors in a re-review body belong to that
+    round's NEW findings — whose numbers RESTART at 1 and therefore COLLIDE with
+    carried `#N` (verified on real chains). Joining the two on the bare integer
+    would cross-wire a carried blocker to an unrelated finding's diff state and
+    could mark it CHANGED → un-pinned, defeating the whole guarantee. So line
+    evidence is deliberately NOT used here: carried pinning is purely by number,
+    matching CLAUDE.md's documented "pin by number not line — over-conservative."
+    (`parse_changed_lines` / `finding_changed` are retained for a future v2 that
+    carries a STABLE per-finding anchor; `inter_diff` / `base_sha` stay in the
+    signature for that v2 and for call-site stability — both are unused today.)
+
+    Falls back to the prior body's FRESH findings when it has no status block —
+    the round-1 → round-2 transition (the first and most common re-review),
+    previously an empty-ledger no-op. `sibling=True` (promote fast-path: a
+    different PR's tree) skips the fresh fallback and pins only an existing
+    status block by number. Empty list when there's nothing to carry → no-op."""
     triples = extract_prior_statuses(prior_body)
+    if not triples and not sibling:
+        triples = extract_fresh_findings(prior_body)
     if not triples:
         return []
-    locations = {} if sibling else extract_prior_finding_locations(prior_body, base_sha or "")
-    index = parse_changed_lines(inter_diff or "")
-    ledger = []
-    for num, sev, status in triples:
-        loc = locations.get(num)
-        change = INDETERMINATE if (sibling or loc is None) else finding_changed(loc, index)
-        ledger.append(LedgerEntry(num, sev, status, loc, change))
-    return ledger
+    return [LedgerEntry(num, sev, status, None, INDETERMINATE)
+            for num, sev, status in triples]
 
 
 # Same shape/enums as _PRIOR_STATUS_RE but with a trailing-tail capture so the
