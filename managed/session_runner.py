@@ -858,7 +858,20 @@ async def run_session(
     if terminated_reason is None:
         LIVE_SESSIONS.discard(session.id)
 
-    output = "".join(parts).strip()
+    # Join with a newline, NOT "" — each `parts` entry is a complete
+    # agent.message text block (sub-agent forwards AND the coordinator's own
+    # voice, interleaved). On the GA multiagent runtime these arrive as
+    # separate events with NO `<agent-notification>` wrapper, so `_extract_
+    # review_body`'s tag-flattening can't insert a line break for it. With ""
+    # the coordinator's `## Code Review` header concatenates onto the tail of
+    # the prior block and is NOT line-start, demoting it below any later
+    # mid-line `## Code Review` the body quotes (e.g. a finding discussing the
+    # selector) — the posted comment then starts mid-finding and DROPS the
+    # head, which on a fresh review also drops a leading `### Blockers` section
+    # from the gate (silent fail-open). A separator guarantees every block-
+    # leading header is line-start; an extra blank line between blocks is inert
+    # for every downstream consumer.
+    output = "\n".join(parts).strip()
     if terminated_reason and not output:
         raise SpecialistSessionError(label, terminated_reason)
     if require_dispatch and not threads.ever_dispatched:
