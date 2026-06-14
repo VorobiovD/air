@@ -373,11 +373,17 @@ def test_parse_changed_lines_stub_and_truncation():
 
 
 def test_finding_changed_matrix():
+    # HUNK-LEVEL: a finding whose line falls inside an edited hunk's old-side
+    # window reads CHANGED — so additive/refactor fixes that touch the region
+    # (but not the flagged line itself) are HONORED, not over-gated. A line
+    # outside every hunk reads UNCHANGED.
     idx = parse_changed_lines(_DIFF)
-    assert finding_changed(("foo.py", 50, 50), idx) == CHANGED       # modified line
-    assert finding_changed(("foo.py", 48, 48), idx) == UNCHANGED     # context above
-    assert finding_changed(("foo.py", 48, 52), idx) == CHANGED       # span includes 50
-    assert finding_changed(("mid.py", 10, 11), idx) == UNCHANGED     # pure insertion nearby
+    assert finding_changed(("foo.py", 50, 50), idx) == CHANGED       # the `-` line
+    assert finding_changed(("foo.py", 48, 48), idx) == CHANGED       # context INSIDE the hunk (48-51)
+    assert finding_changed(("foo.py", 47, 47), idx) == UNCHANGED     # just OUTSIDE the hunk → pin
+    assert finding_changed(("foo.py", 48, 52), idx) == CHANGED       # span overlaps the hunk
+    assert finding_changed(("mid.py", 10, 11), idx) == CHANGED       # insertion hunk spans old 10-11
+    assert finding_changed(("mid.py", 99, 99), idx) == UNCHANGED     # outside any hunk
     assert finding_changed(("bar.py", 5, 5), idx) == CHANGED         # renamed file
     assert finding_changed(("other.py", 1, 1), idx) == UNCHANGED     # absent → pin
     assert finding_changed(None, idx) == INDETERMINATE               # no location
@@ -436,6 +442,54 @@ def test_round_two_fresh_prior_builds_nonempty_ledger():
     pinned, log = pin_and_resurrect(emitted, led)
     assert "[blocker]" in pinned and _gates(pinned)
     assert any("#1 severity low->blocker" in l for l in log)
+
+
+_R2_SHA = "aaaa000000000000000000000000000000000000"
+_R2_PRIOR = (
+    "## Code Review\n\n### Blockers\n\n**1. sql injection**\n\n"
+    "[`db.py#L5`](https://github.com/o/r/blob/aaaa00000000/db.py#L5) — bad\n\n"
+    "Reviewed at: " + _R2_SHA + "\n"
+)
+
+
+def test_round_two_honors_real_fix_via_line_evidence():
+    # Round-2 (fresh prior) USES line evidence — safe here (no carried-vs-new
+    # collision). A round-1 blocker the dev actually fixed (its region edited in
+    # the inter-diff, even additively) reads CHANGED → the verifier's FIXED is
+    # HONORED → NO false block. This is what fixed the ~70% round-2 over-gating.
+    diff = ("diff --git a/db.py b/db.py\n--- a/db.py\n+++ b/db.py\n"
+            "@@ -3,5 +3,7 @@\n ctx\n ctx\n+    guard()\n+    validate()\n cur.execute(q)\n ctx\n ctx\n")
+    led = build_carry_forward_ledger(_R2_PRIOR, diff, "aaaa00000000")
+    assert [e.change for e in led] == [CHANGED]   # line 5 is inside the edited hunk (3-7)
+    emitted = _rr_body("- **#1** [blocker] — FIXED — parameterized + guarded")
+    pinned, log = pin_and_resurrect(emitted, led)
+    assert "FIXED" in pinned and not _gates(pinned)          # honored, no false block
+    assert not any("FIXED->NOT FIXED" in l for l in log)
+
+
+def test_round_two_catches_fake_fix_on_untouched_file():
+    # The dev touched a DIFFERENT file; the flagged file is untouched → UNCHANGED
+    # → a claimed FIXED is rewritten to NOT FIXED and gates (the real protection
+    # the round-2 line evidence must NOT lose).
+    diff = ("diff --git a/other.py b/other.py\n--- a/other.py\n+++ b/other.py\n"
+            "@@ -1,1 +1,1 @@\n-a\n+b\n")
+    led = build_carry_forward_ledger(_R2_PRIOR, diff, "aaaa00000000")
+    assert [e.change for e in led] == [UNCHANGED]
+    emitted = _rr_body("- **#1** [blocker] — FIXED — claims fixed")
+    pinned, _ = pin_and_resurrect(emitted, led)
+    assert "NOT FIXED" in pinned and _gates(pinned)
+
+
+def test_bold_status_parses_and_rewrites_cleanly():
+    # The verifier sometimes emits `— **FIXED**` (bold). It must parse as FIXED
+    # (else the finding reads absent and is falsely resurrected — the real
+    # ai-relay#249 false block), and a rewrite must produce a canonical
+    # `— STATUS — rationale` with no orphan `**`.
+    body = _rr_body("- **#1** [blocker] — **FIXED** — done at db.py:5")
+    assert (1, "blocker", "FIXED") in extract_prior_statuses(body)
+    pinned, _ = pin_and_resurrect(body, [_ledger_entry(1, "blocker", "NOT FIXED")])
+    assert "— NOT FIXED — done at db.py:5" in pinned
+    assert "FIXED**" not in pinned and "**FIXED" not in pinned
 
 
 def test_carried_finding_never_cross_wired_to_colliding_new_anchor():
