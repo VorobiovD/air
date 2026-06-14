@@ -120,6 +120,49 @@ def test_wrong_sha_still_rejected():
     assert ok is False
 
 
+def test_real_header_beats_midtext_code_review_quote():
+    """A finding that QUOTES `## Code Review` mid-sentence (preceded by a quote,
+    not a backtick, so the lookbehind misses it) must NOT beat the real
+    line-start header. The full review extracts head-first — the #158 dogfood
+    truncation, where the posted comment started mid-finding and dropped the
+    leading Blockers section."""
+    raw = (
+        "## Code Review\n\n"
+        "### Blockers\n\n**1. real blocker** — must not be dropped\n\n"
+        "### Medium\n\n**5. spoofable selection** — the code uses "
+        "`startswith('## Code Review')` with no identity filter\n\n"
+        f"Reviewed at: {HEAD}\n"
+    )
+    body, ok = _extract_review_body(raw, HEAD)
+    assert ok is True
+    assert body.startswith("## Code Review\n")   # full review, header-first
+    assert "real blocker" in body                # head NOT truncated
+    assert "**5." in body                        # tail present too
+
+
+def test_ma_output_join_keeps_review_header_line_start():
+    """Regression for the GA multiagent truncation (session_runner output
+    assembly, :861). Sub-agent forwards and the coordinator's review arrive as
+    SEPARATE agent.message blocks with no `<agent-notification>` wrapper to
+    flatten. Joined with "" the review header concatenates onto the prior
+    block's tail (NOT line-start) and loses to a later mid-text `## Code Review`
+    quote — dropping the head, and on a fresh review a leading Blockers section
+    from the gate. The newline join guarantees a line-start header."""
+    parts = [
+        "verifier thread: consolidated findings; review follows",  # no trailing \n
+        ("## Code Review\n\n### Blockers\n\n**1. real blocker** — keep me\n\n"
+         "### Medium\n\n**5. x** — uses `startswith('## Code Review')`\n\n"
+         f"Reviewed at: {HEAD}\n"),
+    ]
+    # Without the separator the header is not line-start → truncates (the bug).
+    buggy, _ = _extract_review_body("".join(parts), HEAD)
+    assert not buggy.startswith("## Code Review\n")
+    # With it (the fixed session_runner join) the full review extracts intact.
+    fixed, ok = _extract_review_body("\n".join(parts), HEAD)
+    assert ok is True
+    assert fixed.startswith("## Code Review\n") and "real blocker" in fixed
+
+
 # ---------------------------------------------------------------------------
 # R1 — GitHub HTTP discipline
 # ---------------------------------------------------------------------------
