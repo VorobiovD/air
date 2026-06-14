@@ -483,7 +483,7 @@ def test_round_two_catches_fake_fix_on_untouched_file():
 def test_bold_status_parses_and_rewrites_cleanly():
     # The verifier sometimes emits `— **FIXED**` (bold). It must parse as FIXED
     # (else the finding reads absent and is falsely resurrected — the real
-    # ai-relay#249 false block), and a rewrite must produce a canonical
+    # repo-C #249 false block), and a rewrite must produce a canonical
     # `— STATUS — rationale` with no orphan `**`.
     body = _rr_body("- **#1** [blocker] — **FIXED** — done at db.py:5")
     assert (1, "blocker", "FIXED") in extract_prior_statuses(body)

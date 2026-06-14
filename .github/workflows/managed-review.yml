@@ -92,8 +92,10 @@ on:
         description: |
           Optional JSON map pinning agent versions, e.g.
           '{"air-code-reviewer": N, "air-simplify": N, "air-security-auditor": N,
-            "air-git-history-reviewer": N, "air-review-verifier": N, "air-coordinator": N}'
-          with N taken from the target air release's notes.
+            "air-git-history-reviewer": N, "air-ui-copy-reviewer": N,
+            "air-review-verifier": N, "air-coordinator": N}'
+          with N taken from the target air release's notes. Pin the WHOLE blessed
+          set — setup.py aborts if air-coordinator is pinned but a specialist isn't.
           Pinned agents skip prompt sync entirely and sessions reference the
           pinned version — work repos pin the blessed set published in each
           air release's notes and bump deliberately; leave empty to float on

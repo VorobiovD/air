@@ -1,6 +1,6 @@
 ---
 description: Automated code review with verification, pattern learning, and team knowledge — review PRs, self-check before pushing, or track fixes across iterations
-argument-hint: [<pr-number-or-url>] [--self] [--fix] [--fresh] [--rewrite] [--re-review] [--respond] [--full] [--closed] [--no-codex] [--dry-run]
+argument-hint: [<pr-number-or-url>] [--self] [--fix] [--fresh] [--rewrite] [--re-review] [--respond] [--solo] [--gate] [--full] [--closed] [--no-codex] [--dry-run]
 ---
 
 Review code using specialized agents. If a PR number is given, review that PR. If no arguments, auto-detect: review the current branch's PR if one exists, or self-review local changes if not.
@@ -578,7 +578,7 @@ Two-dot (`..`) gives the direct range from old SHA to new SHA — exactly what c
 
 **If the inter-diff is empty (0 lines):** the developer made no changes since the last review. Do NOT fall through to a full review. Instead:
 - If `REVIEWED_AT_SHA` == `headRefOid`: print "Already reviewed at <SHA> — no changes since. Use --fresh for full re-review." and STOP.
-- If SHAs differ but diff is still empty (possible with merge commits that don't change PR files): classify all previous findings as NOT FIXED and post a re-review status update without launching agents. Skip to Step 10 (Post).
+- If SHAs differ but diff is still empty (possible with merge commits that don't change PR files): classify all previous findings as NOT FIXED and post a re-review status update without launching agents. Skip to Step 11 (Format and Write) — it flows through Step 11.5 (pin) to Step 12 (Post).
 
 If the command fails (cross-repo, SHA not available locally):
 ```bash
