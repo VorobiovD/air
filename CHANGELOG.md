@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.32.0](https://github.com/VorobiovD/air/compare/v1.31.0...v1.32.0) (2026-06-14)
+
+
+### Features
+
+* deterministic re-review severity-pin + deferred-findings ledger ([#158](https://github.com/VorobiovD/air/issues/158)) ([612bfa6](https://github.com/VorobiovD/air/commit/612bfa67bf3352ced6e62f5446852c9dcc2d0fa7))
+
+
+### Bug Fixes
+
+* honor real round-2 fixes with hunk-level line evidence ([#162](https://github.com/VorobiovD/air/issues/162)) ([adf3346](https://github.com/VorobiovD/air/commit/adf33463e9ba66917a23865dc2bf9be903f5fbfd))
+* join multiagent session output blocks with newlines ([#160](https://github.com/VorobiovD/air/issues/160)) ([4f055d2](https://github.com/VorobiovD/air/commit/4f055d2a936cfcbee2cb0823ff4fd4b6d57099f1))
+* re-review ledger — number-identity pinning + round-2 coverage ([#161](https://github.com/VorobiovD/air/issues/161)) ([2917d5f](https://github.com/VorobiovD/air/commit/2917d5f9f75bc9ca6189465ec895d76de0a632f1))
+
 ## [1.31.0](https://github.com/VorobiovD/air/compare/v1.30.0...v1.31.0) (2026-06-13)
 
 
