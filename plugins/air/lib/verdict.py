@@ -239,11 +239,21 @@ _BLOCKER_ENTRY_RE = re.compile(r"^\*\*\d+\.", re.MULTILINE)
 # Capture groups (1-indexed): 1=finding-number, 2=severity (or None),
 # 3=status. Both `_count_gating_unfixed` and `extract_prior_statuses`
 # read this regex — keep one pattern, both call sites in lockstep.
+# Shared status/severity alternation fragments — the FROZEN gate enum. BOTH
+# _PRIOR_STATUS_RE (the parse/gate contract) and _PRIOR_STATUS_LINE_RE (the
+# rewrite sibling, defined far below) build their groups from these, so a status
+# can never be added to one regex but silently missed by the other — the drift
+# footgun that would let a new status escape rewrite+`seen` and get a finding
+# spuriously resurrected. The literal status alternation lives here (Check E and
+# a cross-regex test both pin it). Editing the enum is editing the gate contract.
+_STATUS_ALT = r"FIXED|NOT\s+FIXED|PARTIALLY\s+FIXED|DEFERRED|DISPUTED"
+_SEVERITY_ALT = r"blocker|medium|low|nit"
+
 _PRIOR_STATUS_RE = re.compile(
     r"^-\s+\*\*#(\d+)\*\*"
-    r"(?:\s*\[(blocker|medium|low|nit)\])?"
+    rf"(?:\s*\[({_SEVERITY_ALT})\])?"
     r"\s+—\s+"
-    r"(FIXED|NOT\s+FIXED|PARTIALLY\s+FIXED|DEFERRED|DISPUTED)\b",
+    rf"({_STATUS_ALT})\b",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -628,19 +638,28 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
 
 # Same shape/enums as _PRIOR_STATUS_RE but with a trailing-tail capture so the
 # rationale survives a rewrite. _PRIOR_STATUS_RE stays frozen (the gate/parse
-# contract); this is the rewrite-only sibling.
+# contract); this is the rewrite-only sibling. Both build their severity/status
+# groups from the SHARED `_SEVERITY_ALT`/`_STATUS_ALT` fragments so they can
+# never drift apart on the enum (PR7 review #8 — a status added to the gate
+# regex but missed here would escape rewrite+`seen` and spuriously resurrect).
 _PRIOR_STATUS_LINE_RE = re.compile(
     r"^-\s+\*\*#(\d+)\*\*"
-    r"(?:\s*\[(blocker|medium|low|nit)\])?"
+    rf"(?:\s*\[({_SEVERITY_ALT})\])?"
     r"\s+—\s+"
-    r"(FIXED|NOT\s+FIXED|PARTIALLY\s+FIXED|DEFERRED|DISPUTED)\b"
+    rf"({_STATUS_ALT})\b"
     r"(.*)$",
     re.MULTILINE | re.IGNORECASE,
 )
 
 
 def _section_end(body: str, from_idx: int) -> int:
-    m = re.search(r"^#{2,4}\s", body[from_idx:], re.MULTILINE)
+    # Stop at the next markdown header OR the `Reviewed at:` footer line,
+    # whichever comes first. The footer is not a header, so without it
+    # resurrected entries would be appended AFTER the footer when `Previous
+    # Findings Status` is the last section — gating still works (the status
+    # regex is MULTILINE) but the posted comment reads as malformed, with the
+    # timestamp stranded mid-section (PR7 review #6).
+    m = re.search(r"^(?:#{2,4}\s|Reviewed at:)", body[from_idx:], re.MULTILINE)
     return from_idx + m.start() if m else len(body)
 
 
@@ -700,7 +719,15 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
                 log.append(f"[pin] #{num} severity {emitted_sev}->{new_sev} "
                            f"(pinned to prior; change={entry.change})")
         new_status = status
-        if status == "FIXED" and entry.change != CHANGED:
+        # FIXED on non-CHANGED code is the hide-a-finding rewrite — but only
+        # ENFORCE it for gate-relevant severities (medium+). Severity is already
+        # pinned to max(prior, emitted) above, so a laundered blocker can't hide
+        # behind a low/nit tag; a genuinely low/nit finding never gates, so
+        # trusting its explicit FIXED just avoids needless re-open noise on long
+        # chains. (Resurrection of a SILENTLY-dropped finding is unaffected — an
+        # absent finding is suspicious regardless of severity; only an explicit
+        # FIXED is trusted here.)
+        if status == "FIXED" and entry.change != CHANGED and _SEVERITY_RANK.get(new_sev, 3) >= 2:
             new_status = "NOT FIXED"
             log.append(f"[pin] #{num} FIXED->NOT FIXED (no code change; change={entry.change})")
         elif status == "DEFERRED":

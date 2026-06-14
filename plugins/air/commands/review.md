@@ -900,16 +900,14 @@ This is the CLI half of the shared carry-forward guarantee (`lib/verdict.py:pin_
 
 Disabled by `AIR_LEDGER_PIN=0` (the same kill switch managed reads) — if set, skip this step.
 
-1. Write the PRIOR review body to a file (the ledger's prior-state input). Re-fetch it cleanly rather than echoing the cached `REVIEW_COMMENT_BODY` shell variable — comment bodies contain newlines/control chars that corrupt in shell vars (same reason Step 2 pipes `.body` straight to a parser):
+1. Write the PRIOR review body to a file (the ledger's prior-state input). **Fetch the exact comment Step 2/6 already selected, by its `REVIEW_COMMENT_ID`** — do NOT re-run a `startswith('## Code Review')` scan here. A fresh unscoped scan that takes `prior[-1]` is a spoofable control-plane sink: anyone who can comment on the PR could post a later `## Code Review`-prefixed body and win the selection, poisoning the deterministic gate (pre-mark blockers `FIXED`, or inject `[blocker] — NOT FIXED` lines). Keying on the ID Step 2/6 resolved means the ledger uses the *same* prior body the rest of the re-review is built on — no second, divergent selection. (Hardening the shared Step 2/6/12 selectors to bot-identity scoping is a separate, repo-wide follow-up.) Fetch by ID straight to the file — comment bodies contain newlines/control chars that corrupt in shell vars, so never echo the cached `REVIEW_COMMENT_BODY`:
 ```bash
-gh api repos/<owner>/<repo>/issues/<number>/comments 2>/dev/null | python3 -c "
-import json, sys
-comments = json.loads(sys.stdin.buffer.read())
-prior = [c for c in comments if c['body'].startswith('## Code Review')]
-sys.stdout.write(prior[-1]['body'] if prior else '')
-" > $AIR_TMP/prior-body-<number>.md
+if [ -n "${REVIEW_COMMENT_ID:-}" ]; then
+  gh api repos/<owner>/<repo>/issues/comments/$REVIEW_COMMENT_ID --jq '.body' \
+    > $AIR_TMP/prior-body-<number>.md 2>/dev/null
+fi
 ```
-If the file is empty (no prior comment), skip Step 11.5 — there is nothing to pin against.
+If `REVIEW_COMMENT_ID` is unset or the file is empty (no prior comment), skip Step 11.5 — there is nothing to pin against.
 
 2. Generate the **three-dot** ledger inter-diff. This deliberately differs from Step 6's two-dot review diff: the ledger's CHANGED/UNCHANGED determination must match managed's exactly, and managed computes it from GitHub's three-dot compare (`<base>...<head>`). Three-dot here aligns the CLI ledger's "what moved" map with managed's; the agents still review the two-dot diff from Step 6 (unchanged — only the ledger uses this diff):
 ```bash
@@ -917,21 +915,27 @@ git diff <REVIEWED_AT_SHA>...<headRefOid> > $AIR_TMP/ledger-diff-<number>.diff 2
 ```
 If this fails or produces nothing (cross-repo fallback, SHA not local): skip Step 11.5. Print "Step 11.5: ledger inter-diff unavailable — severity-pin skipped (no-op)." Number-identity pinning still needs both the prior body AND a parseable diff, so a missing diff is a clean no-op (the un-pinned body posts; the verdict is computed the pre-PR7 way).
 
-3. Pipe the formatted body through `verdict.py --pin`, inside the same `$AIR_PLUGIN_ROOT` guard Step 12 uses (an empty variable must take the no-op branch, not expand to `python3 "/lib/verdict.py"`). Redirect stdout straight to a file (no command substitution — that strips the trailing newline and would break byte-parity with the parser); `mv` over the original only on success:
+3. Pipe the formatted body through `verdict.py --pin`, inside the same `$AIR_PLUGIN_ROOT` guard Step 12 uses (an empty variable must take the no-op branch, not expand to `python3 "/lib/verdict.py"`). Redirect stdout straight to a file (no command substitution — that strips the trailing newline and would break byte-parity with the parser); `mv` over the original only on success. **A non-zero exit must fail LOUD**, not silently revert to the un-pinned body — otherwise the "HARD deterministic guarantee" would silently degrade to advisory-only and Step 12 would gate on un-pinned content with no signal. Distinguish that failure from the clean disabled/missing-input skip:
 ```bash
 if [ "${AIR_LEDGER_PIN:-1}" != "0" ] \
    && [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/verdict.py" ] \
    && [ -s "$AIR_TMP/prior-body-<number>.md" ] && [ -s "$AIR_TMP/ledger-diff-<number>.diff" ]; then
-  python3 "$AIR_PLUGIN_ROOT/lib/verdict.py" --pin \
-    --prior-body "$AIR_TMP/prior-body-<number>.md" \
-    --inter-diff "$AIR_TMP/ledger-diff-<number>.diff" \
-    --base-sha "<REVIEWED_AT_SHA>" \
-    < "$AIR_TMP/review-comment.md" \
-    > "$AIR_TMP/review-comment.pinned.md" 2> "$AIR_TMP/pin-log-<number>.txt" \
-    && mv "$AIR_TMP/review-comment.pinned.md" "$AIR_TMP/review-comment.md"
-  # Surface the [pin]/[ledger] log lines to the operator console (mirrors
-  # managed's stderr prints; never in the PR comment).
-  [ -s "$AIR_TMP/pin-log-<number>.txt" ] && cat "$AIR_TMP/pin-log-<number>.txt" >&2
+  if python3 "$AIR_PLUGIN_ROOT/lib/verdict.py" --pin \
+       --prior-body "$AIR_TMP/prior-body-<number>.md" \
+       --inter-diff "$AIR_TMP/ledger-diff-<number>.diff" \
+       --base-sha "<REVIEWED_AT_SHA>" \
+       < "$AIR_TMP/review-comment.md" \
+       > "$AIR_TMP/review-comment.pinned.md" 2> "$AIR_TMP/pin-log-<number>.txt"; then
+    mv "$AIR_TMP/review-comment.pinned.md" "$AIR_TMP/review-comment.md"
+    # Surface the [pin]/[ledger] log lines to the operator console (mirrors
+    # managed's stderr prints; never in the PR comment).
+    [ -s "$AIR_TMP/pin-log-<number>.txt" ] && cat "$AIR_TMP/pin-log-<number>.txt" >&2
+  else
+    # Pin crashed (non-zero exit). Do NOT post the un-pinned body silently —
+    # the carry-forward guarantee would be lost with no operator signal.
+    echo "Step 11.5: WARNING — severity-pin FAILED (non-zero exit); the carry-forward guarantee is NOT applied this run — Step 12 will gate on the UN-PINNED body. See pin-log:" >&2
+    cat "$AIR_TMP/pin-log-<number>.txt" >&2
+  fi
 else
   echo "Step 11.5: severity-pin skipped (no-op) — disabled, or missing plugin root / prior body / ledger diff." >&2
 fi

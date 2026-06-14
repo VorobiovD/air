@@ -597,6 +597,94 @@ def test_cli_pin_noop_without_inputs():
     assert _run_pin(body) == body  # no --prior-body/--inter-diff → verbatim
 
 
+# --- PR7 dogfood-review hardening (review #5-#9 + the low/nit noise-reducer) ---
+
+def test_low_nit_fixed_on_unchanged_kept():
+    # The noise-reducer: a genuinely low/nit finding marked FIXED on unchanged
+    # code is TRUSTED (kept FIXED) — it never gates, and severity is pinned
+    # first so a laundered blocker can't hide behind a low tag. Avoids needless
+    # re-open noise on long chains.
+    for sev in ("low", "nit"):
+        body = _rr_body(f"- **#1** [{sev}] — FIXED — small, done")
+        out, log = pin_and_resurrect(body, [_ledger_entry(1, sev, "NOT FIXED")])
+        assert "FIXED" in out and "NOT FIXED" not in out  # left as FIXED
+        assert not _gates(out)
+        assert not any("FIXED->NOT FIXED" in l for l in log)
+
+
+def test_medium_fixed_on_unchanged_still_rewritten():
+    # The reducer must NOT relax gate-relevant severities: a medium FIXED on
+    # unchanged code is still rewritten to NOT FIXED.
+    body = _rr_body("- **#1** [medium] — FIXED — claims done")
+    out, log = pin_and_resurrect(body, [_ledger_entry(1, "medium", "NOT FIXED")])
+    assert "NOT FIXED" in out
+    assert any("FIXED->NOT FIXED" in l for l in log)
+
+
+def test_low_dropped_finding_still_resurrected():
+    # Asymmetry by design: the reducer trusts an EXPLICIT low/nit FIXED, but a
+    # SILENTLY-dropped finding is suspicious at any severity — still resurrected.
+    body = _rr_body("- **#9** [nit] — NOT FIXED — unrelated")
+    out, log = pin_and_resurrect(body, [_ledger_entry(1, "low", "NOT FIXED"),
+                                        _ledger_entry(9, "nit", "NOT FIXED")])
+    assert "**#1**" in out
+    assert any("#1 resurrected" in l for l in log)
+
+
+def test_prior_status_line_re_shares_enum_with_gate_re():
+    # PR7 review #8: the rewrite regex and the frozen gate regex must accept the
+    # EXACT same status/severity tokens (they derive from the shared fragments),
+    # so a status added to one can never be silently missed by the other.
+    import verdict as v
+    for status in ("FIXED", "NOT FIXED", "PARTIALLY FIXED", "DEFERRED", "DISPUTED"):
+        line = f"- **#1** [blocker] — {status} — rationale"
+        assert v._PRIOR_STATUS_RE.search(line), status
+        assert v._PRIOR_STATUS_LINE_RE.search(line), status
+    for bogus in ("- **#1** [blocker] — WONTFIX — x", "- **#1** [critical] — FIXED — x"):
+        assert not v._PRIOR_STATUS_RE.search(bogus)
+        assert not v._PRIOR_STATUS_LINE_RE.search(bogus)
+
+
+def test_diff_markers_match_github_client_producers():
+    # PR7 review #8: verdict.py hand-copies the diff-hygiene markers from
+    # github_client.py (a stdlib-only lib can't import managed). Assert they
+    # stay in lockstep with the actual PRODUCER output — a marker rename in
+    # github_client must not silently make parse_changed_lines miss stubbed /
+    # truncated segments.
+    import github_client as gc
+    import verdict as v
+    assert v._DIFF_TRUNCATION_MARKER == gc.DIFF_TRUNCATION_MARKER
+    raw = ("diff --git a/x.min.js b/x.min.js\n--- a/x.min.js\n+++ b/x.min.js\n"
+           "@@ -1 +1 @@\n-a\n+b\n")
+    stubbed = gc.apply_diff_hygiene(raw)
+    assert v._DIFF_STUB_RE.search(stubbed), f"stub regex no longer matches producer: {stubbed!r}"
+
+
+def test_malformed_prior_body_parse_robustness():
+    # PR7 review #9: trailing whitespace + lowercase status ARE tolerated (the
+    # gate regex is IGNORECASE and collapses whitespace). A non-em-dash
+    # separator is OUT of contract — pinned bodies always use U+2014, so this
+    # documents the boundary (an attacker-injected en-dash is the #5 spoof
+    # vector, handled by fetching the prior body by trusted comment id).
+    ok = _rr_body("- **#1** [blocker] — not fixed   ")
+    assert (1, "blocker", "NOT FIXED") in extract_prior_statuses(ok)
+    endash = _rr_body("- **#1** [blocker] – NOT FIXED – x")  # U+2013 en-dash
+    assert not any(n == 1 for n, _, _ in extract_prior_statuses(endash))
+
+
+def test_resurrected_findings_land_before_footer():
+    # PR7 review #6: when `Previous Findings Status` is the last section, a
+    # resurrected entry must be inserted BEFORE the `Reviewed at:` footer, not
+    # appended after it (which reads as a malformed comment).
+    body = _rr_body("- **#2** [low] — NOT FIXED — x")  # #1 silently dropped
+    out, _ = pin_and_resurrect(body, [_ledger_entry(1, "blocker", "NOT FIXED"),
+                                      _ledger_entry(2, "low", "NOT FIXED")])
+    res_at = out.index("**#1**")
+    footer_at = out.index("Reviewed at:")
+    assert res_at < footer_at, "resurrected finding landed after the footer"
+    assert _gates(out)
+
+
 def test_cli_two_call_flow_matches_one_call_decide():
     # The CLI re-review path is TWO subprocesses: Step 11.5 `--pin` rewrites the
     # posted body, then Step 12's plain `--decide` (no ledger args) gates the
