@@ -898,7 +898,7 @@ This is the CLI half of the shared carry-forward guarantee (`lib/verdict.py:pin_
 
 **Run only on a re-review** (Step 6 ran — `--re-review` or auto-detected). **Skip entirely** — degrade to a clean no-op, never block — for any non-re-review mode (`--fresh` / `--rewrite` / `--self` / `--full` / `--solo` / `--respond`) and whenever the guarantee can't be computed: no prior comment body, no `REVIEWED_AT_SHA`, or the cross-repo fallback (Step 6 step 4) where the local SHA range is unavailable. It runs BEFORE Step 12, so a `--dry-run` print also reflects the pinned body.
 
-Disabled by `AIR_LEDGER_PIN=0` (the same kill switch managed reads) — if set, skip this step.
+Disabled by `AIR_LEDGER_PIN` set to `0`, `false`, or `no` (case-insensitive — the same kill switch, byte-for-byte, that managed's `_ledger_pin_enabled` reads) — if disabled, skip this step.
 
 1. Write the PRIOR review body to a file (the ledger's prior-state input). **Fetch the exact comment Step 2/6 already selected, by its `REVIEW_COMMENT_ID`** — do NOT re-run a `startswith('## Code Review')` scan here. A fresh unscoped scan that takes `prior[-1]` is a spoofable control-plane sink: anyone who can comment on the PR could post a later `## Code Review`-prefixed body and win the selection, poisoning the deterministic gate (pre-mark blockers `FIXED`, or inject `[blocker] — NOT FIXED` lines). Keying on the ID Step 2/6 resolved means the ledger uses the *same* prior body the rest of the re-review is built on — no second, divergent selection. (Hardening the shared Step 2/6/12 selectors to bot-identity scoping is a separate, repo-wide follow-up.) Fetch by ID straight to the file — comment bodies contain newlines/control chars that corrupt in shell vars, so never echo the cached `REVIEW_COMMENT_BODY`:
 ```bash
@@ -917,7 +917,13 @@ If this fails or produces nothing (cross-repo fallback, SHA not local): skip Ste
 
 3. Pipe the formatted body through `verdict.py --pin`, inside the same `$AIR_PLUGIN_ROOT` guard Step 12 uses (an empty variable must take the no-op branch, not expand to `python3 "/lib/verdict.py"`). Redirect stdout straight to a file (no command substitution — that strips the trailing newline and would break byte-parity with the parser); `mv` over the original only on success. **A non-zero exit must fail LOUD**, not silently revert to the un-pinned body — otherwise the "HARD deterministic guarantee" would silently degrade to advisory-only and Step 12 would gate on un-pinned content with no signal. Distinguish that failure from the clean disabled/missing-input skip:
 ```bash
-if [ "${AIR_LEDGER_PIN:-1}" != "0" ] \
+# Kill switch: mirror managed's _ledger_pin_enabled EXACTLY — 0/false/no
+# (case-folded) all disable, so `AIR_LEDGER_PIN=false` can't disable managed
+# while the CLI keeps pinning (that would split the single-sourced contract).
+case "$(printf '%s' "${AIR_LEDGER_PIN:-1}" | tr '[:upper:]' '[:lower:]')" in
+  0|false|no) LEDGER_PIN_OFF=1 ;; *) LEDGER_PIN_OFF=0 ;;
+esac
+if [ "$LEDGER_PIN_OFF" = "0" ] \
    && [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/verdict.py" ] \
    && [ -s "$AIR_TMP/prior-body-<number>.md" ] && [ -s "$AIR_TMP/ledger-diff-<number>.diff" ]; then
   if python3 "$AIR_PLUGIN_ROOT/lib/verdict.py" --pin \

@@ -52,7 +52,7 @@ VorobiovD/air/
 │   ├── setup.py                      Creates/updates 6 specialists + air-coordinator + air-solo-reviewer via API
 │   ├── review.py                     Client-side driver — orchestrates the run (coordinator session launch, gating, epilogue)
 │   ├── github_client.py              GitHub REST: fetchers, pagination, comment/verdict POSTs
-│   ├── verdict.py                    Review-body parsing + gating (blocker counts, prior statuses, body extractor)
+│   ├── verdict.py                    Review-body parsing + gating (blocker counts, prior statuses, body extractor) + re-review severity-pin/ledger (build_carry_forward_ledger + pin_and_resurrect, number-identity)
 │   ├── session_runner.py             Session lifecycle: run_session, REST drain, billing retry, SIGTERM cleanup
 │   ├── prompts.py                    Prompt builders: PR context block + verifier-task templates
 │   ├── learn.py                      Triggers wiki maintenance sessions (single-agent)
@@ -130,6 +130,7 @@ VorobiovD/air/
   ├── Step 9: Console attribution (severity table, drops/downgrades — never posted)
   ├── Step 10: Consolidate (deduplicate, strengths, wiki drift collection)
   ├── Step 11: Format (clickable links, sequential numbering, code blocks)
+  ├── Step 11.5: Re-review severity-pin + ledger (verdict.py --pin; number-identity carry-forward)
   ├── Step 12: Post (new comment or PATCH, own-PR guard, review verdict)
   └── Step 13: Learn (author pattern lifecycle, graduated resistance, wiki push)
 ```
