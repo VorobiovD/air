@@ -252,6 +252,21 @@ def test_solo_prompt_includes_ui_lens():
     assert "ui-copy-reviewer" in prompt  # its lens header is concatenated in
 
 
+def test_solo_prompt_carries_security_severity_discipline():
+    # The fix for solo's consistent PHI/auth blocker→medium downgrade: the
+    # assembled prompt must carry BOTH the preamble severity-discipline (Fix B,
+    # solo-only — verifier downgrade doesn't license softening security) AND the
+    # security lens's blocker criteria (Fix A, shared). A future edit that drops
+    # either re-opens the downgrade.
+    prompt = assemble_solo_prompt()
+    # Fix B — preamble discipline (solo-only):
+    assert "SEVERITY DISCIPLINE" in prompt
+    assert "may NOT talk a real SECURITY finding DOWN" in prompt
+    # Fix A — blocker criteria carried in via the security-auditor lens:
+    assert "Blocker criteria (when Medium is NOT enough)" in prompt
+    assert "unauthorized actor can read or exfiltrate" in prompt
+
+
 _TESTS = [v for k, v in sorted(globals().items())
           if k.startswith("test_") and callable(v)]
 
