@@ -164,6 +164,47 @@ def test_ma_output_join_keeps_review_header_line_start():
 
 
 # ---------------------------------------------------------------------------
+# R3 — codex hang: a stuck codex must not block the whole review
+# ---------------------------------------------------------------------------
+
+def test_kill_process_group_frees_orphan_child_holding_the_pipe():
+    """The repo-D #124 hang: codex spawns a child that inherits the stdout
+    pipe; killing only the parent leaves the child holding the pipe so the reap
+    blocks forever. _kill_process_group must take the whole group (parent +
+    child) so the reap returns promptly. Spawn a parent that forks a `sleep 30`
+    child inheriting stdout, group-kill it, and assert communicate() returns
+    well under the child's sleep — proving the pipe was released."""
+    import asyncio
+    import time
+
+    async def _run():
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c",
+            "import subprocess,time; subprocess.Popen(['sleep','30']); time.sleep(30)",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,  # same as run_codex_session
+        )
+        await asyncio.sleep(0.4)  # let the child spawn + inherit the pipe
+        t = time.monotonic()
+        review._kill_process_group(proc)
+        await asyncio.wait_for(proc.communicate(), timeout=10)
+        return time.monotonic() - t
+
+    elapsed = asyncio.run(_run())
+    assert elapsed < 8, f"group-kill should release the pipe promptly, took {elapsed:.1f}s"
+
+
+def test_run_codex_session_spawns_in_own_group_and_group_kills():
+    """Lock the fix into run_codex_session so a revert to a bare proc.kill()
+    (which re-opens the hang) is caught: it must spawn with start_new_session
+    and use the group-kill helper on cancel."""
+    import inspect
+    src = inspect.getsource(review.run_codex_session)
+    assert "start_new_session=True" in src
+    assert "_kill_process_group(proc)" in src
+
+
+# ---------------------------------------------------------------------------
 # R1 — GitHub HTTP discipline
 # ---------------------------------------------------------------------------
 
