@@ -252,9 +252,11 @@ _SEVERITY_ALT = r"blocker|medium|low|nit"
 _PRIOR_STATUS_RE = re.compile(
     r"^-\s+\*\*#(\d+)\*\*"
     rf"(?:\s*\[({_SEVERITY_ALT})\])?"
-    r"\s+—\s+\*{0,2}"   # tolerate a `**`-bolded status (`— **FIXED**`) the
-    rf"({_STATUS_ALT})\b",  # verifier sometimes emits — else it reads as absent
-    re.MULTILINE | re.IGNORECASE,  # and a real FIXED gets falsely resurrected
+    r"\s+—\s+[^\w\n]*"  # tolerate ANY leading decoration before the status
+                        # token — a `**`-bolded `— **FIXED**` OR a leading
+                        # emoji/✅ the verifier emits — else the line reads as
+    rf"({_STATUS_ALT})\b",  # absent and a real FIXED gets falsely resurrected
+    re.MULTILINE | re.IGNORECASE,  # (repo-D #124: `— ✅ FIXED` block).
 )
 
 
@@ -757,11 +759,78 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
 _PRIOR_STATUS_LINE_RE = re.compile(
     r"^-\s+\*\*#(\d+)\*\*"
     rf"(?:\s*\[({_SEVERITY_ALT})\])?"
-    r"\s+—\s+\*{0,2}"   # tolerate `— **FIXED**` (see _PRIOR_STATUS_RE); a
-    rf"({_STATUS_ALT})\b"   # trailing `**` falls into the tail and is stripped
-    r"(.*)$",               # in _rewrite so the rewritten line stays canonical
+    r"\s+—\s+[^\w\n]*"  # tolerate ANY leading decoration (see _PRIOR_STATUS_RE);
+    rf"({_STATUS_ALT})\b"   # a leading `**`/✅ is consumed here, a trailing `**`
+    r"(.*)$",               # falls into the tail and is stripped in _rewrite so
+    re.MULTILINE | re.IGNORECASE,  # the rewritten line stays canonical.
+)
+
+
+# Off-enum SYNONYMS the verifier sometimes emits for an exit status (observed on
+# repo-D #124: `ACCEPTED` for accept-by-design, whose canonical token is
+# `DISPUTED`). The frozen status regexes only know the five-token enum, so a
+# synonym WORD reads as "absent" and the finding is spuriously resurrected as
+# NOT FIXED — the same footgun the `[^\w\n]*` prefix closes for emoji decoration,
+# but for the status word itself. Mapped to canonical BEFORE parsing. Unknown
+# words are left alone → they still resurrect (over-gate, fail-safe). The
+# verifier prompt is also tightened to emit enum-only tokens; this is the
+# deterministic backstop for when the model ignores it.
+_STATUS_SYNONYMS = {"ACCEPTED": "DISPUTED", "WONTFIX": "DISPUTED", "RESOLVED": "FIXED"}
+# IGNORECASE: match a `[BLOCKER]`-cased tag too (else the synonym misses and the
+# finding resurrects). `(?P<word>...)(?=\s*(?:[^\w\s]|$))`: rewrite ONLY when the
+# synonym is the COMPLETE leading status token — followed by a DELIMITER (the
+# ` — ` rationale dash, but also `:`/`(`/`.`/bold `**`, matching the canonical
+# parser's `\b` tolerance so a `— **ACCEPTED**` / `— RESOLVED: x` normalizes too)
+# or end-of-line. The `[^\w\s]` (a non-word, non-space char) is what refuses to
+# fire on a word that merely PRECEDES a real status (`— RESOLVED NOT FIXED —`,
+# where a space-then-word follows) — that would corrupt the line the gate then
+# re-parses. `num`/`sev` are captured for the severity-aware rule below.
+_SYNONYM_STATUS_RE = re.compile(
+    r"(?P<prefix>^-\s+\*\*#(?P<num>\d+)\*\*(?:\s*\[(?P<sev>" + _SEVERITY_ALT + r")\])?\s+—\s+[^\w\n]*)"
+    r"(?P<word>[A-Za-z]+)(?=\s*(?:[^\w\s]|$))",
     re.MULTILINE | re.IGNORECASE,
 )
+
+
+def _canonicalize_status_synonyms(review_body: str, by_num: dict) -> tuple:
+    """Rewrite a known off-enum status synonym on a `### Previous Findings
+    Status` line to its canonical token before the frozen regexes parse it.
+    Returns (body, log_lines). Only a synonym that is the COMPLETE leading
+    status token is touched; the rationale and every other line are untouched.
+
+    Severity-aware: an accept-by-design synonym (ACCEPTED/WONTFIX → DISPUTED) on
+    a BLOCKER is instead rewritten to NOT FIXED. DISPUTED is a non-gating exit,
+    so promoting an accept word to it on a blocker would convert the pre-fix
+    fail-safe (resurrect → NOT FIXED → gate) into an UN-gate — violating the
+    PR7 invariant that the gate may only ever get STRICTER on a carried finding.
+    An accept-by-design call on a blocker must escalate (gate → human override,
+    or an explicit DISPUTED the verifier deliberately typed), never auto-clear.
+    RESOLVED→FIXED is exempt: the FIXED-on-unchanged guard in `_rewrite` already
+    re-gates an unsubstantiated FIXED on a medium+ finding. Severity is read
+    from the ledger (authoritative carried severity), maxed with the emitted
+    tag, so a downgraded-but-pinned blocker is still treated as a blocker here."""
+    log: list = []
+
+    def _repl(m):
+        canon = _STATUS_SYNONYMS.get(m.group("word").upper())
+        if not canon:
+            return m.group(0)
+        if canon == "DISPUTED":
+            # Governing severity = the ledger's carried severity (authoritative)
+            # maxed with the emitted tag, so a downgraded-but-pinned blocker is
+            # still treated as a blocker. With no ledger entry (only in direct
+            # unit calls — the real ledger enumerates every prior finding), fall
+            # back to the emitted tag, then to blocker (the gate's missing-tag
+            # default).
+            entry = by_num.get(int(m.group("num")))  # `\d+` ⇒ always parseable
+            emitted_sev = (m.group("sev") or "").lower()
+            prior_sev = entry.prior_severity if entry else (emitted_sev or "blocker")
+            if _max_severity(prior_sev, emitted_sev or prior_sev) == "blocker":
+                canon = "NOT FIXED"  # accept-by-design must not auto-clear a blocker
+        log.append(f"[pin] normalized status synonym {m.group('word')!r} -> {canon}")
+        return m.group("prefix") + canon
+
+    return _SYNONYM_STATUS_RE.sub(_repl, review_body), log
 
 
 def _section_end(body: str, from_idx: int) -> int:
@@ -811,7 +880,11 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
     if not ledger:
         return review_body, []
     by_num = {e.num: e for e in ledger}
-    log: list = []
+    # Normalize off-enum status synonyms (e.g. `— ACCEPTED` → `— DISPUTED`)
+    # BEFORE the rewrite/parse pass, so a real exit isn't misread as absent and
+    # resurrected. Leading emoji/symbol decoration is handled by the regex
+    # prefix tolerance; this handles the WORD. Seeds the log.
+    review_body, log = _canonicalize_status_synonyms(review_body, by_num)
     seen: set = set()
 
     def _rewrite(m):

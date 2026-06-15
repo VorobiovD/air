@@ -305,6 +305,15 @@ _Re-reviewed at `{head_sha[:8]}`, previous review at `{(prior_sha or '')[:8]}`._
 For each prior finding, emit one line in this shape:
   - **#N** [<severity>] — <STATUS> — brief rationale
 
+`<STATUS>` MUST be EXACTLY one of the five tokens above — `FIXED`,
+`PARTIALLY FIXED`, `NOT FIXED`, `DEFERRED`, `DISPUTED` — written verbatim with
+NO decoration: no leading emoji or ✅/✔/🚫, no `**bold**`, no parenthetical
+(`FIXED (resolved)`), and no synonym (`ACCEPTED`, `WONTFIX`, `RESOLVED` → use
+`DISPUTED` for accept-by-design, `FIXED` for resolved). The orchestrator parses
+this token deterministically to gate the verdict; any decoration makes the
+finding read as silently dropped and it is re-inserted as NOT FIXED, falsely
+blocking the PR. Put all nuance in the rationale AFTER the second em-dash.
+
 Where `<severity>` is the original severity from the prior review (one of
 `blocker`, `medium`, `low`, `nit`) — copy it from the prior review's
 section heading where finding #N originally appeared. The orchestrator

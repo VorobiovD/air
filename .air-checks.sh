@@ -86,7 +86,7 @@ grep -qF -- '- **#N** [<severity>] — STATUS' "$REVIEW_MD" \
 # must stay in the shared lib, and review.md's Step 11.5 must route the
 # re-review body through `--pin` before the Step 12 `--decide` — or the CLI
 # silently loses the carry-forward guarantee managed enforces.
-for fn in parse_changed_lines finding_changed build_carry_forward_ledger pin_and_resurrect; do
+for fn in parse_changed_lines finding_changed build_carry_forward_ledger pin_and_resurrect _canonicalize_status_synonyms; do
   grep -qF "def $fn(" "$VERDICT_LIB" \
     || fail "lib/verdict.py missing PR7 guard fn '$fn' (re-review severity-pin contract)"
 done
