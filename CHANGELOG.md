@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.32.1](https://github.com/VorobiovD/air/compare/v1.32.0...v1.32.1) (2026-06-15)
+
+
+### Bug Fixes
+
+* a hung codex no longer takes down the whole review (kill its process group) ([#166](https://github.com/VorobiovD/air/issues/166)) ([293e479](https://github.com/VorobiovD/air/commit/293e479b87ade3f226fe387b310a2c831fec195b))
+* **coordinator:** fail loud when run outside the managed runtime ([#168](https://github.com/VorobiovD/air/issues/168)) ([5e29d29](https://github.com/VorobiovD/air/commit/5e29d29aba0b2d2ef4e982aaac586a6f1d2c8667))
+* stop the solo reviewer downgrading PHI/auth exposures below blocker ([#164](https://github.com/VorobiovD/air/issues/164)) ([f834a15](https://github.com/VorobiovD/air/commit/f834a15e36513ee549c5a085773b2a9b8f5d73df))
+* **verdict:** decorated/synonym statuses no longer resurrect a fixed finding ([#167](https://github.com/VorobiovD/air/issues/167)) ([9dfaa88](https://github.com/VorobiovD/air/commit/9dfaa88d487e030d996d031e513fc64dcdbe953e))
+
 ## [1.32.0](https://github.com/VorobiovD/air/compare/v1.31.0...v1.32.0) (2026-06-14)
 
 
