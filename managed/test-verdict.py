@@ -867,24 +867,68 @@ def test_emoji_fixed_on_unchanged_single_clean_not_fixed():
     assert "— NOT FIXED —" in n1[0] and _gates(out)
 
 
-def test_accepted_synonym_normalized_to_disputed_clears_gate():
-    # `— ACCEPTED` (accept-by-design) → canonical DISPUTED → evidence exit, no
-    # gate, no phantom. Previously: unparsed → resurrected NOT FIXED → gated.
-    body = _rr_body("- **#1** [blocker] — ACCEPTED — team decision, documented")
-    out, log = pin_and_resurrect(body, [_ledger_entry(1, "blocker", "NOT FIXED")])
-    n1 = [l for l in out.splitlines() if "**#1**" in l]
-    assert len(n1) == 1 and "re-inserted" not in out
-    assert "— DISPUTED —" in n1[0] and not _gates(out)
+def test_accepted_on_blocker_gates_not_cleared():
+    # SEVERITY-AWARE (self-review fix): an accept-by-design synonym
+    # (ACCEPTED/WONTFIX) on a BLOCKER must NOT auto-clear via DISPUTED — it is
+    # rewritten to NOT FIXED so the blocker still gates (pre-fix fail-safe
+    # preserved; the PR7 invariant that the gate only gets STRICTER on a carried
+    # finding). DISPUTED is a non-gating blocker exit, so mapping an accept word
+    # to it would UN-gate a real blocker — the regression this test guards.
+    for word in ("ACCEPTED", "WONTFIX"):
+        body = _rr_body(f"- **#1** [blocker] — {word} — shipping it")
+        out, _ = pin_and_resurrect(body, [_ledger_entry(1, "blocker", "NOT FIXED")])
+        n1 = [l for l in out.splitlines() if "**#1**" in l]
+        assert len(n1) == 1 and "re-inserted" not in out, word
+        assert "— NOT FIXED —" in n1[0] and _gates(out), word
+
+
+def test_accepted_on_nonblocker_normalizes_to_disputed():
+    # On a non-blocker the accept-by-design synonym DOES normalize to DISPUTED
+    # (a clean exit, killing the phantom-resurrection duplicate); a medium/low
+    # never gates regardless, so this is purely the cosmetic win.
+    body = _rr_body("- **#5** [medium] — ACCEPTED — team decision, documented")
+    out, log = pin_and_resurrect(body, [_ledger_entry(5, "medium", "NOT FIXED")])
+    n5 = [l for l in out.splitlines() if "**#5**" in l]
+    assert len(n5) == 1 and "re-inserted" not in out
+    assert "— DISPUTED —" in n5[0] and not _gates(out)
     assert any("normalized status synonym" in l and "DISPUTED" in l for l in log)
 
 
-def test_wontfix_and_resolved_synonyms():
-    assert _canonicalize_status_synonyms(
-        "- **#1** [blocker] — WONTFIX — x")[0].count("— DISPUTED —") == 1
-    assert _canonicalize_status_synonyms(
-        "- **#2** [medium] — RESOLVED — y")[0].count("— RESOLVED —") == 0  # -> FIXED
-    assert "— FIXED —" in _canonicalize_status_synonyms(
-        "- **#2** [medium] — RESOLVED — y")[0]
+def test_synonym_pass_is_severity_aware_and_resolved_exempt():
+    # WONTFIX on a blocker → NOT FIXED (not DISPUTED); on a non-blocker →
+    # DISPUTED. RESOLVED → FIXED always (the FIXED-on-unchanged guard re-gates
+    # an unsubstantiated blocker FIXED downstream, so it needs no severity rule).
+    assert "— NOT FIXED —" in _canonicalize_status_synonyms(
+        "- **#1** [blocker] — WONTFIX — x", {})[0]
+    assert "— DISPUTED —" in _canonicalize_status_synonyms(
+        "- **#1** [medium] — WONTFIX — x", {})[0]
+    resolved = _canonicalize_status_synonyms("- **#2** [medium] — RESOLVED — y", {})[0]
+    assert "— FIXED —" in resolved and "RESOLVED" not in resolved
+
+
+def test_synonym_only_rewrites_complete_leading_token():
+    # F2: a synonym word that merely PRECEDES a real status token must NOT be
+    # rewritten — that would corrupt the line the gate then re-parses. Only a
+    # synonym that IS the whole leading status (followed by ` — ` or EOL) maps.
+    for line in ("- **#1** [blocker] — RESOLVED NOT FIXED — x",
+                 "- **#1** [blocker] — ACCEPTED but still broken NOT FIXED — x"):
+        assert _canonicalize_status_synonyms(line, {})[0] == line
+
+
+def test_synonym_pass_is_case_insensitive_on_severity_tag():
+    # F3: an uppercase / odd-cased severity tag must not slip past normalization
+    # (else the synonym misses and the finding spuriously resurrects).
+    assert "— NOT FIXED —" in _canonicalize_status_synonyms(
+        "- **#1** [BLOCKER] — ACCEPTED — x", {})[0]            # blocker → NOT FIXED
+    assert "— DISPUTED —" in _canonicalize_status_synonyms(
+        "- **#2** [Medium] — ACCEPTED — x", {})[0]
+
+
+def test_synonym_word_in_rationale_left_untouched():
+    # The pass anchors to the LEADING status token only; the same word appearing
+    # in the rationale (after the second em-dash) must be untouched.
+    line = "- **#1** [blocker] — FIXED — was ACCEPTED by the team earlier"
+    assert _canonicalize_status_synonyms(line, {})[0] == line
 
 
 def test_unknown_status_word_still_resurrects_failsafe():
@@ -903,7 +947,7 @@ def test_canonical_statuses_not_touched_by_synonym_pass():
                  "- **#2** [medium] — NOT FIXED — y",
                  "- **#3** [low] — DISPUTED — z",
                  "- **#4** [nit] — PARTIALLY FIXED — w"):
-        assert _canonicalize_status_synonyms(line)[0] == line
+        assert _canonicalize_status_synonyms(line, {})[0] == line
 
 
 def test_decorated_rewrite_reparses_canonically():

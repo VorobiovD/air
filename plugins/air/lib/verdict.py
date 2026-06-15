@@ -776,24 +776,54 @@ _PRIOR_STATUS_LINE_RE = re.compile(
 # verifier prompt is also tightened to emit enum-only tokens; this is the
 # deterministic backstop for when the model ignores it.
 _STATUS_SYNONYMS = {"ACCEPTED": "DISPUTED", "WONTFIX": "DISPUTED", "RESOLVED": "FIXED"}
+# IGNORECASE: match a `[BLOCKER]`-cased tag too (else the synonym misses and the
+# finding resurrects). `(?P<word>...)(?=\s*(?:—|$))`: rewrite ONLY when the
+# synonym is the COMPLETE leading status token (followed by the ` — ` rationale
+# delimiter or end-of-line) — never a word that merely precedes a real status
+# (`— RESOLVED NOT FIXED —`), which would otherwise corrupt the line the gate
+# then re-parses. `num`/`sev` are captured for the severity-aware rule below.
 _SYNONYM_STATUS_RE = re.compile(
-    r"(?P<prefix>^-\s+\*\*#\d+\*\*(?:\s*\[(?:" + _SEVERITY_ALT + r")\])?\s+—\s+[^\w\n]*)"
-    r"(?P<word>[A-Za-z]+)",
-    re.MULTILINE,
+    r"(?P<prefix>^-\s+\*\*#(?P<num>\d+)\*\*(?:\s*\[(?P<sev>" + _SEVERITY_ALT + r")\])?\s+—\s+[^\w\n]*)"
+    r"(?P<word>[A-Za-z]+)(?=\s*(?:—|$))",
+    re.MULTILINE | re.IGNORECASE,
 )
 
 
-def _canonicalize_status_synonyms(review_body: str) -> tuple:
+def _canonicalize_status_synonyms(review_body: str, by_num: dict) -> tuple:
     """Rewrite a known off-enum status synonym on a `### Previous Findings
     Status` line to its canonical token before the frozen regexes parse it.
-    Returns (body, log_lines). Only the leading status word is touched; the
-    rationale and every other line are untouched."""
+    Returns (body, log_lines). Only a synonym that is the COMPLETE leading
+    status token is touched; the rationale and every other line are untouched.
+
+    Severity-aware: an accept-by-design synonym (ACCEPTED/WONTFIX → DISPUTED) on
+    a BLOCKER is instead rewritten to NOT FIXED. DISPUTED is a non-gating exit,
+    so promoting an accept word to it on a blocker would convert the pre-fix
+    fail-safe (resurrect → NOT FIXED → gate) into an UN-gate — violating the
+    PR7 invariant that the gate may only ever get STRICTER on a carried finding.
+    An accept-by-design call on a blocker must escalate (gate → human override,
+    or an explicit DISPUTED the verifier deliberately typed), never auto-clear.
+    RESOLVED→FIXED is exempt: the FIXED-on-unchanged guard in `_rewrite` already
+    re-gates an unsubstantiated FIXED on a medium+ finding. Severity is read
+    from the ledger (authoritative carried severity), maxed with the emitted
+    tag, so a downgraded-but-pinned blocker is still treated as a blocker here."""
     log: list = []
 
     def _repl(m):
         canon = _STATUS_SYNONYMS.get(m.group("word").upper())
         if not canon:
             return m.group(0)
+        if canon == "DISPUTED":
+            # Governing severity = the ledger's carried severity (authoritative)
+            # maxed with the emitted tag, so a downgraded-but-pinned blocker is
+            # still treated as a blocker. With no ledger entry (only in direct
+            # unit calls — the real ledger enumerates every prior finding), fall
+            # back to the emitted tag, then to blocker (the gate's missing-tag
+            # default).
+            entry = by_num.get(int(m.group("num")))
+            emitted_sev = (m.group("sev") or "").lower()
+            prior_sev = entry.prior_severity if entry else (emitted_sev or "blocker")
+            if _max_severity(prior_sev, emitted_sev or prior_sev) == "blocker":
+                canon = "NOT FIXED"  # accept-by-design must not auto-clear a blocker
         log.append(f"[pin] normalized status synonym {m.group('word')!r} -> {canon}")
         return m.group("prefix") + canon
 
@@ -851,7 +881,7 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
     # BEFORE the rewrite/parse pass, so a real exit isn't misread as absent and
     # resurrected. Leading emoji/symbol decoration is handled by the regex
     # prefix tolerance; this handles the WORD. Seeds the log.
-    review_body, log = _canonicalize_status_synonyms(review_body)
+    review_body, log = _canonicalize_status_synonyms(review_body, by_num)
     seen: set = set()
 
     def _rewrite(m):
