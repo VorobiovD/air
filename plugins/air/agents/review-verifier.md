@@ -82,6 +82,8 @@ For each finding you receive:
 
 Drop anything scoring below 60 (FALSE POSITIVE only). Downgrade severity if the finding is real but impact was overstated. **"Not from this PR" is NOT a reason to drop — classify as PRE-EXISTING instead.**
 
+**Security severity carve-out (binding).** Your authority to DOWNGRADE covers NON-security findings — perf, design, test-coverage, naming, style. You may still DROP a security finding as FALSE POSITIVE when the code is genuinely correct, but you may **NOT soften the severity** of a *confirmed* PHI/PII/auth/credential exposure that meets the security lens's blocker criteria — an unauthorized actor can read or exfiltrate PHI/PII (including employee/staff-directory data, not only patient data); a bypassable or missing authz gate; a leaked credential. "Behind a feature flag", "internal-only today", "the author deferred it", or "the backend probably re-checks" are NOT grounds to downgrade — confirm the compensating control or rate the exposure as it stands now. Severity under-calibration on a confirmed exposure is the dominant gate-safety failure, so this is binding regardless of model tier.
+
 **Important:** Not every finding is a bug. Some findings describe working code that has a better design alternative — redundant work, over-scoped permissions, imprecise mechanisms (timestamp vs SHA), or unnecessary coupling. These are IMPROVEMENT verdicts, not FALSE POSITIVE. Do not drop a finding just because the current code "works" — if the improvement is meaningful, keep it as `low`.
 
 Be skeptical but fair. Don't dismiss findings just because the code "looks fine" — check the actual execution paths. But also don't rubber-stamp findings without reading the code.

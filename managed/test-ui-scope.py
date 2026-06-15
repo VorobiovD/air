@@ -267,6 +267,17 @@ def test_solo_prompt_carries_security_severity_discipline():
     assert "unauthorized actor can read or exfiltrate" in prompt
 
 
+def test_verifier_prompt_carries_security_severity_carveout():
+    # Full-mode (now Sonnet) gap: the shared verifier may DOWNGRADE blocker→low
+    # freely, with no security carve-out — so a Sonnet verifier can soften a
+    # confirmed PHI/auth blocker the security lens flagged → un-gate (the bench
+    # failure). This pins the #164 discipline extended to review-verifier.md.
+    text = (Path(__file__).parent.parent / "plugins/air/agents/review-verifier.md").read_text()
+    assert "Security severity carve-out" in text
+    assert "NOT soften the severity" in text
+    assert "regardless of model tier" in text
+
+
 _TESTS = [v for k, v in sorted(globals().items())
           if k.startswith("test_") and callable(v)]
 
