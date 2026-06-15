@@ -777,14 +777,17 @@ _PRIOR_STATUS_LINE_RE = re.compile(
 # deterministic backstop for when the model ignores it.
 _STATUS_SYNONYMS = {"ACCEPTED": "DISPUTED", "WONTFIX": "DISPUTED", "RESOLVED": "FIXED"}
 # IGNORECASE: match a `[BLOCKER]`-cased tag too (else the synonym misses and the
-# finding resurrects). `(?P<word>...)(?=\s*(?:—|$))`: rewrite ONLY when the
-# synonym is the COMPLETE leading status token (followed by the ` — ` rationale
-# delimiter or end-of-line) — never a word that merely precedes a real status
-# (`— RESOLVED NOT FIXED —`), which would otherwise corrupt the line the gate
-# then re-parses. `num`/`sev` are captured for the severity-aware rule below.
+# finding resurrects). `(?P<word>...)(?=\s*(?:[^\w\s]|$))`: rewrite ONLY when the
+# synonym is the COMPLETE leading status token — followed by a DELIMITER (the
+# ` — ` rationale dash, but also `:`/`(`/`.`/bold `**`, matching the canonical
+# parser's `\b` tolerance so a `— **ACCEPTED**` / `— RESOLVED: x` normalizes too)
+# or end-of-line. The `[^\w\s]` (a non-word, non-space char) is what refuses to
+# fire on a word that merely PRECEDES a real status (`— RESOLVED NOT FIXED —`,
+# where a space-then-word follows) — that would corrupt the line the gate then
+# re-parses. `num`/`sev` are captured for the severity-aware rule below.
 _SYNONYM_STATUS_RE = re.compile(
     r"(?P<prefix>^-\s+\*\*#(?P<num>\d+)\*\*(?:\s*\[(?P<sev>" + _SEVERITY_ALT + r")\])?\s+—\s+[^\w\n]*)"
-    r"(?P<word>[A-Za-z]+)(?=\s*(?:—|$))",
+    r"(?P<word>[A-Za-z]+)(?=\s*(?:[^\w\s]|$))",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -819,7 +822,7 @@ def _canonicalize_status_synonyms(review_body: str, by_num: dict) -> tuple:
             # unit calls — the real ledger enumerates every prior finding), fall
             # back to the emitted tag, then to blocker (the gate's missing-tag
             # default).
-            entry = by_num.get(int(m.group("num")))
+            entry = by_num.get(int(m.group("num")))  # `\d+` ⇒ always parseable
             emitted_sev = (m.group("sev") or "").lower()
             prior_sev = entry.prior_severity if entry else (emitted_sev or "blocker")
             if _max_severity(prior_sev, emitted_sev or prior_sev) == "blocker":

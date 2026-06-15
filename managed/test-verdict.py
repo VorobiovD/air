@@ -931,6 +931,37 @@ def test_synonym_word_in_rationale_left_untouched():
     assert _canonicalize_status_synonyms(line, {})[0] == line
 
 
+def test_synonym_normalizes_across_delimiters():
+    # The lookahead fires on any DELIMITER (not just the em-dash) so a synonym
+    # the verifier bolds or punctuates still normalizes — matching the canonical
+    # parser's `\b` tolerance and killing the phantom-duplicate this PR targets.
+    # (All on non-blockers, where DISPUTED/FIXED is the intended exit.)
+    for line, expect in (
+        ("- **#5** [medium] — **WONTFIX** — by design", "DISPUTED"),
+        ("- **#5** [medium] — RESOLVED: fixed in CI", "FIXED"),
+        ("- **#5** [low] — ACCEPTED (team decision)", "DISPUTED"),
+    ):
+        out = _canonicalize_status_synonyms(line, {})[0]
+        assert expect in out, (line, out)
+
+
+def test_synonym_eol_arm_normalizes():
+    # The `$` arm: a synonym as the whole line (no rationale) still normalizes.
+    out = _canonicalize_status_synonyms("- **#1** [blocker] — ACCEPTED", {})[0]
+    assert "— NOT FIXED" in out                    # blocker → NOT FIXED, gates
+
+
+def test_synonym_pass_reads_ledger_severity_for_downgraded_tag():
+    # The headline of the severity-aware delta: the emitted tag is [medium] but
+    # the LEDGER carries the finding as a blocker → the synonym pass itself reads
+    # the ledger and rewrites ACCEPTED → NOT FIXED (not DISPUTED), so a
+    # downgraded-but-pinned blocker can't be accept-cleared.
+    out = _canonicalize_status_synonyms(
+        "- **#1** [medium] — ACCEPTED — looks minor",
+        {1: _ledger_entry(1, "blocker", "NOT FIXED")})[0]
+    assert "— NOT FIXED —" in out and "DISPUTED" not in out
+
+
 def test_unknown_status_word_still_resurrects_failsafe():
     # An UNKNOWN status word (not in the synonym map) is left alone → the line
     # stays unparsed → the finding still resurrects (over-gate, fail-safe). We
