@@ -36,6 +36,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -294,6 +295,21 @@ _CODEX_SOFT_FAIL_RE = re.compile(
 _CODEX_SOFT_FAIL_MAX_LEN = 1200
 
 
+def _kill_process_group(proc) -> None:
+    """SIGKILL the subprocess's whole process group, falling back to the bare
+    process. The subprocess must have been spawned with start_new_session=True
+    so it leads its own group; killing the group takes its children (which
+    inherit the stdio pipes) with it so the reap can't hang. Best-effort —
+    a process that already exited (ProcessLookupError) is the success case."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+
 async def run_codex_session(target_repo: str, base_sha: str) -> str:
     """Invoke `codex review --base <sha>` in the target repo; return stdout.
 
@@ -368,16 +384,25 @@ async def run_codex_session(target_repo: str, base_sha: str) -> str:
         env=narrow_env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        # Own process group so the cancel path can kill codex AND its children.
+        # `codex` spawns child processes that inherit the stdout/stderr pipes;
+        # without this, proc.kill() reaps only the parent and the orphaned
+        # children keep the pipe write-ends open, so the reap below blocks
+        # forever and the whole review hangs past its budget until the runner
+        # SIGKILLs the job (observed: repo-D #124 re-reviews cancelled at ~31m
+        # with no review ever posted, because codex hung on the delta).
+        start_new_session=True,
     )
     try:
         stdout, stderr = await proc.communicate()
     except asyncio.CancelledError:
-        # Outer wait_for timed out; kill the subprocess before re-raising
-        # so it doesn't orphan on the runner.
-        proc.kill()
+        # Outer wait_for timed out (or the watchdog fired). Kill the whole
+        # process GROUP so codex's children die too and release the pipes,
+        # then reap with a hard bound so a stubborn child can never re-hang us.
+        _kill_process_group(proc)
         try:
-            await proc.communicate()
-        except Exception:
+            await asyncio.wait_for(proc.communicate(), timeout=10)
+        except (Exception, asyncio.TimeoutError):
             pass
         raise
 
