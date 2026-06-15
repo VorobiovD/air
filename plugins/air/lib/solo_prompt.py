@@ -39,7 +39,18 @@ SOLO_PREAMBLE = (
     "You are reviewing ALONE in a single session — there is no separate verifier "
     "pass, so the verifier lens applies to your OWN findings in real time. Output "
     "exactly the `## Code Review` format the lenses describe, including the "
-    "`Reviewed at: <head_sha>` footer.\n"
+    "`Reviewed at: <head_sha>` footer.\n\n"
+    "SEVERITY DISCIPLINE — you are the only reviewer; there is no panel to restore "
+    "a severity you rationalize away. When you self-verify you may DROP a finding "
+    "as a false positive if the code is actually correct, but you may NOT talk a "
+    "real SECURITY finding DOWN a severity level. The security lens's severity "
+    "floor AND its blocker criteria are binding on your own findings: a real "
+    "PHI/PII exposure to an unauthorized actor, a bypassable or missing authz "
+    "gate, or a leaked credential is a BLOCKER — keep it a blocker; do not settle "
+    "it at medium because it's flag-gated, internal-today, or author-deferred. The "
+    "verifier lens's authority to 'downgrade overstated severity' applies to "
+    "NON-security findings (perf, design, test-coverage, style); it does not "
+    "license softening a confirmed security exposure.\n"
 )
 
 
