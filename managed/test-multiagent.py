@@ -484,6 +484,10 @@ def test_coordinator_prompt_has_wrong_runtime_guard():
     assert "AIR_COORDINATOR_WRONG_RUNTIME" in text
     assert "delegator, never a reviewer" in text
     assert "NEVER fabricate findings" in text
+    # Pin the load-bearing STOP semantics too — not just the labels. Keeping the
+    # sentinel while dropping "Do NOT proceed"/"STOP" would re-open the
+    # emit-then-confabulate path the guard exists to close.
+    assert "Do NOT proceed" in text and "STOP" in text
 
 
 if __name__ == "__main__":
