@@ -471,5 +471,24 @@ def test_sdk_page_cursor_still_exposes_next_page():
     assert "next_page" in AsyncPageCursor.model_fields
 
 
+def test_coordinator_prompt_has_wrong_runtime_guard():
+    """The coordinator is a managed-runtime DELEGATOR (callable_agents), not a
+    reviewer. Invoked as a LOCAL Claude Code subagent — no callable_agents, no
+    MODE line, no embedded PR Context+diff — it used to silently confabulate a
+    full review AND fake the tool-call transcript (tool_uses:0), even narrating
+    a wiki push of invented "author patterns". `require_dispatch=True` catches
+    this in the managed runtime; this prompt-level guard is its analog for the
+    local-misinvocation path. Keep it.
+    """
+    text = (Path(__file__).parents[1] / "plugins/air/agents/coordinator.md").read_text()
+    assert "AIR_COORDINATOR_WRONG_RUNTIME" in text
+    assert "delegator, never a reviewer" in text
+    assert "NEVER fabricate findings" in text
+    # Pin the load-bearing STOP semantics too — not just the labels. Keeping the
+    # sentinel while dropping "Do NOT proceed"/"STOP" would re-open the
+    # emit-then-confabulate path the guard exists to close.
+    assert "Do NOT proceed" in text and "STOP" in text
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
