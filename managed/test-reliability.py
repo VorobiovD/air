@@ -734,6 +734,36 @@ def test_blame_summaries_escaped_in_pr_context():
 
 
 # ---------------------------------------------------------------------------
+# Store mount path: a memory_store mounts as a SUBDIRECTORY under /mnt/memory/
+# (runtime-assigned, no mount_path on the resource). Earlier wording named the
+# parent /mnt/memory/ as the dir then listed bare filenames, so agents read
+# /mnt/memory/accepted-patterns.md and ground their tools on `awk: cannot open`
+# retry-loops. The store branch must point at the mount note + an `ls` self-
+# discovery and forbid the direct /mnt/memory/<file> read — without losing the
+# `Wiki files directory:` anchor every specialist greps for.
+# ---------------------------------------------------------------------------
+
+def test_store_mount_points_at_subdirectory_not_parent():
+    import prompts
+    meta = {
+        "title": "t", "body": "b", "number": 1,
+        "user": {"login": "dev"},
+        "base": {"ref": "main"}, "head": {"ref": "feat", "sha": HEAD},
+        "additions": 1, "deletions": 0, "changed_files": 1, "commits": 1,
+    }
+    store = prompts.build_pr_context(meta, "o/r", store_mounted=True)
+    assert "Wiki files directory:" in store          # specialist grep anchor
+    assert "ls /mnt/memory/" in store                 # runtime-agnostic discovery
+    assert "subdirectory" in store.lower()
+    assert "/mnt/memory/<file>" in store              # the explicit anti-pattern
+    assert "authors/dev.md" in store
+
+    wiki = prompts.build_pr_context(meta, "o/r", store_mounted=False)
+    assert "/workspace/wiki" in wiki                  # legacy branch unchanged
+    assert "ls /mnt/memory/" not in wiki
+
+
+# ---------------------------------------------------------------------------
 # Full-mode coordinator must catch the wall-clock TimeoutError (round-2 audit):
 # uncaught it crashed run_review as a bare traceback after a fully billed
 # session — no run-failed comment, no ::error::. Solo already had the handler;

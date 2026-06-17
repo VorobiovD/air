@@ -53,10 +53,26 @@ def build_pr_context(
     # under /mnt/memory/, exact path is in the mount note the runtime adds
     # to the agent's system prompt) vs the legacy wiki git mount.
     if store_mounted:
+        # The store mounts READ-ONLY as a single subdirectory UNDER
+        # /mnt/memory/ (e.g. /mnt/memory/<store-dir>/) — the runtime assigns
+        # the directory name and records it in the memory-mount note it adds
+        # to the system prompt; a memory_store resource takes no mount_path,
+        # so we cannot pin a known path. Earlier wording said "mounted under
+        # /mnt/memory/" then listed bare filenames, so agents read
+        # /mnt/memory/accepted-patterns.md (the parent, not the subdir) and
+        # grind `awk: cannot open` retry-loops. Point at the mount note plus a
+        # one-shot `ls /mnt/memory/` self-discovery (runtime-agnostic —
+        # survives any slug change) and name every file RELATIVE to the
+        # resolved directory.
         wiki_line = (
-            "Wiki files directory: the pattern store mounted under "
-            "/mnt/memory/ (read-only; see the memory mount note in your "
-            f"system prompt for the exact path). Your per-author patterns: "
+            "Wiki files directory: a read-only memory store mounted as a "
+            "single subdirectory UNDER /mnt/memory/ — NOT /mnt/memory/ "
+            "itself. The exact directory is in the memory-mount note already "
+            "in your system prompt; if unsure, run `ls /mnt/memory/` once and "
+            "use the one subdirectory it lists. Resolve every file below "
+            "against that directory (e.g. <dir>/accepted-patterns.md), never "
+            "as /mnt/memory/<file> directly — that parent holds no files and "
+            "the read will fail. Your per-author patterns: "
             f"authors/{author}.md. Shared files: common-findings.md, "
             "service-patterns.md, accepted-patterns.md, "
             "severity-calibration.md, glossary.md, project-profile.md"
