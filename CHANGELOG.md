@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.32.2](https://github.com/VorobiovD/air/compare/v1.32.1...v1.32.2) (2026-06-17)
+
+
+### Bug Fixes
+
+* **review:** point store-backed agents at the real /mnt/memory subdir ([#172](https://github.com/VorobiovD/air/issues/172)) ([602e5de](https://github.com/VorobiovD/air/commit/602e5de77629a420f22b5b2419b74813920b11d9))
+* **verifier:** forbid downgrading a confirmed security exposure ([#170](https://github.com/VorobiovD/air/issues/170)) ([f4060b3](https://github.com/VorobiovD/air/commit/f4060b390d7f42835b242fe5090703379bf7033a))
+
 ## [1.32.1](https://github.com/VorobiovD/air/compare/v1.32.0...v1.32.1) (2026-06-15)
 
 
