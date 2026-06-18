@@ -208,6 +208,27 @@ def fetch_pr_metadata(repo: str, pr_number: int, token: str) -> dict:
     return resp.json()
 
 
+# Invisible marker appended to every air formal verdict body. Lets a later
+# run recognize its OWN prior verdicts regardless of which rotated bot account
+# posted them — multi-PAT fleets post verdicts under different logins, and
+# GitHub's reviewDecision blocks on ANY account whose latest review is
+# CHANGES_REQUESTED, so an APPROVE under account B never clears a stale block
+# orphaned under account A. An HTML comment → hidden in the rendered GitHub
+# review UI. Only air's code ever writes this string, so matching it can never
+# dismiss a human's review.
+AIR_VERDICT_SENTINEL = "<!-- air-review-verdict -->"
+
+
+def _is_air_verdict(review: dict, bot_logins: frozenset) -> bool:
+    """True iff this PR review is one air posted. Identified by the verdict
+    sentinel in the body (account-independent; zero false positives — only air
+    writes it) OR an explicitly caller-allowlisted bot login (catches legacy
+    pre-sentinel verdicts by identity). A human review matches neither."""
+    if AIR_VERDICT_SENTINEL in (review.get("body") or ""):
+        return True
+    return ((review.get("user") or {}).get("login") or "") in bot_logins
+
+
 def submit_review_verdict(
     repo: str,
     pr_number: int,
@@ -241,7 +262,8 @@ def submit_review_verdict(
     # review. Same replay-safety posture as the comment POST.
     resp = _gh_request(
         "POST", f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews",
-        token=token, json={"event": event, "body": body, "commit_id": commit_id},
+        token=token,
+        json={"event": event, "body": f"{body}\n\n{AIR_VERDICT_SENTINEL}", "commit_id": commit_id},
         retry_timeouts=False,
     )
     if not resp.ok:
@@ -253,6 +275,68 @@ def submit_review_verdict(
         )
         return
     print(f"  Verdict: {event} (commit {commit_id[:8]})")
+
+
+def dismiss_review(repo: str, pr_number: int, review_id: int, token: str, message: str) -> bool:
+    """Dismiss a single PR review (PUT .../reviews/{id}/dismissals). Best-effort:
+    a missing-permission 403 or any other failure is logged and swallowed — the
+    verdict is already posted, so a failed cleanup never breaks the run. Returns
+    True on success."""
+    resp = _gh_request(
+        "PUT",
+        f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews/{review_id}/dismissals",
+        token=token, json={"message": message, "event": "DISMISS"},
+        retry_timeouts=False,
+    )
+    if not resp.ok:
+        print(f"  [warn] could not dismiss review {review_id}: {_github_error_message(resp)}", file=sys.stderr)
+        return False
+    return True
+
+
+def dismiss_stale_air_verdicts(
+    repo: str, pr_number: int, token: str, current_login: str | None,
+    bot_logins: frozenset = frozenset(),
+) -> int:
+    """Clear the multi-PAT gate-orphan: dismiss prior CHANGES_REQUESTED reviews
+    air left under a DIFFERENT bot account than the one just used.
+
+    GitHub's reviewDecision blocks on ANY account whose latest review is
+    CHANGES_REQUESTED, so an APPROVE posted under a rotated account never clears
+    a stale block left by an earlier cycle under another bot account — the PR
+    stays gated despite a correct APPROVE at HEAD. This dismisses those orphans.
+
+    Safe by construction: only reviews air provably owns are touched — those
+    carrying the verdict sentinel, or authored by an explicitly allowlisted bot
+    login. A human's CHANGES_REQUESTED matches neither and is never dismissed.
+    The posting account's own prior reviews are auto-superseded by GitHub and
+    left alone. Best-effort; returns the count dismissed."""
+    try:
+        reviews = fetch_pr_reviews(repo, pr_number, token)
+    except Exception as e:  # noqa: BLE001 — cleanup must never break the run
+        print(f"  [warn] orphan-block cleanup skipped (review fetch failed): {str(e)[:120]}", file=sys.stderr)
+        return 0
+    dismissed = 0
+    for r in reviews:
+        if r.get("state") != "CHANGES_REQUESTED":
+            continue
+        login = (r.get("user") or {}).get("login") or ""
+        if current_login and login == current_login:
+            continue  # GitHub auto-supersedes the posting account's own prior state
+        if not _is_air_verdict(r, bot_logins):
+            continue  # not air's verdict — never touch a human's block
+        if dismiss_review(
+            repo, pr_number, r["id"], token,
+            "Superseded by air's latest verdict — stale block orphaned by "
+            "multi-account (PAT-rotation) posting.",
+        ):
+            dismissed += 1
+            print(
+                f"  [dismiss] cleared stale air CHANGES_REQUESTED by @{login} "
+                f"(review {r['id']}) — cross-account gate-orphan",
+                file=sys.stderr,
+            )
+    return dismissed
 
 
 # Generated/vendored content travels ~11-13× per review (the coordinator

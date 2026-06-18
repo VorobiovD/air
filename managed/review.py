@@ -32,6 +32,7 @@ import asyncio
 import fnmatch
 import html
 import io
+import json
 import os
 import re
 import secrets
@@ -77,6 +78,7 @@ from github_client import (  # noqa: E402,F401 — split modules; re-exported fo
     _gh_error_message_only,
     fetch_pr_metadata,
     submit_review_verdict,
+    dismiss_stale_air_verdicts,
     fetch_pr_diff,
     _github_paginate,
     fetch_bot_login,
@@ -155,6 +157,26 @@ COORDINATOR_MA_AGENT = "air-coordinator-ma"
 
 def _multiagent_enabled() -> bool:
     return os.environ.get("AIR_MULTIAGENT", "") in ("1", "true")
+
+
+def _air_bot_logins() -> frozenset:
+    """Optional allowlist of bot accounts air rotates through — lets the
+    gate-orphan cleanup recognize air's OWN prior verdicts left under a
+    different account even on LEGACY reviews posted before the verdict
+    sentinel shipped. Sourced from the caller's `AIR_PAT_MAP` (login→secret
+    map) keys if present in env, plus an optional comma-separated
+    `AIR_BOT_LOGINS`. Empty when neither is set — then only sentinel-stamped
+    verdicts are recognized, which already covers everything posted since the
+    sentinel shipped. Never hardcoded (anonymization)."""
+    logins = set()
+    raw = os.environ.get("AIR_PAT_MAP", "").strip()
+    if raw:
+        try:
+            logins.update(json.loads(raw).keys())
+        except (ValueError, AttributeError):
+            pass
+    logins.update(x.strip() for x in os.environ.get("AIR_BOT_LOGINS", "").split(",") if x.strip())
+    return frozenset(logins)
 
 
 def _ledger_pin_enabled() -> bool:
@@ -1545,6 +1567,8 @@ def _backfill_verdict_if_missing(
                      "run posted the comment but its verdict step did not complete.)",
                 commit_id=head_sha,
             )
+        # Clear any cross-account stale block orphaned by PAT rotation.
+        dismiss_stale_air_verdicts(args.repo, args.pr_number, token, bot_login, _air_bot_logins())
     except Exception as e:
         print(
             f"  [warn] verdict backfill failed ({type(e).__name__}: {e}) — "
@@ -2569,6 +2593,12 @@ async def run_review(args):
                     body="Approved — 0 blockers found. See review comment for medium/low/nit findings.",
                     commit_id=head_sha,
                 )
+            # Multi-PAT gate-orphan: clear any stale CHANGES_REQUESTED air left
+            # under a DIFFERENT bot account (PAT rotation), which GitHub's
+            # reviewDecision would otherwise keep gating on despite this verdict.
+            dismiss_stale_air_verdicts(
+                args.repo, args.pr_number, bot_token, bot_login, _air_bot_logins()
+            )
         except RequestException as e:
             # Comment is posted; the verdict is repairable — the skip-gate
             # backfill recomputes it from the comment on the next trigger.
