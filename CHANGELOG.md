@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.32.3](https://github.com/VorobiovD/air/compare/v1.32.2...v1.32.3) (2026-06-18)
+
+
+### Bug Fixes
+
+* **verdict:** dismiss cross-account stale blocks orphaned by PAT rotation ([#173](https://github.com/VorobiovD/air/issues/173)) ([81237dd](https://github.com/VorobiovD/air/commit/81237dd80a95da96613582fc2a60ff5447f0ece5))
+
 ## [1.32.2](https://github.com/VorobiovD/air/compare/v1.32.1...v1.32.2) (2026-06-17)
 
 
