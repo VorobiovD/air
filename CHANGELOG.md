@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.33.0](https://github.com/VorobiovD/air/compare/v1.32.3...v1.33.0) (2026-06-19)
+
+
+### Features
+
+* **multiagent:** opt-in cheaper MA coordinator tier (AIR_MA_COORDINATOR_MODEL) ([#176](https://github.com/VorobiovD/air/issues/176)) ([a603209](https://github.com/VorobiovD/air/commit/a603209e9b36c35c4ef330b71b22002950711a11))
+
 ## [1.32.3](https://github.com/VorobiovD/air/compare/v1.32.2...v1.32.3) (2026-06-18)
 
 
