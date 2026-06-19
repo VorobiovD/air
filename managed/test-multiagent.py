@@ -492,3 +492,35 @@ def test_coordinator_prompt_has_wrong_runtime_guard():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------------------
+# Opt-in tiered MA coordinator (AIR_MA_COORDINATOR_MODEL) — routes to a
+# SEPARATE air-coordinator-ma-<alias> agent so a per-repo opt-in never mutates
+# the shared Sonnet coordinator. The coordinator only relays the verifier's
+# review verbatim (validated relay-safe), so a cheaper tier is gate-consistent.
+# ---------------------------------------------------------------------------
+
+def test_ma_coordinator_default_unset():
+    assert review._ma_coordinator_name("") == "air-coordinator-ma"
+    assert review._ma_coordinator_name(None) == "air-coordinator-ma"
+
+
+def test_ma_coordinator_sonnet_is_default_agent():
+    # sonnet == the default tier → no separate agent, route to the standard one
+    assert review._ma_coordinator_name("sonnet") == "air-coordinator-ma"
+
+
+def test_ma_coordinator_haiku_routes_to_tiered_agent():
+    assert review._ma_coordinator_name("haiku") == "air-coordinator-ma-haiku"
+    assert review._ma_coordinator_name(" Haiku ") == "air-coordinator-ma-haiku"  # trimmed/lowercased
+
+
+def test_ma_coordinator_opus_routes_to_tiered_agent():
+    assert review._ma_coordinator_name("opus") == "air-coordinator-ma-opus"
+
+
+def test_ma_coordinator_unknown_alias_fails_safe_to_default():
+    # an unknown value must NOT route to a non-existent agent — fall back
+    assert review._ma_coordinator_name("gpt5") == "air-coordinator-ma"
+    assert review._ma_coordinator_name("haiku-4-5-20251001") == "air-coordinator-ma"

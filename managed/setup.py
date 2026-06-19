@@ -536,6 +536,36 @@ def main():
             speed=coord_speed,
         )
 
+        # 4c. Opt-in cheaper/faster MA coordinator tier (AIR_MA_COORDINATOR_MODEL).
+        # The MA coordinator only delegates + relays the verifier's review
+        # VERBATIM — it does NOT synthesize (coordinator.md TURN 3 Part A) — so a
+        # cheaper model is relay-safe (validated 2026-06-19: 0 findings dropped,
+        # gate verdict unchanged) and cuts the idle-wake latency. Built as a
+        # SEPARATE agent (air-coordinator-ma-<alias>) so a per-repo opt-in never
+        # mutates the shared Sonnet air-coordinator-ma other callers route to.
+        ma_tier = os.environ.get("AIR_MA_COORDINATOR_MODEL", "").strip().lower()
+        if ma_tier in MODEL_ALIASES and MODEL_ALIASES[ma_tier] != coord_model:
+            tier_name = f"air-coordinator-ma-{ma_tier}"
+            print(f"[4c] Tiered MA coordinator: {tier_name} (model={ma_tier})")
+            create_or_update_agent(
+                name=tier_name,
+                system=coord_system,
+                tools=[{
+                    "type": "agent_toolset_20260401",
+                    "default_config": {"enabled": True},
+                    "configs": coord_tool_configs,
+                }],
+                existing=agents_by_name.get(tier_name),
+                multiagent={
+                    "type": "coordinator",
+                    "agents": [
+                        {"type": "agent", "id": synced[n]["id"], "version": synced[n]["version"]}
+                        for n in SUB_AGENTS
+                    ],
+                },
+                model=MODEL_ALIASES[ma_tier],
+            )
+
     # 5. Solo reviewer agent. One agent applying all 6 lenses + self-verify in
     # a single session — the opt-in AIR_REVIEW_MODE=solo|both path in review.py.
     # Its prompt is assembled from the same specialist .md files (zero drift),
