@@ -152,7 +152,23 @@ COORDINATOR_AGENT = "air-coordinator"
 # threads, enabling MODE: WORKSPACE-HANDOFF (the coordinator writes
 # context files ONCE instead of re-emitting them into every delegation).
 # Created by setup.py only when the flag is on; not pinnable.
-COORDINATOR_MA_AGENT = "air-coordinator-ma"
+# AIR_MA_COORDINATOR_MODEL opts a caller into a cheaper/faster coordinator tier
+# (e.g. "haiku"). The MA coordinator only delegates + relays the verifier's
+# review VERBATIM (it does NOT synthesize), so a cheaper tier is relay-safe
+# (validated 2026-06-19: 0 findings dropped, verdict unchanged) and cuts
+# idle-wake latency. Routes to a SEPARATE agent (created by setup.py 4c) so a
+# per-repo opt-in never touches the shared Sonnet coordinator. Default / an
+# unset / "sonnet" / unknown value → the standard air-coordinator-ma.
+def _ma_coordinator_name(tier: str) -> str:
+    """Route the MA coordinator to a tiered agent (air-coordinator-ma-<alias>)
+    when AIR_MA_COORDINATOR_MODEL names a known, non-default (non-sonnet) model;
+    otherwise the standard air-coordinator-ma. Unset / "sonnet" / unknown → the
+    standard agent (fail-safe to the validated default)."""
+    t = (tier or "").strip().lower()
+    return f"air-coordinator-ma-{t}" if t in MODEL_ALIASES and t != "sonnet" else "air-coordinator-ma"
+
+
+COORDINATOR_MA_AGENT = _ma_coordinator_name(os.environ.get("AIR_MA_COORDINATOR_MODEL", ""))
 
 
 def _multiagent_enabled() -> bool:
@@ -471,6 +487,9 @@ def sync_agents(review_arch: str = "full"):
         # Same conditional-create posture for the multiagent coordinator
         # (air-coordinator-ma): only synced when the run opts in.
         "AIR_MULTIAGENT": os.environ.get("AIR_MULTIAGENT", ""),
+        # Opt-in cheaper MA coordinator tier — setup.py 4c creates the
+        # air-coordinator-ma-<alias> agent this run will route to.
+        "AIR_MA_COORDINATOR_MODEL": os.environ.get("AIR_MA_COORDINATOR_MODEL", ""),
     }
     result = subprocess.run(
         [sys.executable, str(Path(__file__).parent / "setup.py")],
@@ -1296,7 +1315,7 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
                 # short pointers — replacing the per-delegation re-emission
                 # that is full mode's #1 structural cost. git-history stays
                 # inline per coordinator.md's carve-out.
-                print("  multiagent: WORKSPACE-HANDOFF via air-coordinator-ma (AIR_MULTIAGENT=1)")
+                print(f"  multiagent: WORKSPACE-HANDOFF via {coordinator_agent_name} (AIR_MULTIAGENT=1)")
                 coordinator_user_text = _workspace_handoff_text(
                     pattern_note, ui_scope_line, pr_context, diff,
                     codex_block, verifier_task,
