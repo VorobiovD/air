@@ -485,6 +485,12 @@ jobs:
           # deterministic carry-forward guard fleet-lessly. Fails closed, so
           # disabling only removes the guard — it never breaks a review.
           AIR_LEDGER_PIN: ${{ vars.AIR_LEDGER_PIN }}
+          # Fresh-gate exposure floor. Default ON (review.py treats unset/empty
+          # as enabled); set a caller repo/org VARIABLE AIR_CATEGORY_FLOOR=0 in
+          # Settings → Variables to disable the deterministic "active exposure =
+          # blocker" floor fleet-lessly. Inert on tag-less review bodies, so
+          # disabling is byte-identical to the pre-floor gate.
+          AIR_CATEGORY_FLOOR: ${{ vars.AIR_CATEGORY_FLOOR }}
           # Absolute path to the local checkout. review.py uses it for
           # both `codex review` (when enabled) and client-side
           # pre-computation (blame/churn/file-status/diff-check

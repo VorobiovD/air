@@ -204,6 +204,17 @@ def _ledger_pin_enabled() -> bool:
     return os.environ.get("AIR_LEDGER_PIN", "1").strip().lower() not in ("0", "false", "no")
 
 
+def _category_floor_enabled() -> bool:
+    # PR-(b) fresh-gate determinism. Default ON; AIR_CATEGORY_FLOOR=0/false is
+    # the instant kill switch (caller/org variable, no deploy). Floors any
+    # `[sec:<cat>]`-tagged blocker-class exposure to a blocker for the gate,
+    # so a weaker tier rating a real PII/authz/credential exposure "medium"
+    # can no longer silently un-gate. Inert on tag-less bodies, so disabling
+    # is byte-identical to the pre-floor gate. Same kill-switch grammar as
+    # AIR_LEDGER_PIN — read once, applied at every should_request_changes site.
+    return os.environ.get("AIR_CATEGORY_FLOOR", "1").strip().lower() not in ("0", "false", "no")
+
+
 def _required_agents(review_arch: str) -> list[str]:
     """The agents a run must find synced before any session spend.
 
@@ -1562,7 +1573,7 @@ def _backfill_verdict_if_missing(
                 and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")
             ):
                 return  # verdict already present (or deliberately dismissed)
-        request_changes, reason = should_request_changes(prior_body)
+        request_changes, reason = should_request_changes(prior_body, floor_exposures=_category_floor_enabled())
         print(
             f"  [backfill] no verdict found for reviewed SHA {head_sha[:8]} — "
             f"submitting {'REQUEST_CHANGES' if request_changes else 'APPROVE'} "
@@ -2587,7 +2598,7 @@ async def run_review(args):
     elif pr_state == "closed":
         print("  [info] PR is closed/merged — skipping verdict (GitHub 422s verdicts on those)")
     else:
-        request_changes, reason = should_request_changes(review_body)
+        request_changes, reason = should_request_changes(review_body, floor_exposures=_category_floor_enabled())
         # Deterministic conflict-marker gate (CLAUDE.md: "conflict markers =
         # automatic blocker"). Don't trust the model to have emitted the
         # blocker — if `git diff --check` or the diff itself shows an

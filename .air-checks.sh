@@ -93,6 +93,20 @@ done
 grep -qF 'lib/verdict.py" --pin' "$REVIEW_MD" \
   || fail "review.md Step 11.5 no longer routes the re-review body through lib/verdict.py --pin"
 
+# Check F: fresh-gate exposure floor. The floor reads the verifier's
+# `[sec:<token>]` tags; the tag vocabulary the verifier is told to emit
+# (managed/prompts.py:_SEC_TAG_RULE) MUST be single-sourced from the floor's
+# `_BLOCKER_CATEGORIES` frozenset, or a tag the model emits could fail to gate
+# (or a non-blocker token could gate). Lock both halves + the import link.
+grep -qF 'def count_category_floored(' "$VERDICT_LIB" \
+  || fail "lib/verdict.py missing the floor fn 'count_category_floored' (fresh-gate determinism)"
+grep -qF '_BLOCKER_CATEGORIES = frozenset(' "$VERDICT_LIB" \
+  || fail "lib/verdict.py missing the floor vocabulary frozenset '_BLOCKER_CATEGORIES'"
+grep -qF '_BLOCKER_CATEGORIES' managed/prompts.py \
+  || fail "managed/prompts.py no longer single-sources the tag vocabulary from _BLOCKER_CATEGORIES (drift risk)"
+grep -qF '[sec:<token>]' managed/prompts.py \
+  || fail "managed/prompts.py _SEC_TAG_RULE no longer instructs the verifier to emit the [sec:<token>] gate tag"
+
 if [ "$status" -eq 0 ]; then
   printf 'air drift-check: all checks passed.\n'
 fi
