@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.35.0](https://github.com/VorobiovD/air/compare/v1.34.0...v1.35.0) (2026-06-20)
+
+
+### Features
+
+* **verifier:** emit the [sec:] exposure tag on all paths (CLI + solo + managed) ([#181](https://github.com/VorobiovD/air/issues/181)) ([7f73d02](https://github.com/VorobiovD/air/commit/7f73d0273d95429cfd447a40944fbe35a0c0323a))
+
 ## [1.34.0](https://github.com/VorobiovD/air/compare/v1.33.0...v1.34.0) (2026-06-20)
 
 
