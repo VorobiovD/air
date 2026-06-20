@@ -10,6 +10,7 @@ decision (only unfixed BLOCKERS gate; DEFERRED-on-blocker gates as defense
 in depth), the deterministic conflict-marker gate, and the SHA-validated
 `## Code Review` body extractor.
 """
+import os
 import re
 import sys
 from pathlib import Path
@@ -131,33 +132,49 @@ def format_prior_statuses_block(prior_body: str) -> str:
     return f"<prior-round-statuses>\n{lines}\n</prior-round-statuses>"
 
 
-def should_request_changes(review_body: str) -> tuple[bool, str]:
+def should_request_changes(review_body: str, floor_exposures: bool = True) -> tuple[bool, str]:
     """Decide whether to submit REQUEST_CHANGES instead of APPROVE.
 
     Returns (request_changes, reason). The verdict drives `reviewDecision`
     and branch-protection state.
 
-    - Fresh review: REQUEST_CHANGES if any blockers exist.
+    - Fresh review: REQUEST_CHANGES if any blockers exist OR any blocker-class
+      exposure was FLOORED (a `[sec:<cat>]`-tagged finding the model placed
+      below blocker — see `count_category_floored`; the deterministic
+      "active exposure = blocker" enforcement, so a weaker tier rating a real
+      PII/authz/credential exposure "medium" no longer silently un-gates).
     - Re-review: REQUEST_CHANGES if any NEW blockers exist OR any prior
       finding originally classified as `blocker` is still NOT FIXED /
-      PARTIALLY FIXED / DEFERRED. Medium / low / nit prior findings left
-      unfixed do NOT gate — they appear in the body as recommendations.
+      PARTIALLY FIXED / DEFERRED OR any blocker-class exposure was floored.
+      Medium / low / nit prior findings left unfixed do NOT gate.
       A developer can clear a blocker gate by either fixing, explicitly
       disputing (verifier marks DISPUTED), or — for prompt-edge cases —
       escalating to a human reviewer.
+
+    `floor_exposures=False` (kill switch, wired to AIR_CATEGORY_FLOOR by
+    callers) disables the floor. The floor is inert on bodies without
+    `[sec:...]` tags, so a disabled / tag-less run is byte-identical to the
+    pre-floor gate.
     """
     blockers = count_blockers(review_body)
+    floored, floored_cats = count_category_floored(review_body) if floor_exposures else (0, [])
+    floor_note = f"; +{floored} floored exposure(s) [{', '.join(floored_cats)}]" if floored else ""
+    exposure_reason = f"{floored} blocker-class exposure(s) [{', '.join(floored_cats)}] floored to blocker"
     if _REREVIEW_HEADER_RE.search(review_body):
         unfixed = _count_gating_unfixed(review_body)
         if blockers > 0 and unfixed > 0:
-            return True, f"{blockers} new blocker(s), {unfixed} prior blocker(s) still unfixed"
+            return True, f"{blockers} new blocker(s), {unfixed} prior blocker(s) still unfixed{floor_note}"
         if blockers > 0:
-            return True, f"{blockers} new blocker(s)"
+            return True, f"{blockers} new blocker(s){floor_note}"
         if unfixed > 0:
-            return True, f"{unfixed} prior blocker(s) still unfixed"
+            return True, f"{unfixed} prior blocker(s) still unfixed{floor_note}"
+        if floored > 0:
+            return True, exposure_reason
         return False, ""
     if blockers > 0:
-        return True, f"{blockers} blocker(s)"
+        return True, f"{blockers} blocker(s){floor_note}"
+    if floored > 0:
+        return True, exposure_reason
     return False, ""
 
 
@@ -207,6 +224,47 @@ _BLOCKERS_SECTION_RE = re.compile(
 
 
 _BLOCKER_ENTRY_RE = re.compile(r"^\*\*\d+\.", re.MULTILINE)
+
+
+# --- Deterministic exposure floor (fresh-gate determinism) -------------------
+# The security lens tags each finding with the 31-item-checklist bucket that
+# fired, e.g. `[sec:pii-exposure]`. A finding whose bucket is a data-exposure /
+# access-control / injection class gates as a blocker REGARDLESS of the model's
+# own severity label — the deterministic "active exposure = blocker"
+# enforcement (advisory→enforced, same move as has_conflict_markers and the
+# re-review ledger). Closes the fresh-review gap where a weaker tier finds a
+# real exposure but rates it "medium" and silently un-gates it (the 06-12
+# Sonnet bench: org-wide PII + RBAC bypass, both found, both rated medium,
+# both would have APPROVED). The model classifies into a bucket (reliable
+# across tiers); verdict.py assigns the gate severity (ours, deterministic).
+_BLOCKER_CATEGORIES = frozenset({
+    "pii-exposure", "phi-exposure", "data-exposure", "sensitive-data-exposure",
+    "authz-bypass", "authn-bypass", "auth-bypass", "broken-access-control",
+    "idor", "privilege-escalation",
+    "leaked-credential", "secret-exposure", "hardcoded-secret",
+    "sqli", "injection", "rce", "ssrf", "deserialization",
+})
+_SEC_TAG_RE = re.compile(r"\[sec:([a-z0-9-]+)\]", re.IGNORECASE)
+
+
+def count_category_floored(review_body: str) -> tuple[int, list[str]]:
+    """Count blocker-class exposure findings the model did NOT already place in
+    the Blockers section — these are floored to blocker for the gate.
+
+    Returns (count, sorted-unique-categories). Findings whose `[sec:<cat>]`
+    tag sits INSIDE the Blockers section are already counted by
+    count_blockers, so they're excluded here (no double-count). Inert on
+    bodies with no `[sec:...]` tags → (0, []), so the gate is byte-identical
+    to pre-floor behavior until the security lens starts emitting tags.
+    """
+    sec = _BLOCKERS_SECTION_RE.search(review_body)
+    bstart, bend = (sec.start(), sec.end()) if sec else (-1, -1)
+    cats: list[str] = []
+    for m in _SEC_TAG_RE.finditer(review_body):
+        cat = m.group(1).lower()
+        if cat in _BLOCKER_CATEGORIES and not (bstart <= m.start() < bend):
+            cats.append(cat)
+    return len(cats), sorted(set(cats))
 
 
 # In re-review mode, the "Previous Findings Status" section lists each
@@ -1011,7 +1069,11 @@ def _main(argv: list[str]) -> int:
     if args.count_blockers:
         print(count_blockers(body))
         return 0
-    request_changes, reason = should_request_changes(_maybe_pin(body))
+    # AIR_CATEGORY_FLOOR=0/false/no is the fresh-gate floor kill switch (same
+    # grammar as AIR_LEDGER_PIN). The CLI's Step 12 `--decide` inherits it from
+    # the environment, so managed CI and the CLI gate identically.
+    floor = os.environ.get("AIR_CATEGORY_FLOOR", "1").strip().lower() not in ("0", "false", "no")
+    request_changes, reason = should_request_changes(_maybe_pin(body), floor_exposures=floor)
     print(f"request-changes\t{reason}" if request_changes else "approve")
     return 0
 

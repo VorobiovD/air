@@ -996,3 +996,99 @@ def test_decorated_rewrite_reparses_canonically():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------------------
+# Category→severity floor (fresh-gate determinism): a blocker-class exposure
+# the model rated below blocker still gates, deterministically. Inert on
+# tag-less bodies (legacy behavior preserved); kill-switch via floor_exposures.
+# ---------------------------------------------------------------------------
+from verdict import count_category_floored  # noqa: E402
+
+
+def _fbody(blockers="", medium=""):
+    return f"## Code Review\n\n### Blockers\n{blockers}\n\n### Medium\n{medium}\n\n### Strengths\n- ok\n"
+
+
+def test_floor_pii_in_medium_gates():
+    body = _fbody(medium="**1. patient phone leaked to logs** [sec:pii-exposure] — bad")
+    n, cats = count_category_floored(body)
+    assert n == 1 and cats == ["pii-exposure"]
+    rc, reason = should_request_changes(body)
+    assert rc and "floored" in reason
+
+
+def test_floor_no_double_count_when_already_blocker():
+    body = _fbody(blockers="**1. raw SQL interpolation** [sec:sqli] — injectable")
+    assert count_category_floored(body) == (0, [])   # tag inside Blockers → not floored
+    rc, _ = should_request_changes(body)
+    assert rc                                          # gated by count_blockers
+
+
+def test_floor_ignores_non_blocker_category():
+    body = _fbody(medium="**1. verbose request logging** [sec:verbose-logging] — nit")
+    assert count_category_floored(body) == (0, [])
+    assert should_request_changes(body) == (False, "")
+
+
+def test_floor_inert_without_tags_is_legacy():
+    body = _fbody(medium="**1. variable naming** — rename for clarity")
+    assert count_category_floored(body) == (0, [])
+    assert should_request_changes(body) == (False, "")
+
+
+def test_floor_kill_switch_disables():
+    body = _fbody(medium="**1. missing authz check on route** [sec:authz-bypass] — open")
+    assert should_request_changes(body, floor_exposures=True)[0] is True
+    assert should_request_changes(body, floor_exposures=False) == (False, "")
+
+
+def test_floor_multiple_categories_sorted_unique():
+    body = _fbody(medium="**1. PII** [sec:pii-exposure]\n**2. creds** [sec:leaked-credential]\n**3. more PII** [sec:pii-exposure]")
+    n, cats = count_category_floored(body)
+    assert n == 3 and cats == ["leaked-credential", "pii-exposure"]
+
+
+def test_floor_rereview_new_finding_gates_with_no_unfixed_blocker():
+    # Re-review where every prior finding is FIXED but a NEW exposure is found
+    # and rated Medium → must still gate via the floor (the fresh-finding leg
+    # of the re-review branch, which has no ledger anchor to pin against).
+    body = (
+        "## Code Review (Re-review)\n\n_Re-reviewed at `abcd1234`._\n\n"
+        "### Previous Findings Status\n\n- **#1** [blocker] — FIXED — done.\n\n"
+        "### New Findings (introduced since last review)\n\n"
+        "#### Medium / Low / Nits\n\n"
+        "**1. new endpoint missing authz** [sec:authz-bypass] — anyone can call it\n"
+    )
+    rc, reason = should_request_changes(body)
+    assert rc and "authz-bypass" in reason
+    assert should_request_changes(body, floor_exposures=False) == (False, "")
+
+
+def test_floor_rereview_tag_in_new_blockers_not_double_counted():
+    # A correctly-placed new exposure under `#### Blockers` is counted by
+    # count_blockers; the floor must not also count it (no double-gate noise).
+    body = (
+        "## Code Review (Re-review)\n\n_Re-reviewed at `abcd1234`._\n\n"
+        "### Previous Findings Status\n\n- **#1** [low] — FIXED — done.\n\n"
+        "### New Findings (introduced since last review)\n\n"
+        "#### Blockers\n\n**1. raw SQL** [sec:sqli] — injectable\n"
+    )
+    assert count_category_floored(body) == (0, [])
+    rc, _ = should_request_changes(body)
+    assert rc  # gated by the new blocker count, not the floor
+
+
+def test_verifier_task_renders_sec_tag_rule_both_modes():
+    # The tag vocabulary the verifier emits must be single-sourced from
+    # verdict._BLOCKER_CATEGORIES and present in BOTH templates.
+    import prompts
+    from verdict import _BLOCKER_CATEGORIES
+    fresh = prompts.build_verifier_task("full", "o/r", "a" * 40, None, None)
+    rr = prompts.build_verifier_task(
+        "re-review", "o/r", "a" * 40, "b" * 40, "## Code Review\n\n### Blockers\n\n**1. x**\n"
+    )
+    for t in (fresh, rr):
+        assert "[sec:<token>]" in t
+        for cat in _BLOCKER_CATEGORIES:
+            assert cat in t
