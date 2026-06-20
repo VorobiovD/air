@@ -473,6 +473,12 @@ jobs:
           # (GA roster, shared /workspace, ≈ −65–80% session cost in the
           # 2026-06-11 A/B); delete the variable to roll back instantly.
           AIR_MULTIAGENT: ${{ vars.AIR_MULTIAGENT }}
+          # Optional cheaper/faster MA coordinator tier (default off). Caller
+          # repo/org VARIABLE: set AIR_MA_COORDINATOR_MODEL=haiku (with
+          # AIR_MULTIAGENT=1) to route the coordinator — a pure delegate+relay
+          # layer — to a separate air-coordinator-ma-<alias> agent. ~15% faster,
+          # relay-safe (validated), NOT a gate-safety change; delete to roll back.
+          AIR_MA_COORDINATOR_MODEL: ${{ vars.AIR_MA_COORDINATOR_MODEL }}
           # Re-review severity-pin + deferred-findings ledger. Default ON
           # (review.py treats unset/empty as enabled); set a caller repo/org
           # VARIABLE AIR_LEDGER_PIN=0 in Settings → Variables to disable the
