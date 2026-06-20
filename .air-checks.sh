@@ -93,19 +93,32 @@ done
 grep -qF 'lib/verdict.py" --pin' "$REVIEW_MD" \
   || fail "review.md Step 11.5 no longer routes the re-review body through lib/verdict.py --pin"
 
-# Check F: fresh-gate exposure floor. The floor reads the verifier's
-# `[sec:<token>]` tags; the tag vocabulary the verifier is told to emit
-# (managed/prompts.py:_SEC_TAG_RULE) MUST be single-sourced from the floor's
-# `_BLOCKER_CATEGORIES` frozenset, or a tag the model emits could fail to gate
-# (or a non-blocker token could gate). Lock both halves + the import link.
+# Check F: fresh-gate exposure floor. Two halves must stay consistent:
+#  - APPLICATION lives in lib/verdict.py (count_category_floored + the
+#    _BLOCKER_CATEGORIES vocabulary it floors).
+#  - EMISSION lives in the verifier SYSTEM PROMPT (agents/review-verifier.md)
+#    so managed + CLI + solo all emit `[sec:<token>]` from one source.
+# Every blocker-class token in the frozenset MUST appear (backtick-quoted) in
+# review-verifier.md, or a tag the model emits could fail to gate (or a token
+# the prompt teaches isn't in the floor → silently never gates).
+VERIFIER_MD=plugins/air/agents/review-verifier.md
 grep -qF 'def count_category_floored(' "$VERDICT_LIB" \
   || fail "lib/verdict.py missing the floor fn 'count_category_floored' (fresh-gate determinism)"
 grep -qF '_BLOCKER_CATEGORIES = frozenset(' "$VERDICT_LIB" \
   || fail "lib/verdict.py missing the floor vocabulary frozenset '_BLOCKER_CATEGORIES'"
-grep -qF '_BLOCKER_CATEGORIES' managed/prompts.py \
-  || fail "managed/prompts.py no longer single-sources the tag vocabulary from _BLOCKER_CATEGORIES (drift risk)"
-grep -qF '[sec:<token>]' managed/prompts.py \
-  || fail "managed/prompts.py _SEC_TAG_RULE no longer instructs the verifier to emit the [sec:<token>] gate tag"
+grep -qF '[sec:<token>]' "$VERIFIER_MD" \
+  || fail "$VERIFIER_MD no longer instructs the verifier to emit the [sec:<token>] gate tag"
+# Lock the markdown token list to the frozenset (markdown can't import Python).
+python3 - "$VERDICT_LIB" "$VERIFIER_MD" <<'PYF' || status=1
+import re, sys
+lib, md = open(sys.argv[1]).read(), open(sys.argv[2]).read()
+m = re.search(r"_BLOCKER_CATEGORIES = frozenset\(\{(.*?)\}\)", lib, re.DOTALL)
+toks = re.findall(r'"([a-z0-9-]+)"', m.group(1)) if m else []
+missing = [t for t in toks if f"`{t}`" not in md]
+if missing:
+    print(f"  [FAIL] review-verifier.md missing floor token(s): {missing}", file=sys.stderr)
+    sys.exit(1)
+PYF
 
 if [ "$status" -eq 0 ]; then
   printf 'air drift-check: all checks passed.\n'

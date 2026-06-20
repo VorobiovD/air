@@ -1079,16 +1079,19 @@ def test_floor_rereview_tag_in_new_blockers_not_double_counted():
     assert rc  # gated by the new blocker count, not the floor
 
 
-def test_verifier_task_renders_sec_tag_rule_both_modes():
-    # The tag vocabulary the verifier emits must be single-sourced from
-    # verdict._BLOCKER_CATEGORIES and present in BOTH templates.
-    import prompts
+def test_sec_tag_rule_lives_in_verifier_system_prompt():
+    # The emission rule lives in the verifier SYSTEM PROMPT (review-verifier.md)
+    # so managed + CLI + solo all emit it from one source — NOT in the managed
+    # build_verifier_task template. The full blocker-class vocabulary must be
+    # present and match verdict._BLOCKER_CATEGORIES (the floor that reads it).
+    from pathlib import Path
     from verdict import _BLOCKER_CATEGORIES
+    md = (Path(__file__).resolve().parent.parent
+          / "plugins/air/agents/review-verifier.md").read_text()
+    assert "[sec:<token>]" in md
+    for cat in _BLOCKER_CATEGORIES:
+        assert f"`{cat}`" in md, f"review-verifier.md missing token {cat}"
+    # And it must NOT be re-injected into the managed task (single source).
+    import prompts
     fresh = prompts.build_verifier_task("full", "o/r", "a" * 40, None, None)
-    rr = prompts.build_verifier_task(
-        "re-review", "o/r", "a" * 40, "b" * 40, "## Code Review\n\n### Blockers\n\n**1. x**\n"
-    )
-    for t in (fresh, rr):
-        assert "[sec:<token>]" in t
-        for cat in _BLOCKER_CATEGORIES:
-            assert cat in t
+    assert "[sec:<token>]" not in fresh
