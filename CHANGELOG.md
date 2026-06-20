@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.34.0](https://github.com/VorobiovD/air/compare/v1.33.0...v1.34.0) (2026-06-20)
+
+
+### Features
+
+* **verdict:** deterministic fresh-gate exposure floor (AIR_CATEGORY_FLOOR) ([#180](https://github.com/VorobiovD/air/issues/180)) ([afbdfeb](https://github.com/VorobiovD/air/commit/afbdfebfedaf0d2729b0c8cb32f96f56b6914e60))
+
+
+### Bug Fixes
+
+* **workflow:** forward AIR_MA_COORDINATOR_MODEL caller var to the driver ([#178](https://github.com/VorobiovD/air/issues/178)) ([e92d887](https://github.com/VorobiovD/air/commit/e92d887411153468a85e32c463d278a78fe13757))
+
 ## [1.33.0](https://github.com/VorobiovD/air/compare/v1.32.3...v1.33.0) (2026-06-19)
 
 
