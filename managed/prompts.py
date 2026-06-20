@@ -8,33 +8,15 @@ import html
 from verdict import (
     CARRY_FORWARD_THRESHOLD,
     PRIOR_REVIEW_MAX_CHARS,
-    _BLOCKER_CATEGORIES,
     format_prior_statuses_block,
 )
 
-# Single-sourced from verdict._BLOCKER_CATEGORIES so the tag vocabulary the
-# verifier emits can never drift from the floor that reads it. The verifier
-# tags confirmed exposures `[sec:<token>]`; verdict.count_category_floored
-# floors any such finding to a blocker for the gate.
-_SEC_TAG_RULE = (
-    "- Security-exposure tag (gate floor): if a finding is a CONFIRMED, "
-    "genuinely exploitable exposure — a real PII/PHI/credential leak, a "
-    "bypassable or missing auth/authz check on a sensitive path, an IDOR, or "
-    "an injection/RCE/SSRF/deserialization sink reachable with attacker-"
-    "controlled input — append `[sec:<token>]` to its title line, EXACTLY ONE "
-    "token from: " + ", ".join(sorted(_BLOCKER_CATEGORIES)) + ". This maps the "
-    "security audit's broad buckets to a precise token: data-exposure → "
-    "pii-exposure / phi-exposure / data-exposure / leaked-credential; auth → "
-    "authz-bypass / authn-bypass / idor / broken-access-control / privilege-"
-    "escalation; injection → sqli / injection / rce / ssrf / deserialization. "
-    "A tagged finding gates the merge as a blocker REGARDLESS of the section "
-    "you place it in (the deterministic floor catches a real exposure you "
-    "under-rated) — so always also place it in `### Blockers`. The tag is a "
-    "narrow backstop, NOT a catch-all: do NOT tag informational disclosures, "
-    "defense-in-depth hardening, theoretical/non-reachable issues, "
-    "input-validation nits, or any style/perf/operational finding. When in "
-    "doubt whether it is a real exploitable exposure, do NOT tag."
-)
+# NOTE: the verifier's `[sec:<token>]` exposure-tag rule (the EMISSION half of
+# the deterministic exposure floor) lives in the verifier SYSTEM PROMPT
+# (plugins/air/agents/review-verifier.md), not here — so the managed verifier,
+# the CLI verifier, AND solo all emit it from one source. verdict.py reads the
+# tag and assigns the gate severity (the APPLICATION half). See `.air-checks.sh`
+# Check F for the vocabulary lock against verdict._BLOCKER_CATEGORIES.
 
 
 def build_pr_context(
@@ -384,8 +366,6 @@ Examples:
 ...same structure as new-finding sections, numbered sequentially across the
 new-findings block (prior findings keep their #N from the last review).
 
-{_SEC_TAG_RULE}
-
 ---
 
 Reviewed at: {head_sha}
@@ -445,7 +425,6 @@ Reviewed at: {head_sha}
 
 Rules: sequential numbering across all sections, empty sections omitted,
 Strengths omitted if 3+ blockers, Nits only if < 10 findings total, no emoji.
-{_SEC_TAG_RULE}
 """
 
     return verifier_task
