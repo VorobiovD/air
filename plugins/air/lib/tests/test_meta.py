@@ -69,6 +69,7 @@ def test_roundtrip(wiki_dir):
         "reviews_since": 4,
         "last_processed_pr": 42,
         "last_mirror_render": "2026-04-02T01:00:00Z",
+        "learn_claimed_at": "",
     }
     _write(wiki_dir, original)
     m = meta.read_meta(wiki_dir)
@@ -285,4 +286,102 @@ def test_script_is_directly_invocable(wiki_dir):
         capture_output=True, text=True,
     )
     assert result.returncode == 0
+    assert _read(wiki_dir)["reviews_since"] == 1
+
+
+# -------- claim: atomic bump + learn-slot lock (anti-storm) --------------
+
+def test_cmd_claim_bumps_and_skips_below_threshold(wiki_dir):
+    _write(wiki_dir, {
+        "last_cleanup": _iso(datetime.now(timezone.utc)),
+        "last_check": _iso(datetime.now(timezone.utc)),
+        "reviews_since": 3, "last_processed_pr": 10,
+    })
+    rc = meta.main(["claim", "--wiki-dir", str(wiki_dir), "--pr-number", "11"])
+    data = _read(wiki_dir)
+    assert rc == 0                       # below threshold → no claim
+    assert data["reviews_since"] == 4    # but still counted
+    assert not data.get("learn_claimed_at")  # no lock
+
+
+def test_cmd_claim_claims_on_crossing_threshold(wiki_dir):
+    _write(wiki_dir, {
+        "last_cleanup": _iso(datetime.now(timezone.utc)),
+        "last_check": _iso(datetime.now(timezone.utc)),
+        "reviews_since": 14, "last_processed_pr": 10,
+    })
+    rc = meta.main(["claim", "--wiki-dir", str(wiki_dir), "--pr-number", "11"])
+    data = _read(wiki_dir)
+    assert rc == 1                       # 14→15 crosses → CLAIMED
+    assert data["reviews_since"] == 15
+    assert data["learn_claimed_at"]      # lock acquired
+
+
+def test_cmd_claim_skips_when_lock_live(wiki_dir):
+    # Threshold met AND a learn is already in flight (fresh lock) → skip,
+    # but still count this review. This is the anti-storm guarantee.
+    now = datetime.now(timezone.utc)
+    _write(wiki_dir, {
+        "last_cleanup": _iso(now), "last_check": _iso(now),
+        "reviews_since": 20, "last_processed_pr": 10,
+        "learn_claimed_at": _iso(now),   # someone is learning right now
+    })
+    rc = meta.main(["claim", "--wiki-dir", str(wiki_dir), "--pr-number", "11"])
+    data = _read(wiki_dir)
+    assert rc == 0                       # lock held → no second learn
+    assert data["reviews_since"] == 21   # review still counts
+    assert data["learn_claimed_at"] == _iso(now)  # lock untouched
+
+
+def test_cmd_claim_reclaims_when_lock_stale(wiki_dir):
+    # A learn that died without resetting leaves a stale lock; past the TTL the
+    # next review re-claims (self-healing — never wedged).
+    now = datetime.now(timezone.utc)
+    stale = now - timedelta(minutes=meta.LEARN_LOCK_TTL_MIN + 5)
+    _write(wiki_dir, {
+        "last_cleanup": _iso(now), "last_check": _iso(now),
+        "reviews_since": 20, "last_processed_pr": 10,
+        "learn_claimed_at": _iso(stale),
+    })
+    rc = meta.main(["claim", "--wiki-dir", str(wiki_dir), "--pr-number", "11"])
+    data = _read(wiki_dir)
+    assert rc == 1                                   # stale lock → re-claim
+    assert _iso(stale) != data["learn_claimed_at"]   # lock refreshed
+
+
+def test_cmd_reset_clears_the_learn_lock(wiki_dir):
+    now = datetime.now(timezone.utc)
+    _write(wiki_dir, {
+        "last_cleanup": "2026-04-01T00:00:00Z", "last_check": "2026-04-01T00:00:00Z",
+        "reviews_since": 16, "last_processed_pr": 10,
+        "learn_claimed_at": _iso(now),
+    })
+    meta.main(["reset", "--wiki-dir", str(wiki_dir), "--pr-number", "50"])
+    data = _read(wiki_dir)
+    assert data["reviews_since"] == 0
+    assert data["learn_claimed_at"] == ""   # lock released
+
+
+def test_learn_lock_live_states():
+    now = datetime.now(timezone.utc)
+    assert meta._learn_lock_live({"learn_claimed_at": ""}) is False
+    assert meta._learn_lock_live({}) is False
+    assert meta._learn_lock_live({"learn_claimed_at": "garbage"}) is False
+    assert meta._learn_lock_live({"learn_claimed_at": _iso(now)}) is True
+    old = now - timedelta(minutes=meta.LEARN_LOCK_TTL_MIN + 1)
+    assert meta._learn_lock_live({"learn_claimed_at": _iso(old)}) is False
+
+
+def test_claim_then_reset_then_claim_cycle(wiki_dir):
+    # Full cadence: cross → claim (lock) → reset (clear) → next review bumps
+    # from 0 and does NOT re-fire while below threshold.
+    now = datetime.now(timezone.utc)
+    _write(wiki_dir, {
+        "last_cleanup": _iso(now), "last_check": _iso(now),
+        "reviews_since": 14, "last_processed_pr": 10,
+    })
+    assert meta.main(["claim", "--wiki-dir", str(wiki_dir), "--pr-number", "11"]) == 1
+    assert meta.main(["reset", "--wiki-dir", str(wiki_dir), "--pr-number", "11"]) == 0
+    assert _read(wiki_dir)["reviews_since"] == 0
+    assert meta.main(["claim", "--wiki-dir", str(wiki_dir), "--pr-number", "12"]) == 0
     assert _read(wiki_dir)["reviews_since"] == 1
