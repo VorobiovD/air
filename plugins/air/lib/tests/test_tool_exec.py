@@ -179,6 +179,18 @@ def test_bash_pathspec_magic_refused(repo):
             s.bash(cmd)
 
 
+def test_bash_wildcard_pathspec_refused(repo):
+    # A glob-wildcard pathspec expands git-side to match files the literal token
+    # never equals: `.e??` matches `.env`, `*.key` matches a private key, `[se]*`
+    # matches `secrets.yml`. The literal deny-glob check can't see the expansion,
+    # so refuse any pathspec carrying *, ?, or [ outright.
+    s = Sandbox(str(repo))
+    for cmd in ["git log -p -- .e??", "git log -p -- *.key", "git diff -- '[se]*'",
+                "git show HEAD -- .en?", "git log -- 'config/*.yml'"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+
+
 def test_glob_does_not_surface_secrets(repo):
     # glob() must filter deny-globbed paths like read/grep do — surfacing even the
     # NAME points a prompt-injected agent straight at the secret to read next.

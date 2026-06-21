@@ -19,7 +19,12 @@ induce — it can only emit jailed read calls. This is STRICTER than the CLI's
 general `Bash` and managed's broad sandbox. Residual (same as every air mode
 today): a read tool can read a secret that is IN the checkout — mitigated by
 reviewing clean clones + the deny-globs below (a blocklist = defense-in-depth,
-NOT the primary control; the read-only design is).
+NOT the primary control; the read-only design is). The deny-glob is PATH-based,
+so it screens path/refspec/pathspec reads (literal, magic, and wildcard forms);
+it deliberately does NOT try to catch a content read addressed by raw object SHA
+(`git show <blob-sha>` / `cat-file -p <sha>`, SHA enumerable via `ls-files -s`) —
+that's unscreenable without crippling git, and is an accepted defense-in-depth
+gap whose backstop is the clean-clone assumption (no committed secrets).
 
 stdlib-only (the lib/ rule). Secrets (ANTHROPIC_API_KEY / bot PAT / ssh) live in
 the orchestrator and are NEVER placed in the git subprocess env (narrow env) —
@@ -202,11 +207,19 @@ class Sandbox:
             if tok.startswith(":"):
                 raise ToolError(f"git pathspec/refspec magic (leading ':') not allowed: {tok}")
             self._screen_refspec_path(tok)  # `git show HEAD:.env` → refused
-            # Plain pathspec args (`git log -p -- .env`, `git diff <range> -- secret.pem`)
-            # are not refspecs, so the refspec screen above misses them. Screen the raw
-            # token too: refs / SHAs / `--` never match a sensitive deny-glob, so this
-            # only ever refuses an actual deny-globbed path, never a legitimate ref.
             if not tok.startswith("-"):
+                # A pathspec with a glob wildcard (`.e??`, `*.key`, `[a-z]*secret*`)
+                # expands — git-side — to match files the LITERAL token never equals,
+                # so the deny-glob check below (which compares the token text against
+                # the deny-globs) can't see what it will read. Refuse wildcard pathspecs
+                # outright: a read-only review names concrete files (the Glob/Grep tools
+                # already screen their own results). Closes the whole expand-to-secret
+                # class, not just the specific magic/wildcard forms seen so far.
+                if any(c in tok for c in "*?["):
+                    raise ToolError(f"git wildcard pathspec not allowed: {tok}")
+                # Plain literal pathspec args (`git log -p -- .env`): screen the raw
+                # token — refs / SHAs / `--` never match a sensitive deny-glob, so this
+                # only ever refuses an actual deny-globbed path, never a legitimate ref.
                 self._deny_glob_check(tok, os.path.basename(tok))
         run_argv = ["git", "--no-pager", verb, *argv[2:]]
         try:
