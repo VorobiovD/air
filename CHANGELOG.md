@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.36.0](https://github.com/VorobiovD/air/compare/v1.35.1...v1.36.0) (2026-06-21)
+
+
+### Features
+
+* **direct-post:** post the verifier body to bypass coordinator relay drops (AIR_POST_VERIFIER_BODY) ([#185](https://github.com/VorobiovD/air/issues/185)) ([46b6c5d](https://github.com/VorobiovD/air/commit/46b6c5dcd52427bd67281ce19485480074d21b66))
+
 ## [1.35.1](https://github.com/VorobiovD/air/compare/v1.35.0...v1.35.1) (2026-06-21)
 
 
