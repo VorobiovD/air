@@ -32,7 +32,8 @@ def _accumulate_usage(acc: dict, usage) -> None:
 
 
 def run_agent(client, *, model, persona, pr_context, task, sandbox,
-              effort="high", max_tokens=16000, label="", thinking=True, log=print):
+              effort="high", max_tokens=16000, label="", thinking=True, log=print,
+              max_turns=None):
     """Run one agent to end_turn against the sandboxed tools.
 
     Layout (cache-aware): `persona` (the agent's agents/*.md body) is the system
@@ -65,7 +66,8 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
     t0 = time.monotonic()
     final_text = ""
     stop = "max_turns"
-    for turn in range(1, MAX_TURNS + 1):
+    turn_cap = max_turns or MAX_TURNS  # caller scales it by PR size; MAX_TURNS is the floor/default
+    for turn in range(1, turn_cap + 1):
         with client.messages.stream(model=model, system=system, messages=messages,
                                     tools=TOOL_SCHEMAS, max_tokens=max_tokens, **extra) as stream:
             msg = stream.get_final_message()

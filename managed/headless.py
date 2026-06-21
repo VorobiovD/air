@@ -61,12 +61,25 @@ def _persona_model(agent: str) -> tuple[str, str, str]:
     return body, MODEL_ALIASES.get(alias, MODEL_ALIASES["sonnet"]), _TIER.get(alias, "sonnet")
 
 
+# Each agent loop turn is a full model round-trip; serializing one tool per turn
+# is the dominant cost/latency driver on big PRs (the A/B's 50-86 tool-call
+# specialists). This directive pushes the model to fan out independent reads —
+# it does not change WHAT gets read, only that it's batched. Shared across the
+# specialist + verifier tasks (NOT the personas, which managed also uses).
+_BATCH_DIRECTIVE = (
+    " TOOL EFFICIENCY: when you need several files or independent searches, issue them as "
+    "MULTIPLE parallel tool calls in a SINGLE response — do not read one-per-turn. Serialize "
+    "only when a call genuinely depends on a prior result. This materially cuts review latency."
+)
+
+
 def _specialist_task(agent: str) -> str:
     return (
         "Review THIS PR through your lens (your system prompt defines it). The PR Context + "
         "`<diff>` are provided above. Use your Read / Grep / Bash(git blame/log) tools to verify "
         "against the actual source at the changed lines BEFORE reporting — the diff alone is not "
         "enough context. Emit your findings in exactly the format your lens specifies. Be concise."
+        + _BATCH_DIRECTIVE
     )
 
 
@@ -87,6 +100,16 @@ async def run_headless_review(args, bot_token: str) -> dict:
     pr_context = (build_pr_context(meta, args.repo, mode="full")
                   + f"\n\n<diff>\n{diff}\n</diff>\n")
 
+    # Per-agent turn budget scales with PR size: a big multi-file PR needs more
+    # read/blame round-trips than a small one. A fixed cap that's fine for a
+    # 4-file PR starves a 30+-file one mid-investigation (the agent hits the cap
+    # before emitting findings; the verifier then never sees them — observed in
+    # A/B testing: two specialists hit a 45-turn cap and produced nothing).
+    n_files = diff.count("\ndiff --git ") + (1 if diff.startswith("diff --git ") else 0)
+    turn_budget = int(os.environ.get("AIR_HEADLESS_MAX_TURNS")
+                      or min(150, 45 + 3 * max(n_files, 1)))
+    print(f"[headless] turn budget: {turn_budget} ({n_files} changed files)")
+
     # v1: the 4 core specialists. The UI/copy lens (conditional on user-facing
     # diffs) is a v1.1 dispatch follow-up — mirror review.py:_diff_touches_ui.
     in_scope = list(SPECIALISTS)
@@ -100,7 +123,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
         r = agent_loop.run_agent(
             client, model=model, persona=persona, pr_context=pr_context,
             task=_specialist_task(agent), sandbox=sandbox, effort="high",
-            label=agent.replace("air-", ""))
+            label=agent.replace("air-", ""), max_turns=turn_budget)
         r["agent"], r["tier"] = agent, tier
         return r
 
@@ -132,13 +155,14 @@ async def run_headless_review(args, bot_token: str) -> dict:
     verifier_input = (
         "Specialist findings to verify (verify each against source per your system prompt; "
         "drop FALSE POSITIVE / below-threshold; emit [sec:<token>] tags on confirmed exposures):\n\n"
-        + "\n\n".join(findings_block) + "\n\n" + verifier_task)
+        + "\n\n".join(findings_block) + "\n\n" + verifier_task + _BATCH_DIRECTIVE)
     vpersona, vmodel, _ = _persona_model(VERIFIER)
     print("[headless] running verifier (self-hosted loop)…")
     vres = await asyncio.to_thread(
         agent_loop.run_agent, client, **{
             "model": vmodel, "persona": vpersona, "pr_context": pr_context,
-            "task": verifier_input, "sandbox": sandbox, "effort": "high", "label": "verifier"})
+            "task": verifier_input, "sandbox": sandbox, "effort": "high", "label": "verifier",
+            "max_turns": turn_budget})
     review_body_raw = vres["text"]
     wall = time.monotonic() - t0
 
