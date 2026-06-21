@@ -27,7 +27,7 @@ if str(_LIB) not in sys.path:
 import anthropic  # noqa: E402
 
 from github_client import (  # noqa: E402
-    fetch_pr_metadata, fetch_pr_diff,
+    fetch_pr_metadata, fetch_pr_diff, fetch_bot_login,
     _post_review_comment_with_retry, submit_review_verdict, dismiss_stale_air_verdicts,
 )
 from prompts import build_pr_context, build_verifier_task  # noqa: E402
@@ -52,8 +52,8 @@ def _persona_model(agent: str) -> tuple[str, str, str]:
     short = agent.replace("air-", "")
     text = (AGENTS_DIR / f"{short}.md").read_text()
     body, alias = text, "sonnet"
-    if text.startswith("---"):
-        end = text.index("---", 3)
+    end = text.index("---", 3) if text.startswith("---") and "---" in text[3:] else -1
+    if end != -1:
         for line in text[3:end].splitlines():
             if line.strip().startswith("model:"):
                 alias = line.split(":", 1)[1].split("#", 1)[0].strip()
@@ -156,7 +156,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
         "Specialist findings to verify (verify each against source per your system prompt; "
         "drop FALSE POSITIVE / below-threshold; emit [sec:<token>] tags on confirmed exposures):\n\n"
         + "\n\n".join(findings_block) + "\n\n" + verifier_task + _BATCH_DIRECTIVE)
-    vpersona, vmodel, _ = _persona_model(VERIFIER)
+    vpersona, vmodel, vtier = _persona_model(VERIFIER)
     print("[headless] running verifier (self-hosted loop)…")
     vres = await asyncio.to_thread(
         agent_loop.run_agent, client, **{
@@ -168,7 +168,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
 
     # ---- DETERMINISTIC TAIL (reused verbatim) ----------------------------
     review_body, extracted = _extract_review_body(review_body_raw, head_sha)
-    cost = (agent_loop.usage_cost(vres["usage"], "sonnet")
+    cost = (agent_loop.usage_cost(vres["usage"], vtier)
             + sum(agent_loop.usage_cost(r["usage"], r["tier"])
                   for r in specialist_results.values() if r))
     print(f"\n[headless] complete in {wall:.1f}s  cost≈${cost:.2f}  verifier_extracted={extracted}")
@@ -193,9 +193,14 @@ async def run_headless_review(args, bot_token: str) -> dict:
 
     _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
     if meta.get("state") == "open":
+        # commit_id pins the verdict to the SHA we reviewed (not the PR's current
+        # head); current_login is the bot account this run posts under, so the
+        # gate-orphan dismissal skips it. Both are required args — omitting them
+        # crashed the post path (only --dry-run, which returns above, was tested).
+        bot_login = fetch_bot_login(bot_token)
         submit_review_verdict(args.repo, args.pr_number, bot_token,
-                              event=verdict, body=reason or "")
-        dismiss_stale_air_verdicts(args.repo, args.pr_number, bot_token)
+                              event=verdict, body=reason or "", commit_id=head_sha)
+        dismiss_stale_air_verdicts(args.repo, args.pr_number, bot_token, bot_login)
     return {"ok": True, "verdict": verdict, "reason": reason, "wall": wall, "cost": cost}
 
 

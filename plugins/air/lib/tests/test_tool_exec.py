@@ -149,6 +149,33 @@ def test_bash_show_refspec_normal_allowed(repo):
     assert "def login" in s.bash("git show HEAD:src/app.py")
 
 
+def test_bash_pathspec_secret_refused(repo):
+    # A plain pathspec (NOT a `ref:path` refspec) must also be deny-globbed:
+    # `git log -p -- .env` / `git diff -- config/secrets.yml` would otherwise dump
+    # the in-tree secret's content straight from history, bypassing the deny-glob.
+    s = Sandbox(str(repo))
+    for cmd in ["git log -p -- .env", "git diff HEAD -- .env", "git show HEAD -- .env",
+                "git log --oneline -- config/secrets.yml", "git log -p .env"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+
+
+def test_bash_pathspec_normal_allowed(repo):
+    # A non-sensitive pathspec is fine — refs / SHAs / `--` / normal paths never
+    # match a deny-glob, so legitimate path-scoped history reads still work.
+    s = Sandbox(str(repo))
+    assert "init" in s.bash("git log --oneline -- src/app.py")
+
+
+def test_glob_does_not_surface_secrets(repo):
+    # glob() must filter deny-globbed paths like read/grep do — surfacing even the
+    # NAME points a prompt-injected agent straight at the secret to read next.
+    s = Sandbox(str(repo))
+    out = s.glob("**/*")
+    assert ".env" not in out and "secrets.yml" not in out
+    assert "src/app.py" in out   # normal files still listed
+
+
 def test_bash_shell_metachars_inert(repo, tmp_path):
     # The security property: NO shell runs, so `;`/`&&`/`|` cannot chain a second
     # command. Either the split makes argv[1] a non-verb (refused), or the

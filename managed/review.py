@@ -1747,7 +1747,12 @@ async def run_review(args):
     # setup below and return. Reuses fetch/build/verdict/post helpers verbatim.
     if review_arch == "messages-api":
         from headless import run_headless_review
-        await run_headless_review(args, bot_token)
+        result = await run_headless_review(args, bot_token)
+        # A failed/empty headless review (no usable body, ok=False) must FAIL the
+        # job, not silently exit 0 — otherwise CI goes green on a review that never
+        # ran. (headless's own __main__ does this; the --mode dispatch must too.)
+        if not (result or {}).get("ok"):
+            sys.exit(1)
         return
 
     sync_agents(review_arch)

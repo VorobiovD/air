@@ -140,6 +140,8 @@ class Sandbox:
                 rel = hit.resolve().relative_to(self.root)
             except ValueError:
                 continue  # globbed outside the jail (symlink) — skip
+            if any(fnmatch.fnmatch(hit.name, g) or fnmatch.fnmatch(str(rel), g) for g in DENY_GLOBS):
+                continue  # don't surface deny-globbed paths (parity with read/grep)
             hits.append(str(rel))
         return ("\n".join(hits) or "(no matches)")[:_MAX_OUTPUT]
 
@@ -193,6 +195,12 @@ class Sandbox:
             if _GIT_DENY_FLAG_RE.match(tok):
                 raise ToolError(f"git flag not allowed: {tok}")
             self._screen_refspec_path(tok)  # `git show HEAD:.env` → refused
+            # Plain pathspec args (`git log -p -- .env`, `git diff <range> -- secret.pem`)
+            # are not refspecs, so the refspec screen above misses them. Screen the raw
+            # token too: refs / SHAs / `--` never match a sensitive deny-glob, so this
+            # only ever refuses an actual deny-globbed path, never a legitimate ref.
+            if not tok.startswith("-"):
+                self._deny_glob_check(tok, os.path.basename(tok))
         run_argv = ["git", "--no-pager", verb, *argv[2:]]
         try:
             proc = subprocess.run(
