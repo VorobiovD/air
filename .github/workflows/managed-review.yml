@@ -491,6 +491,12 @@ jobs:
           # blocker" floor fleet-lessly. Inert on tag-less review bodies, so
           # disabling is byte-identical to the pre-floor gate.
           AIR_CATEGORY_FLOOR: ${{ vars.AIR_CATEGORY_FLOOR }}
+          # Direct-post: post the verifier's body verbatim instead of the
+          # coordinator's relay (bypasses the relay-drop failure mode for any
+          # coordinator model). Default OFF; set a caller repo/org VARIABLE
+          # AIR_POST_VERIFIER_BODY=1 to opt a repo in. Safe-by-construction —
+          # falls back to the coordinator relay on any ambiguity.
+          AIR_POST_VERIFIER_BODY: ${{ vars.AIR_POST_VERIFIER_BODY }}
           # Absolute path to the local checkout. review.py uses it for
           # both `codex review` (when enabled) and client-side
           # pre-computation (blame/churn/file-status/diff-check
