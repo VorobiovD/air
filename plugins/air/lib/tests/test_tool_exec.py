@@ -1,0 +1,178 @@
+"""Parser-grade + adversarial tests for tool_exec.Sandbox — the headless mode's
+read-only trust boundary. Every refusal here is a security property: a
+prompt-injected PR diff must not be able to escape the checkout, read a secret,
+or run anything but read-only git."""
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+import tool_exec  # noqa: E402
+from tool_exec import Sandbox, ToolError  # noqa: E402
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """A real git checkout with a normal file, a nested source file, and an
+    in-tree secret (.env) to attack."""
+    r = tmp_path / "checkout"
+    r.mkdir()
+    (r / "src").mkdir()
+    (r / "src" / "app.py").write_text("def login(user):\n    return user\n# TODO auth\n")
+    (r / ".env").write_text("SECRET_TOKEN=sk-super-secret-value\n")
+    (r / "config").mkdir()
+    (r / "config" / "secrets.yml").write_text("db_password: hunter2\n")
+    env = {**tool_exec._GIT_HARDENED_ENV, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init", "-q"], cwd=r, env=env, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=r, env=env, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=r, env=env, check=True)
+    return r
+
+
+# ---- the happy path (must WORK) ------------------------------------------
+
+def test_read_normal_file(repo):
+    s = Sandbox(str(repo))
+    out = s.read("src/app.py")
+    assert "def login" in out and "\t" in out  # numbered
+
+
+def test_glob_and_grep_jailed_to_checkout(repo):
+    s = Sandbox(str(repo))
+    assert "src/app.py" in s.glob("**/*.py")
+    hits = s.grep("login", glob="*.py")
+    assert "src/app.py:1:" in hits
+
+
+def test_bash_git_blame_allowed(repo):
+    s = Sandbox(str(repo))
+    out = s.bash("git blame src/app.py")
+    assert "def login" in out
+
+
+def test_bash_git_log_allowed(repo):
+    s = Sandbox(str(repo))
+    assert "init" in s.bash("git log --oneline")
+
+
+# ---- path-jail escapes (must REFUSE) -------------------------------------
+
+def test_read_parent_traversal_refused(repo):
+    s = Sandbox(str(repo))
+    with pytest.raises(ToolError):
+        s.read("../../../etc/passwd")
+
+
+def test_read_absolute_outside_refused(repo):
+    s = Sandbox(str(repo))
+    with pytest.raises(ToolError):
+        s.read("/etc/passwd")
+
+
+def test_symlink_escape_refused(repo):
+    s = Sandbox(str(repo))
+    (repo / "evil").symlink_to("/etc")
+    with pytest.raises(ToolError):
+        s.read("evil/passwd")
+
+
+# ---- in-tree secret reads (must REFUSE via deny-glob) --------------------
+
+def test_read_dotenv_refused(repo):
+    s = Sandbox(str(repo))
+    with pytest.raises(ToolError):
+        s.read(".env")
+
+
+def test_read_secrets_yaml_refused(repo):
+    s = Sandbox(str(repo))
+    with pytest.raises(ToolError):
+        s.read("config/secrets.yml")   # matches *secret*
+
+
+def test_grep_skips_secret_files(repo):
+    s = Sandbox(str(repo))
+    out = s.grep("SECRET_TOKEN")        # the value lives in .env
+    assert "sk-super-secret-value" not in out
+
+
+# ---- the git dispatcher (the adversary's flag/refspec surface) -----------
+
+def test_bash_non_git_refused(repo):
+    s = Sandbox(str(repo))
+    for cmd in ["rm -rf /", "cat /etc/passwd", "curl http://evil", "python -c 'x'"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+
+
+def test_bash_disallowed_git_verb_refused(repo):
+    s = Sandbox(str(repo))
+    for cmd in ["git push origin main", "git config core.pager x", "git clone http://e",
+                "git fetch", "git checkout -- .", "git commit -m x"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+
+
+def test_bash_global_option_before_verb_refused(repo):
+    # `git -c core.pager=<exec>` is the classic config-exec vector.
+    s = Sandbox(str(repo))
+    for cmd in ["git -c core.pager=touch\\ pwned blame src/app.py",
+                "git -C /etc log", "git --exec-path=/tmp blame src/app.py"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+
+
+def test_bash_deny_flag_refused(repo):
+    s = Sandbox(str(repo))
+    for cmd in ["git log --output=/tmp/pwned", "git diff -O/tmp/x",
+                "git log --upload-pack=/bin/sh"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+
+
+def test_bash_show_refspec_secret_refused(repo):
+    # `git show HEAD:.env` reads the secret from the object DB, bypassing an
+    # FS-only jail — the refspec path must still be deny-globbed.
+    s = Sandbox(str(repo))
+    for cmd in ["git show HEAD:.env", "git show HEAD:config/secrets.yml",
+                "git cat-file -p HEAD:.env"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+
+
+def test_bash_show_refspec_normal_allowed(repo):
+    s = Sandbox(str(repo))
+    assert "def login" in s.bash("git show HEAD:src/app.py")
+
+
+def test_bash_shell_metachars_inert(repo, tmp_path):
+    # The security property: NO shell runs, so `;`/`&&`/`|` cannot chain a second
+    # command. Either the split makes argv[1] a non-verb (refused), or the
+    # metachars become literal args to a read verb (git errors) — never executed.
+    s = Sandbox(str(repo))
+    marker = tmp_path / "pwned"
+    with pytest.raises(ToolError):
+        s.bash(f"git log; touch {marker}")     # 'log;' is not an allowed verb
+    try:
+        s.bash(f"git log && touch {marker}")   # args passed literally to `git log`
+    except ToolError:
+        pass
+    assert not marker.exists()                  # the key property: touch never ran
+
+
+# ---- dispatch contract (never raises into the loop) ----------------------
+
+def test_dispatch_returns_error_tuple_not_raise(repo):
+    s = Sandbox(str(repo))
+    txt, is_err = s.dispatch("Read", {"file_path": ".env"})
+    assert is_err and "refused" in txt
+    txt, is_err = s.dispatch("Bash", {"command": "rm -rf /"})
+    assert is_err and "git" in txt
+    txt, is_err = s.dispatch("Read", {"file_path": "src/app.py"})
+    assert not is_err and "def login" in txt
+    txt, is_err = s.dispatch("Nonexistent", {})
+    assert is_err
