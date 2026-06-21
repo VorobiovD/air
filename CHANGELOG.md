@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.35.1](https://github.com/VorobiovD/air/compare/v1.35.0...v1.35.1) (2026-06-21)
+
+
+### Bug Fixes
+
+* **learn:** atomic claim-lock so a busy repo can't fire concurrent learns ([#183](https://github.com/VorobiovD/air/issues/183)) ([89240cf](https://github.com/VorobiovD/air/commit/89240cfe203a491732fcce1923ef2c00fe85e22f))
+
 ## [1.35.0](https://github.com/VorobiovD/air/compare/v1.34.0...v1.35.0) (2026-06-20)
 
 
