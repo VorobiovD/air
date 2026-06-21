@@ -1,8 +1,8 @@
 """Network-free unit tests for the headless (messages-api) mode.
 
-Locks the three regressions the #187 dogfood review flagged as blockers on code
-paths the dry-run A/B never exercised: the post-path call signatures (#2), the
-CI exit-code propagation on failure (#3), and frontmatter-parse robustness (#11).
+Locks the regressions the dogfood review flagged on code paths the dry-run A/B
+never exercised: the post-path call signatures, the CI exit-code propagation on
+failure, and frontmatter-parse robustness.
 Imports review.py / headless.py, so it needs the managed deps (CI installs them).
 """
 import asyncio

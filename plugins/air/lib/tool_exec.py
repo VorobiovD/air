@@ -194,6 +194,13 @@ class Sandbox:
         for tok in argv[2:]:
             if _GIT_DENY_FLAG_RE.match(tok):
                 raise ToolError(f"git flag not allowed: {tok}")
+            # git pathspec/refspec MAGIC (a leading ':') defeats literal-text deny-glob
+            # screening: `:(glob).e??` / `:(icase).ENV` expand to match `.env`, and the
+            # `:path` staged form names a blob directly — the literal token matches no
+            # deny-glob. A read-only review never needs a leading-colon pathspec, so
+            # refuse the whole class. Plain `ref:path` (colon in the MIDDLE) is unaffected.
+            if tok.startswith(":"):
+                raise ToolError(f"git pathspec/refspec magic (leading ':') not allowed: {tok}")
             self._screen_refspec_path(tok)  # `git show HEAD:.env` → refused
             # Plain pathspec args (`git log -p -- .env`, `git diff <range> -- secret.pem`)
             # are not refspecs, so the refspec screen above misses them. Screen the raw

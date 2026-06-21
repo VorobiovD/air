@@ -167,6 +167,18 @@ def test_bash_pathspec_normal_allowed(repo):
     assert "init" in s.bash("git log --oneline -- src/app.py")
 
 
+def test_bash_pathspec_magic_refused(repo):
+    # Literal-text deny-globbing is defeated by git pathspec MAGIC: `:(glob).e??`
+    # and `:(icase).ENV` expand to match `.env`, and `:.env` (staged form) names the
+    # blob directly — none match a deny-glob as literal text. Refuse any leading-':'
+    # token outright (a read-only review never needs one).
+    s = Sandbox(str(repo))
+    for cmd in ["git log -p -- :(glob).e??", "git show :(icase).ENV", "git show :.env",
+                "git log -p -- :(top).env", "git diff -- :!src"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+
+
 def test_glob_does_not_surface_secrets(repo):
     # glob() must filter deny-globbed paths like read/grep do — surfacing even the
     # NAME points a prompt-injected agent straight at the secret to read next.

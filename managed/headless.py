@@ -194,13 +194,21 @@ async def run_headless_review(args, bot_token: str) -> dict:
     _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
     if meta.get("state") == "open":
         # commit_id pins the verdict to the SHA we reviewed (not the PR's current
-        # head); current_login is the bot account this run posts under, so the
-        # gate-orphan dismissal skips it. Both are required args — omitting them
-        # crashed the post path (only --dry-run, which returns above, was tested).
-        bot_login = fetch_bot_login(bot_token)
+        # head). Both are required args — omitting them crashed the post path
+        # (only --dry-run, which returns above, was tested). fetch_bot_login is a
+        # blocking requests.get, so off-thread it to keep the event loop free.
+        bot_login = await asyncio.to_thread(fetch_bot_login, bot_token)
         submit_review_verdict(args.repo, args.pr_number, bot_token,
                               event=verdict, body=reason or "", commit_id=head_sha)
-        dismiss_stale_air_verdicts(args.repo, args.pr_number, bot_token, bot_login)
+        # Gate-orphan dismissal needs OUR login to skip our own just-posted verdict.
+        # If we can't resolve it, SKIP dismissal — calling with current_login=None
+        # makes the skip-self guard falsy and dismisses the verdict we just posted,
+        # silently un-gating a REQUEST_CHANGES (the dogfood-caught gate-safety bug).
+        if bot_login:
+            dismiss_stale_air_verdicts(args.repo, args.pr_number, bot_token, bot_login)
+        else:
+            print("  [warn] bot login unresolved — skipping stale-verdict dismissal "
+                  "(won't risk clearing our own verdict)", file=sys.stderr)
     return {"ok": True, "verdict": verdict, "reason": reason, "wall": wall, "cost": cost}
 
 
