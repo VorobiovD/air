@@ -41,7 +41,9 @@ MODEL_ALIASES = {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-4-6", "haik
 SPECIALISTS = ["air-code-reviewer", "air-simplify", "air-security-auditor", "air-git-history-reviewer"]
 UI_SPECIALIST = "air-ui-copy-reviewer"
 VERIFIER = "air-review-verifier"
-_DIFF_CAP = 120_000          # chars; v1 guard (managed has apply_diff_hygiene — a follow-up)
+_DIFF_CAP = int(os.environ.get("AIR_HEADLESS_DIFF_CAP", "120000"))  # chars; v1 guard
+                             # (managed has apply_diff_hygiene — a follow-up). Tunable so a
+                             # big-PR run can match the diff the managed coordinator saw.
 _TIER = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku"}
 
 
