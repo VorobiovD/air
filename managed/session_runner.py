@@ -397,6 +397,7 @@ async def run_session(
     multiagent_primary: str | None = None,
     require_dispatch: bool = False,
     metadata: dict | None = None,
+    capture: dict | None = None,
 ) -> str:
     """Create a session, send the user prompt, stream events, return collected agent text.
 
@@ -493,6 +494,12 @@ async def run_session(
     threads = ThreadTracker(multiagent_primary, label=label)
 
     parts: list[str] = []
+    # Direct-post: bodies the verifier delivers to the coordinator (thread
+    # messages containing `## Code Review`). Populated only when `capture` is
+    # passed; lets review.py post the verifier's body verbatim instead of the
+    # coordinator's relay (which a cheap coordinator can truncate — the
+    # 2026-06-20 Haiku 11→9 drop). Empty/unused on the default path.
+    received_reviews: list[str] = []
     terminated_reason: str | None = None
     # SSE / REST events backend can lag in EITHER direction relative to the
     # other:
@@ -554,6 +561,19 @@ async def run_session(
                 # dispatch turns. Skip them.
                 if text and text.strip() != "[empty message]":
                     parts.append(text)
+            return None
+        if t == "agent.thread_message_received":
+            # A sub-agent's reply delivered to the coordinator. The verifier's
+            # is the one carrying the final `## Code Review` body. Capture it
+            # (when requested) so review.py can post it verbatim — bypassing
+            # the coordinator's relay turn, the only place a cheap coordinator
+            # drops findings. Capture-only: no effect when `capture is None`.
+            if capture is not None:
+                body = "".join(
+                    getattr(b, "text", "") or "" for b in (getattr(event, "content", None) or [])
+                )
+                if "## Code Review" in body:
+                    received_reviews.append(body)
             return None
         if t.startswith("session.thread_"):
             threads.on_event(t, getattr(event, "agent_name", "") or "")
@@ -889,6 +909,12 @@ async def run_session(
             "(delegation toolset or multiagent roster misconfiguration; "
             "re-run managed/setup.py and check the agent's config)",
         )
+    if capture is not None:
+        # ALL `## Code Review` bodies delivered to the coordinator — specialists
+        # also emit that header, so review.py disambiguates the verifier's body
+        # from the full list (it can't be done here: no agent_name on events).
+        capture["received_reviews"] = list(received_reviews)
+        capture["session_id"] = getattr(session, "id", None)
     print(f"  [done] {label}")
     return output
 

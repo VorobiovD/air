@@ -215,6 +215,121 @@ def _category_floor_enabled() -> bool:
     return os.environ.get("AIR_CATEGORY_FLOOR", "1").strip().lower() not in ("0", "false", "no")
 
 
+def _post_verifier_body_enabled() -> bool:
+    # Direct-post: post the VERIFIER's body verbatim instead of the
+    # coordinator's relay. The coordinator is a pure relay layer (the verifier
+    # synthesizes), so its relay turn is the only place a cheap coordinator can
+    # drop findings (the 2026-06-20 Haiku 11→9 drop on repo-A #1243). Posting
+    # the verifier body directly removes that failure mode for ANY coordinator
+    # model. Default OFF (opt-in until fleet-soaked); set AIR_POST_VERIFIER_BODY=1.
+    # Safe-by-construction: falls back to the coordinator relay when no verifier
+    # body is captured or it fails SHA validation.
+    return os.environ.get("AIR_POST_VERIFIER_BODY", "").strip().lower() in ("1", "true", "yes")
+
+
+# Finding-title line: `**1. <title>` or re-review `**#3. <title>`. The title
+# text (normalized) is the join key between the coordinator's relayed findings
+# and the verifier's delivered ones.
+_FINDING_TITLE_RE = re.compile(r"(?m)^\*\*#?\d+\.\s*(.+?)\s*$")
+# Sections the VERIFIER template emits that specialists do not — used to reject
+# specialist bodies (which also carry a `## Code Review` header) before any
+# title comparison.
+_VERIFIER_ONLY_SECTIONS = ("### Strengths", "### Pre-existing", "### Blockers")
+# The coordinator relays a SUBSET of the verifier's findings (the drop), so the
+# real verifier body's titles cover (nearly) all relayed titles. A specialist's
+# titles are its own pre-verification wording → low coverage. 0.6 tolerates
+# minor title reformatting (e.g. the coordinator escaping backticks) while
+# still cleanly separating the verifier (~1.0) from any specialist (~0).
+_VERIFIER_COVERAGE_MIN = 0.6
+
+
+def _finding_titles(body: str) -> list[str]:
+    """Normalized finding-title prefixes (`**N. <title>` lines) for matching."""
+    out = []
+    for m in _FINDING_TITLE_RE.finditer(body):
+        norm = re.sub(r"[^a-z0-9]", "", m.group(1).lower())[:40]
+        if norm:
+            out.append(norm)
+    return out
+
+
+def _append_review_footer(body: str, head_sha: str) -> str:
+    """The verifier delivers review CONTENT without the `Reviewed at:` footer
+    (the coordinator appends it on relay). For direct-post we append it
+    ourselves — head_sha is deterministic and ours, so it can't be spoofed and
+    is more trustworthy than a model-emitted footer. Makes the body pass
+    _extract_review_body + the re-review skip-gate."""
+    return (
+        f"{body.rstrip()}\n\n---\n\nReviewed at: {head_sha}\n\n"
+        "> After fixing, run `/air:review --respond` to verify and reply.\n"
+    )
+
+
+def _select_verifier_body(candidates, coord_body, head_sha):
+    """Pick the verifier's delivered body from the captured `## Code Review`
+    candidates (specialists emit that header too). Returns (body, status).
+
+    Safe by construction — only returns a candidate that is UNAMBIGUOUSLY the
+    body the coordinator relayed from: it must carry a verifier-only section
+    AND its finding titles must cover >= `_VERIFIER_COVERAGE_MIN` of the
+    coordinator's relayed titles AND it must have >= as many findings as the
+    relay (the verifier body is a superset of the dropped relay). Anything else
+    falls back to the coordinator body — a specialist's (unverified) body can
+    never be selected.
+    """
+    relayed = _finding_titles(coord_body)
+    if not relayed:
+        # 0 relayed findings → can't distinguish a clean approve from a total
+        # drop by coverage; keep the coordinator body (a total drop would
+        # surface as a run-failure, handled elsewhere). Documented v1 limit.
+        return coord_body, "no-relayed-findings"
+    relayed_set = set(relayed)
+    best, best_cov, best_n = None, 0.0, 0
+    for c in candidates:
+        if not re.search(r"(?m)^## Code Review", c):
+            continue
+        if not any(s in c for s in _VERIFIER_ONLY_SECTIONS):
+            continue  # specialist-shaped → never a candidate
+        ct = _finding_titles(c)
+        if not ct:
+            continue
+        cov = len(relayed_set & set(ct)) / len(relayed_set)
+        if cov > best_cov or (cov == best_cov and len(ct) > best_n):
+            best, best_cov, best_n = c, cov, len(ct)
+    if best is None or best_cov < _VERIFIER_COVERAGE_MIN:
+        return coord_body, "no-verifier-match"
+    if best_n < len(relayed):
+        return coord_body, "fewer-findings"  # never post FEWER than the relay
+    return best, "direct"
+
+
+def _select_review_source(coordinator_out, session_capture, head_sha, review_arch):
+    """Choose the body to post: the verifier's delivered body (direct-post,
+    recovering any findings the coordinator's relay dropped) or the coordinator
+    relay. Returns (source_text, status_msg). Direct-post applies only to the
+    coordinator architectures (full/both) — solo IS the reviewer. The selected
+    verifier body is re-validated through the SAME SHA-checking extractor after
+    footer synthesis, so direct-post can ONLY ever swap in a faithful, SHA-valid
+    verifier body that supersets the relay — never a specialist/unverified body.
+    """
+    if session_capture is None or review_arch not in ("full", "both"):
+        return coordinator_out, "off"
+    candidates = session_capture.get("received_reviews") or []
+    if not candidates:
+        return coordinator_out, "no candidates captured"
+    coord_body, coord_ok = _extract_review_body(coordinator_out, head_sha)
+    if not coord_ok:
+        return coordinator_out, "coordinator body not extractable"
+    verifier, status = _select_verifier_body(candidates, coord_body, head_sha)
+    if status != "direct":
+        return coordinator_out, status
+    finalized = _append_review_footer(verifier, head_sha)
+    if not _extract_review_body(finalized, head_sha)[1]:
+        return coordinator_out, "verifier body failed SHA re-validation"
+    recovered = len(_finding_titles(verifier)) - len(_finding_titles(coord_body))
+    return finalized, f"direct (verifier body; +{recovered} finding(s) the relay dropped)"
+
+
 def _required_agents(review_arch: str) -> list[str]:
     """The agents a run must find synced before any session spend.
 
@@ -1237,6 +1352,7 @@ async def _run_coordinator_session(
     agents, env_id, args, checkout, bot_token, store_id,
     pr_context, diff, codex_block, verifier_task, meta, mode, head_sha,
     ui_in_scope=False,
+    verifier_capture: dict | None = None,
 ) -> tuple[str, str]:
     """Run the multi-agent coordinator session (the default 'full' path).
 
@@ -1369,6 +1485,10 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
                     f"{codex_block}\n\n"
                     f"<verifier-task>\n{verifier_task}\n</verifier-task>"
                 )
+            # Direct-post: when run_review passes `verifier_capture`, run_session
+            # populates it with the verifier's delivered `## Code Review` body so
+            # run_review can post it verbatim instead of the coordinator's relay.
+            # None on the default path → run_session captures nothing (byte-identical).
             try:
                 # Billing-retry contract lives in _run_session_with_billing_retry.
                 coordinator_out = await _run_session_with_billing_retry(
@@ -1380,6 +1500,7 @@ Follow your 3-turn protocol in file-handoff mode (see your system prompt). Do no
                         coordinator_user_text, coordinator_agent_name,
                         store_id=store_id,
                         file_resources=file_resources,
+                        capture=verifier_capture,
                         # MA sessions: per-thread accounting that excludes
                         # the primary thread (it idles between turns and
                         # re-runs — a bare counter drifts; see ThreadTracker).
@@ -2230,6 +2351,10 @@ async def run_review(args):
     coordinator_failure_reason = ""
     solo_out = ""
     solo_failure_reason = ""
+    # Direct-post (AIR_POST_VERIFIER_BODY): a dict the coordinator session fills
+    # with the verifier's delivered body, so we post it verbatim instead of the
+    # coordinator's relay. None when disabled → run_session captures nothing.
+    session_capture = {} if _post_verifier_body_enabled() else None
 
     if review_arch == "both":
         # Run the two independent sessions CONCURRENTLY so wall-clock ≈
@@ -2244,6 +2369,7 @@ async def run_review(args):
                 agents, env_id, args, checkout, bot_token, store_id,
                 pr_context, diff, codex_block, verifier_task, meta, mode, head_sha,
                 ui_in_scope=ui_in_scope,
+                verifier_capture=session_capture,
             ),
             _run_solo_session(
                 agents, env_id, args, checkout, bot_token, store_id,
@@ -2264,6 +2390,7 @@ async def run_review(args):
             agents, env_id, args, checkout, bot_token, store_id,
             pr_context, diff, codex_block, verifier_task, meta, mode, head_sha,
             ui_in_scope=ui_in_scope,
+            verifier_capture=session_capture,
         )
     else:  # solo
         print("  Running solo session (single merged-lens agent)...")
@@ -2290,10 +2417,26 @@ async def run_review(args):
             file=sys.stderr,
         )
 
+    # Direct-post: prefer the VERIFIER's delivered body over the coordinator's
+    # relay when enabled and one was captured. It runs through the SAME
+    # SHA-validating extractor (same anti-spoof footer check), so a missing or
+    # spoofed verifier body fails validation and falls back to the coordinator
+    # relay — the feature can only ADD a faithful body, never post an
+    # unvalidated one. Only the source string differs; pin/gate/post downstream
+    # are unchanged.
+    body_source, _direct_status = _select_review_source(
+        coordinator_out, session_capture, head_sha, review_arch
+    )
+    if _direct_status != "off":
+        if _direct_status.startswith("direct"):
+            print(f"  [direct] {_direct_status} — coordinator relay bypassed")
+        else:
+            print(f"  [direct] keeping coordinator relay ({_direct_status})", file=sys.stderr)
+
     # Extract the SHA-validated `## Code Review` body from the session output.
     # See _extract_review_body for the segmentation + anti-spoof rationale.
     # (Shared by full/solo here and by the `both`-mode solo comment below.)
-    review_body, review_extracted = _extract_review_body(coordinator_out, head_sha)
+    review_body, review_extracted = _extract_review_body(body_source, head_sha)
 
     # PR 7: the deterministic guard. ONLY on a successfully-extracted re-review
     # body (a run-failed fallback below has no status block — never pin/

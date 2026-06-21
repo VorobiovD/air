@@ -524,3 +524,106 @@ def test_ma_coordinator_unknown_alias_fails_safe_to_default():
     # an unknown value must NOT route to a non-existent agent — fall back
     assert review._ma_coordinator_name("gpt5") == "air-coordinator-ma"
     assert review._ma_coordinator_name("haiku-4-5-20251001") == "air-coordinator-ma"
+
+
+# ---------------------------------------------------------------------------
+# Direct-post (AIR_POST_VERIFIER_BODY): recover findings the coordinator's relay
+# dropped by posting the VERIFIER's delivered body. Selection MUST be safe by
+# construction — a specialist's (unverified) body, which also carries a
+# `## Code Review` header, can NEVER be selected; anything ambiguous falls back
+# to the coordinator relay.
+# ---------------------------------------------------------------------------
+_SHA = "a" * 40
+# Coordinator relayed 2 of the verifier's 3 findings (the drop) + the footer.
+_COORD = (
+    "Excellent. Synthesizing for TURN 3.\n\n## Code Review\n\nsummary\n\n"
+    "### Blockers\n\n**1. alpha auth bypass**\n\n[l] — x\n\n"
+    "### Medium\n\n**2. beta pii leak**\n\n[l] — y\n\n### Strengths\n\n- ok\n\n"
+    f"Reviewed at: {_SHA}\n"
+)
+# Verifier delivered all 3 findings, verifier-template sections, NO footer.
+_VERIFIER = (
+    "Review complete. Here are the findings.\n\n## Code Review\n\nsummary\n\n"
+    "### Blockers\n\n**1. alpha auth bypass**\n\n[l] — x\n\n"
+    "### Medium\n\n**2. beta pii leak**\n\n[l] — y\n\n"
+    "### Low\n\n**3. gamma dropped nit**\n\n[l] — z\n\n### Strengths\n\n- ok\n"
+)
+# A specialist that ALSO emits `## Code Review` but with its own (different)
+# findings and no verifier-only sections — must never be selected.
+_SPECIALIST = (
+    "## Code Review — PR by dev\n\nReview complete.\n\n"
+    "### Medium\n\n**1. delta unrelated thing**\n\n### Nit\n\n**2. epsilon**\n"
+)
+
+
+def test_direct_post_flag_off_by_default(monkeypatch):
+    monkeypatch.delenv("AIR_POST_VERIFIER_BODY", raising=False)
+    assert review._post_verifier_body_enabled() is False
+    for v in ("1", "true", "YES"):
+        monkeypatch.setenv("AIR_POST_VERIFIER_BODY", v)
+        assert review._post_verifier_body_enabled() is True
+    for v in ("0", "false", ""):
+        monkeypatch.setenv("AIR_POST_VERIFIER_BODY", v)
+        assert review._post_verifier_body_enabled() is False
+
+
+def test_direct_recovers_dropped_findings_from_verifier_body():
+    cap = {"received_reviews": [_SPECIALIST, _VERIFIER]}
+    src, status = review._select_review_source(_COORD, cap, _SHA, "full")
+    assert status.startswith("direct")
+    # the posted body is the verifier's (3 findings, incl. the dropped gamma) +
+    # a synthesized footer that re-validates against head_sha
+    assert "gamma dropped nit" in src
+    assert review._extract_review_body(src, _SHA)[1] is True
+    assert len(review._finding_titles(src)) == 3
+
+
+def test_direct_never_selects_a_specialist_body():
+    # Only a specialist was delivered (no verifier-only sections / its titles
+    # don't cover the relayed findings) → must fall back, never post it.
+    cap = {"received_reviews": [_SPECIALIST]}
+    src, status = review._select_review_source(_COORD, cap, _SHA, "full")
+    assert src == _COORD and "delta unrelated" not in src
+    assert status == "no-verifier-match"
+
+
+def test_direct_falls_back_when_no_candidates():
+    src, status = review._select_review_source(_COORD, {"received_reviews": []}, _SHA, "full")
+    assert src == _COORD and status == "no candidates captured"
+
+
+def test_direct_off_when_capture_disabled():
+    src, status = review._select_review_source(_COORD, None, _SHA, "full")
+    assert status == "off" and src == _COORD
+
+
+def test_direct_not_applied_to_solo():
+    cap = {"received_reviews": [_VERIFIER]}
+    src, status = review._select_review_source(_COORD, cap, _SHA, "solo")
+    assert status == "off" and src == _COORD
+
+
+def test_select_verifier_body_requires_coverage_and_count():
+    coord_body = review._extract_review_body(_COORD, _SHA)[0]
+    # a verifier-shaped body whose findings DON'T cover the relayed ones (wrong
+    # body) is rejected on coverage
+    wrong = (
+        "## Code Review\n\n### Blockers\n\n**1. totally other one**\n\n"
+        "### Strengths\n\n- ok\n"
+    )
+    _, status = review._select_verifier_body([wrong], coord_body, _SHA)
+    assert status == "no-verifier-match"
+    # the real verifier body (covers relayed, >= findings) is selected
+    body, status = review._select_verifier_body([_VERIFIER], coord_body, _SHA)
+    assert status == "direct" and "gamma" in body
+
+
+def test_append_review_footer_makes_body_sha_valid():
+    finalized = review._append_review_footer(_VERIFIER, _SHA)
+    assert review._extract_review_body(finalized, _SHA)[1] is True
+
+
+def test_finding_titles_parses_numbered_lines():
+    titles = review._finding_titles(_VERIFIER)
+    assert len(titles) == 3
+    assert any("alpha" in t for t in titles)
