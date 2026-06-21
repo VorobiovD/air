@@ -158,13 +158,17 @@ on:
           Review architecture (opt-in): 'full' (default — the 6-agent
           coordinator), 'solo' (one merged-lens agent — ~70% cheaper/faster
           but NOT gate-safe: it can downgrade a blocker's severity, so use
-          only where an advisory review is acceptable), or 'both' (run both;
+          only where an advisory review is acceptable), 'both' (run both;
           the full review gates as usual and the solo review posts alongside,
-          labeled and non-blocking, for comparison). Default 'full' is
-          byte-identical to today. Set per-request via workflow_dispatch, or
-          persistently by setting a repo/org VARIABLE `AIR_REVIEW_MODE` on the
-          CALLER repo (it wins over this input — handy for running 'both' over
-          a data-collection window with no workflow edit; delete it to revert).
+          labeled and non-blocking, for comparison), or 'messages-api'
+          (EXPERIMENTAL — air self-hosts the agent loop client-side instead of
+          a managed session, eliminating the runtime's between-turn scheduling
+          stall; fresh full reviews only in v1; uses the same checkout at
+          AIR_TARGET_REPO). Default 'full' is byte-identical to today. Set
+          per-request via workflow_dispatch, or persistently by setting a
+          repo/org VARIABLE `AIR_REVIEW_MODE` on the CALLER repo (it wins over
+          this input — handy for running 'both' or 'messages-api' over a
+          data-collection window with no workflow edit; delete it to revert).
         required: false
         type: string
         default: 'full'
