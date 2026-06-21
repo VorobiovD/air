@@ -2736,16 +2736,15 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
         return _run_meta(meta_script, *meta_args)
 
     if store_id:
-        bump = _meta("bump", "--store-id", store_id,
-                     "--pr-number", str(pr_number))
-        sys.stderr.write(bump.stderr)
-        if bump.returncode != 0:
-            print(f"  [warn] meta bump failed: {bump.stderr.strip()}",
-                  file=sys.stderr)
-            return
-        check = _meta("check", "--store-id", store_id)
-        sys.stderr.write(check.stderr)
-        if check.returncode == 1:
+        # Atomic bump + learn-slot claim (replaces the bump+check pair). The
+        # single CAS write prevents a busy repo from firing N concurrent learns
+        # while the first is still running — exactly one review wins the lock;
+        # the rest still count their review but exit 0 (the 2026-06-20 learn-storm
+        # cluster fix). Exit 1 = this review claimed → run learn.
+        claim = _meta("claim", "--store-id", store_id,
+                      "--pr-number", str(pr_number))
+        sys.stderr.write(claim.stderr)
+        if claim.returncode == 1:
             _run_learn_sync(air_root, repo)
         return
 
@@ -2759,23 +2758,16 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
             return
         wiki_git.configure_identity(wiki_dir, "air-machine", "air-machine@users.noreply.github.com")
 
-        # 1. Bump the counter.
-        bump = _meta("bump", "--wiki-dir", str(wiki_dir),
-                     "--pr-number", str(pr_number))
-        if bump.returncode != 0:
-            print(f"  [warn] meta bump failed: {bump.stderr.strip()}", file=sys.stderr)
-            return
-        sys.stderr.write(bump.stderr)
-
-        # 2. Check threshold. Exit 1 == trigger.
-        check = _meta("check", "--wiki-dir", str(wiki_dir))
-        sys.stderr.write(check.stderr)
-
-        if check.returncode == 1:
+        # 1. Atomic bump + learn-slot claim (replaces the bump+check pair).
+        #    Exit 1 == this review claimed the learn slot.
+        claim = _meta("claim", "--wiki-dir", str(wiki_dir),
+                      "--pr-number", str(pr_number))
+        sys.stderr.write(claim.stderr)
+        if claim.returncode == 1:
             _run_learn_sync(air_root, repo)
 
-        # 3. Push the meta change (includes bump + any last_check update
-        #    from check). learn.py's reset will push a follow-up commit.
+        # 2. Push the meta change (the bump + any lock stamp). learn.py's reset
+        #    will push a follow-up commit that clears the lock + zeroes the count.
         wiki_git.commit_meta(wiki_dir, f"meta: bump counter for PR #{pr_number}")
 
 

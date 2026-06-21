@@ -161,3 +161,50 @@ def test_mirror_rendered_then_due_is_within_window(fake):
     # End-to-end: stamping resets the throttle, so the next due-check is a no-op.
     meta.main(["mirror-rendered", "--store-id", "memstore_x"])
     assert meta.main(["mirror-due", "--store-id", "memstore_x"]) == 0
+
+
+# --- claim: atomic bump + learn lock on the store backend ------------------
+
+def test_store_claim_below_threshold_bumps_no_lock(fake):
+    seed = meta._default_meta()
+    seed["reviews_since"] = 3
+    fake.content = json.dumps(seed)
+    rc = meta.main(["claim", "--store-id", "memstore_x", "--pr-number", "11"])
+    data = json.loads(fake.content)
+    assert rc == 0
+    assert data["reviews_since"] == 4
+    assert not data.get("learn_claimed_at")
+
+
+def test_store_claim_claims_at_threshold(fake):
+    seed = meta._default_meta()
+    seed["reviews_since"] = meta.REVIEWS_THRESHOLD - 1   # 14 → 15 crosses
+    fake.content = json.dumps(seed)
+    rc = meta.main(["claim", "--store-id", "memstore_x", "--pr-number", "11"])
+    data = json.loads(fake.content)
+    assert rc == 1
+    assert data["reviews_since"] == meta.REVIEWS_THRESHOLD
+    assert data["learn_claimed_at"]   # lock acquired in the same write
+
+
+def test_store_claim_skips_when_lock_live(fake):
+    seed = meta._default_meta()
+    seed["reviews_since"] = 20
+    seed["learn_claimed_at"] = meta._utc_now_iso()   # learn in flight
+    fake.content = json.dumps(seed)
+    rc = meta.main(["claim", "--store-id", "memstore_x", "--pr-number", "11"])
+    data = json.loads(fake.content)
+    assert rc == 0                       # lock held → no second learn
+    assert data["reviews_since"] == 21   # review still counts
+    assert data["learn_claimed_at"] == seed["learn_claimed_at"]  # untouched
+
+
+def test_store_reset_clears_lock(fake):
+    seed = meta._default_meta()
+    seed["reviews_since"] = 16
+    seed["learn_claimed_at"] = meta._utc_now_iso()
+    fake.content = json.dumps(seed)
+    meta.main(["reset", "--store-id", "memstore_x", "--pr-number", "50"])
+    data = json.loads(fake.content)
+    assert data["reviews_since"] == 0
+    assert data["learn_claimed_at"] == ""

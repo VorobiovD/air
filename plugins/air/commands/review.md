@@ -1030,13 +1030,14 @@ if [ -n "$AIR_PLUGIN_ROOT" ]; then
   if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     AIR_STORE_ID=$(python3 "$AIR_PLUGIN_ROOT/lib/meta.py" find-store --repo "$CURRENT_REPO")
   fi
+  # `claim` = atomic bump + learn-slot claim (replaces the old bump+check
+  # pair). Exit 1 = this run claimed the learn slot (run /air:learn); exit 0 =
+  # counted but below threshold OR another run already holds the learn lock.
   if [ -n "$AIR_STORE_ID" ]; then
-    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --store-id "$AIR_STORE_ID" --pr-number "<number>"
-    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --store-id "$AIR_STORE_ID"
+    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" claim --store-id "$AIR_STORE_ID" --pr-number "<number>"
     META_RC=$?
   else
-    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" bump --wiki-dir "$WIKI_DIR" --pr-number "<number>"
-    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" check --wiki-dir "$WIKI_DIR"
+    python3 "$AIR_PLUGIN_ROOT/lib/meta.py" claim --wiki-dir "$WIKI_DIR" --pr-number "<number>"
     META_RC=$?
   fi
 else
@@ -1065,10 +1066,10 @@ If `$META_RC == 0` (threshold not met):
 **Threshold rules** (enforced in `meta.py::should_trigger_learn`):
 - `reviews_since >= 15` → trigger
 - `days_since_cleanup >= 14` AND `reviews_since > 0` → trigger
-- `days_since_cleanup >= 14` AND `reviews_since == 0` → skip + bump `last_check` (prevents re-evaluating every review)
+- `days_since_cleanup >= 14` AND `reviews_since == 0` → skip
 - else → skip
 
-The counter bump and check are atomic from the caller's perspective; only the wiki push (sub-step 5) commits them to the remote.
+**Learn lock (anti-storm):** when the threshold fires, `claim` also acquires a lock (`learn_claimed_at`) in the SAME atomic write; a concurrent review that crosses the threshold while a learn is already in flight sees the live lock and exits 0 (counts its review, doesn't fire a second learn). `/air:learn`'s `meta.py reset` clears the lock; a learn that dies without resetting leaves a lock that ages out after `LEARN_LOCK_TTL_MIN` (self-healing). The bump and the claim are atomic from the caller's perspective; only the wiki push (sub-step 5) commits them to the remote.
 
 1. Read `$AIR_TMP/REVIEW.md` (from Step 3)
 2. Add new patterns from this review. This is NOT optional — every review that produced findings MUST update the wiki. For each confirmed/downgraded/improvement finding from Step 8:

@@ -25,10 +25,14 @@ or was never rendered) throttles the per-review render so it's a cheap meta
 read in the common case and a git push at most ~once/hour; `mirror-rendered`
 stamps the time after a successful render. (See managed/render_store_to_wiki.py.)
 
+A learn run also holds a lock (`learn_claimed_at`) so a busy repo can't fire
+several concurrent learns while the first is still running — see `claim`.
+
 Usage (CLI or managed):
-    python3 meta.py bump  --wiki-dir <dir> --pr-number <N>
-    python3 meta.py check --wiki-dir <dir>        # exit 1 triggers /air:learn, 0 skips
-    python3 meta.py reset --wiki-dir <dir> --pr-number <N>  # after /air:learn finishes
+    python3 meta.py claim --wiki-dir <dir> --pr-number <N>  # atomic bump + learn-slot claim; exit 1 = run /air:learn
+    python3 meta.py bump  --wiki-dir <dir> --pr-number <N>  # increment only (legacy; `claim` supersedes for the per-review path)
+    python3 meta.py check --wiki-dir <dir>        # exit 1 triggers /air:learn, 0 skips (legacy; superseded by `claim`)
+    python3 meta.py reset --wiki-dir <dir> --pr-number <N>  # after /air:learn finishes (zeroes counter + releases the lock)
     python3 meta.py mirror-due      --store-id <id>   # exit 1 = render the mirror, 0 = within window
     python3 meta.py mirror-rendered --store-id <id>   # stamp after a successful render
 """
@@ -145,6 +149,28 @@ def _store_mutate_meta(store_id: str, fn) -> dict:
 REVIEWS_THRESHOLD = 15
 DAYS_THRESHOLD = 14
 
+# Anti-storm learn lock. When a review crosses the threshold it sets
+# `learn_claimed_at`; concurrent reviews within this window see the lock and
+# skip (so a busy repo doesn't fire N concurrent learns while the first is
+# still running — the 2026-06-20 learn-storm cluster). Generous vs the ~3-5 min learn
+# runtime so a normal run always clears its own lock first; a learn that dies
+# without resetting leaves a stale lock that ages out here (self-healing — the
+# next review re-claims) rather than blocking learn forever.
+LEARN_LOCK_TTL_MIN = 20
+
+
+def _learn_lock_live(meta: dict, now: datetime | None = None) -> bool:
+    """True iff a learn run is in flight (lock set and younger than the TTL).
+    An unparseable/blank lock is treated as free so a corrupt stamp can never
+    wedge the cadence."""
+    lock = meta.get("learn_claimed_at") or ""
+    if not lock:
+        return False
+    try:
+        return days_since(lock, now=now) * 1440.0 < LEARN_LOCK_TTL_MIN
+    except Exception:
+        return False
+
 # Wiki-mirror render throttle: re-render the store→wiki mirror at most once
 # per this interval on the per-review path (the learn cadence forces an
 # authoritative render regardless). Keeps the wiki fresh within an hour while
@@ -173,6 +199,12 @@ def _default_meta() -> dict:
         "last_processed_pr": 0,
         # Empty = never rendered → the first mirror-due check renders.
         "last_mirror_render": "",
+        # Set by `claim` when a review wins the learn slot; cleared by `reset`
+        # when learn finishes. A non-empty, non-stale value means a learn run
+        # is in flight → concurrent reviews skip (the anti-storm lock). MUST be
+        # a default key so the wiki read_meta round-trips it (it drops unknown
+        # keys); store reads preserve it regardless.
+        "learn_claimed_at": "",
     }
 
 
@@ -303,6 +335,88 @@ def cmd_check(args) -> int:
     return 1 if trigger else 0
 
 
+def _claim_decide(meta: dict, now_iso: str) -> tuple[bool, str]:
+    """Given a freshly-bumped meta, decide whether THIS caller claims the learn
+    slot. Mutates `meta` in place (sets the lock) when claiming. Returns
+    (claimed, reason)."""
+    trigger, reason = should_trigger_learn(meta)
+    if not trigger:
+        return False, reason
+    if _learn_lock_live(meta):
+        return False, f"{reason}; learn already in progress (locked {meta['learn_claimed_at']}) — skip"
+    meta["learn_claimed_at"] = now_iso
+    return True, reason
+
+
+def cmd_claim(args) -> int:
+    """Atomic bump + learn-slot claim — REPLACES the bump+check pair on the
+    managed/CLI per-review path. Increments `reviews_since`, and if that crosses
+    the threshold AND no learn run is already in flight (the lock), acquires the
+    lock and signals the caller to run /air:learn (exit 1). The bump and the
+    conditional lock happen in ONE CAS write, so concurrent reviews on a busy
+    repo can't each fire a learn: exactly one wins the lock; the rest still
+    count their review but exit 0. `reset` (called by learn.py on completion)
+    clears the lock. Exit 1 = run learn; exit 0 = bumped only / locked / below
+    threshold."""
+    pr = int(args.pr_number)
+    now = _utc_now_iso()
+    if args.store_id:
+        try:
+            return _claim_store(args.store_id, pr, now)
+        except Exception as e:
+            print(f"  [warn] meta: store claim failed ({e}) — not triggering learn",
+                  file=sys.stderr)
+            return 0
+    wiki = Path(args.wiki_dir)
+    meta = _bump_fn(pr)(read_meta(wiki))
+    claimed, reason = _claim_decide(meta, now)
+    write_meta(wiki, meta)
+    print(f"  [meta] bumped: reviews_since={meta['reviews_since']}; {reason}"
+          + ("  → CLAIMED learn" if claimed else ""), file=sys.stderr)
+    return 1 if claimed else 0
+
+
+def _claim_store(store_id: str, pr: int, now: str) -> int:
+    """Store-backed cmd_claim: bump + conditional lock in one sha256-CAS write,
+    retried on precondition races (a concurrent review's write). On a lost CAS
+    we re-read and re-decide — so a review that lost the lock race re-evaluates
+    against the winner's state and exits 0 instead of double-firing."""
+    for attempt in range(5):
+        found = _store_find_meta(store_id)
+        if found is None:
+            # First review ever — create + bump; reviews_since=1 can't be due.
+            meta = _bump_fn(pr)(_default_meta())
+            try:
+                _store_api(
+                    "POST", f"/memory_stores/{store_id}/memories",
+                    {"path": STORE_META_PATH,
+                     "content": json.dumps(meta, indent=2, sort_keys=True)},
+                )
+            except urllib.error.HTTPError:
+                continue  # raced a concurrent create — retry as update
+            print(f"  [meta] bumped (created): reviews_since={meta['reviews_since']}",
+                  file=sys.stderr)
+            return 0
+        meta, sha, mem_id = found
+        meta = _bump_fn(pr)(dict(meta))
+        claimed, reason = _claim_decide(meta, now)
+        try:
+            _store_api(
+                "POST", f"/memory_stores/{store_id}/memories/{mem_id}",
+                {"content": json.dumps(meta, indent=2, sort_keys=True),
+                 "precondition": {"type": "content_sha256", "content_sha256": sha}},
+            )
+        except urllib.error.HTTPError as e:
+            print(f"  [meta] claim precondition raced (attempt {attempt + 1}): "
+                  f"{e.code}; re-reading", file=sys.stderr)
+            continue
+        print(f"  [meta] bumped: reviews_since={meta['reviews_since']}; {reason}"
+              + ("  → CLAIMED learn" if claimed else ""), file=sys.stderr)
+        return 1 if claimed else 0
+    print("  [meta] claim CAS exhausted — not triggering learn this run", file=sys.stderr)
+    return 0
+
+
 def cmd_reset(args) -> int:
     """Called after /air:learn finishes successfully. Resets the counter and
     records the cleanup timestamp + latest PR processed."""
@@ -313,6 +427,11 @@ def cmd_reset(args) -> int:
         meta["last_cleanup"] = now
         meta["last_check"] = now
         meta["reviews_since"] = 0
+        # Release the learn lock acquired by `claim` so the next cadence can
+        # fire. Clearing it here (on the run that actually did the cleanup) is
+        # the lock's normal release; a crashed learn that never reaches reset
+        # relies on the TTL in _learn_lock_live instead.
+        meta["learn_claimed_at"] = ""
         if pr > int(meta.get("last_processed_pr", 0)):
             meta["last_processed_pr"] = pr
         return meta
@@ -406,6 +525,11 @@ def main(argv: list[str] | None = None) -> int:
     p_check = sub.add_parser("check", help="Decide whether to trigger /air:learn (exit 1 = trigger)")
     add_backend_args(p_check)
     p_check.set_defaults(fn=cmd_check)
+
+    p_claim = sub.add_parser("claim", help="Atomic bump + learn-slot claim (exit 1 = run learn). Replaces bump+check.")
+    add_backend_args(p_claim)
+    p_claim.add_argument("--pr-number", required=True, type=int, help="PR number just reviewed")
+    p_claim.set_defaults(fn=cmd_claim)
 
     p_reset = sub.add_parser("reset", help="Record a successful /air:learn run")
     add_backend_args(p_reset)
