@@ -20,7 +20,9 @@ import time
 
 from tool_exec import TOOL_SCHEMAS  # type: ignore
 
-MAX_TURNS = 30          # backstop: a runaway tool loop can't spin forever
+MAX_TURNS = 45          # backstop: a runaway tool loop can't spin forever. Haiku
+                        # (no thinking/effort) batches 1 tool/turn, so it needs
+                        # more headroom than Sonnet (~12-18) to converge.
 _CACHE_TTL = "1h"       # GA on the raw Messages API (no beta header); managed can't reach it
 
 
@@ -47,6 +49,11 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
          "cache_control": {"type": "ephemeral", "ttl": _CACHE_TTL}},
         {"type": "text", "text": task},
     ]}]
+    # Haiku 4.5 supports NEITHER adaptive thinking NOR output_config.effort
+    # (both 400 on it — they're Opus-4.x / Sonnet-4.6 features). The git-history
+    # reviewer runs on Haiku, so gate both on the model rather than the caller.
+    if "haiku" in model.lower():
+        thinking, effort = False, None
     extra = {}
     if thinking:
         extra["thinking"] = {"type": "adaptive"}
