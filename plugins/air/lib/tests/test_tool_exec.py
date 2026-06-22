@@ -244,6 +244,17 @@ def test_bash_flag_allowlist_default_deny(repo):
     assert "def login" in s.bash("git log -p -- src/app.py")
 
 
+def test_bash_dash_L_path_smuggle_refused(repo):
+    # git log -L<range>:<file> / -L:<funcname>:<file> embeds a file path in the -L flag
+    # value, which skips the path screens. Refuse the colon (path-bearing) form; the
+    # normal range form (file as a separate arg) still works.
+    s = Sandbox(str(repo))
+    for cmd in ["git log -L1,1:.env", "git log -L:.*:config/secrets.yml", "git show -L1,1:.env"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+    assert "def login" in s.bash("git blame -L1,2 src/app.py")  # plain range still works
+
+
 def test_bash_traversal_refused(repo):
     s = Sandbox(str(repo))
     for cmd in ["git log -- ../../../etc/passwd", "git log -- a/../../etc/passwd"]:

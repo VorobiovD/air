@@ -80,6 +80,13 @@ _NUMERIC_FLAG_RE = re.compile(r"^-\d+$")   # `git log -5`
 
 
 def _git_flag_allowed(tok: str) -> bool:
+    # -L<start>,<end> is a safe line range, BUT git's -L<start>,<end>:<file> and
+    # -L:<funcname>:<file> embed a FILE PATH inside the flag value — and a flag's
+    # value never reaches the path/deny-glob screens, so `-L1,1:.env` reads the
+    # secret. Refuse the path-bearing (colon) form; the normal review usage passes
+    # the file as a SEPARATE arg (`git blame -L 1,5 <file>`), which has no colon.
+    if tok.startswith("-L"):
+        return ":" not in tok
     return (tok in _SAFE_GIT_FLAGS
             or any(tok.startswith(p) for p in _SAFE_GIT_FLAG_PREFIXES)
             or bool(_NUMERIC_FLAG_RE.match(tok)))

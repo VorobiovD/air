@@ -128,7 +128,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
                 "wall": 0.0, "cost": 0.0}
 
     diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
-    if len(diff) > _DIFF_CAP:
+    diff_truncated = len(diff) > _DIFF_CAP
+    if diff_truncated:
         diff = diff[:_DIFF_CAP] + f"\n[air: diff truncated at {_DIFF_CAP} chars — v1 guard]\n"
     # html.escape the diff before interpolating: it's attacker-controlled (the PR
     # author writes it), and a raw `</diff>` line would close the XML wrapper and
@@ -222,9 +223,26 @@ async def run_headless_review(args, bot_token: str) -> dict:
         return {"ok": False, "reason": "no review body", "wall": wall, "cost": cost}
 
     rc, reason = should_request_changes(review_body, floor_exposures=floor)
-    # Fail closed if a blocker-class lens didn't run (headless partial-failure policy).
+    # Anti-decoy: also gate on the FULL raw verifier output. A single verifier emits
+    # ONE review block; if a prompt-injected DECOY second `## Code Review` block (with
+    # the real, public head SHA) made _extract_review_body select a clean block while an
+    # honest blocker block exists in the raw output, gating on the raw body catches it.
+    # (Headless-local — the verifier output is one agent's; managed's relay multi-block
+    # case goes through a different path and isn't affected.)
+    rc_raw, reason_raw = should_request_changes(review_body_raw, floor_exposures=floor)
+    if rc_raw and not rc:
+        rc, reason = True, f"raw verifier output gates ({reason_raw}) but the extracted body did not — possible injected decoy review block; failing closed"
+        print(f"  [gate] {reason}", file=sys.stderr)
+    # Fail closed if a blocker-class lens didn't run / was truncated (partial-failure policy).
     if not rc and missing_blocker_lens:
         rc, reason = True, f"blocker-class lens did not complete: {', '.join(missing_blocker_lens)}"
+        print(f"  [gate] {reason} — failing closed", file=sys.stderr)
+    # Fail closed on a truncated diff: a blocker living past the cap is invisible to every
+    # lens, so a clean verdict can't be trusted. The reviewer raises AIR_HEADLESS_DIFF_CAP
+    # (or splits the PR) to get a real verdict.
+    if not rc and diff_truncated:
+        rc, reason = True, (f"diff truncated at {_DIFF_CAP} chars — a blocker beyond the cap "
+                            "can't be ruled out; raise AIR_HEADLESS_DIFF_CAP or split the PR")
         print(f"  [gate] {reason} — failing closed", file=sys.stderr)
     verdict = "REQUEST_CHANGES" if rc else "APPROVE"
 
