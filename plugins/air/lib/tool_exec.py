@@ -105,6 +105,17 @@ DENY_GLOBS = (
     ".git/*", "*/.git/*",
 )
 
+
+def _deny_glob_match(name: str, rel: str) -> bool:
+    """Case-INSENSITIVE deny-glob match (basename AND full rel path). fnmatch's normcase
+    is identity on macOS/Linux, so a plain fnmatch is case-SENSITIVE — but a case-
+    insensitive checkout FS (macOS/Windows) opens `.ENV` as `.env` while the requested
+    spelling `.ENV` sails past a case-sensitive deny-glob. Fold both sides (DENY_GLOBS are
+    already lowercase) so a case-variant can't read .env/*.pem/*secret*. May over-refuse a
+    legitimately-uppercase name on a case-sensitive FS — safe (a lost read, never a leak)."""
+    nl, rl = name.lower(), rel.lower()
+    return any(fnmatch.fnmatch(nl, g) or fnmatch.fnmatch(rl, g) for g in DENY_GLOBS)
+
 # Hardened env for the git subprocess: no system/global/user config (kills alias
 # + core.pager exec vectors), no pager, no network prompts. Plus a minimal PATH.
 _GIT_HARDENED_ENV = {
@@ -149,9 +160,8 @@ class Sandbox:
 
     # ---- path jail -------------------------------------------------------
     def _deny_glob_check(self, rel: str, name: str) -> None:
-        for g in DENY_GLOBS:
-            if fnmatch.fnmatch(name, g) or fnmatch.fnmatch(rel, g):
-                raise ToolError(f"refused: sensitive path matches deny-glob ({g})")
+        if _deny_glob_match(name, rel):
+            raise ToolError("refused: sensitive path matches a deny-glob")
 
     def _jail(self, p: str) -> Path:
         """Resolve `p` (relative to root, or absolute) and assert it stays inside
@@ -194,7 +204,7 @@ class Sandbox:
                 rel = hit.resolve().relative_to(self.root)
             except ValueError:
                 continue  # globbed outside the jail (symlink) — skip
-            if any(fnmatch.fnmatch(hit.name, g) or fnmatch.fnmatch(str(rel), g) for g in DENY_GLOBS):
+            if _deny_glob_match(hit.name, str(rel)):
                 continue  # don't surface deny-globbed paths (parity with read/grep)
             hits.append(str(rel))
         return ("\n".join(hits) or "(no matches)")[:_MAX_OUTPUT]
@@ -219,7 +229,7 @@ class Sandbox:
             # cross `/`, so `*secret*` matches `secrets/token.txt` whose basename
             # ("token.txt") is innocuous. Without the rel check grep could read a file
             # under a deny-globbed DIRECTORY that read()/glob() (which check rel) refuse.
-            if any(fnmatch.fnmatch(f.name, g) or fnmatch.fnmatch(str(rel), g) for g in DENY_GLOBS):
+            if _deny_glob_match(f.name, str(rel)):
                 continue
             try:
                 for n, ln in enumerate(f.read_text(errors="replace").splitlines(), 1):

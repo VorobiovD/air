@@ -244,6 +244,23 @@ def test_bash_flag_allowlist_default_deny(repo):
     assert "def login" in s.bash("git log -p -- src/app.py")
 
 
+def test_deny_glob_case_insensitive(repo):
+    # On a case-insensitive FS (macOS/Windows) `.ENV` opens `.env`; a case-sensitive
+    # fnmatch let the spelling slip past the deny-glob. The check now folds case, so
+    # case-variant spellings of a deny-globbed secret are refused on EVERY platform
+    # (the match is in code, before the file open).
+    (repo / "server.pem").write_text("-----BEGIN PRIVATE KEY-----\n")
+    s = Sandbox(str(repo))
+    with pytest.raises(ToolError):
+        s.read(".ENV")
+    with pytest.raises(ToolError):
+        s.read(".Env")
+    with pytest.raises(ToolError):
+        s.read("server.PEM")
+    with pytest.raises(ToolError):
+        s.grep("SECRET", path=".ENV")
+
+
 def test_bash_dash_L_path_smuggle_refused(repo):
     # git log -L<range>:<file> / -L:<funcname>:<file> embeds a file path in the -L flag
     # value, which skips the path screens. Refuse the colon (path-bearing) form; the
