@@ -191,6 +191,50 @@ def test_bash_wildcard_pathspec_refused(repo):
             s.bash(cmd)
 
 
+def test_bash_no_index_refused(repo):
+    # `git diff --no-index <a> <b>` turns git into a general two-path file differ that
+    # reads ARBITRARY filesystem paths (/proc/<ppid>/environ → the bot PAT + API key),
+    # bypassing the realpath jail. --no-index must be in the deny-flag screen.
+    s = Sandbox(str(repo))
+    for cmd in ["git diff --no-index /etc/hosts /dev/null",
+                "git diff --no-index .env /dev/null"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+
+
+def test_bash_absolute_path_arg_refused(repo):
+    # Defense-in-depth: no git arg may name an absolute path outside the checkout.
+    # (Commit ranges like HEAD~2..HEAD don't start with '/', so they're unaffected.)
+    s = Sandbox(str(repo))
+    with pytest.raises(ToolError):
+        s.bash("git log -- /etc/passwd")
+
+
+def test_grep_does_not_scan_under_secret_directory(repo):
+    # grep must screen the full rel path, not just basename: fnmatch lets `*` cross
+    # `/`, so `*secret*` matches `secrets/token.txt` whose basename is innocuous.
+    # Without the rel check grep reads a file read()/glob() would refuse.
+    (repo / "secrets").mkdir()
+    (repo / "secrets" / "token.txt").write_text("API_KEY=sk-leak-me\n")
+    s = Sandbox(str(repo))
+    assert "sk-leak-me" not in s.grep("API_KEY")
+
+
+@pytest.mark.xfail(reason="accepted defense-in-depth gap: a raw-object-SHA read has no "
+                          "path to deny-glob; backstop is the clean-clone assumption",
+                   strict=False)
+def test_bash_raw_sha_blob_read_known_gap(repo):
+    # Documents the disclosed limit (tool_exec docstring): `git show <blob-sha>` reads a
+    # blob by SHA with no path the deny-glob can screen. xfail keeps the gap visible so
+    # accidental hardening doesn't silently mask it (and flips to pass if ever closed).
+    import subprocess as _sp
+    sha = _sp.run(["git", "-C", str(repo), "rev-parse", "HEAD:.env"],
+                  capture_output=True, text=True).stdout.strip()
+    s = Sandbox(str(repo))
+    with pytest.raises(ToolError):
+        s.bash(f"git show {sha}")
+
+
 def test_glob_does_not_surface_secrets(repo):
     # glob() must filter deny-globbed paths like read/grep do — surfacing even the
     # NAME points a prompt-injected agent straight at the secret to read next.

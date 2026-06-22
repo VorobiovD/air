@@ -12,9 +12,16 @@ reuse the same ledger machinery and are follow-ups. Requires a local checkout at
 the PR head (AIR_TARGET_REPO) — the sandbox reads it; CI's actions/checkout
 provides it. Reuses verbatim: prompts.build_pr_context / build_verifier_task,
 verdict.py (the gate), github_client (fetch + post). Personas + model tiers come
-from plugins/air/agents/*.md frontmatter (all Sonnet today; git-history Haiku).
+from plugins/air/agents/*.md frontmatter — headless reads whatever those declare
+(all Sonnet today + git-history Haiku, per the temporary #169 tier; managed full
+mode runs code-reviewer/security-auditor on Opus via the SAME frontmatter, so
+headless picks up Opus automatically when those files are reverted).
+
+v1 OMISSIONS vs full/solo (follow-ups): no meta.py learn-counter bump and no
+pattern_writer author-pattern update after a headless review.
 """
 import asyncio
+import html
 import os
 import sys
 import time
@@ -32,12 +39,12 @@ from github_client import (  # noqa: E402
 )
 from prompts import build_pr_context, build_verifier_task  # noqa: E402
 from verdict import should_request_changes, _extract_review_body  # noqa: E402 (managed shim)
+from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
 
 import agent_loop  # noqa: E402  (plugins/air/lib)
 from tool_exec import Sandbox  # noqa: E402
 
 AGENTS_DIR = _LIB.parent / "agents"
-MODEL_ALIASES = {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-4-6", "haiku": "claude-haiku-4-5"}
 SPECIALISTS = ["air-code-reviewer", "air-simplify", "air-security-auditor", "air-git-history-reviewer"]
 UI_SPECIALIST = "air-ui-copy-reviewer"
 VERIFIER = "air-review-verifier"
@@ -94,11 +101,27 @@ async def run_headless_review(args, bot_token: str) -> dict:
     print(f"[headless] fetching PR #{args.pr_number} on {args.repo} …")
     meta = fetch_pr_metadata(args.repo, args.pr_number, bot_token)
     head_sha = meta["head"]["sha"]
+
+    # Closed-PR gate (mirror review.py Step 5): the --mode dispatch returns before
+    # review.py's own gate, so enforce it here — otherwise a closed PR burns the full
+    # specialist+verifier spend AND posts a stray comment. --closed or --dry-run
+    # (replays/audits) opt back in; everything else skips at ~$0.
+    if (meta.get("state") or "").lower() != "open" \
+            and not getattr(args, "closed", False) and not getattr(args, "dry_run", False):
+        print(f"  [gate] PR is {meta.get('state')} — skipping (pass --closed to review anyway)")
+        return {"ok": True, "verdict": None, "reason": f"{meta.get('state')} PR — skipped",
+                "wall": 0.0, "cost": 0.0}
+
     diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
     if len(diff) > _DIFF_CAP:
         diff = diff[:_DIFF_CAP] + f"\n[air: diff truncated at {_DIFF_CAP} chars — v1 guard]\n"
+    # html.escape the diff before interpolating: it's attacker-controlled (the PR
+    # author writes it), and a raw `</diff>` line would close the XML wrapper and
+    # smuggle untagged prompt-injection text to every specialist + the verifier.
+    # build_pr_context escapes every other untrusted field (title/body/blame/codex);
+    # the diff must match (PROJECT-PROFILE check 9). Truncation (above) is pre-escape.
     pr_context = (build_pr_context(meta, args.repo, mode="full")
-                  + f"\n\n<diff>\n{diff}\n</diff>\n")
+                  + f"\n\n<diff>\n{html.escape(diff)}\n</diff>\n")
 
     # Per-agent turn budget scales with PR size: a big multi-file PR needs more
     # read/blame round-trips than a small one. A fixed cap that's fine for a
@@ -191,7 +214,15 @@ async def run_headless_review(args, bot_token: str) -> dict:
                 "wall": wall, "cost": cost, "dry_run": True,
                 "specialists": {a: (r["tool_calls"] if r else None) for a, r in specialist_results.items()}}
 
-    _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
+    # If the comment POST fails (e.g. a second 422), don't proceed to submit a formal
+    # verdict — that would gate the PR with no visible review. Fail the run instead
+    # (mirrors managed review.py, which checks resp.ok and exits non-zero).
+    resp = _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
+    if not getattr(resp, "ok", True):
+        print(f"  [gate] review comment POST failed: HTTP {getattr(resp, 'status_code', '?')} "
+              "— not submitting a verdict", file=sys.stderr)
+        return {"ok": False, "reason": f"comment post failed: HTTP {getattr(resp, 'status_code', '?')}",
+                "wall": wall, "cost": cost}
     if meta.get("state") == "open":
         # commit_id pins the verdict to the SHA we reviewed (not the PR's current
         # head). Both are required args — omitting them crashed the post path

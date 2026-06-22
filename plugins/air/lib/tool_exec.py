@@ -45,7 +45,11 @@ GIT_VERB_ALLOWLIST = frozenset({
 # Rejected ANYWHERE in argv (matched whole-token, incl. the `--flag=value` form).
 _GIT_DENY_FLAG_RE = re.compile(
     r"^(--output(=.*)?|-[oO].*|--exec-path(=.*)?|--upload-pack(=.*)?|--receive-pack(=.*)?"
-    r"|--git-dir(=.*)?|--work-tree(=.*)?|--namespace(=.*)?|--open-files-in-pager(=.*)?)$"
+    r"|--git-dir(=.*)?|--work-tree(=.*)?|--namespace(=.*)?|--open-files-in-pager(=.*)?"
+    # --no-index turns `git diff` into a general two-path file differ that reads
+    # ARBITRARY filesystem paths (e.g. /proc/<ppid>/environ → the bot PAT + API
+    # key), bypassing the realpath jail entirely. Without it git is repo-confined.
+    r"|--no-index)$"
 )
 
 # Sensitive basenames/paths a read tool must refuse even though they're in-tree.
@@ -163,10 +167,14 @@ class Sandbox:
             if not f.is_file():
                 continue
             try:
-                f.resolve().relative_to(self.root)
+                rel = f.resolve().relative_to(self.root)
             except ValueError:
                 continue
-            if any(fnmatch.fnmatch(f.name, g) for g in DENY_GLOBS):
+            # Check the full relative path, not just the basename — fnmatch lets `*`
+            # cross `/`, so `*secret*` matches `secrets/token.txt` whose basename
+            # ("token.txt") is innocuous. Without the rel check grep could read a file
+            # under a deny-globbed DIRECTORY that read()/glob() (which check rel) refuse.
+            if any(fnmatch.fnmatch(f.name, g) or fnmatch.fnmatch(str(rel), g) for g in DENY_GLOBS):
                 continue
             try:
                 for n, ln in enumerate(f.read_text(errors="replace").splitlines(), 1):
@@ -217,6 +225,12 @@ class Sandbox:
                 # class, not just the specific magic/wildcard forms seen so far.
                 if any(c in tok for c in "*?["):
                     raise ToolError(f"git wildcard pathspec not allowed: {tok}")
+                # Defense-in-depth (with --no-index denied above, git already rejects
+                # outside-repo pathspecs): refuse an absolute-path token so no git arg
+                # can name a path outside the checkout. Doesn't touch commit ranges
+                # (`A..B` / SHAs don't start with '/').
+                if tok.startswith("/"):
+                    raise ToolError(f"absolute path not allowed in a git arg: {tok}")
                 # Plain literal pathspec args (`git log -p -- .env`): screen the raw
                 # token — refs / SHAs / `--` never match a sensitive deny-glob, so this
                 # only ever refuses an actual deny-globbed path, never a legitimate ref.
