@@ -90,6 +90,21 @@ def _specialist_task(agent: str) -> str:
     )
 
 
+BLOCKER_LENSES = ("air-security-auditor", "air-code-reviewer")
+
+
+def _blocker_lens_incomplete(agent: str, r) -> bool:
+    """True if a blocker-class specialist did NOT complete — never ran, produced no
+    text, or stopped early (max_turns) mid-investigation. Drives the fail-closed gate:
+    a truncated security lens carries truthy trailing text, so "has text" is not
+    "completed" — without the stop check a starved security lens reads as clean."""
+    if agent not in BLOCKER_LENSES:
+        return False
+    if not (r and r.get("text")):
+        return True
+    return r.get("stop") not in (None, "end_turn")
+
+
 async def run_headless_review(args, bot_token: str) -> dict:
     api_key = os.environ["ANTHROPIC_API_KEY"]
     checkout = os.environ.get("AIR_TARGET_REPO") or os.getcwd()
@@ -166,13 +181,19 @@ async def run_headless_review(args, bot_token: str) -> dict:
     missing_blocker_lens = []
     for agent in in_scope:
         r = specialist_results.get(agent)
-        short = agent.replace("air-", "")
+        # A specialist that hit the turn cap stops with stop != "end_turn" but still
+        # carries truthy trailing text — so "has text" is NOT "completed". A truncated
+        # security lens that never reached the blocker reads as a clean run otherwise,
+        # un-gating a large hostile PR. Include any partial findings (flagged), but
+        # treat a non-end_turn stop on a blocker-class lens as a missing lens → fail closed.
+        truncated = bool(r and r.get("stop") and r.get("stop") != "end_turn")
         if r and r.get("text"):
-            findings_block.append(f"===== Findings from {agent} =====\n{r['text']}")
+            note = f" [INCOMPLETE — stopped early: {r.get('stop')}]" if truncated else ""
+            findings_block.append(f"===== Findings from {agent}{note} =====\n{r['text']}")
         else:
             findings_block.append(f"===== {agent} =====\n(specialist did not complete — unavailable)")
-            if agent in ("air-security-auditor", "air-code-reviewer"):
-                missing_blocker_lens.append(agent)
+        if _blocker_lens_incomplete(agent, r):
+            missing_blocker_lens.append(agent)
 
     verifier_task = build_verifier_task("full", args.repo, head_sha, None, "")
     verifier_input = (

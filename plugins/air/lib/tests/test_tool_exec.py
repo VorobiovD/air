@@ -220,6 +220,49 @@ def test_grep_does_not_scan_under_secret_directory(repo):
     assert "sk-leak-me" not in s.grep("API_KEY")
 
 
+def test_bash_contents_flag_refused(repo):
+    # git blame --contents=<file> reads an ARBITRARY filesystem path (the --no-index
+    # sibling: leaks /proc/<ppid>/environ → the bot PAT). Refused in every form.
+    s = Sandbox(str(repo))
+    for cmd in ["git blame --contents=/etc/hosts src/app.py",
+                "git blame --contents /etc/hosts src/app.py",
+                "git blame --contents=.env src/app.py"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+
+
+def test_bash_flag_allowlist_default_deny(repo):
+    # Default-deny: path-valued / exec / object-enumerating flags are refused even
+    # though they're not in the explicit deny-regex; the small safe set still works.
+    s = Sandbox(str(repo))
+    for bad in ["git blame -S/tmp/revs src/app.py", "git diff --anchored=/etc/passwd",
+                "git log --textconv", "git cat-file --batch", "git diff --ext-diff=/bin/sh"]:
+        with pytest.raises(ToolError):
+            s.bash(bad)
+    assert "def login" in s.bash("git blame -L 1,2 src/app.py")
+    assert "init" in s.bash("git log -1 --format=%s")
+    assert "def login" in s.bash("git log -p -- src/app.py")
+
+
+def test_bash_traversal_refused(repo):
+    s = Sandbox(str(repo))
+    for cmd in ["git log -- ../../../etc/passwd", "git log -- a/../../etc/passwd"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+
+
+def test_git_internals_refused(repo):
+    # .git/ holds the actions/checkout-persisted bot PAT (extraheader) + hooks/refs.
+    # Read/Grep/Glob must refuse .git/* but still allow .gitignore (no slash → not matched).
+    (repo / ".gitignore").write_text("*.log\n")
+    s = Sandbox(str(repo))
+    with pytest.raises(ToolError):
+        s.read(".git/config")
+    assert "config" not in s.glob(".git/**/*")
+    assert "repositoryformatversion" not in s.grep("repositoryformatversion")  # .git/config not scanned
+    assert "*.log" in s.read(".gitignore")  # legit dotfile still readable
+
+
 @pytest.mark.xfail(reason="accepted defense-in-depth gap: a raw-object-SHA read has no "
                           "path to deny-glob; backstop is the clean-clone assumption",
                    strict=False)

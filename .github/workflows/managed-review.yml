@@ -400,6 +400,13 @@ jobs:
           ref: refs/pull/${{ env.PR_NUMBER_RESOLVED }}/head
           path: target-repo
           fetch-depth: 0
+          # Don't persist the bot PAT into target-repo/.git/config (extraheader) —
+          # this checkout is the headless Sandbox root + Codex's tree, both of which
+          # read it, so a persisted repo-write PAT there is exfiltrable into a public
+          # review comment. Only local reads (blame/log/diff) run against it (no
+          # fetch/push needs the cred), so dropping it is safe. Defense-in-depth pairs
+          # with tool_exec DENY_GLOBS refusing .git/ internals.
+          persist-credentials: false
           # Authenticate as the bot, not GITHUB_TOKEN. Callers using
           # least-privilege `permissions: {}` (per the example in the
           # docblock above) zero out GITHUB_TOKEN — actions/checkout's

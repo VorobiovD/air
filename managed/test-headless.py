@@ -61,6 +61,18 @@ def test_messages_api_dispatch_exits_nonzero_on_failure(monkeypatch):
     assert e.value.code == 1
 
 
+def test_blocker_lens_incomplete_detects_truncation():
+    # The dogfood gate-bypass: a max_turns-truncated security lens has truthy trailing
+    # text, so it must NOT read as a completed lens — fail closed instead.
+    inc = headless._blocker_lens_incomplete
+    assert inc("air-security-auditor", {"text": "partial findings…", "stop": "max_turns"}) is True
+    assert inc("air-code-reviewer", {"text": "findings", "stop": "end_turn"}) is False
+    assert inc("air-code-reviewer", None) is True
+    assert inc("air-security-auditor", {"text": "", "stop": "end_turn"}) is True
+    # a non-blocker lens never fail-closes (simplify/git-history can degrade)
+    assert inc("air-simplify", {"text": "x", "stop": "max_turns"}) is False
+
+
 def test_messages_api_dispatch_returns_cleanly_on_success(monkeypatch):
     monkeypatch.setenv("AIR_BOT_TOKEN", "x")
 

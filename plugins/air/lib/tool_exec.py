@@ -52,12 +52,50 @@ _GIT_DENY_FLAG_RE = re.compile(
     r"|--no-index)$"
 )
 
+# Default-DENY flag allowlist for the read-only git verbs. Blocklisting known-bad
+# flags (above) repeatedly lost to unenumerated siblings — `--no-index` was blocked
+# but `git blame --contents=<file>` (reads ANY filesystem path) was not, and the
+# path screens all sat behind `if not tok.startswith("-")`, so a `-`-prefixed
+# path-valued flag skipped every check. So a `-`-prefixed git arg must now be an
+# EXACT safe flag, a safe value-glued prefix, or a numeric `-<N>`; everything else —
+# path-valued (`--contents`/`--no-index`/`--output`/blame `-S<revs-file>`/`--anchored`),
+# config-exec (`--textconv`/`--ext-diff`), or object-enumerating (`cat-file --batch*`) —
+# is refused. The legitimate read-only surface (blame/log/show/diff/cat-file/rev-parse/
+# ls-files/status with formatting/range flags) is small and fully covered here.
+_SAFE_GIT_FLAGS = frozenset({
+    "-p", "--patch", "-s", "--no-patch", "--stat", "--shortstat", "--numstat",
+    "--summary", "--name-only", "--name-status", "--oneline", "--no-color",
+    "--graph", "--decorate", "--no-decorate", "--reverse", "--first-parent",
+    "--follow", "-w", "--ignore-all-space", "--ignore-space-change", "--function-context",
+    "-M", "-C", "--find-renames", "--find-copies", "--line-porcelain", "--porcelain",
+    "--cached", "--staged", "--others", "-t", "-e", "--short", "--verify",
+    "--abbrev-ref", "--branch", "--all", "-z",
+})
+_SAFE_GIT_FLAG_PREFIXES = (
+    "--format=", "--pretty=", "--pretty", "--abbrev=", "--abbrev", "--color=",
+    "--date=", "--max-count=", "--skip=", "--since=", "--until=", "--after=",
+    "--before=", "--unified=", "-U", "-L", "-n", "--decorate=", "--porcelain=",
+)
+_NUMERIC_FLAG_RE = re.compile(r"^-\d+$")   # `git log -5`
+
+
+def _git_flag_allowed(tok: str) -> bool:
+    return (tok in _SAFE_GIT_FLAGS
+            or any(tok.startswith(p) for p in _SAFE_GIT_FLAG_PREFIXES)
+            or bool(_NUMERIC_FLAG_RE.match(tok)))
+
 # Sensitive basenames/paths a read tool must refuse even though they're in-tree.
 # Blocklist (fails open on the unenumerated) — defense-in-depth, not the control.
 DENY_GLOBS = (
     ".env", ".env.*", "*.env", "*.pem", "*.key", "*.p12", "*.pfx",
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "*_rsa", "*_key",
     "*credential*", "*secret*", "*.keystore", ".npmrc", ".pypirc", ".netrc",
+    # .git internals — actions/checkout persists the bot PAT into .git/config
+    # (extraheader); .git/ also holds hooks/refs/etc a review never reads. fnmatch
+    # `*` crosses `/`, so `.git/*` matches every file under .git at any depth, and
+    # `*/.git/*` covers a nested/submodule .git. `.gitignore`/`.gitattributes` are
+    # NOT matched (no slash after `.git`), so reviewers still read those.
+    ".git/*", "*/.git/*",
 )
 
 # Hardened env for the git subprocess: no system/global/user config (kills alias
@@ -205,36 +243,34 @@ class Sandbox:
         if verb not in GIT_VERB_ALLOWLIST:
             raise ToolError(f"git verb not allowed (read-only allowlist): {verb}")
         for tok in argv[2:]:
-            if _GIT_DENY_FLAG_RE.match(tok):
-                raise ToolError(f"git flag not allowed: {tok}")
-            # git pathspec/refspec MAGIC (a leading ':') defeats literal-text deny-glob
-            # screening: `:(glob).e??` / `:(icase).ENV` expand to match `.env`, and the
-            # `:path` staged form names a blob directly — the literal token matches no
-            # deny-glob. A read-only review never needs a leading-colon pathspec, so
-            # refuse the whole class. Plain `ref:path` (colon in the MIDDLE) is unaffected.
+            if tok == "--":
+                continue  # pathspec separator — neither a flag nor a path
+            if tok.startswith("-"):
+                # FLAG: default-deny (see _git_flag_allowed). The deny-regex is kept as
+                # an explicit, documented blocklist of the worst flags; the allowlist is
+                # the backstop that closes unenumerated path-valued/exec siblings.
+                if _GIT_DENY_FLAG_RE.match(tok) or not _git_flag_allowed(tok):
+                    raise ToolError(f"git flag not allowed (read-only allowlist): {tok}")
+                continue
+            # NON-flag token: a ref, commit range, or pathspec. Screen all path shapes.
+            # Leading ':' magic (`:(glob).e??` / `:.env` staged) defeats literal-text
+            # deny-globbing; refuse the whole class (plain `ref:path` colon-in-middle ok).
             if tok.startswith(":"):
                 raise ToolError(f"git pathspec/refspec magic (leading ':') not allowed: {tok}")
+            # Path traversal (`../x`, `a/../../etc`) escapes the checkout; absolute paths
+            # name files outside it. Commit ranges (`A..B`, `A...B`) never contain '/..'.
+            if tok.startswith("../") or "/.." in tok:
+                raise ToolError(f"path traversal not allowed in a git arg: {tok}")
+            if tok.startswith("/"):
+                raise ToolError(f"absolute path not allowed in a git arg: {tok}")
             self._screen_refspec_path(tok)  # `git show HEAD:.env` → refused
-            if not tok.startswith("-"):
-                # A pathspec with a glob wildcard (`.e??`, `*.key`, `[a-z]*secret*`)
-                # expands — git-side — to match files the LITERAL token never equals,
-                # so the deny-glob check below (which compares the token text against
-                # the deny-globs) can't see what it will read. Refuse wildcard pathspecs
-                # outright: a read-only review names concrete files (the Glob/Grep tools
-                # already screen their own results). Closes the whole expand-to-secret
-                # class, not just the specific magic/wildcard forms seen so far.
-                if any(c in tok for c in "*?["):
-                    raise ToolError(f"git wildcard pathspec not allowed: {tok}")
-                # Defense-in-depth (with --no-index denied above, git already rejects
-                # outside-repo pathspecs): refuse an absolute-path token so no git arg
-                # can name a path outside the checkout. Doesn't touch commit ranges
-                # (`A..B` / SHAs don't start with '/').
-                if tok.startswith("/"):
-                    raise ToolError(f"absolute path not allowed in a git arg: {tok}")
-                # Plain literal pathspec args (`git log -p -- .env`): screen the raw
-                # token — refs / SHAs / `--` never match a sensitive deny-glob, so this
-                # only ever refuses an actual deny-globbed path, never a legitimate ref.
-                self._deny_glob_check(tok, os.path.basename(tok))
+            # A wildcard pathspec (`.e??`, `*.key`) expands git-side to match files the
+            # literal token never equals, so the deny-glob below can't see what it reads.
+            if any(c in tok for c in "*?["):
+                raise ToolError(f"git wildcard pathspec not allowed: {tok}")
+            # Plain literal pathspec (`git log -p -- .env`): refs/SHAs/ranges never match
+            # a sensitive deny-glob, so this only ever refuses an actual deny-globbed path.
+            self._deny_glob_check(tok, os.path.basename(tok))
         run_argv = ["git", "--no-pager", verb, *argv[2:]]
         try:
             proc = subprocess.run(
