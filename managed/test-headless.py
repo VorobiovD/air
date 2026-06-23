@@ -439,6 +439,23 @@ def test_codex_disabled_by_no_codex_flag(tmp_path, monkeypatch):
     assert "should-not-appear" not in calls["verifier_task"] and out["ok"]
 
 
+# ---- P4 AIR_EXPECTED_REVIEWER identity assertion -----------------------------
+
+def test_expected_reviewer_mismatch_fails_at_zero_cost(tmp_path, monkeypatch):
+    # Wrong token owner (bot_login is "air-bot") → refuse to run, before any agent.
+    monkeypatch.setenv("AIR_EXPECTED_REVIEWER", "someone-else")
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[])
+    assert out["ok"] is False and "identity mismatch" in out["reason"]
+    assert out["cost"] == 0.0  # failed pre-spend
+
+
+def test_expected_reviewer_match_proceeds(tmp_path, monkeypatch):
+    # Matching reviewer → review proceeds normally.
+    monkeypatch.setenv("AIR_EXPECTED_REVIEWER", "air-bot")
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[])
+    assert out["ok"] is True and out["verdict"] == "APPROVE"
+
+
 def test_already_reviewed_at_head_skips(tmp_path, monkeypatch):
     out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("a" * 40)],
                                inter_diff="x", head="a" * 40)

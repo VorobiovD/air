@@ -305,6 +305,26 @@ async def run_headless_review(args, bot_token: str) -> dict:
         if isinstance(x, BaseException):
             print(f"  [warn] pr-conversation fetch ({lbl}) failed: {x!r} — partial thread", file=sys.stderr)
 
+    # Identity assertion (fleet multi-PAT safety, mirrors review.py): if
+    # AIR_EXPECTED_REVIEWER is set, refuse to review under the wrong account —
+    # fail at ~$0 before any agent runs. Moot for air's single bot account; needed
+    # when callers route per-reviewer PATs. Empty/unset → no assertion (legacy +
+    # single-token callers unchanged).
+    expected_reviewer = os.environ.get("AIR_EXPECTED_REVIEWER", "").strip()
+    if expected_reviewer:
+        if not bot_login:
+            print(f"::error::AIR_EXPECTED_REVIEWER={expected_reviewer} set but the token owner "
+                  "could not be resolved — refusing to run under an unverified identity.", file=sys.stderr)
+            return {"ok": False, "reason": "expected-reviewer set but token owner unresolved",
+                    "wall": 0.0, "cost": 0.0}
+        if bot_login.lower() != expected_reviewer.lower():
+            print(f"::error::token owner '{bot_login}' != requested reviewer '{expected_reviewer}' — "
+                  "wrong PAT in the reviewer's secret? Refusing to run under the wrong identity.", file=sys.stderr)
+            return {"ok": False, "reason": f"identity mismatch: {bot_login} != {expected_reviewer}",
+                    "wall": 0.0, "cost": 0.0}
+        print(f"  [identity] token owner '{bot_login}' matches expected reviewer '{expected_reviewer}'",
+              file=sys.stderr)
+
     # Prior-review detection (mirror review.py): air's own last `## Code Review`
     # (bot-authored — the author filter is the anti-spoof), then its `Reviewed at:`
     # footer SHA (extract_reviewed_at_sha lowercases it so the at-head compare matches

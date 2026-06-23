@@ -38,6 +38,8 @@ plugins/air/
 │   ├── wiki_git.py            # Clone + commit-meta-with-retry (legacy wiki backend)
 │   ├── pattern_lifecycle.py   # Deterministic author-pattern strengthen/clean/decline/archive ops
 │   ├── pr_conversation.py     # Merge GitHub PR comments/reviews into <pr-conversation> agent context
+│   ├── agent_loop.py          # Self-hosted Messages-API tool-use loop for headless mode (1h cache, thinking round-trip)
+│   ├── tool_exec.py           # Read-only sandbox for headless agents (path-jailed Read/Grep/Glob + fixed-verb git, shell=False)
 │   ├── solo_prompt.py         # THE solo-prompt assembly (CLI --solo runs it; managed setup.py imports it)
 │   ├── wiki_cap.py            # THE deterministic wiki bloat-cap (per-file byte ceilings; managed learn/render + CLI learn all call it)
 │   └── verdict.py             # THE review-gating contract (shared: CLI Step 12 runs it via --decide; managed imports it)
@@ -53,6 +55,7 @@ managed/                          # Managed Agent (CI automation)
 ├── api.py                        # Shared API helpers
 ├── setup.py                      # Creates/updates agents + environment via API
 ├── review.py                     # Client-side driver: orchestrates the review run (launches coordinator, posts)
+├── headless.py                   # `messages-api` mode driver: self-hosted specialist+verifier loop (full lens set), reuses verdict/prompts/github_client/review helpers
 ├── github_client.py              # GitHub REST: fetchers, pagination, comment/verdict POSTs
 ├── verdict.py                    # Thin shim re-exporting plugins/air/lib/verdict.py (the shared gating contract)
 ├── session_runner.py             # Session lifecycle: run_session, REST drain, billing retry, SIGTERM cleanup
