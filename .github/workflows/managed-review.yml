@@ -163,8 +163,9 @@ on:
           labeled and non-blocking, for comparison), or 'messages-api'
           (EXPERIMENTAL — air self-hosts the agent loop client-side instead of
           a managed session, eliminating the runtime's between-turn scheduling
-          stall; fresh full reviews only in v1; uses the same checkout at
-          AIR_TARGET_REPO). Default 'full' is byte-identical to today. Set
+          stall; supports fresh + same-PR re-review + the learn-counter
+          write-back; uses the same checkout at AIR_TARGET_REPO). Default
+          'full' is byte-identical to today. Set
           per-request via workflow_dispatch, or persistently by setting a
           repo/org VARIABLE `AIR_REVIEW_MODE` on the CALLER repo (it wins over
           this input — handy for running 'both' or 'messages-api' over a

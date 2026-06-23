@@ -7,18 +7,26 @@ loops (agent_loop.run_agent + the read-only tool_exec sandbox), run the verifier
 then feed its body through the SAME verdict/post tail as managed. No server-side
 session → no between-turn scheduling stall.
 
-v1 SCOPE: fresh full reviews + --dry-run. Re-review / promote-fastpath / both-mode
-reuse the same ledger machinery and are follow-ups. Requires a local checkout at
-the PR head (AIR_TARGET_REPO) — the sandbox reads it; CI's actions/checkout
-provides it. Reuses verbatim: prompts.build_pr_context / build_verifier_task,
-verdict.py (the gate), github_client (fetch + post). Personas + model tiers come
-from plugins/air/agents/*.md frontmatter — headless reads whatever those declare
-(all Sonnet today + git-history Haiku, per the temporary #169 tier; managed full
-mode runs code-reviewer/security-auditor on Opus via the SAME frontmatter, so
-headless picks up Opus automatically when those files are reverted).
+SCOPE: fresh full reviews + same-PR RE-REVIEW (P2) + --dry-run. Re-review detects
+air's prior `## Code Review`, builds the inter-diff (prior_sha...head), feeds
+mode="re-review" to both prompt builders, builds the carry-forward ledger, and runs
+pin_and_resurrect before the gate — all reused verbatim from verdict.py/review.py.
+Requires a local checkout at the PR head (AIR_TARGET_REPO) — the sandbox reads it;
+CI's actions/checkout provides it. Reuses verbatim: prompts.build_pr_context /
+build_verifier_task, verdict.py (gate + ledger + pin), github_client (fetch + post),
+review.py (compute_* / prior-detection / dev-context / learn-counter helpers).
+Personas + model tiers come from plugins/air/agents/*.md frontmatter — headless
+reads whatever those declare (all Sonnet today + git-history Haiku, per the temporary
+#169 tier; managed full mode runs code-reviewer/security-auditor on Opus via the SAME
+frontmatter, so headless picks up Opus automatically when those files are reverted).
 
-v1 OMISSIONS vs full/solo (follow-ups): no meta.py learn-counter bump and no
-pattern_writer author-pattern update after a headless review.
+POST-REVIEW: advances the shared learn cadence (meta.py claim via review.py's
+_update_learn_counter) — wiki path on air; pattern_writer + store→wiki mirror fire
+only on store-backed repos. Each learning step is independently guarded (never
+affects the posted verdict).
+
+OMISSIONS (follow-ups): promote-fastpath, cross-repo re-review, UI/copy-lens
+dispatch, Codex, and _backfill_verdict_if_missing on the already-reviewed skip.
 """
 import asyncio
 import html
@@ -36,13 +44,18 @@ if str(_LIB) not in sys.path:
 
 import anthropic  # noqa: E402
 
+import requests  # noqa: E402  (RequestException wrap for fetch_inter_diff — it RAISES on retry exhaustion)
+
 from github_client import (  # noqa: E402
-    fetch_pr_metadata, fetch_pr_diff, fetch_bot_login,
+    fetch_pr_metadata, fetch_pr_diff, fetch_inter_diff, fetch_bot_login,
     fetch_issue_comments, fetch_pr_reviews, fetch_pr_review_comments,
     _post_review_comment_with_retry, submit_review_verdict, dismiss_stale_air_verdicts,
 )
 from prompts import build_pr_context, build_verifier_task  # noqa: E402
-from verdict import should_request_changes, _extract_review_body, has_conflict_markers  # noqa: E402 (managed shim)
+from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py; pure, network-free)
+    should_request_changes, _extract_review_body, has_conflict_markers,
+    find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
+)
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
 
 import memory_store  # noqa: E402  (managed/ — client-side store reads for pattern staging)
@@ -70,6 +83,7 @@ _TIERS = frozenset(MODEL_ALIASES)   # known model-alias tiers; unknown → "sonn
 # splits per-author + common/service, a legacy wiki keeps one REVIEW.md), and the
 # agent Globs the dir to see what's actually present.
 _PATTERNS_SUBDIR = ".air-patterns"
+_STORE_UNSET = object()  # sentinel: stage_patterns resolves store_id itself when not threaded in
 # store path -> staged filename
 _STORE_PATTERN_FILES = (
     (memory_store.COMMON_FINDINGS_PATH, "common-findings.md"),
@@ -91,7 +105,8 @@ _WIKI_PATTERN_FILES = (
 
 
 def stage_patterns(repo: str, author: str, checkout: str, token: str,
-                   platform_domain: str = "github.com") -> tuple[str | None, str | None, str]:
+                   platform_domain: str = "github.com",
+                   store_id=_STORE_UNSET) -> tuple[str | None, str | None, str]:
     """Fetch this repo's learned review patterns and stage them into
     <checkout>/.air-patterns/ for the sandboxed agents to read selectively
     (the headless analogue of the managed store mount / CLI wiki clone).
@@ -112,7 +127,8 @@ def stage_patterns(repo: str, author: str, checkout: str, token: str,
         staged.append(name)
 
     try:
-        store_id = memory_store.get_store_id(repo, flow="review")
+        if store_id is _STORE_UNSET:  # not threaded in (e.g. standalone/test) — resolve here
+            store_id = memory_store.get_store_id(repo, flow="review")
         if store_id:
             os.makedirs(dest, exist_ok=True)
             # ONE list call for the whole store, then retrieve only the files we
@@ -246,34 +262,108 @@ async def run_headless_review(args, bot_token: str) -> dict:
         return {"ok": True, "verdict": None, "reason": f"{meta.get('state')} PR — skipped",
                 "wall": 0.0, "cost": 0.0}
 
-    diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
+    # ---- IDENTITY + CONVERSATION + PRIOR-REVIEW DETECTION ----------------
+    # Resolve the bot identity AND the three conversation surfaces up front
+    # (concurrently). Re-review detection needs both: find_prior_review filters the
+    # issue comments by bot author, and the inter-diff base comes from the prior
+    # review's footer. compute_* + the re-review/learning helpers come from review.py,
+    # imported LAZILY (review.py imports headless lazily at --mode dispatch, so a
+    # top-level import here would cycle).
+    from review import (  # noqa: E402
+        compute_file_statuses, compute_blame_summaries, compute_churn_data,
+        compute_diff_check_warnings, CONVERSATION_MAX_ENTRIES,
+        filter_comments_after, format_developer_responses, _ledger_pin_enabled,
+        _update_learn_counter, _maybe_render_mirror)
+    author = meta["user"]["login"]
+    have_checkout = bool(checkout and os.path.isdir(checkout))
+
+    # Resolve the pattern store + bot identity + the three conversation surfaces
+    # CONCURRENTLY (one gather, no serial network hop on the critical path — this
+    # mode's stated win is wall-time). store_id is threaded into stage_patterns + the
+    # learning tail; empty/None ⇒ legacy-wiki backend (air's case).
+    sid_res, bl_res, ic_res, rv_res, inl_res = await asyncio.gather(
+        asyncio.to_thread(memory_store.get_store_id, args.repo, "review"),
+        asyncio.to_thread(fetch_bot_login, bot_token),
+        asyncio.to_thread(fetch_issue_comments, args.repo, args.pr_number, bot_token),
+        asyncio.to_thread(fetch_pr_reviews, args.repo, args.pr_number, bot_token),
+        asyncio.to_thread(fetch_pr_review_comments, args.repo, args.pr_number, bot_token),
+        return_exceptions=True)
+    store_id = None if isinstance(sid_res, BaseException) else sid_res
+    if isinstance(sid_res, BaseException):
+        print(f"  [warn] store lookup failed: {sid_res!r} — wiki backend", file=sys.stderr)
+    bot_login = None if isinstance(bl_res, BaseException) else bl_res
+    if isinstance(bl_res, BaseException):
+        print(f"  [warn] bot-login fetch failed: {bl_res!r}", file=sys.stderr)
+    ic, rv, inl = [x if not isinstance(x, BaseException) else [] for x in (ic_res, rv_res, inl_res)]
+    for lbl, x in (("issue", ic_res), ("reviews", rv_res), ("inline", inl_res)):
+        if isinstance(x, BaseException):
+            print(f"  [warn] pr-conversation fetch ({lbl}) failed: {x!r} — partial thread", file=sys.stderr)
+
+    # Prior-review detection (mirror review.py): air's own last `## Code Review`
+    # (bot-authored — the author filter is the anti-spoof), then its `Reviewed at:`
+    # footer SHA (extract_reviewed_at_sha lowercases it so the at-head compare matches
+    # GitHub's lowercase SHA). --fresh forces full; unresolved bot_login ⇒ no
+    # detection ⇒ full. Both reused verbatim — no hand-rolled regex.
+    prior = prior_sha = None
+    if not getattr(args, "fresh", False) and bot_login and ic:
+        prior = find_prior_review(ic, bot_login)
+        prior_sha = extract_reviewed_at_sha(prior["body"]) if prior else None
+    mode = "re-review" if (prior and prior_sha) else "full"
+
+    # Already reviewed at this exact head → nothing to do (mirror review.py's skip).
+    if mode == "re-review" and prior_sha == head_sha:
+        print(f"  [gate] already reviewed at head {head_sha[:8]} — skipping")
+        return {"ok": True, "verdict": None, "reason": "already reviewed at head",
+                "wall": 0.0, "cost": 0.0}
+
+    # ---- DIFF SELECTION (full vs re-review inter-diff) -------------------
+    # Re-review reviews the INTER-DIFF (prior_sha...head via GitHub three-dot
+    # compare), not the whole PR. None = API failure (incl. a force-push-GC'd base) →
+    # fall back to a FULL review; "" = a genuinely-empty successful compare (no new
+    # commits) → skip. The None/"" distinction is load-bearing. fetch_inter_diff
+    # RAISES on retry exhaustion, so wrap it.
+    if mode == "re-review":
+        try:
+            inter = fetch_inter_diff(args.repo, prior_sha, head_sha, bot_token)
+        except requests.exceptions.RequestException as e:
+            print(f"  [warn] inter-diff fetch failed: {e!r} — falling back to full review", file=sys.stderr)
+            inter = None
+        if inter is None:
+            print("  [re-review] inter-diff unavailable — full review", file=sys.stderr)
+            diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
+            mode, prior, prior_sha = "full", None, None
+        elif not inter.strip():  # empty/whitespace-only successful compare (parity w/ review.py)
+            print(f"  [gate] no changes since the prior review at {prior_sha[:8]} — skipping")
+            return {"ok": True, "verdict": None, "reason": "no changes since last review",
+                    "wall": 0.0, "cost": 0.0}
+        else:
+            print(f"  [re-review] inter-diff {prior_sha[:8]}..{head_sha[:8]} ({len(inter.splitlines())} lines)")
+            diff = inter
+    else:
+        diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
     diff_truncated = len(diff) > _DIFF_CAP
     if diff_truncated:
         diff = diff[:_DIFF_CAP] + f"\n[air: diff truncated at {_DIFF_CAP} chars — v1 guard]\n"
 
-    # ---- CONTEXT PARITY (P1): precomp signals + learned patterns ---------
-    # Managed feeds specialists pre-computed git signals (file statuses, blame,
-    # churn, diff-check) AND the repo's learned patterns (store mount / wiki). We
-    # build the SAME context CLIENT-SIDE here so headless agents aren't
-    # "pattern-blind". Everything is best-effort: any gap degrades to the prior
-    # context-light behavior and never blocks the review. compute_* / the conv cap
-    # come from review.py — imported lazily because review.py imports headless
-    # lazily (the dispatch), so a top-level import here would cycle.
-    from review import (  # noqa: E402
-        compute_file_statuses, compute_blame_summaries, compute_churn_data,
-        compute_diff_check_warnings, CONVERSATION_MAX_ENTRIES)
-    author = meta["user"]["login"]
-    have_checkout = bool(checkout and os.path.isdir(checkout))
+    # Developer responses since the prior review (same-PR re-review only) — lets the
+    # verifier classify prior findings against what the developer actually said.
+    dev_context = ""
+    if mode == "re-review" and prior:
+        try:
+            dev_context = format_developer_responses(filter_comments_after(ic, prior["id"]))
+        except Exception as e:
+            print(f"  [warn] dev-context build failed: {type(e).__name__}: {e}", file=sys.stderr)
 
-    # Resolve the bot identity, pre-compute the git signals, and stage the learned
-    # patterns CONCURRENTLY — three independent blocking calls (only the
-    # pr-conversation fetch below depends on bot_login). _precomp + stage_patterns
-    # swallow their own failures; return_exceptions=True also covers a raising
-    # fetch_bot_login so one degraded signal never sinks the other two.
+    # ---- CONTEXT PARITY (P1): precomp signals + learned patterns ---------
+    # precomp + pattern staging run concurrently (both best-effort; any gap degrades
+    # to context-light, never blocks). In re-review the precomp base is the prior SHA
+    # (the inter-diff's old side) so blame/churn/status describe what changed since
+    # the last review, matching the inter-diff the agents see.
+    precomp_base = prior_sha if mode == "re-review" else f"origin/{meta['base']['ref']}"
+
     def _precomp():
         if not have_checkout:
             return ("", "", "", "")
-        precomp_base = f"origin/{meta['base']['ref']}"
         try:
             statuses, paths = compute_file_statuses(checkout, precomp_base, head_sha)
             return (statuses,
@@ -284,44 +374,42 @@ async def run_headless_review(args, bot_token: str) -> dict:
             print(f"  [warn] precomp failed: {type(e).__name__}: {e}", file=sys.stderr)
             return ("", "", "", "")
 
-    bot_login, precomp, patterns = await asyncio.gather(
-        asyncio.to_thread(fetch_bot_login, bot_token),
+    precomp, patterns = await asyncio.gather(
         asyncio.to_thread(_precomp),
-        asyncio.to_thread(stage_patterns, args.repo, author, checkout, bot_token),
+        asyncio.to_thread(stage_patterns, args.repo, author, checkout, bot_token, store_id=store_id),
         return_exceptions=True)
-    if isinstance(bot_login, BaseException):
-        print(f"  [warn] bot-login fetch failed: {bot_login!r}", file=sys.stderr)
-        bot_login = None
     file_statuses, blame_summaries, churn_data, diff_check_warnings = (
         precomp if not isinstance(precomp, BaseException) else ("", "", "", ""))
     patterns_rel, patterns_abs, psource = (
         patterns if not isinstance(patterns, BaseException) else (None, None, "error"))
     if have_checkout:
-        print(f"[headless] precomp: {sum(bool(x) for x in (file_statuses, blame_summaries, churn_data, diff_check_warnings))}/4 sections populated")
+        print(f"[headless] precomp ({mode}): {sum(bool(x) for x in (file_statuses, blame_summaries, churn_data, diff_check_warnings))}/4 sections populated")
     else:
         print(f"  [warn] AIR_TARGET_REPO not a dir ({checkout!r}) — precomp skipped", file=sys.stderr)
     print(f"[headless] patterns: {psource}")
 
-    # PR conversation thread (humans + other bots, bot-self-filtered). Best-effort:
-    # rendered "none" if the bot identity is unresolved or a fetch fails.
-    # return_exceptions=True so one failing endpoint doesn't cancel + discard the
-    # other two already-fetched lists (the specialist gather does the same).
+    # PR conversation thread (humans + other bots, bot-self-filtered). Reuses the
+    # ic/rv/inl fetched above. Best-effort: "none" if the bot identity is unresolved.
     pr_conv_block = "none"
     if bot_login:
-        got = await asyncio.gather(
-            asyncio.to_thread(fetch_issue_comments, args.repo, args.pr_number, bot_token),
-            asyncio.to_thread(fetch_pr_reviews, args.repo, args.pr_number, bot_token),
-            asyncio.to_thread(fetch_pr_review_comments, args.repo, args.pr_number, bot_token),
-            return_exceptions=True)
-        for g in got:
-            if isinstance(g, BaseException):
-                print(f"  [warn] a pr-conversation fetch failed: {type(g).__name__}: {g} — partial thread", file=sys.stderr)
-        ic, rv, inl = [g if not isinstance(g, BaseException) else [] for g in got]
         try:
             pr_conv_block = pr_conversation.build_pr_conversation(
                 ic, rv, inl, bot_login, max_entries=CONVERSATION_MAX_ENTRIES)
         except Exception as e:
             print(f"  [warn] pr-conversation build failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+    # Carry-forward ledger (re-review only; respects AIR_LEDGER_PIN). Built from the
+    # prior body + the INTER-DIFF (its old side IS prior_sha) — feeding the full diff
+    # would misalign finding_changed's anchors. When the ledger is non-empty,
+    # pin_and_resurrect (after extract, before the gate) makes severity carry-forward
+    # + finding-resurrection deterministic — the gate can only get stricter, never
+    # un-gate. An empty ledger (fresh / kill-switch / all findings moved) is a no-op.
+    ledger = []
+    if mode == "re-review" and _ledger_pin_enabled():
+        try:
+            ledger = build_carry_forward_ledger(prior.get("body", ""), diff, prior_sha, sibling=False)
+        except Exception as e:
+            print(f"  [warn] ledger build failed: {type(e).__name__}: {e} — no severity pin", file=sys.stderr)
 
     # html.escape the diff before interpolating: it's attacker-controlled (the PR
     # author writes it), and a raw `</diff>` line would close the XML wrapper and
@@ -329,7 +417,11 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # build_pr_context escapes every other untrusted field (title/body/blame/codex);
     # the diff must match (PROJECT-PROFILE check 9). Truncation (above) is pre-escape.
     pr_context = (build_pr_context(
-                    meta, args.repo, mode="full",
+                    meta, args.repo, mode=mode,
+                    prior_review_body=(prior.get("body", "") if prior else ""),
+                    prior_sha=prior_sha,
+                    prior_pr_number=None,   # promote-fastpath only — deferred (P3)
+                    dev_context=dev_context,
                     pr_conv_block=pr_conv_block,
                     file_statuses=file_statuses,
                     blame_summaries=blame_summaries,
@@ -408,7 +500,9 @@ async def run_headless_review(args, bot_token: str) -> dict:
             if _blocker_lens_incomplete(agent, r):
                 missing_blocker_lens.append(agent)
 
-        verifier_task = build_verifier_task("full", args.repo, head_sha, None, "")
+        verifier_task = build_verifier_task(
+            mode, args.repo, head_sha, prior_sha,
+            (prior.get("body", "") if prior else ""), ledger=ledger)
         verifier_input = (
             "Specialist findings to verify (verify each against source per your system prompt; "
             "drop FALSE POSITIVE / below-threshold; emit [sec:<token>] tags on confirmed exposures). "
@@ -443,6 +537,19 @@ async def run_headless_review(args, bot_token: str) -> dict:
     if not extracted:
         print("[headless] verifier produced no usable ## Code Review block — failing the run", file=sys.stderr)
         return {"ok": False, "reason": "no review body", "wall": wall, "cost": cost}
+
+    # Re-review severity-pin + finding-resurrection (deterministic carry-forward
+    # guarantee). Runs BEFORE the gate AND the post, so the pinned/resurrected body
+    # both drives the verdict and is what the developer sees. pin_and_resurrect pins
+    # each prior finding's severity to max(prior, emitted) (reverts a downgrade,
+    # preserves an escalation) and re-inserts any silently-dropped prior finding — so
+    # the gate can only get STRICTER, never un-gate. It rewrites only the EXTRACTED
+    # body; the raw-body anti-decoy gate below (rc_raw) stays a one-directional
+    # escalation and is unaffected. Empty ledger (fresh/kill-switch) ⇒ no-op.
+    if ledger:
+        review_body, pin_log = pin_and_resurrect(review_body, ledger)
+        for line in pin_log:
+            print(f"  {line}", file=sys.stderr)
 
     rc, reason = should_request_changes(review_body, floor_exposures=floor)
     # Deterministic conflict-marker gate (parity with managed/CLI): CLAUDE.md mandates
@@ -506,14 +613,38 @@ async def run_headless_review(args, bot_token: str) -> dict:
         else:
             print("  [warn] bot login unresolved — skipping stale-verdict dismissal "
                   "(won't risk clearing our own verdict)", file=sys.stderr)
+
+    # ---- LEARNING WRITE-BACK (post-review) -------------------------------
+    # After the verdict is posted, advance the shared learn cadence — the same tail
+    # review.py runs. Each step is INDEPENDENTLY guarded: a learning failure must
+    # never change the already-posted review's outcome. (extracted is guaranteed past
+    # the guard above; dry-run returned earlier, so this only runs on a real posted
+    # review.) On air (wiki-backed, store_id empty) only the counter/learn-trigger
+    # half fires — pattern_writer + mirror are store-only no-ops.
+    if store_id:
+        try:
+            import pattern_writer  # noqa: E402 (lazy — managed/, store-only path)
+            pattern_writer.apply_review_to_store(store_id, author, args.pr_number, review_body)
+        except Exception as e:
+            print(f"  [warn] pattern_writer failed: {type(e).__name__}: {e}", file=sys.stderr)
+        try:
+            _maybe_render_mirror(args.repo, store_id, bot_token)
+        except Exception as e:
+            print(f"  [warn] mirror render failed: {type(e).__name__}: {e}", file=sys.stderr)
+    try:
+        _update_learn_counter(args.repo, args.pr_number, bot_token, store_id=store_id)
+    except Exception as e:
+        print(f"  [warn] learn-counter update failed: {type(e).__name__}: {e}", file=sys.stderr)
+
     return {"ok": True, "verdict": verdict, "reason": reason, "wall": wall, "cost": cost}
 
 
 if __name__ == "__main__":
     import argparse
-    p = argparse.ArgumentParser(description="Headless (messages-api) air review — v1 fresh full review")
+    p = argparse.ArgumentParser(description="Headless (messages-api) air review — fresh + re-review")
     p.add_argument("repo"); p.add_argument("pr_number", type=int)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--fresh", action="store_true", help="force a full review even if a prior review exists")
     a = p.parse_args()
     token = os.environ["AIR_BOT_TOKEN"]
     out = asyncio.run(run_headless_review(a, token))

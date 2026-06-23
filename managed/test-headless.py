@@ -13,6 +13,7 @@ import types
 from pathlib import Path
 
 import pytest
+import requests
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -218,7 +219,9 @@ def test_run_headless_review_dry_run_orchestration(tmp_path, monkeypatch):
     monkeypatch.setattr(headless, "fetch_issue_comments", lambda *a, **k: [])
     monkeypatch.setattr(headless, "fetch_pr_reviews", lambda *a, **k: [])
     monkeypatch.setattr(headless, "fetch_pr_review_comments", lambda *a, **k: [])
-    # No real store/wiki/git: stage degrades pattern-blind, precomp returns empties.
+    # Hermetic: no store (wiki backend, mode stays full — empty issue comments mean
+    # no prior detected anyway), stage degrades pattern-blind, precomp empties.
+    monkeypatch.setattr(headless.memory_store, "get_store_id", lambda *a, **k: None)
     monkeypatch.setattr(headless, "stage_patterns", lambda *a, **k: (None, None, "mock"))
     # headless does `from review import compute_*` lazily, which reads the review
     # module's attrs at call time — so patch the review module itself.
@@ -248,3 +251,147 @@ def test_stage_patterns_empty_store_cleans_up(tmp_path, monkeypatch):
     rel, abs_, src = headless.stage_patterns("o/r", "alice", str(tmp_path), "tok")
     assert rel is None and "no pattern files" in src
     assert not (tmp_path / ".air-patterns").exists()
+
+
+# ---- P2 re-review path -------------------------------------------------------
+
+def _prior_comment(prior_sha):
+    """A bot-authored prior `## Code Review` with a `Reviewed at:` footer — what
+    find_prior_review matches and extract_reviewed_at_sha parses. No findings, so the
+    real build_carry_forward_ledger returns [] (pin skipped) unless a test mocks it."""
+    return {"id": 11, "user": {"login": "air-bot"},
+            "body": f"## Code Review\n\nNo issues.\n\nReviewed at: {prior_sha}\n"}
+
+
+def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc=None,
+                  head="a" * 40, fresh=False, ledger=None, pin=None,
+                  ledger_pin_env=None, ledger_calls=None):
+    """Drive run_headless_review (dry-run) for re-review-path tests. Returns
+    (result, calls) where calls counts which diff fetcher fired. inter_diff is the
+    fetch_inter_diff RETURN (str / "" / None); inter_exc, if set, makes it RAISE.
+    ledger_pin_env sets AIR_LEDGER_PIN (else deleted → enabled). ledger_calls, if a
+    list, spies build_carry_forward_ledger (records each call, returns ledger or [])."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("AIR_TARGET_REPO", str(tmp_path))
+    if ledger_pin_env is None:
+        monkeypatch.delenv("AIR_LEDGER_PIN", raising=False)  # default → pin enabled
+    else:
+        monkeypatch.setenv("AIR_LEDGER_PIN", ledger_pin_env)
+    meta = {"number": 7, "user": {"login": "alice"}, "title": "T", "body": "b",
+            "base": {"ref": "main"}, "head": {"ref": "feat", "sha": head},
+            "additions": 1, "deletions": 0, "changed_files": 1, "commits": 2,
+            "state": "open"}
+    calls = {"inter": 0, "full": 0}
+    monkeypatch.setattr(headless, "fetch_pr_metadata", lambda *a, **k: meta)
+    monkeypatch.setattr(headless, "fetch_bot_login", lambda *a, **k: "air-bot")
+    monkeypatch.setattr(headless, "fetch_issue_comments", lambda *a, **k: comments)
+    monkeypatch.setattr(headless, "fetch_pr_reviews", lambda *a, **k: [])
+    monkeypatch.setattr(headless, "fetch_pr_review_comments", lambda *a, **k: [])
+    monkeypatch.setattr(headless.memory_store, "get_store_id", lambda *a, **k: None)
+    monkeypatch.setattr(headless, "stage_patterns", lambda *a, **k: (None, None, "mock"))
+    monkeypatch.setattr(review, "compute_file_statuses", lambda *a, **k: ("", []))
+    for fn in ("compute_blame_summaries", "compute_churn_data", "compute_diff_check_warnings"):
+        monkeypatch.setattr(review, fn, lambda *a, **k: "")
+
+    def _full(*a, **k):
+        calls["full"] += 1
+        return "diff --git a/f.py b/f.py\n@@ -1 +1 @@\n-x\n+y\n"
+
+    def _inter(*a, **k):
+        calls["inter"] += 1
+        if inter_exc is not None:
+            raise inter_exc
+        return inter_diff
+
+    monkeypatch.setattr(headless, "fetch_pr_diff", _full)
+    monkeypatch.setattr(headless, "fetch_inter_diff", _inter)
+    if ledger_calls is not None:  # spy: detect whether the ledger is built at all
+        def _spy_ledger(*a, **k):
+            ledger_calls.append(True)
+            return ledger or []
+        monkeypatch.setattr(headless, "build_carry_forward_ledger", _spy_ledger)
+    elif ledger is not None:
+        monkeypatch.setattr(headless, "build_carry_forward_ledger", lambda *a, **k: ledger)
+    if pin is not None:
+        monkeypatch.setattr(headless, "pin_and_resurrect", pin)
+
+    def fake_run_agent(client, **kw):
+        body = (f"## Code Review\n\nClean.\n\nNo blockers.\n\nReviewed at: {head}\n"
+                if kw.get("label") == "verifier" else "## Code Review\n\nlens.\n")
+        return {"text": body, "usage": {}, "turns": 1, "tool_calls": 0, "wall_s": 0.0, "stop": "end_turn"}
+
+    monkeypatch.setattr(headless.agent_loop, "run_agent", fake_run_agent)
+    args = types.SimpleNamespace(repo="o/r", pr_number=7, dry_run=True, closed=False, fresh=fresh)
+    return asyncio.run(headless.run_headless_review(args, "tok")), calls
+
+
+def test_rereview_uses_inter_diff(tmp_path, monkeypatch):
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("b" * 40)],
+                               inter_diff="diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n")
+    assert out["ok"] and out["verdict"] in ("APPROVE", "REQUEST_CHANGES")
+    assert calls["inter"] == 1 and calls["full"] == 0  # re-review reviewed the inter-diff
+
+
+def test_rereview_inter_none_falls_back_to_full(tmp_path, monkeypatch):
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("b" * 40)],
+                               inter_diff=None)
+    assert out["ok"] and calls["inter"] == 1 and calls["full"] == 1  # None → full review
+
+
+def test_rereview_empty_inter_skips(tmp_path, monkeypatch):
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("b" * 40)],
+                               inter_diff="")
+    assert out["ok"] and out["verdict"] is None and "no changes" in out["reason"]
+    assert calls["full"] == 0  # empty successful compare → skip, no full fetch
+
+
+def test_rereview_inter_raises_falls_back_to_full(tmp_path, monkeypatch):
+    # fetch_inter_diff RAISES on retry exhaustion (not None) — the except branch must
+    # catch RequestException and fall back to a full review (the return-None branch is
+    # covered separately; this exercises the distinct raise path).
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("b" * 40)],
+                               inter_exc=requests.exceptions.ConnectionError("timeout"))
+    assert out["ok"] and calls["inter"] == 1 and calls["full"] == 1  # raise → full
+
+
+def test_rereview_ledger_pin_disabled_by_killswitch(tmp_path, monkeypatch):
+    # AIR_LEDGER_PIN=0 → neither the ledger build nor pin_and_resurrect runs.
+    ledger_calls, pin_calls = [], []
+
+    def spy_pin(body, ledger):
+        pin_calls.append(True)
+        return body, []
+
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("b" * 40)],
+                           inter_diff="diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n",
+                           ledger_pin_env="0", ledger_calls=ledger_calls, pin=spy_pin)
+    assert ledger_calls == [] and pin_calls == [] and out["ok"]  # kill-switch gates both
+
+
+def test_already_reviewed_at_head_skips(tmp_path, monkeypatch):
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("a" * 40)],
+                               inter_diff="x", head="a" * 40)
+    assert out["ok"] and out["verdict"] is None and "already reviewed" in out["reason"]
+    assert calls["inter"] == 0 and calls["full"] == 0  # returned before diff selection
+
+
+def test_fresh_flag_forces_full_despite_prior(tmp_path, monkeypatch):
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("b" * 40)],
+                               inter_diff="x", fresh=True)
+    assert out["ok"] and calls["inter"] == 0 and calls["full"] == 1  # --fresh ignores the prior
+
+
+def test_rereview_ledger_pin_wired(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_pin(body, ledger):
+        seen["ledger"] = ledger
+        return body + "\n[pinned]", ["[pin] test applied"]
+
+    # Ledger entries carry the attrs build_verifier_task renders (num/prior_severity/change).
+    mock_ledger = [types.SimpleNamespace(num=1, prior_severity="blocker", change="UNCHANGED")]
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("b" * 40)],
+                           inter_diff="diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n",
+                           ledger=mock_ledger, pin=fake_pin)
+    # Re-review built a (non-empty) ledger and threaded the SAME list into pin_and_resurrect.
+    assert seen.get("ledger") is mock_ledger and out["ok"]
