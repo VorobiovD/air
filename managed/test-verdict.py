@@ -602,12 +602,40 @@ def test_touched_file_defers_genuine_vs_fake_to_verifier_by_design():
     assert "**#1**" in out2 and _gates(out2)
 
 
+def test_metadata_only_segment_does_not_count_as_file_touched():
+    # Finding-1 regression (dogfood review of this fix): a metadata-only diff
+    # segment (mode 100644->100755, or a binary recreation) lands the file in
+    # `index.present` but produces NO `@@` hunk and NO content change. It must
+    # NOT qualify as file_touched (else the cross-region exemption would trust a
+    # FIXED on byte-identical source). build_carry_forward_ledger keys
+    # file_touched on a real hunk (hunk_old), so this stays UNCHANGED +
+    # file_touched=False → the FIXED is rewritten to NOT FIXED and gates.
+    diff = ("diff --git a/svc.py b/svc.py\n"
+            "old mode 100644\nnew mode 100755\n")
+    led = build_carry_forward_ledger(_CR_PRIOR, diff, "bbbb00000000")
+    assert [(e.change, e.file_touched) for e in led] == [
+        (UNCHANGED, False), (UNCHANGED, False)]
+    emitted = _rr_body("- **#1** [blocker] — FIXED — claims fixed (chmod only)",
+                       "- **#2** [blocker] — FIXED — claims fixed")
+    pinned, _ = pin_and_resurrect(emitted, led)
+    assert "NOT FIXED" in pinned and _gates(pinned)
+
+
+def test_cross_region_exemption_emits_pin_log():
+    # Finding-2 regression: the exemption must leave a [pin] trace (every other
+    # rewrite logs; a silent honor is unauditable).
+    e = _ledger_entry(1, "blocker", "NOT FIXED", change=UNCHANGED, file_touched=True)
+    _, log = pin_and_resurrect(_rr_body("- **#1** [blocker] — FIXED — upstream fix"), [e])
+    assert any("cross-region FIXED trusted" in l for l in log)
+
+
 def test_stubbed_file_fixed_still_gates_despite_file_touched():
-    # Edge the exemption must NOT swallow: a stubbed/cap-omitted file is
-    # INDETERMINATE *with* file_touched=True (present is populated before the
-    # stub check), but it has NO real line evidence. The exemption keys on
-    # UNCHANGED (not `change != CHANGED`), so an INDETERMINATE-from-stub FIXED is
-    # still rewritten to NOT FIXED — the conservative over-gate stands.
+    # Defensive unit-check of the pin logic: an INDETERMINATE entry must gate a
+    # claimed FIXED regardless of file_touched. The exemption keys on UNCHANGED
+    # (not `change != CHANGED`), so even a (now-unreachable via the ledger, since
+    # file_touched is hunk-based) INDETERMINATE+file_touched=True combination is
+    # still rewritten to NOT FIXED — the conservative over-gate stands for any
+    # no-line-evidence finding (stubbed / cap-omitted / no-anchor).
     stubbed = _ledger_entry(1, "blocker", "NOT FIXED",
                             change=INDETERMINATE, file_touched=True)
     body = _rr_body("- **#1** [blocker] — FIXED — claims fixed in a vendored bundle")

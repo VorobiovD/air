@@ -388,10 +388,11 @@ def find_prior_review(comments: list[dict], bot_login: str) -> dict | None:
     matches = [c for c in comments
                if (c.get("user") or {}).get("login") == bot_login
                and (c.get("body") or "").startswith(BOT_REVIEW_PREFIXES)]
-    # Sort by (created_at, id) — id is monotonic and always present, so it both
-    # breaks same-second ties deterministically AND backstops the (never-seen-in-
-    # practice) case of a newest comment missing created_at, which a bare
-    # `or ""` would wrongly sort to the minimum.
+    # Sort by (created_at, id): id breaks same-second ties deterministically.
+    # (A comment missing created_at still sorts to the minimum — the `or ""`
+    # first element dominates the tuple compare, the id is only consulted on a
+    # created_at tie. Not load-bearing: created_at is always present on real
+    # GitHub responses; this is just a deterministic tiebreak.)
     return max(matches, key=lambda c: (c.get("created_at") or "", c.get("id") or 0)) \
         if matches else None
 
@@ -839,10 +840,15 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
     for num, sev, status in fresh:
         loc = locs.get(num)
         change = finding_changed(loc, index) if loc else INDETERMINATE
-        # File-level signal: did the dev touch this finding's FILE at all? A
-        # genuine cross-region fix changes the file (just not the flagged line);
-        # a bogus FIXED on code the dev never opened leaves the file absent.
-        file_touched = bool(loc) and loc[0] in index.present
+        # File-level signal: did the dev make a real CODE edit to this finding's
+        # file? A genuine cross-region fix changes a hunk in the file (just not
+        # the flagged line); a bogus FIXED on code the dev never opened leaves
+        # the file absent. We key on `hunk_old` (a real `@@` hunk), NOT mere
+        # `present` membership: a metadata-only segment (mode 100644->100755, a
+        # binary recreation) lands the path in `present` with NO hunk and no
+        # content change, which must NOT qualify for the cross-region exemption
+        # (it would trust a FIXED on byte-identical source).
+        file_touched = bool(loc) and bool(index.hunk_old.get(loc[0]))
         ledger.append(LedgerEntry(num, sev, status, loc, change, file_touched))
     return ledger
 
@@ -1020,21 +1026,30 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
         # cross-region fix — and nothing else. It is scoped narrowly on PURPOSE:
         #   • round-3+ carried findings have no anchor (INDETERMINATE, loc=None ⇒
         #     file_touched=False) → still pin-by-number to NOT FIXED;
-        #   • a stubbed/cap-omitted file is INDETERMINATE *with* file_touched=True
-        #     (present is populated before the stub check) but has NO real line
-        #     evidence → must NOT be exempted, so it stays the conservative
-        #     over-gate (this is why the exemption keys on UNCHANGED, not on
-        #     `change != CHANGED`);
-        #   • round-2 fakes on an untouched file (UNCHANGED, file absent) → rewrite
-        #     and gate;
+        #   • a stubbed/cap-omitted file is INDETERMINATE (no hunk ⇒
+        #     file_touched=False), and `cross_region_fix` keys on UNCHANGED not
+        #     `!= CHANGED`, so it stays the conservative over-gate either way;
+        #   • round-2 fakes on an untouched file (UNCHANGED, no code hunk) →
+        #     rewrite and gate;
         #   • resurrection of SILENTLY-dropped findings is untouched.
-        # So the guard still can only make the gate stricter on a real blocker —
-        # it just stops false-blocking real cross-region fixes.
+        # NOTE this is NOT monotone-strict like the severity-pin above: for a
+        # touched-file cross-region FIXED the gate now yields APPROVE where the
+        # old over-gating rule gave CHANGES_REQUESTED — by design (same trust
+        # class as a fresh-review blocker). Gate-safety is preserved by the
+        # OTHER guards, not this one: severity is still pinned to max(prior,
+        # emitted) so a downgrade can't un-gate, and a silently-dropped finding
+        # is still resurrected.
         cross_region_fix = entry.change == UNCHANGED and entry.file_touched
         if (status == "FIXED" and entry.change != CHANGED and not cross_region_fix
                 and _SEVERITY_RANK.get(new_sev, 3) >= 2):
             new_status = "NOT FIXED"
             log.append(f"[pin] #{num} FIXED->NOT FIXED (no cross-region edit; change={entry.change}, file_touched={entry.file_touched})")
+        elif (status == "FIXED" and cross_region_fix
+                and _SEVERITY_RANK.get(new_sev, 3) >= 2):
+            # Trace the trust decision — every other rewrite logs, so the
+            # exemption must too (a silent honor is indistinguishable from "no
+            # pin needed" in a post-incident audit).
+            log.append(f"[pin] #{num} cross-region FIXED trusted (change=UNCHANGED, file_touched=True; verifier-judged)")
         elif status == "DEFERRED":
             if new_sev == "blocker":
                 new_status = "NOT FIXED"
