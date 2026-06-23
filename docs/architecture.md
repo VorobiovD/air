@@ -66,7 +66,7 @@ VorobiovD/air/
 │   ├── render_store_to_wiki.py       Deterministic store→wiki mirror render (inverse of migrate split; throttled per-review + on learn)
 │   ├── salvage_review.py             Drain a finished orphaned session, post its review ($0 — job-cancel recovery)
 │   ├── test-session.py               9-test verification (repo, auth, blame, comment, wiki)
-│   ├── test-*.py                     Offline unit suites (pure, no API): test-verdict (gating + re-review ledger), test-reliability (extraction + HTTP), test-extract, test-precomp, test-cost-wins, test-multiagent, test-promote-fastpath, test-ui-scope, test-render, test-learn, test-parallel
+│   ├── test-*.py                     Offline unit suites (pure, no API): test-verdict (gating + re-review ledger), test-headless (headless mode: post path, gate, stage_patterns, dry-run orchestration), test-reliability (extraction + HTTP), test-extract, test-precomp, test-cost-wins, test-multiagent, test-promote-fastpath, test-ui-scope, test-render, test-learn, test-parallel
 │   ├── prompts/
 │   │   └── learn-orchestrator.md     Learn pipeline for cloud (review orchestrator.md deleted in v1.7.0 — replaced by review.py)
 │   └── requirements.txt             anthropic>=0.93.0, requests>=2.28.0
@@ -81,7 +81,7 @@ VorobiovD/air/
 │
 ├── CLAUDE.md                         Project conventions (references both plugin and managed)
 ├── README.md                         User docs with CLI + CI setup guides
-├── .gitignore                        Excludes: managed/config.json, *.pem, *.pyc
+├── .gitignore                        Excludes: managed/config.json, *.pem, *.pyc, .air-patterns/ (headless pattern staging)
 └── LICENSE
 ```
 

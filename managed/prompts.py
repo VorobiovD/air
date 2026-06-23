@@ -34,6 +34,7 @@ def build_pr_context(
     churn_data: str = "",
     diff_check_warnings: str = "",
     store_mounted: bool = False,
+    patterns_dir: str = "",
 ) -> str:
     """Build the PR Context block shared by every specialist session.
 
@@ -59,7 +60,33 @@ def build_pr_context(
     # Pattern source: memory store (migrated repos — mounted read-only
     # under /mnt/memory/, exact path is in the mount note the runtime adds
     # to the agent's system prompt) vs the legacy wiki git mount.
-    if store_mounted:
+    if patterns_dir:
+        # Headless (messages-api) stage-and-read: patterns are pre-fetched
+        # client-side (store via memory_store.read_memory, or wiki clone) into a
+        # READ-ONLY subdirectory of the sandbox checkout root, so the agent reads
+        # them SELECTIVELY with its own file tools — same access model as the
+        # managed mount / CLI wiki clone, no 100KB+ inline bloat (air's glossary
+        # alone is ~58KB). Names are normalized to lowercase canonical files;
+        # the agent Globs the dir to see what's actually present (the file SET
+        # differs by backend — a legacy wiki has review-patterns.md where a store
+        # has common-findings.md + per-author splits).
+        wiki_line = (
+            f"Review patterns directory: {patterns_dir} (read-only, pre-staged in "
+            "your checkout root — read with your file tools, not from /workspace or "
+            f"/mnt). Run Glob `{patterns_dir}/*` once to list the available pattern "
+            "files, then Read the ones relevant to this diff. Your per-author "
+            f"patterns, if present, are {patterns_dir}/author-patterns.md; broad "
+            "guidance is in whichever of review-patterns.md / common-findings.md the "
+            "Glob lists (backends differ), false-positive whitelist in "
+            "accepted-patterns.md, per-repo thresholds in severity-calibration.md, "
+            "domain terms in glossary.md."
+        )
+        wiki_fallback_line = (
+            f"If {patterns_dir} is absent or a listed file is missing, proceed "
+            "without that pattern source — do NOT fall back to /tmp, /workspace, "
+            "or /mnt."
+        )
+    elif store_mounted:
         # The store mounts READ-ONLY as a single subdirectory UNDER
         # /mnt/memory/ (e.g. /mnt/memory/<store-dir>/) — the runtime assigns
         # the directory name and records it in the memory-mount note it adds

@@ -13,3 +13,8 @@ managed/experiments/
 *.pyc
 __pycache__/
 .pytest_cache/
+
+# Headless (messages-api) review mode stages the repo's learned patterns here
+# for selective sandbox reads; removed after each run, but ignore it so a
+# crashed local --dry-run can never get committed.
+.air-patterns/
