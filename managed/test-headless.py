@@ -81,3 +81,94 @@ def test_messages_api_dispatch_returns_cleanly_on_success(monkeypatch):
 
     monkeypatch.setattr(headless, "run_headless_review", fake_ok)
     asyncio.run(review.run_review(_args()))  # returns, no SystemExit, no managed setup
+
+
+# ---- P1 context parity: patterns_dir branch + stage_patterns ----------------
+
+def test_build_pr_context_patterns_dir_branch():
+    from prompts import build_pr_context
+    meta = {"number": 5, "user": {"login": "alice"}, "title": "T", "body": "b",
+            "base": {"ref": "main"}, "head": {"ref": "feat", "sha": "abc123"},
+            "additions": 1, "deletions": 0, "changed_files": 1, "commits": 1}
+    # Default (managed) paths must NOT mention the headless staged dir — additive only.
+    assert ".air-patterns" not in build_pr_context(meta, "o/r")
+    assert ".air-patterns" not in build_pr_context(meta, "o/r", store_mounted=True)
+    pat = build_pr_context(meta, "o/r", patterns_dir=".air-patterns")
+    # Points at the staged dir, tells the agent to Glob+Read it, names the author file,
+    # and does NOT send it to the (non-existent) managed mount paths.
+    assert ".air-patterns" in pat and "Glob" in pat and "author-patterns.md" in pat
+    assert "/workspace/wiki" not in pat and "/mnt/memory/" not in pat
+
+
+def test_stage_patterns_store_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIR_HEADLESS_PATTERNS", raising=False)
+    monkeypatch.setattr(headless.memory_store, "get_store_id",
+                        lambda repo, flow="review": "store_x")
+    data = {
+        "/authors/alice.md": "alice patterns",
+        headless.memory_store.GLOSSARY_PATH: "glossary body",
+        headless.memory_store.ACCEPTED_PATTERNS_PATH: "accepted body",
+    }
+    monkeypatch.setattr(headless.memory_store, "read_memory",
+                        lambda sid, path: (data[path], "sha", "id") if path in data else None)
+    rel, abs_, src = headless.stage_patterns("o/r", "alice", str(tmp_path), "secret-tok")
+    assert rel == ".air-patterns"
+    d = tmp_path / ".air-patterns"
+    assert (d / "author-patterns.md").read_text() == "alice patterns"
+    assert (d / "glossary.md").read_text() == "glossary body"
+    assert (d / "accepted-patterns.md").read_text() == "accepted body"
+    assert "store_x" in src
+    # Only files that exist are staged (service/common/severity/project-profile absent here).
+    assert not (d / "service-patterns.md").exists()
+
+
+def test_stage_patterns_wiki_path_no_token_leak(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIR_HEADLESS_PATTERNS", raising=False)
+    monkeypatch.setattr(headless.memory_store, "get_store_id",
+                        lambda repo, flow="review": None)
+
+    def fake_clone(argv, **kw):
+        dest = argv[-1]  # `git clone --depth 1 <url> <dest>`
+        with open(__import__("os").path.join(dest, "REVIEW.md"), "w") as fh:
+            fh.write("review patterns")
+        with open(__import__("os").path.join(dest, "GLOSSARY.md"), "w") as fh:
+            fh.write("glossary body")
+        return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(headless.subprocess, "run", fake_clone)
+    rel, abs_, src = headless.stage_patterns("o/r", "alice", str(tmp_path), "secret-tok")
+    assert rel == ".air-patterns"
+    d = tmp_path / ".air-patterns"
+    assert (d / "review-patterns.md").read_text() == "review patterns"
+    assert (d / "glossary.md").read_text() == "glossary body"
+    assert src.startswith("wiki")
+    # The clone URL carries the bot token; it must never surface in the return value.
+    assert "secret-tok" not in src
+
+
+def test_stage_patterns_clone_fail_degrades(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIR_HEADLESS_PATTERNS", raising=False)
+    monkeypatch.setattr(headless.memory_store, "get_store_id",
+                        lambda repo, flow="review": None)
+    monkeypatch.setattr(headless.subprocess, "run",
+                        lambda argv, **kw: types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"err"))
+    rel, abs_, src = headless.stage_patterns("o/r", "alice", str(tmp_path), "tok")
+    assert rel is None and abs_ is None  # pattern-blind, never raises
+    assert not (tmp_path / ".air-patterns").exists()  # no empty dir left behind
+
+
+def test_stage_patterns_disabled_killswitch(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIR_HEADLESS_PATTERNS", "0")
+    rel, abs_, src = headless.stage_patterns("o/r", "alice", str(tmp_path), "tok")
+    assert rel is None and "disabled" in src
+
+
+def test_stage_patterns_empty_store_cleans_up(tmp_path, monkeypatch):
+    # Store exists but holds none of the pattern files -> no dir left, pattern-blind.
+    monkeypatch.delenv("AIR_HEADLESS_PATTERNS", raising=False)
+    monkeypatch.setattr(headless.memory_store, "get_store_id",
+                        lambda repo, flow="review": "store_x")
+    monkeypatch.setattr(headless.memory_store, "read_memory", lambda sid, path: None)
+    rel, abs_, src = headless.stage_patterns("o/r", "alice", str(tmp_path), "tok")
+    assert rel is None and "no pattern files" in src
+    assert not (tmp_path / ".air-patterns").exists()

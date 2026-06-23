@@ -23,7 +23,10 @@ pattern_writer author-pattern update after a headless review.
 import asyncio
 import html
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -35,12 +38,15 @@ import anthropic  # noqa: E402
 
 from github_client import (  # noqa: E402
     fetch_pr_metadata, fetch_pr_diff, fetch_bot_login,
+    fetch_issue_comments, fetch_pr_reviews, fetch_pr_review_comments,
     _post_review_comment_with_retry, submit_review_verdict, dismiss_stale_air_verdicts,
 )
 from prompts import build_pr_context, build_verifier_task  # noqa: E402
 from verdict import should_request_changes, _extract_review_body, has_conflict_markers  # noqa: E402 (managed shim)
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
 
+import memory_store  # noqa: E402  (managed/ — client-side store reads for pattern staging)
+import pr_conversation  # noqa: E402  (plugins/air/lib)
 import agent_loop  # noqa: E402  (plugins/air/lib)
 from tool_exec import Sandbox  # noqa: E402
 
@@ -52,6 +58,99 @@ _DIFF_CAP = int(os.environ.get("AIR_HEADLESS_DIFF_CAP", "120000"))  # chars; v1 
                              # (managed has apply_diff_hygiene — a follow-up). Tunable so a
                              # big-PR run can match the diff the managed coordinator saw.
 _TIERS = frozenset(MODEL_ALIASES)   # known model-alias tiers; unknown → "sonnet"
+
+# ---- learned-pattern staging (P1 context parity) ------------------------
+# Managed MOUNTS the per-repo memory store read-only; the CLI clones the wiki —
+# in both, the agent reads the pattern files SELECTIVELY with its own tools.
+# Headless has no mount, so we fetch the files CLIENT-SIDE and stage them into a
+# read-only subdir of the sandbox checkout (.air-patterns/), then point the agent
+# there (build_pr_context patterns_dir). Names normalize to one lowercase set so
+# the prompt is backend-agnostic; the file SET still differs by backend (a store
+# splits per-author + common/service, a legacy wiki keeps one REVIEW.md), and the
+# agent Globs the dir to see what's actually present.
+_PATTERNS_SUBDIR = ".air-patterns"
+# store path -> staged filename
+_STORE_PATTERN_FILES = (
+    (memory_store.COMMON_FINDINGS_PATH, "common-findings.md"),
+    (memory_store.SERVICE_PATTERNS_PATH, "service-patterns.md"),
+    (memory_store.ACCEPTED_PATTERNS_PATH, "accepted-patterns.md"),
+    (memory_store.SEVERITY_CALIBRATION_PATH, "severity-calibration.md"),
+    (memory_store.GLOSSARY_PATH, "glossary.md"),
+    (memory_store.PROJECT_PROFILE_PATH, "project-profile.md"),
+)
+# legacy-wiki filename -> staged filename
+_WIKI_PATTERN_FILES = (
+    ("REVIEW.md", "review-patterns.md"),
+    ("REVIEW-HISTORY.md", "review-history.md"),
+    ("PROJECT-PROFILE.md", "project-profile.md"),
+    ("ACCEPTED-PATTERNS.md", "accepted-patterns.md"),
+    ("SEVERITY-CALIBRATION.md", "severity-calibration.md"),
+    ("GLOSSARY.md", "glossary.md"),
+)
+
+
+def stage_patterns(repo: str, author: str, checkout: str, token: str,
+                   platform_domain: str = "github.com") -> tuple[str | None, str | None, str]:
+    """Fetch this repo's learned review patterns and stage them into
+    <checkout>/.air-patterns/ for the sandboxed agents to read selectively
+    (the headless analogue of the managed store mount / CLI wiki clone).
+
+    Store-backed repos read via memory_store (client-side API); legacy repos
+    clone the wiki. Returns (rel_dir, abs_dir, source); (None, None, "<reason>")
+    when there's nothing to stage or staging fails — the caller proceeds
+    pattern-blind rather than blocking the review, and removes abs_dir after.
+    Never raises and never logs the (token-bearing) wiki URL."""
+    if os.environ.get("AIR_HEADLESS_PATTERNS", "1").strip().lower() in ("0", "false", "no"):
+        return None, None, "disabled (AIR_HEADLESS_PATTERNS)"
+    dest = os.path.join(checkout, _PATTERNS_SUBDIR)
+    staged: list[str] = []
+
+    def _write(name: str, content: str) -> None:
+        with open(os.path.join(dest, name), "w", encoding="utf-8") as fh:
+            fh.write(content)
+        staged.append(name)
+
+    try:
+        store_id = memory_store.get_store_id(repo, flow="review")
+        if store_id:
+            os.makedirs(dest, exist_ok=True)
+            got = memory_store.read_memory(store_id, f"/authors/{author}.md")
+            if got:
+                _write("author-patterns.md", got[0])
+            for path, name in _STORE_PATTERN_FILES:
+                got = memory_store.read_memory(store_id, path)
+                if got:
+                    _write(name, got[0])
+            source = f"store {store_id}"
+        else:
+            # Legacy wiki. Auth the clone with the bot token (fleet wikis are
+            # private); x-access-token is the GitHub convention. NEVER print the
+            # URL — it carries the token. The clone is the ORCHESTRATOR's git
+            # subprocess; only the resulting .md files land in the checkout, so
+            # the sandbox (and its persist-credentials:false main checkout) never
+            # sees the token.
+            with tempfile.TemporaryDirectory(prefix="air-hl-wiki-") as tmp:
+                url = f"https://x-access-token:{token}@{platform_domain}/{repo}.wiki.git"
+                r = subprocess.run(["git", "clone", "--depth", "1", url, tmp],
+                                   capture_output=True, timeout=90)
+                if r.returncode != 0:
+                    return None, None, "no wiki / clone failed"
+                os.makedirs(dest, exist_ok=True)
+                for src_name, name in _WIKI_PATTERN_FILES:
+                    src = os.path.join(tmp, src_name)
+                    if os.path.isfile(src):
+                        shutil.copyfile(src, os.path.join(dest, name))
+                        staged.append(name)
+            source = "wiki"
+    except Exception as e:  # never block a review on pattern plumbing
+        print(f"  [warn] pattern staging failed: {type(e).__name__}: {e} — "
+              "agents run pattern-blind", file=sys.stderr)
+        shutil.rmtree(dest, ignore_errors=True)
+        return None, None, f"error: {type(e).__name__}"
+    if not staged:
+        shutil.rmtree(dest, ignore_errors=True)
+        return None, None, "no pattern files"
+    return _PATTERNS_SUBDIR, dest, f"{source} ({len(staged)} files)"
 
 
 def _persona_model(agent: str) -> tuple[str, str, str]:
@@ -132,12 +231,72 @@ async def run_headless_review(args, bot_token: str) -> dict:
     diff_truncated = len(diff) > _DIFF_CAP
     if diff_truncated:
         diff = diff[:_DIFF_CAP] + f"\n[air: diff truncated at {_DIFF_CAP} chars — v1 guard]\n"
+
+    # ---- CONTEXT PARITY (P1): precomp signals + learned patterns ---------
+    # Managed feeds specialists pre-computed git signals (file statuses, blame,
+    # churn, diff-check) AND the repo's learned patterns (store mount / wiki). We
+    # build the SAME context CLIENT-SIDE here so headless agents aren't
+    # "pattern-blind". Everything is best-effort: any gap degrades to the prior
+    # context-light behavior and never blocks the review. compute_* / the conv cap
+    # come from review.py — imported lazily because review.py imports headless
+    # lazily (the dispatch), so a top-level import here would cycle.
+    from review import (  # noqa: E402
+        compute_file_statuses, compute_blame_summaries, compute_churn_data,
+        compute_diff_check_warnings, CONVERSATION_MAX_ENTRIES)
+    author = meta["user"]["login"]
+    bot_login = await asyncio.to_thread(fetch_bot_login, bot_token)
+    file_statuses = blame_summaries = churn_data = diff_check_warnings = ""
+    if checkout and os.path.isdir(checkout):
+        precomp_base = f"origin/{meta['base']['ref']}"
+
+        def _precomp():
+            statuses, paths = compute_file_statuses(checkout, precomp_base, head_sha)
+            return (statuses,
+                    compute_blame_summaries(checkout, paths),
+                    compute_churn_data(checkout, paths),
+                    compute_diff_check_warnings(checkout, precomp_base, head_sha))
+        try:
+            file_statuses, blame_summaries, churn_data, diff_check_warnings = \
+                await asyncio.to_thread(_precomp)
+        except Exception as e:
+            print(f"  [warn] precomp failed: {type(e).__name__}: {e}", file=sys.stderr)
+        n = sum(bool(x) for x in (file_statuses, blame_summaries, churn_data, diff_check_warnings))
+        print(f"[headless] precomp: {n}/4 sections populated")
+    else:
+        print(f"  [warn] AIR_TARGET_REPO not a dir ({checkout!r}) — precomp skipped", file=sys.stderr)
+
+    # PR conversation thread (humans + other bots, bot-self-filtered). Best-effort:
+    # rendered "none" if the bot identity is unresolved or any fetch fails.
+    pr_conv_block = "none"
+    if bot_login:
+        try:
+            ic, rv, inl = await asyncio.gather(
+                asyncio.to_thread(fetch_issue_comments, args.repo, args.pr_number, bot_token),
+                asyncio.to_thread(fetch_pr_reviews, args.repo, args.pr_number, bot_token),
+                asyncio.to_thread(fetch_pr_review_comments, args.repo, args.pr_number, bot_token))
+            pr_conv_block = pr_conversation.build_pr_conversation(
+                ic, rv, inl, bot_login, max_entries=CONVERSATION_MAX_ENTRIES)
+        except Exception as e:
+            print(f"  [warn] pr-conversation fetch failed: {type(e).__name__}: {e}", file=sys.stderr)
+
+    # Learned patterns -> <checkout>/.air-patterns/ for selective sandbox reads.
+    patterns_rel, patterns_abs, psource = await asyncio.to_thread(
+        stage_patterns, args.repo, author, checkout, bot_token)
+    print(f"[headless] patterns: {psource}")
+
     # html.escape the diff before interpolating: it's attacker-controlled (the PR
     # author writes it), and a raw `</diff>` line would close the XML wrapper and
     # smuggle untagged prompt-injection text to every specialist + the verifier.
     # build_pr_context escapes every other untrusted field (title/body/blame/codex);
     # the diff must match (PROJECT-PROFILE check 9). Truncation (above) is pre-escape.
-    pr_context = (build_pr_context(meta, args.repo, mode="full")
+    pr_context = (build_pr_context(
+                    meta, args.repo, mode="full",
+                    pr_conv_block=pr_conv_block,
+                    file_statuses=file_statuses,
+                    blame_summaries=blame_summaries,
+                    churn_data=churn_data,
+                    diff_check_warnings=diff_check_warnings,
+                    patterns_dir=patterns_rel or "")
                   + f"\n\n<diff>\n{html.escape(diff)}\n</diff>\n")
 
     # Per-agent turn budget scales with PR size: a big multi-file PR needs more
@@ -221,6 +380,13 @@ async def run_headless_review(args, bot_token: str) -> dict:
     review_body_raw = vres["text"]
     wall = time.monotonic() - t0
 
+    # Patterns were read during the specialist + verifier loops and aren't needed
+    # past this point — remove the staged dir now. (CI checkouts are ephemeral;
+    # this keeps a LOCAL --dry-run checkout clean. A verifier exception above skips
+    # this, leaving a harmless stray dir — acceptable for the rare path.)
+    if patterns_abs:
+        shutil.rmtree(patterns_abs, ignore_errors=True)
+
     # ---- DETERMINISTIC TAIL (reused verbatim) ----------------------------
     review_body, extracted = _extract_review_body(review_body_raw, head_sha)
     cost = (agent_loop.usage_cost(vres["usage"], vtier)
@@ -281,9 +447,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
     if meta.get("state") == "open":
         # commit_id pins the verdict to the SHA we reviewed (not the PR's current
         # head). Both are required args — omitting them crashed the post path
-        # (only --dry-run, which returns above, was tested). fetch_bot_login is a
-        # blocking requests.get, so off-thread it to keep the event loop free.
-        bot_login = await asyncio.to_thread(fetch_bot_login, bot_token)
+        # (only --dry-run, which returns above, was tested). bot_login was resolved
+        # up front (for the pr-conversation bot-self filter); reuse it here.
         submit_review_verdict(args.repo, args.pr_number, bot_token,
                               event=verdict, body=reason or "", commit_id=head_sha)
         # Gate-orphan dismissal needs OUR login to skip our own just-posted verdict.
