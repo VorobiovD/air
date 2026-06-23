@@ -25,8 +25,11 @@ _update_learn_counter) — wiki path on air; pattern_writer + store→wiki mirro
 only on store-backed repos. Each learning step is independently guarded (never
 affects the posted verdict).
 
-OMISSIONS (follow-ups): promote-fastpath, cross-repo re-review, UI/copy-lens
-dispatch, Codex, and _backfill_verdict_if_missing on the already-reviewed skip.
+The UI/copy reviewer (conditional 5th lens) and Codex (external second opinion)
+are dispatched here too — full specialist-set parity with the managed path.
+
+OMISSIONS (follow-ups): promote-fastpath, cross-repo re-review, and
+_backfill_verdict_if_missing on the already-reviewed skip.
 """
 import asyncio
 import html
@@ -274,7 +277,9 @@ async def run_headless_review(args, bot_token: str) -> dict:
         compute_diff_check_warnings, CONVERSATION_MAX_ENTRIES,
         filter_comments_after, format_developer_responses, _ledger_pin_enabled,
         _update_learn_counter, _maybe_render_mirror,
-        _collect_changed_paths, _path_is_ui, _user_facing_copy_globs, _path_matches_globs)
+        _collect_changed_paths, _path_is_ui, _user_facing_copy_globs, _path_matches_globs,
+        run_codex_session, _codex_skip_tiny_delta)
+    from session_runner import SESSION_TIMEOUT_SECS  # noqa: E402  (codex wall-clock cap)
     author = meta["user"]["login"]
     have_checkout = bool(checkout and os.path.isdir(checkout))
 
@@ -469,6 +474,25 @@ async def run_headless_review(args, bot_token: str) -> dict:
         print(f"[headless] ui-copy: {f'in scope ({ui_reason})' if ui_in_scope else 'skipped (no user-facing files)'}")
         in_scope = list(SPECIALISTS) + ([UI_SPECIALIST] if ui_in_scope else [])
 
+        # Codex external second-opinion (P3) — launched CONCURRENTLY with the
+        # specialists and folded into the verifier input like another finding
+        # source. Reuses review.py's session runner verbatim (subprocess + the
+        # bwrap/narrow-env discipline). Gated on: not --no-codex, a checkout, a
+        # resolvable base SHA, the codex binary + OPENAI_API_KEY present, and not a
+        # tiny re-review delta. Anything missing/failing degrades silently to no
+        # codex. Codex is NOT a blocker-class lens — its findings pass through the
+        # verifier, which assigns severity; a codex failure never gates.
+        codex_base_sha = (prior_sha if mode == "re-review" else meta["base"].get("sha")) or ""
+        codex_enabled = bool(
+            not getattr(args, "no_codex", False) and have_checkout and codex_base_sha
+            and shutil.which("codex") and os.environ.get("OPENAI_API_KEY")
+            and _codex_skip_tiny_delta(mode, diff) is None)
+        codex_task = None
+        if codex_enabled:
+            codex_task = asyncio.create_task(asyncio.wait_for(
+                run_codex_session(checkout, codex_base_sha), timeout=SESSION_TIMEOUT_SECS))
+            print(f"[headless] codex launched (base {codex_base_sha[:8]}) — overlapping specialists")
+
         # ---- SPECIALISTS (parallel self-hosted loops) ------------------------
         print(f"[headless] running {len(in_scope)} specialists in parallel (self-hosted loops)…")
         t0 = time.monotonic()
@@ -492,6 +516,16 @@ async def run_headless_review(args, bot_token: str) -> dict:
                 specialist_results[agent] = None
             else:
                 specialist_results[agent] = res
+
+        # Collect codex now that the specialists are done (it overlapped them).
+        codex_findings = ""
+        if codex_task is not None:
+            try:
+                codex_findings = await codex_task
+                print(f"  [headless] codex complete ({len(codex_findings)} chars)")
+            except Exception as e:  # timeout / unavailable / session error → degrade
+                print(f"  [warn] codex unavailable: {type(e).__name__}: {e} — proceeding without it",
+                      file=sys.stderr)
 
         # ---- VERIFIER --------------------------------------------------------
         findings_block = []
@@ -517,6 +551,14 @@ async def run_headless_review(args, bot_token: str) -> dict:
                 findings_block.append(f"===== {agent} =====\n(specialist did not complete — unavailable)")
             if _blocker_lens_incomplete(agent, r):
                 missing_blocker_lens.append(agent)
+
+        # Fold codex's external findings in as one more source the verifier checks
+        # against source (same untrusted framing — codex output is model-generated
+        # over attacker-authored code).
+        if codex_findings.strip():
+            findings_block.append(
+                "===== Findings from codex (external second opinion) =====\n"
+                f"<untrusted-tool-output>\n{codex_findings}\n</untrusted-tool-output>")
 
         verifier_task = build_verifier_task(
             mode, args.repo, head_sha, prior_sha,

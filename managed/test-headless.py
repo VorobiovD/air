@@ -265,7 +265,8 @@ def _prior_comment(prior_sha):
 
 def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc=None,
                   head="a" * 40, fresh=False, ledger=None, pin=None,
-                  ledger_pin_env=None, ledger_calls=None, full_diff=None):
+                  ledger_pin_env=None, ledger_calls=None, full_diff=None, codex=None,
+                  no_codex=False):
     """Drive run_headless_review (dry-run) for re-review-path tests. Returns
     (result, calls) where calls counts which diff fetcher fired. inter_diff is the
     fetch_inter_diff RETURN (str / "" / None); inter_exc, if set, makes it RAISE.
@@ -315,13 +316,32 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
     if pin is not None:
         monkeypatch.setattr(headless, "pin_and_resurrect", pin)
 
+    # Codex: when `codex` text is given, satisfy the gate (binary + key + base sha)
+    # and mock the session to return that text. Else leave it disabled.
+    if codex is not None:
+        meta["base"]["sha"] = "c" * 40
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-codex")
+        monkeypatch.setattr(headless.shutil, "which", lambda name: "/usr/bin/codex")
+
+        async def _fake_codex(repo, base):
+            return codex
+        # run_codex_session is lazy-imported from review inside the function, so
+        # patch the review module attr (like compute_*), not a headless attr.
+        monkeypatch.setattr(review, "run_codex_session", _fake_codex)
+    else:
+        monkeypatch.setattr(headless.shutil, "which", lambda name: None)  # no codex binary
+
     def fake_run_agent(client, **kw):
-        body = (f"## Code Review\n\nClean.\n\nNo blockers.\n\nReviewed at: {head}\n"
-                if kw.get("label") == "verifier" else "## Code Review\n\nlens.\n")
+        if kw.get("label") == "verifier":
+            calls["verifier_task"] = kw.get("task", "")
+            body = f"## Code Review\n\nClean.\n\nNo blockers.\n\nReviewed at: {head}\n"
+        else:
+            body = "## Code Review\n\nlens.\n"
         return {"text": body, "usage": {}, "turns": 1, "tool_calls": 0, "wall_s": 0.0, "stop": "end_turn"}
 
     monkeypatch.setattr(headless.agent_loop, "run_agent", fake_run_agent)
-    args = types.SimpleNamespace(repo="o/r", pr_number=7, dry_run=True, closed=False, fresh=fresh)
+    args = types.SimpleNamespace(repo="o/r", pr_number=7, dry_run=True, closed=False, fresh=fresh,
+                                 no_codex=no_codex)
     return asyncio.run(headless.run_headless_review(args, "tok")), calls
 
 
@@ -389,6 +409,34 @@ def test_ui_lens_skipped_on_backend_diff(tmp_path, monkeypatch):
     assert "air-ui-copy-reviewer" not in out["specialists"]
     assert set(out["specialists"]) == {
         "air-code-reviewer", "air-simplify", "air-security-auditor", "air-git-history-reviewer"}
+
+
+# ---- P3 Codex external second-opinion ----------------------------------------
+
+def test_codex_findings_folded_into_verifier(tmp_path, monkeypatch):
+    # When codex is set up (binary + key + base sha), its findings are folded into
+    # the verifier's input as an untrusted-wrapped external-opinion block.
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[],
+                               codex="CODEX-FLAG: unchecked array index at f.py:12")
+    vt = calls["verifier_task"]
+    assert "external second opinion" in vt
+    assert "CODEX-FLAG: unchecked array index" in vt
+    assert "<untrusted-tool-output>" in vt  # framed untrusted like the specialists
+    assert out["ok"]
+
+
+def test_codex_absent_when_not_configured(tmp_path, monkeypatch):
+    # No codex binary (default) → no codex block in the verifier input.
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[])
+    assert "external second opinion" not in calls["verifier_task"] and out["ok"]
+
+
+def test_codex_disabled_by_no_codex_flag(tmp_path, monkeypatch):
+    # --no-codex wins even when the binary + key + base sha are all present.
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[],
+                               codex="should-not-appear", no_codex=True)
+    assert "external second opinion" not in calls["verifier_task"]
+    assert "should-not-appear" not in calls["verifier_task"] and out["ok"]
 
 
 def test_already_reviewed_at_head_skips(tmp_path, monkeypatch):
