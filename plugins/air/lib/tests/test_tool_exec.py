@@ -244,6 +244,18 @@ def test_bash_flag_allowlist_default_deny(repo):
     assert "def login" in s.bash("git log -p -- src/app.py")
 
 
+def test_bash_pathless_dump_of_committed_secret_refused(repo):
+    # `git log -p` / `git show HEAD` carry no path token, so the path deny-glob never
+    # engages — but the OUTPUT dumps the committed .env's content. The output-scan
+    # refuses git output whose diff headers name a deny-globbed file. (The fixture
+    # commits .env + config/secrets.yml.)
+    s = Sandbox(str(repo))
+    for cmd in ["git log -p", "git show HEAD"]:
+        with pytest.raises(ToolError):
+            s.bash(cmd)
+    assert "init" in s.bash("git log --oneline")  # no content dump → allowed
+
+
 def test_deny_glob_case_insensitive(repo):
     # On a case-insensitive FS (macOS/Windows) `.ENV` opens `.env`; a case-sensitive
     # fnmatch let the spelling slip past the deny-glob. The check now folds case, so

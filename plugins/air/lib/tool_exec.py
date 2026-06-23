@@ -297,6 +297,15 @@ class Sandbox:
         except subprocess.TimeoutExpired:
             raise ToolError(f"git timed out after {_GIT_TIMEOUT}s")
         body = proc.stdout if proc.returncode == 0 else (proc.stdout + proc.stderr)
+        # Output-scan (defense-in-depth): a path-LESS content dump (`git log -p`,
+        # `git show <commit>`) carries no path token for the deny-glob to screen, so a
+        # COMMITTED deny-globbed file's content would leak through the diff. Refuse the
+        # output if any diff header names a deny-globbed path. Clean-clone repos (no such
+        # committed file) are unaffected; this only ever fires on a real committed secret.
+        for m in re.finditer(r"(?m)^diff --git a/(\S+) b/(\S+)", body or ""):
+            for p in (m.group(1), m.group(2)):
+                if _deny_glob_match(os.path.basename(p), p):
+                    raise ToolError("refused: git output would expose a deny-globbed file's content")
         return (body or "(no output)")[:_MAX_OUTPUT]
 
     # ---- dispatch --------------------------------------------------------

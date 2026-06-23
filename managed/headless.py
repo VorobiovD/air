@@ -51,7 +51,7 @@ VERIFIER = "air-review-verifier"
 _DIFF_CAP = int(os.environ.get("AIR_HEADLESS_DIFF_CAP", "120000"))  # chars; v1 guard
                              # (managed has apply_diff_hygiene — a follow-up). Tunable so a
                              # big-PR run can match the diff the managed coordinator saw.
-_TIER = {"opus": "opus", "sonnet": "sonnet", "haiku": "haiku"}
+_TIERS = frozenset(MODEL_ALIASES)   # known model-alias tiers; unknown → "sonnet"
 
 
 def _persona_model(agent: str) -> tuple[str, str, str]:
@@ -65,7 +65,7 @@ def _persona_model(agent: str) -> tuple[str, str, str]:
             if line.strip().startswith("model:"):
                 alias = line.split(":", 1)[1].split("#", 1)[0].strip()
         body = text[end + 3:].strip()
-    return body, MODEL_ALIASES.get(alias, MODEL_ALIASES["sonnet"]), _TIER.get(alias, "sonnet")
+    return body, MODEL_ALIASES.get(alias, MODEL_ALIASES["sonnet"]), (alias if alias in _TIERS else "sonnet")
 
 
 # Each agent loop turn is a full model round-trip; serializing one tool per turn
@@ -80,7 +80,8 @@ _BATCH_DIRECTIVE = (
 )
 
 
-def _specialist_task(agent: str) -> str:
+def _specialist_task() -> str:
+    # Lens-agnostic — each agent's own system prompt defines its lens.
     return (
         "Review THIS PR through your lens (your system prompt defines it). The PR Context + "
         "`<diff>` are provided above. Use your Read / Grep / Bash(git blame/log) tools to verify "
@@ -161,7 +162,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
         persona, model, tier = _persona_model(agent)
         r = agent_loop.run_agent(
             client, model=model, persona=persona, pr_context=pr_context,
-            task=_specialist_task(agent), sandbox=sandbox, effort="high",
+            task=_specialist_task(), sandbox=sandbox, effort="high",
             label=agent.replace("air-", ""), max_turns=turn_budget)
         r["agent"], r["tier"] = agent, tier
         return r
