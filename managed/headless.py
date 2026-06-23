@@ -28,8 +28,15 @@ affects the posted verdict).
 The UI/copy reviewer (conditional 5th lens) and Codex (external second opinion)
 are dispatched here too — full specialist-set parity with the managed path.
 
-OMISSIONS (follow-ups): promote-fastpath, cross-repo re-review, and
-_backfill_verdict_if_missing on the already-reviewed skip.
+DEFERRED: promote fast-path only — sensible but with no current consumer (only the
+promote/staging-to-main-* repos use it, and they run the managed/MA path, not
+headless). It re-reviews a fresh promote PR as a delta against the last sibling
+promote; port review.py's _detect_promote_fastpath when a headless repo adopts the
+convention. (The earlier "cross-repo re-review" omission was a mislabel of this same
+promote item; "both-mode" is not a headless concept — review_arch resolves to ONE
+mutually-exclusive value, so messages-api dispatches and returns before the both
+branch, never composing with it.) The already-reviewed-at-head skip now backfills a
+missing verdict (review.py's _backfill_verdict_if_missing), at full gate parity.
 """
 import asyncio
 import html
@@ -276,7 +283,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
         compute_file_statuses, compute_blame_summaries, compute_churn_data,
         compute_diff_check_warnings, CONVERSATION_MAX_ENTRIES,
         filter_comments_after, format_developer_responses, _ledger_pin_enabled,
-        _update_learn_counter, _maybe_render_mirror,
+        _update_learn_counter, _maybe_render_mirror, _backfill_verdict_if_missing,
         _collect_changed_paths, _path_is_ui, _user_facing_copy_globs, _path_matches_globs,
         run_codex_session, _codex_skip_tiny_delta)
     from session_runner import SESSION_TIMEOUT_SECS  # noqa: E402  (codex wall-clock cap)
@@ -339,6 +346,20 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # Already reviewed at this exact head → nothing to do (mirror review.py's skip).
     if mode == "re-review" and prior_sha == head_sha:
         print(f"  [gate] already reviewed at head {head_sha[:8]} — skipping")
+        # headless posts comment → verdict → dismissal as three separate
+        # non-transactional REST calls (the post path below); a SIGTERM/network
+        # drop after the comment POST but before submit_review_verdict leaves
+        # reviewDecision stuck at REVIEW_REQUIRED, and this skip gate then refuses
+        # to look again on the next trigger — losing the verdict forever. Reuse
+        # review.py's repair VERBATIM (its docstring documents the guards: it only
+        # ever ADDS a verdict matching the already-posted comment, and is fail-open).
+        _backfill_verdict_if_missing(
+            args, head_sha, prior,
+            bot_login=bot_login,
+            pr_state=meta.get("state", ""),
+            pr_author=(meta.get("user") or {}).get("login", ""),
+            token=bot_token,
+        )
         return {"ok": True, "verdict": None, "reason": "already reviewed at head",
                 "wall": 0.0, "cost": 0.0}
 
