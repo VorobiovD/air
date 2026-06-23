@@ -511,8 +511,11 @@ def test_backfill_not_called_on_normal_rereview(tmp_path, monkeypatch):
     # Scope guard: backfill fires ONLY on the at-head skip, never on a real re-review
     # delta (prior_sha != head_sha → the review proceeds normally and posts a verdict).
     n = {"backfill": 0}
-    monkeypatch.setattr(review, "_backfill_verdict_if_missing",
-                        lambda *a, **k: n.__setitem__("backfill", n["backfill"] + 1))
+
+    def _count_backfill(*a, **k):
+        n["backfill"] += 1
+
+    monkeypatch.setattr(review, "_backfill_verdict_if_missing", _count_backfill)
     out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("b" * 40)],
                                inter_diff="diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n",
                                head="a" * 40)

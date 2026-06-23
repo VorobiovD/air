@@ -350,14 +350,9 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # non-transactional REST calls (the post path below); a SIGTERM/network
         # drop after the comment POST but before submit_review_verdict leaves
         # reviewDecision stuck at REVIEW_REQUIRED, and this skip gate then refuses
-        # to look again on the next trigger — the verdict is lost forever. Repair
-        # it: recompute the verdict deterministically from the (unedited) posted
-        # comment and submit it when GitHub has none for this SHA. Reused VERBATIM
-        # from review.py — best-effort, fail-open (any failure leaves the skip
-        # byte-identical to before), and it can only ADD a verdict matching the
-        # already-published comment (a DISMISSED bot verdict counts as present, so
-        # a human governance action is never overridden; an edited comment is
-        # rejected as an untrusted source).
+        # to look again on the next trigger — losing the verdict forever. Reuse
+        # review.py's repair VERBATIM (its docstring documents the guards: it only
+        # ever ADDS a verdict matching the already-posted comment, and is fail-open).
         _backfill_verdict_if_missing(
             args, head_sha, prior,
             bot_login=bot_login,
