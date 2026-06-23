@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.37.0](https://github.com/VorobiovD/air/compare/v1.36.0...v1.37.0) (2026-06-23)
+
+
+### Features
+
+* **headless:** AIR_EXPECTED_REVIEWER assertion + docs (P4 polish) ([#195](https://github.com/VorobiovD/air/issues/195)) ([6baeb3c](https://github.com/VorobiovD/air/commit/6baeb3c943e79a450b15bc9857f0d76b1e85f169))
+* **headless:** Codex external second-opinion pass (P3) ([#194](https://github.com/VorobiovD/air/issues/194)) ([f6198e0](https://github.com/VorobiovD/air/commit/f6198e0658789320bdb4cb6d7765a3d50106c19b))
+* **headless:** dispatch the UI/copy reviewer on user-facing diffs (P3) ([#193](https://github.com/VorobiovD/air/issues/193)) ([08e85e7](https://github.com/VorobiovD/air/commit/08e85e70dd2fac198cfcaaf2d4cdf76e5e25e7ee))
+* **headless:** experimental messages-api review mode (self-hosted loop, opt-in) ([#187](https://github.com/VorobiovD/air/issues/187)) ([44addd5](https://github.com/VorobiovD/air/commit/44addd5ab14d79bfd6123d5f87ee0f550e10358e))
+* **headless:** feed precomp signals + learned patterns to headless reviews ([#189](https://github.com/VorobiovD/air/issues/189)) ([e15cfd2](https://github.com/VorobiovD/air/commit/e15cfd2063e82f2cb37fe73e896bc0423a20e071))
+* **headless:** re-review mode + learning write-back (P2) ([#190](https://github.com/VorobiovD/air/issues/190)) ([07c84e2](https://github.com/VorobiovD/air/commit/07c84e2b59fa71b1824629e654e9fea3bd5470b5))
+
+
+### Bug Fixes
+
+* **learn:** correct wiki_cap "shipped whole" log + close the A/B follow-ups ([#196](https://github.com/VorobiovD/air/issues/196)) ([2998e6c](https://github.com/VorobiovD/air/commit/2998e6cc1440e5c0f3b4234086ef21ce844928c4))
+* **learn:** deterministic wiki bloat-cap (stop the unbounded growth) ([#192](https://github.com/VorobiovD/air/issues/192)) ([53123c4](https://github.com/VorobiovD/air/commit/53123c4ef15e37144cd84c37387e6025792621d3))
+* **learn:** raise + unify the learn poll/stream timeout (deadlock on a bloated wiki) ([#191](https://github.com/VorobiovD/air/issues/191)) ([24408b0](https://github.com/VorobiovD/air/commit/24408b0f3a54d45f4f007033fd4cc3c14a48cd70))
+* **verdict:** stop re-review false-blocking already-fixed PRs ([#197](https://github.com/VorobiovD/air/issues/197)) ([3715b13](https://github.com/VorobiovD/air/commit/3715b13f97d80d8c8bf3c28094f29b79aa7c6ac1))
+
 ## [1.36.0](https://github.com/VorobiovD/air/compare/v1.35.1...v1.36.0) (2026-06-21)
 
 
