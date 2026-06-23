@@ -25,6 +25,14 @@ from api import API_BASE, get_headers, list_agents, find_environment, api_error_
 from session_runner import build_session_metadata
 from setup import MODEL_ALIASES, create_or_update_agent
 
+# How long to wait for a learn session to reach idle before giving up. The old
+# split (poll()=~10min, stream()=15min) deadlocked repos with a large wiki: a
+# legitimate curation run that takes >10min was killed mid-flight under --poll,
+# so the bloat-caps never applied, the wiki never shrank, and the learn counter
+# never reset — it just climbed (air hit reviews_since=18 unreset). One shared,
+# env-tunable ceiling, defaulting high enough for a bloated wiki's first curation.
+_LEARN_TIMEOUT_S = int(os.environ.get("AIR_LEARN_TIMEOUT_S", "1500"))  # 25 min
+
 
 def sync_learn_agent():
     """Create or update the learn orchestrator agent.
@@ -223,7 +231,7 @@ def _reset_learn_counter(repo: str, bot_token: str,
 
 def stream(client, session_id: str):
     signal.signal(signal.SIGALRM, lambda *_: (print("\nTimed out."), sys.exit(1)))
-    signal.alarm(900)  # 15 min
+    signal.alarm(_LEARN_TIMEOUT_S)
 
     with client.beta.sessions.events.stream(session_id) as s:
         for event in s:
@@ -244,7 +252,8 @@ def stream(client, session_id: str):
 def poll(client, session_id: str):
     print("Polling...")
     time.sleep(15)
-    for i in range(60):  # 10 min
+    iters = max(1, (_LEARN_TIMEOUT_S - 15) // 10)  # 15s warmup + iters×10s ≈ _LEARN_TIMEOUT_S
+    for i in range(iters):
         s = client.beta.sessions.retrieve(session_id)
         if s.status == "idle":
             print("\nDone.")
