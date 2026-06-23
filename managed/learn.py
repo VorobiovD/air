@@ -202,7 +202,8 @@ def _cap_wiki(repo: str, bot_token: str) -> None:
     render_store_to_wiki instead, so this is skipped for them."""
     air_root = Path(__file__).resolve().parent.parent
     lib_dir = air_root / "plugins" / "air" / "lib"
-    sys.path.insert(0, str(lib_dir))
+    if str(lib_dir) not in sys.path:  # dedup — avoid path bloat across calls
+        sys.path.insert(0, str(lib_dir))
     import wiki_git  # type: ignore
     import wiki_cap  # type: ignore  (plugins/air/lib — lib_dir inserted above)
 
@@ -244,7 +245,8 @@ def _reset_learn_counter(repo: str, bot_token: str,
                   file=sys.stderr)
         return
 
-    sys.path.insert(0, str(lib_dir))
+    if str(lib_dir) not in sys.path:  # dedup — avoid path bloat across calls
+        sys.path.insert(0, str(lib_dir))
     import wiki_git  # type: ignore
 
     wiki_url = f"https://x-access-token:{bot_token}@github.com/{repo}.wiki.git"

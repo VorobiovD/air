@@ -246,6 +246,12 @@ The ledger above pins severity by carrying a *prior* finding forward — it has 
 
 On by default; set the caller/org **variable** `AIR_CATEGORY_FLOOR=0` (or `false`/`no`) to disable instantly with no workflow edit. It is **inert on any body without `[sec:...]` tags**, so disabling — or any review the verifier didn't tag — is byte-identical to the pre-floor gate. It can only ever make the gate *stricter* on a real exposure, never un-gate. **Single emission source:** the tag-emission rule lives in the verifier system prompt (`plugins/air/agents/review-verifier.md`) — the system prompt for the managed verifier agent, the CLI verifier, AND assembled into solo — so all three paths emit `[sec:<token>]` from one place (no per-task injection). The floor *application* is parity-wired into `verdict.py --decide`, so managed CI, CLI, and solo all gate identically. The markdown token list is locked to `verdict._BLOCKER_CATEGORIES` by `.air-checks.sh` Check F. Decision logs print the floored category list in the verdict reason.
 
+### Wiki bloat-cap + learn timeout (`AIR_WIKI_CAP`, `AIR_LEARN_TIMEOUT_S` — default ON)
+
+The learn-orchestrator's size caps are advisory prose an LLM applies inconsistently (documented blowups: GLOSSARY 261KB, PROJECT-PROFILE 173KB). `plugins/air/lib/wiki_cap.py` is the deterministic, code-enforced counterpart: per-file byte ceilings with a **safe, class-aware trim ladder** (glossary definition-cell cap keeping every term, per-pass-narrative strip, ephemeral PR-provenance strip, long ref-list windowing) — it never drops a rule/term/count and never byte-slices, and **fails open** (ships the safe-trimmed file + a `[cap][warn]` line) when a file is over ceiling for legitimate content reasons. Wired into all three write paths (store render, the wiki-backed learn tail, and the CLI learn). On by default; set `AIR_WIKI_CAP=0` (`false`/`no`) for a byte-identical pass-through. Per-file ceilings are tunable via `AIR_WIKI_CAP_GLOSSARY` / `_PROFILE` / `_REVIEW` / `_HISTORY` / `_ARCHIVE`. The cap set + ceilings are locked by `.air-checks.sh` Check G.
+
+`AIR_LEARN_TIMEOUT_S` (default 1500 = 25 min) is the unified poll/stream ceiling for a learn session — set generously so a large knowledge base's first curation can finish (apply the caps, shrink, reset the counter) instead of being killed mid-flight.
+
 ### Diff hygiene & cost caps (managed-only)
 
 Three knobs trim per-review context spend. All of them leave **visible markers** — nothing is dropped silently — and none of them changes gating:

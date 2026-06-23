@@ -22,10 +22,11 @@ Design contract:
   glossary term, a lifetime count, or an active author pattern, and it NEVER
   blind-slices bytes (`content[:N]`) — every trim operates on parsed structure
   (table rows, ref-lists, narrative blocks).
-- FAIL-OPEN: if a file is still over its ceiling after the full safe ladder
-  (every remaining byte is must-keep), ship it WHOLE + emit a `[cap][warn]`
-  line. Boundedness is best-effort against a guaranteed-safe floor — we never
-  trade correctness for size (air's "stricter, never wrong" philosophy).
+- FAIL-OPEN: if a file is still over its ceiling after the full safe ladder,
+  ship the SAFE-TRIMMED version (whatever the ladder produced — never an unsafe
+  byte-cut) + emit a `[cap][warn]` line showing before→after. Boundedness is
+  best-effort against a guaranteed-safe floor — we never trade correctness for
+  size (air's "stricter, never wrong" philosophy).
 - IDEMPOTENT: capping already-capped output is a no-op.
 - KILL SWITCH: AIR_WIKI_CAP in {0,false,no} → byte-identical pass-through.
 - Per-file ceilings are env-overridable (AIR_WIKI_CAP_<FILE>); files not in the
@@ -160,7 +161,8 @@ def _cap_glossary_cells(text: str, max_cell: int) -> str:
 
 
 def _drop_dup_table_rows(text: str) -> str:
-    """Drop exact-duplicate glossary rows (same term key), keeping the first."""
+    """Drop duplicate-term-key glossary rows (case-insensitive on the term),
+    keeping the first occurrence regardless of whether the definitions differ."""
     seen = set()
     out = []
     for line in text.split("\n"):
@@ -171,7 +173,7 @@ def _drop_dup_table_rows(text: str) -> str:
             key = m.group("term").strip().lower()
             if not is_separator and key:
                 if key in seen:
-                    continue  # exact-duplicate term row — drop
+                    continue  # duplicate term key — drop (keep the first)
                 seen.add(key)
         out.append(line)
     return "\n".join(out)
@@ -179,12 +181,13 @@ def _drop_dup_table_rows(text: str) -> str:
 
 # ---- per-file ladders -------------------------------------------------------
 
-def _cap_glossary(text: str) -> str:
+def _cap_glossary(text: str, ceiling: int) -> str:
     t = _strip_pass_narrative(text)
     t = _drop_dup_table_rows(t)
     t = _window_ref_lists(t)
-    # progressively tighter cell budgets until under ceiling (fail-open below)
-    ceiling = _ceilings()["GLOSSARY.md"]
+    # progressively tighter cell budgets until under ceiling (fail-open below).
+    # `ceiling` is passed in from cap_files so the loop bound can't diverge from
+    # the gate that decided to call us (avoids a second _ceilings() read).
     for budget in (400, 320, 260):
         if len(t.encode()) <= ceiling:
             break
@@ -209,7 +212,7 @@ def cap_files(files: dict) -> tuple:
             out[name] = content
             continue
         if name == "GLOSSARY.md":
-            capped = _cap_glossary(content)
+            capped = _cap_glossary(content, ceiling)
         else:
             # generic prose files (profile/review/history): strip per-pass
             # narrative + ephemeral PR provenance + window long ref-lists. All
@@ -220,8 +223,15 @@ def cap_files(files: dict) -> tuple:
         after = len(capped.encode())
         out[name] = capped
         if after > ceiling:
-            log.append(f"[cap][warn] {name} {after // 1000}KB still > {ceiling // 1000}KB "
-                       f"after safe ladder (all must-keep) — shipped whole")
+            # We ship `capped` — the safe-trimmed version, NOT the untouched
+            # original: it's strictly smaller and still correctness-safe, we just
+            # couldn't reach the ceiling without an UNSAFE cut. Show before→after
+            # so the operator sees what the ladder did remove, and don't claim
+            # "whole" (it isn't, when the ladder trimmed something).
+            detail = ("safe ladder trimmed all it could" if after < before
+                      else "nothing left safe to trim")
+            log.append(f"[cap][warn] {name} {before // 1000}KB → {after // 1000}KB — "
+                       f"still > {ceiling // 1000}KB ceiling ({detail}); no unsafe cut applied")
         elif after < before:
             log.append(f"[cap] {name} {before // 1000}KB → {after // 1000}KB "
                        f"(ceiling {ceiling // 1000}KB)")
