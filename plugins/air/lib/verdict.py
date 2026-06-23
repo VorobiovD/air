@@ -375,16 +375,25 @@ def find_prior_review(comments: list[dict], bot_login: str) -> dict | None:
     auto-detect flow by posting a fake review body. Takes an already-
     fetched comment list to avoid re-paginating the endpoint.
 
-    Assumes `comments` arrived in desc order (newest-first), matching
-    `fetch_issue_comments`'s URL params. Walks the list and returns on
-    first match so we get the deterministically newest bot review
-    without materializing a full filtered list.
+    Returns the NEWEST match by `created_at` — NOT the first in list order.
+    The GitHub *issue-comments* endpoint IGNORES `sort`/`direction` and always
+    returns ascending (oldest-first), so a "return first match" walk yielded the
+    ORIGINAL review on every re-review — the baseline never advanced past round 1
+    (a multi-round re-review then re-diffs the whole fix set against the original
+    forever; a fixed PR can false-block). Select by max created_at so the result
+    is correct regardless of the endpoint's delivery order. (`created_at` is
+    ISO-8601 UTC — lexicographically sortable; ties are vanishingly rare and
+    either review is a valid baseline.)
     """
-    for c in comments:
-        if (c.get("user") or {}).get("login") == bot_login \
-           and (c.get("body") or "").startswith(BOT_REVIEW_PREFIXES):
-            return c
-    return None
+    matches = [c for c in comments
+               if (c.get("user") or {}).get("login") == bot_login
+               and (c.get("body") or "").startswith(BOT_REVIEW_PREFIXES)]
+    # Sort by (created_at, id) — id is monotonic and always present, so it both
+    # breaks same-second ties deterministically AND backstops the (never-seen-in-
+    # practice) case of a newest comment missing created_at, which a bare
+    # `or ""` would wrongly sort to the minimum.
+    return max(matches, key=lambda c: (c.get("created_at") or "", c.get("id") or 0)) \
+        if matches else None
 
 
 def extract_reviewed_at_sha(body: str) -> str | None:
@@ -769,14 +778,24 @@ def extract_fresh_finding_locations(body: str, base_sha: str) -> dict:
 
 
 class LedgerEntry:
-    __slots__ = ("num", "prior_severity", "prior_status", "location", "change")
+    __slots__ = ("num", "prior_severity", "prior_status", "location", "change",
+                 "file_touched")
 
-    def __init__(self, num, prior_severity, prior_status, location, change):
+    def __init__(self, num, prior_severity, prior_status, location, change,
+                 file_touched=False):
         self.num = num
         self.prior_severity = prior_severity
         self.prior_status = prior_status
         self.location = location
         self.change = change
+        # Did the finding's FILE appear anywhere in the inter-diff? `change`
+        # (line-level) reads UNCHANGED both when the file is absent AND when it
+        # changed but not at the flagged anchor (a cross-region fix). file_touched
+        # distinguishes them so the FIXED→NOT FIXED rewrite fires ONLY on a
+        # provably-untouched file (see pin_and_resurrect). False for the
+        # number-identity rounds (no inter-diff index — INDETERMINATE, which the
+        # pin trusts anyway).
+        self.file_touched = file_touched
 
 
 def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
@@ -820,7 +839,11 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
     for num, sev, status in fresh:
         loc = locs.get(num)
         change = finding_changed(loc, index) if loc else INDETERMINATE
-        ledger.append(LedgerEntry(num, sev, status, loc, change))
+        # File-level signal: did the dev touch this finding's FILE at all? A
+        # genuine cross-region fix changes the file (just not the flagged line);
+        # a bogus FIXED on code the dev never opened leaves the file absent.
+        file_touched = bool(loc) and loc[0] in index.present
+        ledger.append(LedgerEntry(num, sev, status, loc, change, file_touched))
     return ledger
 
 
@@ -981,17 +1004,37 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
                 log.append(f"[pin] #{num} severity {emitted_sev}->{new_sev} "
                            f"(pinned to prior; change={entry.change})")
         new_status = status
-        # FIXED on non-CHANGED code is the hide-a-finding rewrite — but only
-        # ENFORCE it for gate-relevant severities (medium+). Severity is already
-        # pinned to max(prior, emitted) above, so a laundered blocker can't hide
-        # behind a low/nit tag; a genuinely low/nit finding never gates, so
-        # trusting its explicit FIXED just avoids needless re-open noise on long
-        # chains. (Resurrection of a SILENTLY-dropped finding is unaffected — an
-        # absent finding is suspicious regardless of severity; only an explicit
-        # FIXED is trusted here.)
-        if status == "FIXED" and entry.change != CHANGED and _SEVERITY_RANK.get(new_sev, 3) >= 2:
+        # FIXED → NOT FIXED rewrite (the hide-a-finding guard), gate-relevant
+        # severities only (medium+; severity is already pinned to max above, so a
+        # laundered blocker can't hide behind a low tag, and a genuine low/nit
+        # FIXED never gates — trusting it avoids re-open noise on long chains).
+        #
+        # CROSS-REGION EXEMPTION: the ONLY behavior change vs the prior
+        # `change != CHANGED` rule. A pure line-level test false-blocked genuine
+        # CROSS-REGION fixes — the fix lands near, not at, the flagged anchor, so
+        # the anchor line reads UNCHANGED even though the file changed (the
+        # documented ~10% round-2 false-block; hit a live prod hotfix whose
+        # verifier rationale literally said "resolved" while the status was
+        # rewritten to NOT FIXED). We now trust the verifier's source-grounded
+        # FIXED for EXACTLY that case — a genuine UNCHANGED-anchor-but-file-edited
+        # cross-region fix — and nothing else. It is scoped narrowly on PURPOSE:
+        #   • round-3+ carried findings have no anchor (INDETERMINATE, loc=None ⇒
+        #     file_touched=False) → still pin-by-number to NOT FIXED;
+        #   • a stubbed/cap-omitted file is INDETERMINATE *with* file_touched=True
+        #     (present is populated before the stub check) but has NO real line
+        #     evidence → must NOT be exempted, so it stays the conservative
+        #     over-gate (this is why the exemption keys on UNCHANGED, not on
+        #     `change != CHANGED`);
+        #   • round-2 fakes on an untouched file (UNCHANGED, file absent) → rewrite
+        #     and gate;
+        #   • resurrection of SILENTLY-dropped findings is untouched.
+        # So the guard still can only make the gate stricter on a real blocker —
+        # it just stops false-blocking real cross-region fixes.
+        cross_region_fix = entry.change == UNCHANGED and entry.file_touched
+        if (status == "FIXED" and entry.change != CHANGED and not cross_region_fix
+                and _SEVERITY_RANK.get(new_sev, 3) >= 2):
             new_status = "NOT FIXED"
-            log.append(f"[pin] #{num} FIXED->NOT FIXED (no code change; change={entry.change})")
+            log.append(f"[pin] #{num} FIXED->NOT FIXED (no cross-region edit; change={entry.change}, file_touched={entry.file_touched})")
         elif status == "DEFERRED":
             if new_sev == "blocker":
                 new_status = "NOT FIXED"

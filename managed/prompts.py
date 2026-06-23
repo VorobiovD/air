@@ -242,9 +242,14 @@ def _render_carry_forward_ledger(ledger) -> str:
         "\n<carry-forward-ledger>\n"
         "These prior findings are PINNED — severity + existence carried forward "
         "verbatim (the orchestrator re-asserts this deterministically after you "
-        "respond, so don't fight it). A pinned finding may become FIXED ONLY if "
-        "the inter-diff actually changed its lines; otherwise keep its prior "
-        "severity and emit NOT FIXED / PARTIALLY FIXED. DISPUTED / FALSE "
+        "respond, so don't fight it). A pinned finding may become FIXED only if "
+        "the fix is present in the CURRENT source — read the file and judge "
+        "whether the finding is genuinely addressed. The fix may land ELSEWHERE "
+        "in the same file (a helper, an upstream guard, a refactor), so do NOT "
+        "require the exact flagged line to appear in the inter-diff: a genuine "
+        "cross-region fix is still FIXED. But a FIXED is NOT credible when the "
+        "finding's FILE is entirely untouched in the inter-diff — there keep the "
+        "prior severity and emit NOT FIXED / PARTIALLY FIXED. DISPUTED / FALSE "
         "POSITIVE / PRE-EXISTING remain valid evidence-bearing exits. Re-rate "
         "severity ONLY for prior findings NOT listed here (their lines were "
         "touched). Never silently drop a listed finding.\n"
@@ -328,9 +333,12 @@ They were run in RE-REVIEW MODE — each result contains both (a) a classificati
 each prior finding and (b) any NEW findings in the inter-diff.
 
 For each prior finding, choose ONE status:
-- FIXED — the flagged code changed and addresses the finding.
+- FIXED — the finding is addressed in the current source (read it and judge). The
+  fix may be a cross-region edit elsewhere in the SAME file, not only the exact
+  flagged line — don't require the flagged line in the inter-diff. (A FIXED is
+  not credible when the finding's file is entirely untouched.)
 - PARTIALLY FIXED — code changed but doesn't fully address.
-- NOT FIXED — code unchanged, finding still applies.
+- NOT FIXED — the finding's file is untouched, or its code is present unchanged; finding still applies.
 {deferred_bullet}
 - DISPUTED — author pushed back with rationale you accept.
 {ledger_block}{carry_forward_rule}

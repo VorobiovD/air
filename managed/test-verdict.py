@@ -306,6 +306,7 @@ from verdict import (  # noqa: E402
     CHANGED, UNCHANGED, INDETERMINATE,
     _PRIOR_STATUS_RE,
     extract_prior_statuses,
+    find_prior_review,
 )
 
 # A diff that modifies foo.py L50, inserts into mid.py (pure insertion), and
@@ -517,10 +518,149 @@ def test_carried_finding_never_cross_wired_to_colliding_new_anchor():
     assert "[blocker]" in pinned and _gates(pinned)
 
 
+# --- the cross-region false-block incident: a fully-fixed PR must APPROVE ---
+
+# Round-2 prior carrying TWO blockers, both anchored in the SAME file.
+_CR_SHA = "bbbb000000000000000000000000000000000000"
+_CR_PRIOR = (
+    "## Code Review\n\n### Blockers\n\n"
+    "**1. aggregation flaw**\n\n"
+    "[`svc.py#L5`](https://github.com/o/r/blob/bbbb00000000/svc.py#L5) — counts twice\n\n"
+    "**2. missing guard**\n\n"
+    "[`svc.py#L9`](https://github.com/o/r/blob/bbbb00000000/svc.py#L9) — unvalidated\n\n"
+    "Reviewed at: " + _CR_SHA + "\n"
+)
+
+
+def test_cross_region_fix_on_touched_file_yields_approve_all_fixed():
+    # THE incident regression (verbatim from the report): "re-review of a
+    # fully-fixed PR must yield APPROVE with all findings FIXED." The dev fixed
+    # both blockers, but the edits land in a DIFFERENT region of the same file
+    # than the flagged anchors (svc.py:5/:9) — a real cross-region fix. So each
+    # anchor reads UNCHANGED (outside the edited hunk) yet the FILE is touched.
+    # Before the file-level lever this rewrote both FIXED→NOT FIXED and gated
+    # CHANGES_REQUESTED forever (the live prod-hotfix false-block). Now the
+    # touched file trusts the verifier's source-grounded FIXED → clean APPROVE.
+    diff = ("diff --git a/svc.py b/svc.py\n--- a/svc.py\n+++ b/svc.py\n"
+            "@@ -40,4 +40,7 @@ def aggregate():\n ctx40\n ctx41\n"
+            "+    seen = set()\n+    validate(payload)\n+    return dedup(rows)\n ctx42\n")
+    led = build_carry_forward_ledger(_CR_PRIOR, diff, "bbbb00000000")
+    # both anchors UNCHANGED (line 5/9 outside the 40-46 hunk) but file_touched.
+    assert [(e.change, e.file_touched) for e in led] == [
+        (UNCHANGED, True), (UNCHANGED, True)]
+    emitted = _rr_body("- **#1** [blocker] — FIXED — aggregation flaw resolved",
+                       "- **#2** [blocker] — FIXED — guard added")
+    pinned, log = pin_and_resurrect(emitted, led)
+    assert not _gates(pinned)                                 # APPROVE
+    assert pinned.count("FIXED") >= 2 and "NOT FIXED" not in pinned
+    assert not any("FIXED->NOT FIXED" in l for l in log)      # no false rewrite
+
+
+def test_fake_fix_on_untouched_file_still_gates_after_lever():
+    # The lever must NOT loosen the real protection: a claimed FIXED on a file
+    # the dev never opened (file_touched=False) is still rewritten to NOT FIXED
+    # and gates — even though the line-state is the same UNCHANGED. This is the
+    # exact contrast to the cross-region case above; the file-touch is the only
+    # distinguishing signal.
+    fake = _ledger_entry(1, "blocker", "NOT FIXED", change=UNCHANGED, file_touched=False)
+    body = _rr_body("- **#1** [blocker] — FIXED — claims fixed, file never opened")
+    out, log = pin_and_resurrect(body, [fake])
+    assert "NOT FIXED" in out and _gates(out)
+    assert any("FIXED->NOT FIXED" in l for l in log)
+
+
+def test_cross_region_lever_only_changes_touched_file_case():
+    # Lock the lever's exact scope: identical inputs except file_touched flips
+    # the outcome. Touched → FIXED honored (no gate); untouched → rewritten (gate).
+    touched = _ledger_entry(1, "blocker", "NOT FIXED", change=UNCHANGED, file_touched=True)
+    untouched = _ledger_entry(1, "blocker", "NOT FIXED", change=UNCHANGED, file_touched=False)
+    body = _rr_body("- **#1** [blocker] — FIXED — done")
+    assert not _gates(pin_and_resurrect(body, [touched])[0])   # cross-region: trusted
+    assert _gates(pin_and_resurrect(body, [untouched])[0])     # never-opened: rewritten
+
+
+def test_touched_file_defers_genuine_vs_fake_to_verifier_by_design():
+    # EXPLICIT trust-boundary documentation (not a bug): on a touched file with
+    # an UNCHANGED anchor, verdict.py CANNOT distinguish a genuine cross-region
+    # fix from an unrelated same-file edit over a still-unfixed blocker — both
+    # are (UNCHANGED, file_touched=True). It deliberately DEFERS that judgment to
+    # the verifier's source-grounded FIXED (the same trust we extend to a fresh-
+    # review blocker classification, and to a CHANGED finding). The independent
+    # deterministic guards remain: severity is still pinned to max(prior,emitted)
+    # even on a trusted cross-region entry (a downgrade is reverted), and a
+    # SILENTLY-dropped finding is still resurrected. This test pins that
+    # contract so the boundary is a documented decision, not accidental.
+    e = _ledger_entry(1, "blocker", "NOT FIXED", change=UNCHANGED, file_touched=True)
+    # verifier emits a (possibly wrong) FIXED, but DOWNGRADED to medium →
+    # severity is still repinned to blocker even though the status is trusted.
+    out, log = pin_and_resurrect(_rr_body("- **#1** [medium] — FIXED — addressed upstream"), [e])
+    assert "[blocker]" in out                                  # downgrade still reverted
+    assert not _gates(out)                                     # FIXED trusted (verifier's call)
+    assert not any("FIXED->NOT FIXED" in l for l in log)
+    # but if that same finding is silently DROPPED, it still resurrects + gates.
+    out2, _ = pin_and_resurrect(_rr_body("- **#9** [low] — FIXED — unrelated"), [e])
+    assert "**#1**" in out2 and _gates(out2)
+
+
+def test_stubbed_file_fixed_still_gates_despite_file_touched():
+    # Edge the exemption must NOT swallow: a stubbed/cap-omitted file is
+    # INDETERMINATE *with* file_touched=True (present is populated before the
+    # stub check), but it has NO real line evidence. The exemption keys on
+    # UNCHANGED (not `change != CHANGED`), so an INDETERMINATE-from-stub FIXED is
+    # still rewritten to NOT FIXED — the conservative over-gate stands.
+    stubbed = _ledger_entry(1, "blocker", "NOT FIXED",
+                            change=INDETERMINATE, file_touched=True)
+    body = _rr_body("- **#1** [blocker] — FIXED — claims fixed in a vendored bundle")
+    out, log = pin_and_resurrect(body, [stubbed])
+    assert "NOT FIXED" in out and _gates(out)
+    assert any("FIXED->NOT FIXED" in l for l in log)
+
+
+# --- find_prior_review: baseline must advance to the NEWEST review ---
+
+def test_find_prior_review_returns_newest_regardless_of_order():
+    # The GitHub *issue-comments* endpoint ignores sort/direction and returns
+    # ASCENDING (oldest-first). A "return first match" walk therefore pinned the
+    # baseline to the ORIGINAL review forever — every re-review re-diffed the
+    # whole fix set against round 1, false-blocking a fixed PR. Selection must be
+    # by max(created_at), independent of list order.
+    bot = "air-bot"
+    comments = [  # oldest-first, exactly as the endpoint delivers
+        {"user": {"login": bot}, "created_at": "2026-06-01T10:00:00Z",
+         "body": "## Code Review\n\noriginal\n\nReviewed at: aaaa\n"},
+        {"user": {"login": "human"}, "created_at": "2026-06-02T10:00:00Z",
+         "body": "looks reasonable"},
+        {"user": {"login": bot}, "created_at": "2026-06-03T10:00:00Z",
+         "body": "## Code Review (Re-review)\n\nround 2\n\nReviewed at: bbbb\n"},
+    ]
+    got = find_prior_review(comments, bot)
+    assert got is not None and "Reviewed at: bbbb" in got["body"]  # newest, not first
+
+
+def test_find_prior_review_newest_even_when_list_is_desc():
+    # Order-independence both ways: a desc (newest-first) list must also resolve
+    # to the same newest review.
+    bot = "air-bot"
+    comments = [
+        {"user": {"login": bot}, "created_at": "2026-06-03T10:00:00Z",
+         "body": "## Code Review (Re-review)\n\nround 2\n\nReviewed at: bbbb\n"},
+        {"user": {"login": bot}, "created_at": "2026-06-01T10:00:00Z",
+         "body": "## Code Review\n\noriginal\n\nReviewed at: aaaa\n"},
+    ]
+    assert "Reviewed at: bbbb" in find_prior_review(comments, bot)["body"]
+
+
+def test_find_prior_review_none_when_no_bot_review():
+    comments = [{"user": {"login": "human"}, "created_at": "2026-06-01T10:00:00Z",
+                 "body": "## Code Review\n\nnot the bot\n"}]
+    assert find_prior_review(comments, "air-bot") is None
+
+
 # --- pin_and_resurrect: the gate-critical behaviors ---
 
-def _ledger_entry(num, sev, status, *, change=INDETERMINATE, loc=None):
-    return LedgerEntry(num, sev, status, loc, change)
+def _ledger_entry(num, sev, status, *, change=INDETERMINATE, loc=None,
+                  file_touched=False):
+    return LedgerEntry(num, sev, status, loc, change, file_touched)
 
 
 def _rr_body(*status_lines):
