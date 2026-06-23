@@ -601,13 +601,16 @@ def fetch_issue_comments(repo: str, pr_number: int, token: str) -> list[dict]:
     endpoint twice per re-review (doubles API calls on long-discussion
     PRs).
 
-    `sort=created&direction=desc` is symmetric with the bash CLI fetch
-    URL and gives newest-first ordering. In the happy path the merger
-    re-sorts records anyway. The win is partial-fetch resilience: if
-    `_github_paginate` returns early on a transient `not resp.ok`, the
-    caller gets the *newest* slice (what specialists need) instead of
-    the oldest slice. `find_prior_review` reads this same list and is
-    written for desc ordering — keep them in sync.
+    NOTE: this per-issue endpoint IGNORES `sort`/`direction` (only the
+    list-comments-in-a-REPO endpoint honors them) and always returns
+    ASCENDING by id (oldest-first). The params are kept only for URL
+    symmetry with the bash CLI fetch — do NOT rely on them for ordering.
+    Both consumers are order-independent by construction: `find_prior_review`
+    selects the newest bot review by `created_at` (a first-match walk used to
+    return the ORIGINAL review here and wedge the re-review baseline), and
+    `filter_comments_after` re-sorts by id internally. (Caveat: an early
+    partial-fetch return therefore yields the *oldest* slice, not the newest —
+    not currently load-bearing.)
     """
     url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments?per_page=100&sort=created&direction=desc"
     return _github_paginate(url, token)
