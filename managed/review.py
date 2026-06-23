@@ -418,8 +418,9 @@ SOLO_AGENT = "air-solo-reviewer"
 # Review architecture axis (AIR_REVIEW_MODE / --mode), ORTHOGONAL to `mode`
 # (the scope axis: full vs re-review). full = 6-agent coordinator (default);
 # solo = single merged-lens agent; both = run both (full gates, solo posted
-# alongside for comparison — testing).
-REVIEW_ARCH_CHOICES = ("full", "solo", "both")
+# alongside for comparison — testing); messages-api = self-hosted headless loop
+# (no managed session → no between-turn stall; see managed/headless.py).
+REVIEW_ARCH_CHOICES = ("full", "solo", "both", "messages-api")
 
 
 REPO_ARG_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
@@ -1741,6 +1742,19 @@ async def run_review(args):
     if review_arch != "full":
         print(f"  [mode] review architecture: {review_arch}")
 
+    # Headless (messages-api) self-hosts the agent loop client-side — it needs
+    # no managed workspace/agents/env, so dispatch BEFORE the managed-session
+    # setup below and return. Reuses fetch/build/verdict/post helpers verbatim.
+    if review_arch == "messages-api":
+        from headless import run_headless_review
+        result = await run_headless_review(args, bot_token)
+        # A failed/empty headless review (no usable body, ok=False) must FAIL the
+        # job, not silently exit 0 — otherwise CI goes green on a review that never
+        # ran. (headless's own __main__ does this; the --mode dispatch must too.)
+        if not (result or {}).get("ok"):
+            sys.exit(1)
+        return
+
     sync_agents(review_arch)
     agents = list_agents()
     env_id = find_environment()
@@ -3004,7 +3018,7 @@ def main():
     parser.add_argument("--fresh", action="store_true", help="Force a full review even if a prior review exists (ignore re-review auto-detect)")
     parser.add_argument("--closed", action="store_true", help="Allow review of closed/merged PRs (default: refuse and exit). Useful for post-merge audits or backfilling wiki patterns from historical PRs.")
     parser.add_argument("--no-codex", action="store_true", help="Skip the Codex review pass even if OPENAI_API_KEY + AIR_TARGET_REPO are set. Codex otherwise runs automatically when both are available.")
-    parser.add_argument("--mode", choices=REVIEW_ARCH_CHOICES, default=None, help="Review architecture: 'full' (default 6-agent coordinator), 'solo' (one merged-lens agent — ~70%% cheaper/faster, NOT gate-safe), or 'both' (run both; full gates, solo posted alongside for comparison). Falls back to AIR_REVIEW_MODE, then 'full'.")
+    parser.add_argument("--mode", choices=REVIEW_ARCH_CHOICES, default=None, help="Review architecture: 'full' (default 6-agent coordinator), 'solo' (one merged-lens agent — ~70%% cheaper/faster, NOT gate-safe), 'both' (run both; full gates, solo posted alongside), or 'messages-api' (self-hosted headless loop — no managed session, no between-turn stall; needs a local checkout at AIR_TARGET_REPO). Falls back to AIR_REVIEW_MODE, then 'full'.")
     args = parser.parse_args()
 
     if not REPO_ARG_RE.match(args.repo):

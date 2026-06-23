@@ -259,10 +259,26 @@ def count_category_floored(review_body: str) -> tuple[int, list[str]]:
     """
     sec = _BLOCKERS_SECTION_RE.search(review_body)
     bstart, bend = (sec.start(), sec.end()) if sec else (-1, -1)
+    # Exclude a tag from the floor only when it is COVERED BY A NUMBERED (**N.) entry
+    # — that's what count_blockers actually counts. The old whole-section byte-range
+    # exclusion assumed "inside ### Blockers ⟹ already counted", but count_blockers
+    # needs a `**N.` line: a [sec:] tag inside the section as a BULLET or prose (before
+    # the first **N.) was counted by NEITHER detector → a confirmed exposure formatted
+    # that way silently APPROVED (verified gate-bypass). The numbered-entry region runs
+    # from the first **N. to the section end; a tag before it (or with no **N. at all)
+    # is floored.
+    excl_start = -1
+    if sec is not None:
+        first_entry = _BLOCKER_ENTRY_RE.search(review_body, bstart, bend)
+        if first_entry is not None:
+            excl_start = first_entry.start()
     cats: list[str] = []
     for m in _SEC_TAG_RE.finditer(review_body):
         cat = m.group(1).lower()
-        if cat in _BLOCKER_CATEGORIES and not (bstart <= m.start() < bend):
+        if cat not in _BLOCKER_CATEGORIES:
+            continue
+        covered_by_numbered_blocker = (excl_start != -1 and excl_start <= m.start() < bend)
+        if not covered_by_numbered_blocker:
             cats.append(cat)
     return len(cats), sorted(set(cats))
 

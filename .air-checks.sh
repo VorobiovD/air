@@ -19,8 +19,10 @@ fi
 # --- Air-specific extras below ---
 
 # Check A: no bare /tmp/<name> operational paths (should be $AIR_TMP/<name>).
-# Allow-list: mktemp calls, find /tmp GC, and /tmp in example/docstring prose.
-STRAY_TMP=$(grep -rn '/tmp/' plugins/air/ managed/prompts/ 2>/dev/null \
+# Scope: operational flow only. Skip binaries (-I) and build/test dirs — test
+# fixtures use literal /tmp as adversarial sandbox-refusal input, not as paths
+# air writes to. Allow-list: mktemp calls, find /tmp GC, and /tmp in prose.
+STRAY_TMP=$(grep -rnI --exclude-dir=__pycache__ --exclude-dir=tests '/tmp/' plugins/air/ managed/prompts/ 2>/dev/null \
   | grep -Ev 'mktemp|find /tmp|do NOT fall back|e\.g\.?[,:]? */tmp/|parallel session|session temp directory')
 if [ -n "$STRAY_TMP" ]; then
   printf '%s\n' "$STRAY_TMP" >&2

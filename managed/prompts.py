@@ -130,7 +130,7 @@ def build_pr_context(
 - PR: #{meta['number']} by {author}
 - <pr-title>{title}</pr-title>
 - <pr-body>{body}</pr-body>
-- Base: {meta['base']['ref']} -> {meta['head']['ref']}
+- Base: {html.escape(meta['base']['ref'])} -> {html.escape(meta['head']['ref'])}
 - Size: +{meta['additions']}/-{meta['deletions']}, {meta['changed_files']} files, {meta['commits']} commits
 - HEAD: {meta['head']['sha']}
 - Repo: {repo}

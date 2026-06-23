@@ -8,11 +8,15 @@ on:
   pull_request:
     paths:
       - 'managed/**'
+      # The managed tests import plugins/air/lib (verdict via the shim, headless →
+      # tool_exec/agent_loop), so a lib change can break them — trigger on it too.
+      - 'plugins/air/lib/**'
       - '.github/workflows/managed-tests.yml'
   push:
     branches: [main]
     paths:
       - 'managed/**'
+      - 'plugins/air/lib/**'
 
 permissions:
   contents: read
@@ -36,4 +40,4 @@ jobs:
       - name: Run pure managed tests
         working-directory: managed
         # Only the network-free suites (others need AIR_BOT_TOKEN / a live API).
-        run: python -m pytest test-extract.py test-ui-scope.py test-promote-fastpath.py test-render.py test-reliability.py test-verdict.py test-cost-wins.py test-precomp.py test-multiagent.py -v
+        run: python -m pytest test-extract.py test-ui-scope.py test-promote-fastpath.py test-render.py test-reliability.py test-verdict.py test-cost-wins.py test-precomp.py test-multiagent.py test-headless.py -v
