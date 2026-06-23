@@ -276,16 +276,21 @@ async def run_headless_review(args, bot_token: str) -> dict:
         _update_learn_counter, _maybe_render_mirror)
     author = meta["user"]["login"]
     have_checkout = bool(checkout and os.path.isdir(checkout))
-    # Resolve the pattern store ONCE (threaded into stage_patterns + the learning
-    # tail); empty/None ⇒ legacy-wiki backend (air's case).
-    store_id = await asyncio.to_thread(memory_store.get_store_id, args.repo, "review")
 
-    bl_res, ic_res, rv_res, inl_res = await asyncio.gather(
+    # Resolve the pattern store + bot identity + the three conversation surfaces
+    # CONCURRENTLY (one gather, no serial network hop on the critical path — this
+    # mode's stated win is wall-time). store_id is threaded into stage_patterns + the
+    # learning tail; empty/None ⇒ legacy-wiki backend (air's case).
+    sid_res, bl_res, ic_res, rv_res, inl_res = await asyncio.gather(
+        asyncio.to_thread(memory_store.get_store_id, args.repo, "review"),
         asyncio.to_thread(fetch_bot_login, bot_token),
         asyncio.to_thread(fetch_issue_comments, args.repo, args.pr_number, bot_token),
         asyncio.to_thread(fetch_pr_reviews, args.repo, args.pr_number, bot_token),
         asyncio.to_thread(fetch_pr_review_comments, args.repo, args.pr_number, bot_token),
         return_exceptions=True)
+    store_id = None if isinstance(sid_res, BaseException) else sid_res
+    if isinstance(sid_res, BaseException):
+        print(f"  [warn] store lookup failed: {sid_res!r} — wiki backend", file=sys.stderr)
     bot_login = None if isinstance(bl_res, BaseException) else bl_res
     if isinstance(bl_res, BaseException):
         print(f"  [warn] bot-login fetch failed: {bl_res!r}", file=sys.stderr)
@@ -395,9 +400,10 @@ async def run_headless_review(args, bot_token: str) -> dict:
 
     # Carry-forward ledger (re-review only; respects AIR_LEDGER_PIN). Built from the
     # prior body + the INTER-DIFF (its old side IS prior_sha) — feeding the full diff
-    # would misalign finding_changed's anchors. pin_and_resurrect runs after extract,
-    # before the gate, making severity carry-forward + finding-resurrection a hard
-    # deterministic guarantee — the gate can only get stricter, never un-gate.
+    # would misalign finding_changed's anchors. When the ledger is non-empty,
+    # pin_and_resurrect (after extract, before the gate) makes severity carry-forward
+    # + finding-resurrection deterministic — the gate can only get stricter, never
+    # un-gate. An empty ledger (fresh / kill-switch / all findings moved) is a no-op.
     ledger = []
     if mode == "re-review" and _ledger_pin_enabled():
         try:

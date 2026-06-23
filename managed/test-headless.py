@@ -13,6 +13,7 @@ import types
 from pathlib import Path
 
 import pytest
+import requests
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -262,14 +263,20 @@ def _prior_comment(prior_sha):
             "body": f"## Code Review\n\nNo issues.\n\nReviewed at: {prior_sha}\n"}
 
 
-def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff, head="a" * 40,
-                  fresh=False, ledger=None, pin=None):
+def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc=None,
+                  head="a" * 40, fresh=False, ledger=None, pin=None,
+                  ledger_pin_env=None, ledger_calls=None):
     """Drive run_headless_review (dry-run) for re-review-path tests. Returns
     (result, calls) where calls counts which diff fetcher fired. inter_diff is the
-    fetch_inter_diff result (str / "" / None)."""
+    fetch_inter_diff RETURN (str / "" / None); inter_exc, if set, makes it RAISE.
+    ledger_pin_env sets AIR_LEDGER_PIN (else deleted → enabled). ledger_calls, if a
+    list, spies build_carry_forward_ledger (records each call, returns ledger or [])."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setenv("AIR_TARGET_REPO", str(tmp_path))
-    monkeypatch.delenv("AIR_LEDGER_PIN", raising=False)  # ensure pin enabled (default)
+    if ledger_pin_env is None:
+        monkeypatch.delenv("AIR_LEDGER_PIN", raising=False)  # default → pin enabled
+    else:
+        monkeypatch.setenv("AIR_LEDGER_PIN", ledger_pin_env)
     meta = {"number": 7, "user": {"login": "alice"}, "title": "T", "body": "b",
             "base": {"ref": "main"}, "head": {"ref": "feat", "sha": head},
             "additions": 1, "deletions": 0, "changed_files": 1, "commits": 2,
@@ -292,11 +299,18 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff, head="a" * 40,
 
     def _inter(*a, **k):
         calls["inter"] += 1
+        if inter_exc is not None:
+            raise inter_exc
         return inter_diff
 
     monkeypatch.setattr(headless, "fetch_pr_diff", _full)
     monkeypatch.setattr(headless, "fetch_inter_diff", _inter)
-    if ledger is not None:
+    if ledger_calls is not None:  # spy: detect whether the ledger is built at all
+        def _spy_ledger(*a, **k):
+            ledger_calls.append(True)
+            return ledger or []
+        monkeypatch.setattr(headless, "build_carry_forward_ledger", _spy_ledger)
+    elif ledger is not None:
         monkeypatch.setattr(headless, "build_carry_forward_ledger", lambda *a, **k: ledger)
     if pin is not None:
         monkeypatch.setattr(headless, "pin_and_resurrect", pin)
@@ -329,6 +343,29 @@ def test_rereview_empty_inter_skips(tmp_path, monkeypatch):
                                inter_diff="")
     assert out["ok"] and out["verdict"] is None and "no changes" in out["reason"]
     assert calls["full"] == 0  # empty successful compare → skip, no full fetch
+
+
+def test_rereview_inter_raises_falls_back_to_full(tmp_path, monkeypatch):
+    # fetch_inter_diff RAISES on retry exhaustion (not None) — the except branch must
+    # catch RequestException and fall back to a full review (the return-None branch is
+    # covered separately; this exercises the distinct raise path).
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("b" * 40)],
+                               inter_exc=requests.exceptions.ConnectionError("timeout"))
+    assert out["ok"] and calls["inter"] == 1 and calls["full"] == 1  # raise → full
+
+
+def test_rereview_ledger_pin_disabled_by_killswitch(tmp_path, monkeypatch):
+    # AIR_LEDGER_PIN=0 → neither the ledger build nor pin_and_resurrect runs.
+    ledger_calls, pin_calls = [], []
+
+    def spy_pin(body, ledger):
+        pin_calls.append(True)
+        return body, []
+
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("b" * 40)],
+                           inter_diff="diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n",
+                           ledger_pin_env="0", ledger_calls=ledger_calls, pin=spy_pin)
+    assert ledger_calls == [] and pin_calls == [] and out["ok"]  # kill-switch gates both
 
 
 def test_already_reviewed_at_head_skips(tmp_path, monkeypatch):
