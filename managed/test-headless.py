@@ -265,7 +265,7 @@ def _prior_comment(prior_sha):
 
 def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc=None,
                   head="a" * 40, fresh=False, ledger=None, pin=None,
-                  ledger_pin_env=None, ledger_calls=None):
+                  ledger_pin_env=None, ledger_calls=None, full_diff=None):
     """Drive run_headless_review (dry-run) for re-review-path tests. Returns
     (result, calls) where calls counts which diff fetcher fired. inter_diff is the
     fetch_inter_diff RETURN (str / "" / None); inter_exc, if set, makes it RAISE.
@@ -295,7 +295,7 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
 
     def _full(*a, **k):
         calls["full"] += 1
-        return "diff --git a/f.py b/f.py\n@@ -1 +1 @@\n-x\n+y\n"
+        return full_diff or "diff --git a/f.py b/f.py\n@@ -1 +1 @@\n-x\n+y\n"
 
     def _inter(*a, **k):
         calls["inter"] += 1
@@ -366,6 +366,29 @@ def test_rereview_ledger_pin_disabled_by_killswitch(tmp_path, monkeypatch):
                            inter_diff="diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n",
                            ledger_pin_env="0", ledger_calls=ledger_calls, pin=spy_pin)
     assert ledger_calls == [] and pin_calls == [] and out["ok"]  # kill-switch gates both
+
+
+# ---- P3 UI/copy lens dispatch ------------------------------------------------
+
+_UI_DIFF = ("diff --git a/src/Button.tsx b/src/Button.tsx\n"
+           "--- a/src/Button.tsx\n+++ b/src/Button.tsx\n@@ -1 +1 @@\n-old copy\n+new copy\n")
+_BACKEND_DIFF = ("diff --git a/managed/api.py b/managed/api.py\n"
+                "--- a/managed/api.py\n+++ b/managed/api.py\n@@ -1 +1 @@\n-x\n+y\n")
+
+
+def test_ui_lens_dispatched_on_user_facing_diff(tmp_path, monkeypatch):
+    # A user-facing (.tsx) diff → the conditional UI/copy reviewer joins the fan-out.
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[], full_diff=_UI_DIFF)
+    assert "air-ui-copy-reviewer" in out["specialists"]
+
+
+def test_ui_lens_skipped_on_backend_diff(tmp_path, monkeypatch):
+    # Backend-only (.py) diff, no store-declared copy globs → UI lens not dispatched
+    # ($0 added); only the 4 core specialists run.
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[], full_diff=_BACKEND_DIFF)
+    assert "air-ui-copy-reviewer" not in out["specialists"]
+    assert set(out["specialists"]) == {
+        "air-code-reviewer", "air-simplify", "air-security-auditor", "air-git-history-reviewer"}
 
 
 def test_already_reviewed_at_head_skips(tmp_path, monkeypatch):
