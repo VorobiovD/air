@@ -224,9 +224,23 @@ def render_shared_files(read, all_paths) -> dict[str, str]:
 
 def render_files(read, all_paths) -> dict[str, str]:
     """Pure render: {wiki_filename: content}. Injected `read`/`all_paths` keep
-    this API-free for unit tests."""
+    this API-free for unit tests. The deterministic bloat-cap runs here — the
+    single chokepoint through which ALL store→wiki content flows (both the
+    per-review throttled render AND the post-learn authoritative render), so the
+    mirror is bounded on every render, not just at learn time. The store keeps
+    full fidelity; only the exported mirror is capped."""
     files = {"REVIEW.md": render_review_md(read, all_paths)}
     files.update(render_shared_files(read, all_paths))
+    try:
+        _lib = str(Path(__file__).resolve().parent.parent / "plugins" / "air" / "lib")
+        if _lib not in sys.path:
+            sys.path.insert(0, _lib)
+        import wiki_cap  # plugins/air/lib (shared, shipped — same home as verdict.py)
+        files, cap_log = wiki_cap.cap_files(files)
+        for line in cap_log:
+            print(f"  {line}", file=sys.stderr)
+    except Exception as e:  # never let a cap bug break the render
+        print(f"  [warn] wiki bloat-cap skipped: {type(e).__name__}: {e}", file=sys.stderr)
     return files
 
 
