@@ -273,7 +273,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
         compute_file_statuses, compute_blame_summaries, compute_churn_data,
         compute_diff_check_warnings, CONVERSATION_MAX_ENTRIES,
         filter_comments_after, format_developer_responses, _ledger_pin_enabled,
-        _update_learn_counter, _maybe_render_mirror)
+        _update_learn_counter, _maybe_render_mirror,
+        _collect_changed_paths, _path_is_ui, _user_facing_copy_globs, _path_matches_globs)
     author = meta["user"]["login"]
     have_checkout = bool(checkout and os.path.isdir(checkout))
 
@@ -447,9 +448,26 @@ async def run_headless_review(args, bot_token: str) -> dict:
                           or min(150, 45 + 3 * max(n_files, 1)))
         print(f"[headless] turn budget: {turn_budget} ({n_files} changed files)")
 
-        # v1: the 4 core specialists. The UI/copy lens (conditional on user-facing
-        # diffs) is a v1.1 dispatch follow-up — mirror review.py:_diff_touches_ui.
-        in_scope = list(SPECIALISTS)
+        # UI/copy reviewer dispatch (P3) — the conditional 5th specialist, mirroring
+        # review.py's gate: dispatch only when the diff touches a user-facing surface
+        # (built-in web markup/i18n/docs allowlist, OR a repo-declared copy-module
+        # glob from PROJECT-PROFILE on store-backed repos — read only when the web
+        # check misses, so backend diffs + store-less repos pay nothing). It is NOT a
+        # blocker-class lens, so a UI-lens failure never fails the gate closed.
+        changed_paths = _collect_changed_paths([], diff)  # diff headers (post_paths empty in headless)
+        if not changed_paths or diff_truncated:
+            # Fail open: no parseable paths, OR a truncated diff where a UI file
+            # could sit in a cap-omitted segment with no header to detect it.
+            ui_in_scope, ui_reason = True, ("fail-open (truncated diff)" if diff_truncated
+                                            else "fail-open (no paths)")
+        elif any(_path_is_ui(p) for p in changed_paths):
+            ui_in_scope, ui_reason = True, "web markup/i18n/docs"
+        else:
+            copy_globs = await asyncio.to_thread(_user_facing_copy_globs, store_id)
+            ui_in_scope = bool(copy_globs and any(_path_matches_globs(p, copy_globs) for p in changed_paths))
+            ui_reason = "declared copy paths" if ui_in_scope else ""
+        print(f"[headless] ui-copy: {f'in scope ({ui_reason})' if ui_in_scope else 'skipped (no user-facing files)'}")
+        in_scope = list(SPECIALISTS) + ([UI_SPECIALIST] if ui_in_scope else [])
 
         # ---- SPECIALISTS (parallel self-hosted loops) ------------------------
         print(f"[headless] running {len(in_scope)} specialists in parallel (self-hosted loops)…")
