@@ -1,4 +1,4 @@
-"""Unit tests for the deterministic wiki bloat-cap (managed/wiki_cap.py).
+"""Unit tests for the deterministic wiki bloat-cap (plugins/air/lib/wiki_cap.py).
 
 Locks the safety contract: caps shrink mechanical bloat (glossary definition
 tails, ref-lists, narrative) WITHOUT dropping a glossary term, corrupting a
@@ -99,3 +99,20 @@ def test_dup_glossary_rows_dropped():
     text = "| t | def one |\n| t | def one |\n| u | def two |\n"
     out = wiki_cap._drop_dup_table_rows(text)
     assert out.count("| t |") == 1 and "| u |" in out
+
+
+def test_fail_open_after_partial_trim_logs_before_after(monkeypatch):
+    # The case both A/B reviewers flagged: the safe ladder trims (narrative
+    # stripped) but the file stays over ceiling. We ship the TRIMMED content
+    # (not the original) and the warn must show before→after — NOT "shipped
+    # whole" (which falsely implied the original was returned untouched).
+    monkeypatch.setenv("AIR_WIKI_CAP_REVIEW", "2000")  # 2KB
+    rule = "**" + ("Always validate every input before the DB call. " * 60) + "**"  # ~3KB must-keep
+    narrative = "3rd cleanup pass: reorganized the findings section.\n" * 80  # strippable
+    text = "## Common Findings\n" + narrative + rule + "\n"
+    capped, log = wiki_cap.cap_files({"REVIEW.md": text})
+    out = capped["REVIEW.md"]
+    assert len(out.encode()) < len(text.encode())          # trimmed (narrative gone)
+    assert "3rd cleanup pass" not in out and rule in out    # narrative stripped, rule preserved
+    warn = [l for l in log if l.startswith("[cap][warn] REVIEW.md")]
+    assert warn and "→" in warn[0] and "shipped whole" not in warn[0]  # before→after, not "whole"

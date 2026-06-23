@@ -201,6 +201,32 @@ def test_archive_narratives_folded_into_review_archive():
     assert "MALFORMED_CHUNK_NOT_STANDALONE" not in ra     # malformed chunk also excluded
 
 
+def test_render_files_applies_wiki_cap():
+    """render_files MUST run its output through wiki_cap.cap_files — a silent
+    import/logic failure there would un-bound the wiki for every store-backed
+    repo. Spy cap_files (manual patch, no fixture — works under both runners)
+    and assert render_files invokes it AND returns its (capped) output."""
+    lib = str(Path(r.__file__).resolve().parent.parent / "plugins" / "air" / "lib")
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
+    import wiki_cap
+    orig = wiki_cap.cap_files
+    called = {}
+
+    def _spy(files):
+        called["yes"] = True
+        return {k: v + "\n[CAPPED]" for k, v in files.items()}, ["[cap] spy"]
+
+    wiki_cap.cap_files = _spy
+    try:
+        out = r.render_files(lambda p: None, [])
+    finally:
+        wiki_cap.cap_files = orig
+    assert called.get("yes"), "render_files did not call wiki_cap.cap_files"
+    assert out and all(v.endswith("[CAPPED]") for v in out.values()), \
+        "render_files did not return cap_files' output"
+
+
 _TESTS = [v for k, v in sorted(globals().items())
           if k.startswith("test_") and callable(v)]
 
