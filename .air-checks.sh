@@ -122,6 +122,32 @@ if missing:
     sys.exit(1)
 PYF
 
+# Check G: wiki bloat-cap contract. wiki_cap.py must define CAPPED_FILES with the
+# 5 wiki files AND a ceiling for each in _ceilings() — locks the cap set the way
+# Check F locks the security vocabulary (a silently-dropped ceiling would un-bound
+# a wiki file, re-opening the bloat deadlock).
+WIKI_CAP_LIB="plugins/air/lib/wiki_cap.py"
+if [ -f "$WIKI_CAP_LIB" ]; then
+  python3 - "$WIKI_CAP_LIB" <<'PYF' || status=1
+import re, sys
+src = open(sys.argv[1]).read()
+need = {"GLOSSARY.md", "PROJECT-PROFILE.md", "REVIEW.md",
+        "REVIEW-HISTORY.md", "REVIEW-ARCHIVE.md"}
+m = re.search(r"CAPPED_FILES = \((.*?)\)", src, re.DOTALL)
+capped = set(re.findall(r'"([A-Z][A-Z-]+\.md)"', m.group(1) if m else ""))
+cm = re.search(r"def _ceilings\(\).*?return \{(.*?)\}", src, re.DOTALL)
+body = cm.group(1) if cm else ""
+miss_set = sorted(need - capped)
+miss_ceil = sorted(f for f in need if f'"{f}"' not in body)
+if miss_set:
+    print(f"  [FAIL] wiki_cap.py CAPPED_FILES missing: {miss_set}", file=sys.stderr); sys.exit(1)
+if miss_ceil:
+    print(f"  [FAIL] wiki_cap.py _ceilings() missing a ceiling for: {miss_ceil}", file=sys.stderr); sys.exit(1)
+PYF
+else
+  fail "$WIKI_CAP_LIB missing — the deterministic wiki bloat-cap contract is gone"
+fi
+
 if [ "$status" -eq 0 ]; then
   printf 'air drift-check: all checks passed.\n'
 fi

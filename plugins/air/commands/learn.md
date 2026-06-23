@@ -104,7 +104,7 @@ Read the entire file and analyze every pattern entry for:
 - **Author Patterns structure:** Each author has a `### <author-login>` subsection. Archived authors have a separate `### <author-login> (archived)` subsection at the bottom of Author Patterns. Ensure every author pattern entry uses the lifecycle format: `- **<Pattern name>** (<Nx>: <PR refs> | last <N> PRs: <M> clean): <Description>`. Fix any entries that don't match.
 - Group related patterns within each section (security together, config together, etc.)
 - Ensure Common Findings and Service-Specific sections don't exceed ~15 patterns — promote the most general ones to Common Findings. **Do NOT cap Author Patterns** — each author's patterns are their own namespace and must be preserved through the lifecycle.
-- **Cap each pattern entry's inline narrative** at the 3 most recent PR examples (~1,500 chars of prose). Counts and PR-ref lists are never dropped — only prose. Move older example narratives verbatim to `REVIEW-ARCHIVE.md` (create if missing) and leave a `(older examples: see REVIEW-ARCHIVE.md)` marker in the entry. Rationale: every review session loads REVIEW.md into 3-5 agent contexts; single entries have grown >15K chars (one line), overflowing agent tool-output limits and dominating session token cost.
+- **Cap each pattern entry's inline narrative** at the 3 most recent PR examples (~1,500 chars of prose). **Counts are never dropped; long PR-ref enumerations are windowed to the most-recent ~8 refs (count preserved).** Move older example narratives verbatim to `REVIEW-ARCHIVE.md` (create if missing) and leave a `(older examples: see REVIEW-ARCHIVE.md)` marker in the entry. Rationale: every review session loads REVIEW.md into 3-5 agent contexts; single entries have grown >15K chars (one line), overflowing agent tool-output limits and dominating session token cost. (Step 6 runs `wiki_cap.py` after the push as a deterministic byte-ceiling backstop — this prose-trim reduces what it must drop.)
 - If a compliance reference section exists (e.g., HIPAA Quick Reference for healthcare projects), keep it unchanged (it's a reference, not learned patterns)
 
 Generate the cleaned-up REVIEW.md content.
@@ -430,6 +430,14 @@ cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
 cp "$AIR_TMP/SEVERITY-CALIBRATION.md" "$WIKI_DIR/SEVERITY-CALIBRATION.md" 2>/dev/null
 cp "$AIR_TMP/GLOSSARY.md" "$WIKI_DIR/GLOSSARY.md" 2>/dev/null
 cp "$AIR_TMP/REVIEW-ARCHIVE.md" "$WIKI_DIR/REVIEW-ARCHIVE.md" 2>/dev/null
+# Deterministic bloat-cap backstop (the advisory→enforced counterpart to the
+# soft size caps above): hard-caps each wiki file by bytes in place, trimming
+# only mechanical bloat (over-long glossary defs, ref-lists, narrative) — never
+# a rule/term/count, fail-open. Logs [cap] lines to stderr. Skipped (no-op) if
+# the plugin root is unresolved.
+if [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/wiki_cap.py" ]; then
+  python3 "$AIR_PLUGIN_ROOT/lib/wiki_cap.py" --dir "$WIKI_DIR" >&2
+fi
 cd "$WIKI_DIR" && git add REVIEW.md REVIEW-HISTORY.md PROJECT-PROFILE.md ACCEPTED-PATTERNS.md SEVERITY-CALIBRATION.md GLOSSARY.md REVIEW-ARCHIVE.md && { git diff --quiet --cached || git commit -m "review-learn: cleanup + calibration $(date +%Y-%m-%d)"; } && git push
 ```
 

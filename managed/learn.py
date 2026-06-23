@@ -174,6 +174,17 @@ def main():
         except Exception as e:
             print(f"  [warn] mirror render failed: {e}", file=sys.stderr)
 
+    # Deterministic wiki bloat-cap. Store-backed repos are capped INSIDE the
+    # render above (render_store_to_wiki); legacy/wiki-backed repos (the session
+    # pushed the curated wiki itself) are capped here — clone, apply the safe
+    # caps, push any trimmed file. The advisory→enforced backstop for the
+    # orchestrator's soft size caps. Best-effort — never fails the learn.
+    if not store_id:
+        try:
+            _cap_wiki(args.repo, bot_token)
+        except Exception as e:
+            print(f"  [warn] wiki bloat-cap failed: {e}", file=sys.stderr)
+
     # Reset the shared `/air:learn` trigger counter so the next review sees
     # a clean `reviews_since: 0` and the cadence restarts. Store-backed
     # repos mutate the store memory; legacy repos push to the wiki.
@@ -182,6 +193,30 @@ def main():
         _reset_learn_counter(args.repo, bot_token, store_id=store_id)
     except Exception as e:
         print(f"  [warn] counter reset failed: {e}", file=sys.stderr)
+
+
+def _cap_wiki(repo: str, bot_token: str) -> None:
+    """Deterministic bloat-cap on the curated wiki (legacy/wiki-backed repos).
+    The learn session already pushed the curated wiki; clone it, apply the safe
+    `wiki_cap` trims, and push any file that shrank. Store-backed repos cap in
+    render_store_to_wiki instead, so this is skipped for them."""
+    air_root = Path(__file__).resolve().parent.parent
+    lib_dir = air_root / "plugins" / "air" / "lib"
+    sys.path.insert(0, str(lib_dir))
+    import wiki_git  # type: ignore
+    import wiki_cap  # type: ignore  (plugins/air/lib — lib_dir inserted above)
+
+    wiki_url = f"https://x-access-token:{bot_token}@github.com/{repo}.wiki.git"
+    with tempfile.TemporaryDirectory(prefix="air-wiki-cap-") as tmp:
+        wiki_dir = Path(tmp) / "wiki"
+        if not wiki_git.clone_wiki(wiki_url, wiki_dir):
+            return
+        wiki_git.configure_identity(wiki_dir, "air-machine", "air-machine@users.noreply.github.com")
+        for line in wiki_cap.cap_dir(str(wiki_dir)):
+            print(f"  {line}", file=sys.stderr)
+        # commit_paths only commits files that actually changed (no-op if none).
+        wiki_git.commit_paths(wiki_dir, list(wiki_cap.CAPPED_FILES),
+                              "chore: deterministic wiki bloat-cap")
 
 
 def _reset_learn_counter(repo: str, bot_token: str,

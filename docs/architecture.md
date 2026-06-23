@@ -46,6 +46,7 @@ VorobiovD/air/
 │   │   ├── pattern_lifecycle.py       Deterministic author-pattern lifecycle ops
 │   │   ├── pr_conversation.py         Merge GitHub PR comments/reviews into `<pr-conversation>` agent context
 │   │   ├── solo_prompt.py             THE solo-prompt assembly (`assemble_solo_prompt`; CLI `--solo` runs it, managed setup.py imports it)
+│   │   ├── wiki_cap.py                THE deterministic wiki bloat-cap (cap_files/cap_dir; per-file byte ceilings, safe class-aware trims, fail-open; managed learn/render + CLI learn all call it)
 │   │   └── verdict.py                 THE shared gating contract: blocker/prior-status parse, body extractor, re-review severity-pin + ledger (build_carry_forward_ledger, pin_and_resurrect, extract_fresh_findings, finding_changed)
 │   └── .claude-plugin/
 │       └── plugin.json             Plugin manifest (version source of truth)
