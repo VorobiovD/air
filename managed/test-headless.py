@@ -7,6 +7,7 @@ Imports review.py / headless.py, so it needs the managed deps (CI installs them)
 """
 import asyncio
 import inspect
+import os
 import sys
 import types
 from pathlib import Path
@@ -100,17 +101,33 @@ def test_build_pr_context_patterns_dir_branch():
     assert "/workspace/wiki" not in pat and "/mnt/memory/" not in pat
 
 
-def test_stage_patterns_store_path(tmp_path, monkeypatch):
-    monkeypatch.delenv("AIR_HEADLESS_PATTERNS", raising=False)
+def _mock_store(monkeypatch, listing, bodies):
+    """Wire memory_store for the list-once + retrieve-by-id staging path.
+    `listing` maps path -> id; `bodies` maps id -> content."""
     monkeypatch.setattr(headless.memory_store, "get_store_id",
                         lambda repo, flow="review": "store_x")
-    data = {
-        "/authors/alice.md": "alice patterns",
-        headless.memory_store.GLOSSARY_PATH: "glossary body",
-        headless.memory_store.ACCEPTED_PATTERNS_PATH: "accepted body",
-    }
-    monkeypatch.setattr(headless.memory_store, "read_memory",
-                        lambda sid, path: (data[path], "sha", "id") if path in data else None)
+    monkeypatch.setattr(headless.memory_store, "list_memories",
+                        lambda sid, prefix="/": {p: {"id": i, "content_sha256": "s"}
+                                                 for p, i in listing.items()})
+
+    class _Mem:
+        def retrieve(self, mem_id, memory_store_id=None):
+            return types.SimpleNamespace(content=bodies[mem_id])
+
+    class _Client:
+        beta = types.SimpleNamespace(
+            memory_stores=types.SimpleNamespace(memories=_Mem()))
+
+    monkeypatch.setattr(headless.memory_store, "client", lambda: _Client())
+
+
+def test_stage_patterns_store_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIR_HEADLESS_PATTERNS", raising=False)
+    _mock_store(monkeypatch, listing={
+        "/authors/alice.md": "a1",
+        headless.memory_store.GLOSSARY_PATH: "g1",
+        headless.memory_store.ACCEPTED_PATTERNS_PATH: "ac1",
+    }, bodies={"a1": "alice patterns", "g1": "glossary body", "ac1": "accepted body"})
     rel, abs_, src = headless.stage_patterns("o/r", "alice", str(tmp_path), "secret-tok")
     assert rel == ".air-patterns"
     d = tmp_path / ".air-patterns"
@@ -118,7 +135,7 @@ def test_stage_patterns_store_path(tmp_path, monkeypatch):
     assert (d / "glossary.md").read_text() == "glossary body"
     assert (d / "accepted-patterns.md").read_text() == "accepted body"
     assert "store_x" in src
-    # Only files that exist are staged (service/common/severity/project-profile absent here).
+    # Only files present in the listing are staged (service/common/severity/profile absent).
     assert not (d / "service-patterns.md").exists()
 
 
@@ -129,9 +146,9 @@ def test_stage_patterns_wiki_path_no_token_leak(tmp_path, monkeypatch):
 
     def fake_clone(argv, **kw):
         dest = argv[-1]  # `git clone --depth 1 <url> <dest>`
-        with open(__import__("os").path.join(dest, "REVIEW.md"), "w") as fh:
+        with open(os.path.join(dest, "REVIEW.md"), "w") as fh:
             fh.write("review patterns")
-        with open(__import__("os").path.join(dest, "GLOSSARY.md"), "w") as fh:
+        with open(os.path.join(dest, "GLOSSARY.md"), "w") as fh:
             fh.write("glossary body")
         return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
@@ -227,9 +244,7 @@ def test_run_headless_review_dry_run_orchestration(tmp_path, monkeypatch):
 def test_stage_patterns_empty_store_cleans_up(tmp_path, monkeypatch):
     # Store exists but holds none of the pattern files -> no dir left, pattern-blind.
     monkeypatch.delenv("AIR_HEADLESS_PATTERNS", raising=False)
-    monkeypatch.setattr(headless.memory_store, "get_store_id",
-                        lambda repo, flow="review": "store_x")
-    monkeypatch.setattr(headless.memory_store, "read_memory", lambda sid, path: None)
+    _mock_store(monkeypatch, listing={}, bodies={})  # empty store: list returns nothing
     rel, abs_, src = headless.stage_patterns("o/r", "alice", str(tmp_path), "tok")
     assert rel is None and "no pattern files" in src
     assert not (tmp_path / ".air-patterns").exists()
