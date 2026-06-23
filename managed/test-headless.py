@@ -483,3 +483,37 @@ def test_rereview_ledger_pin_wired(tmp_path, monkeypatch):
                            ledger=mock_ledger, pin=fake_pin)
     # Re-review built a (non-empty) ledger and threaded the SAME list into pin_and_resurrect.
     assert seen.get("ledger") is mock_ledger and out["ok"]
+
+
+# ---- P4 gate completeness: backfill a missing verdict on the at-head skip ----
+
+def test_athead_skip_backfills_missing_verdict(tmp_path, monkeypatch):
+    # The at-head skip must repair an orphaned-comment state (comment posted, verdict
+    # lost to a kill between the two POSTs) by calling _backfill_verdict_if_missing with
+    # exactly the values review.py passes. Spying on review._backfill_verdict_if_missing
+    # (the lazy-import source) also validates the import edit — a typo'd name would raise
+    # AttributeError here / ImportError on the lazy import.
+    calls = {}
+
+    def spy(args, head_sha, prior, *, bot_login, pr_state, pr_author, token):
+        calls["kw"] = dict(head_sha=head_sha, prior_id=prior.get("id"), bot_login=bot_login,
+                           pr_state=pr_state, pr_author=pr_author, token=token)
+
+    monkeypatch.setattr(review, "_backfill_verdict_if_missing", spy)
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("a" * 40)],
+                           head="a" * 40)  # prior_sha == head → at-head skip fires
+    assert out["ok"] and out["verdict"] is None and "already reviewed" in out["reason"]
+    assert calls["kw"] == dict(head_sha="a" * 40, prior_id=11, bot_login="air-bot",
+                               pr_state="open", pr_author="alice", token="tok")
+
+
+def test_backfill_not_called_on_normal_rereview(tmp_path, monkeypatch):
+    # Scope guard: backfill fires ONLY on the at-head skip, never on a real re-review
+    # delta (prior_sha != head_sha → the review proceeds normally and posts a verdict).
+    n = {"backfill": 0}
+    monkeypatch.setattr(review, "_backfill_verdict_if_missing",
+                        lambda *a, **k: n.__setitem__("backfill", n["backfill"] + 1))
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_prior_comment("b" * 40)],
+                               inter_diff="diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n",
+                               head="a" * 40)
+    assert out["ok"] and calls["inter"] == 1 and n["backfill"] == 0
