@@ -49,6 +49,7 @@ import memory_store  # noqa: E402  (managed/ — client-side store reads for pat
 import pr_conversation  # noqa: E402  (plugins/air/lib)
 import agent_loop  # noqa: E402  (plugins/air/lib)
 from tool_exec import Sandbox  # noqa: E402
+from wiki_git import _redact  # noqa: E402  (mask token-bearing URLs in clone errors)
 
 AGENTS_DIR = _LIB.parent / "agents"
 SPECIALISTS = ["air-code-reviewer", "air-simplify", "air-security-auditor", "air-git-history-reviewer"]
@@ -143,7 +144,12 @@ def stage_patterns(repo: str, author: str, checkout: str, token: str,
                         staged.append(name)
             source = "wiki"
     except Exception as e:  # never block a review on pattern plumbing
-        print(f"  [warn] pattern staging failed: {type(e).__name__}: {e} — "
+        # _redact str(e): a clone timeout raises subprocess.TimeoutExpired whose
+        # __str__ expands the full argv — including the x-access-token URL. CI masks
+        # registered secrets, but a local --dry-run does not, so scrub it here (same
+        # token-URL shape wiki_git redacts) to honor this function's "never logs the
+        # token-bearing URL" contract on EVERY exit path.
+        print(f"  [warn] pattern staging failed: {type(e).__name__}: {_redact(str(e))} — "
               "agents run pattern-blind", file=sys.stderr)
         shutil.rmtree(dest, ignore_errors=True)
         return None, None, f"error: {type(e).__name__}"
@@ -244,45 +250,65 @@ async def run_headless_review(args, bot_token: str) -> dict:
         compute_file_statuses, compute_blame_summaries, compute_churn_data,
         compute_diff_check_warnings, CONVERSATION_MAX_ENTRIES)
     author = meta["user"]["login"]
-    bot_login = await asyncio.to_thread(fetch_bot_login, bot_token)
-    file_statuses = blame_summaries = churn_data = diff_check_warnings = ""
-    if checkout and os.path.isdir(checkout):
-        precomp_base = f"origin/{meta['base']['ref']}"
+    have_checkout = bool(checkout and os.path.isdir(checkout))
 
-        def _precomp():
+    # Resolve the bot identity, pre-compute the git signals, and stage the learned
+    # patterns CONCURRENTLY — three independent blocking calls (only the
+    # pr-conversation fetch below depends on bot_login). _precomp + stage_patterns
+    # swallow their own failures; return_exceptions=True also covers a raising
+    # fetch_bot_login so one degraded signal never sinks the other two.
+    def _precomp():
+        if not have_checkout:
+            return ("", "", "", "")
+        precomp_base = f"origin/{meta['base']['ref']}"
+        try:
             statuses, paths = compute_file_statuses(checkout, precomp_base, head_sha)
             return (statuses,
                     compute_blame_summaries(checkout, paths),
                     compute_churn_data(checkout, paths),
                     compute_diff_check_warnings(checkout, precomp_base, head_sha))
-        try:
-            file_statuses, blame_summaries, churn_data, diff_check_warnings = \
-                await asyncio.to_thread(_precomp)
         except Exception as e:
             print(f"  [warn] precomp failed: {type(e).__name__}: {e}", file=sys.stderr)
-        n = sum(bool(x) for x in (file_statuses, blame_summaries, churn_data, diff_check_warnings))
-        print(f"[headless] precomp: {n}/4 sections populated")
+            return ("", "", "", "")
+
+    bot_login, precomp, patterns = await asyncio.gather(
+        asyncio.to_thread(fetch_bot_login, bot_token),
+        asyncio.to_thread(_precomp),
+        asyncio.to_thread(stage_patterns, args.repo, author, checkout, bot_token),
+        return_exceptions=True)
+    if isinstance(bot_login, BaseException):
+        print(f"  [warn] bot-login fetch failed: {bot_login!r}", file=sys.stderr)
+        bot_login = None
+    file_statuses, blame_summaries, churn_data, diff_check_warnings = (
+        precomp if not isinstance(precomp, BaseException) else ("", "", "", ""))
+    patterns_rel, patterns_abs, psource = (
+        patterns if not isinstance(patterns, BaseException) else (None, None, "error"))
+    if have_checkout:
+        print(f"[headless] precomp: {sum(bool(x) for x in (file_statuses, blame_summaries, churn_data, diff_check_warnings))}/4 sections populated")
     else:
         print(f"  [warn] AIR_TARGET_REPO not a dir ({checkout!r}) — precomp skipped", file=sys.stderr)
+    print(f"[headless] patterns: {psource}")
 
     # PR conversation thread (humans + other bots, bot-self-filtered). Best-effort:
-    # rendered "none" if the bot identity is unresolved or any fetch fails.
+    # rendered "none" if the bot identity is unresolved or a fetch fails.
+    # return_exceptions=True so one failing endpoint doesn't cancel + discard the
+    # other two already-fetched lists (the specialist gather does the same).
     pr_conv_block = "none"
     if bot_login:
+        got = await asyncio.gather(
+            asyncio.to_thread(fetch_issue_comments, args.repo, args.pr_number, bot_token),
+            asyncio.to_thread(fetch_pr_reviews, args.repo, args.pr_number, bot_token),
+            asyncio.to_thread(fetch_pr_review_comments, args.repo, args.pr_number, bot_token),
+            return_exceptions=True)
+        for g in got:
+            if isinstance(g, BaseException):
+                print(f"  [warn] a pr-conversation fetch failed: {type(g).__name__}: {g} — partial thread", file=sys.stderr)
+        ic, rv, inl = [g if not isinstance(g, BaseException) else [] for g in got]
         try:
-            ic, rv, inl = await asyncio.gather(
-                asyncio.to_thread(fetch_issue_comments, args.repo, args.pr_number, bot_token),
-                asyncio.to_thread(fetch_pr_reviews, args.repo, args.pr_number, bot_token),
-                asyncio.to_thread(fetch_pr_review_comments, args.repo, args.pr_number, bot_token))
             pr_conv_block = pr_conversation.build_pr_conversation(
                 ic, rv, inl, bot_login, max_entries=CONVERSATION_MAX_ENTRIES)
         except Exception as e:
-            print(f"  [warn] pr-conversation fetch failed: {type(e).__name__}: {e}", file=sys.stderr)
-
-    # Learned patterns -> <checkout>/.air-patterns/ for selective sandbox reads.
-    patterns_rel, patterns_abs, psource = await asyncio.to_thread(
-        stage_patterns, args.repo, author, checkout, bot_token)
-    print(f"[headless] patterns: {psource}")
+            print(f"  [warn] pr-conversation build failed: {type(e).__name__}: {e}", file=sys.stderr)
 
     # html.escape the diff before interpolating: it's attacker-controlled (the PR
     # author writes it), and a raw `</diff>` line would close the XML wrapper and
@@ -372,20 +398,20 @@ async def run_headless_review(args, bot_token: str) -> dict:
         + "\n\n".join(findings_block) + "\n\n" + verifier_task + _BATCH_DIRECTIVE)
     vpersona, vmodel, vtier = _persona_model(VERIFIER)
     print("[headless] running verifier (self-hosted loop)…")
-    vres = await asyncio.to_thread(
-        agent_loop.run_agent, client, **{
-            "model": vmodel, "persona": vpersona, "pr_context": pr_context,
-            "task": verifier_input, "sandbox": sandbox, "effort": "high", "label": "verifier",
-            "max_turns": turn_budget})
+    try:
+        vres = await asyncio.to_thread(
+            agent_loop.run_agent, client, **{
+                "model": vmodel, "persona": vpersona, "pr_context": pr_context,
+                "task": verifier_input, "sandbox": sandbox, "effort": "high", "label": "verifier",
+                "max_turns": turn_budget})
+    finally:
+        # Patterns were read during the specialist + verifier loops and aren't needed
+        # past this point — remove the staged dir UNCONDITIONALLY (incl. on a verifier
+        # exception). CI checkouts are ephemeral; this keeps a LOCAL --dry-run clean.
+        if patterns_abs:
+            shutil.rmtree(patterns_abs, ignore_errors=True)
     review_body_raw = vres["text"]
     wall = time.monotonic() - t0
-
-    # Patterns were read during the specialist + verifier loops and aren't needed
-    # past this point — remove the staged dir now. (CI checkouts are ephemeral;
-    # this keeps a LOCAL --dry-run checkout clean. A verifier exception above skips
-    # this, leaving a harmless stray dir — acceptable for the rare path.)
-    if patterns_abs:
-        shutil.rmtree(patterns_abs, ignore_errors=True)
 
     # ---- DETERMINISTIC TAIL (reused verbatim) ----------------------------
     review_body, extracted = _extract_review_body(review_body_raw, head_sha)

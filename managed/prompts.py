@@ -76,9 +76,10 @@ def build_pr_context(
             f"/mnt). Run Glob `{patterns_dir}/*` once to list the available pattern "
             "files, then Read the ones relevant to this diff. Your per-author "
             f"patterns, if present, are {patterns_dir}/author-patterns.md; broad "
-            f"guidance is in {patterns_dir}/review-patterns.md / common-findings.md, "
-            "false-positive whitelist in accepted-patterns.md, per-repo thresholds "
-            "in severity-calibration.md, domain terms in glossary.md."
+            "guidance is in whichever of review-patterns.md / common-findings.md the "
+            "Glob lists (backends differ), false-positive whitelist in "
+            "accepted-patterns.md, per-repo thresholds in severity-calibration.md, "
+            "domain terms in glossary.md."
         )
         wiki_fallback_line = (
             f"If {patterns_dir} is absent or a listed file is missing, proceed "
