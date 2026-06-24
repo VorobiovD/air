@@ -238,17 +238,20 @@ def _specialist_task() -> str:
 BLOCKER_LENSES = ("air-security-auditor", "air-code-reviewer")
 
 # Auto cache-TTL thresholds. 5m-TTL cache writes cost 1.25x base input vs 1h's 2x,
-# and the TTL refreshes on each read — so 5m gives the SAME hit rate as long as
-# between-turn gaps stay < 5min, at ~17% lower cost (measured: a 3-file PR held a 91%
-# cache-read ratio on 5m, saving ~$0.59/run). Calibration of the heavy cutoff (live):
-#   3 files → max gap 1.9min · 7 files → 2.8min (both safe on 5m, 91% ratio)
-#   13 files → cache-read ratio fell to 81% + cw ~1.7x — 5m starts expiring (long turns)
-# so >= 10 files / 80KB switches to 1h, keeping a margin below the 13-file fall-off.
-# A 5m miss only costs one extra prefix re-write on one agent (cents, NOT a gate issue),
-# so the cutoff favors the common small-PR win. Env override AIR_HEADLESS_CACHE_TTL ∈
+# and the TTL refreshes on each read — so 5m gives the SAME hit rate, at ~17-22% lower
+# cost, as long as between-turn gaps stay < 5min. LIVE per-turn measurement (the
+# [turn] gap telemetry → analyze_cache_ttl.py) shows that's the norm, because a single
+# turn's generation is bounded by max_tokens (~2-4min), NOT by file count:
+#   3 files → max gap 1.9min · 7 files → 2.8min · 13 files → 37 turns, 0 gaps >5min,
+#   exact 5m-vs-1h = $3.87 vs $4.95 (5m saves $1.08 / 22%, zero misses).
+# So a heavy PR is NOT inherently miss-prone; the 1h fallback is a loose net for a
+# genuinely-huge PR (>=25 files / 250KB) where a pathological long thinking turn could
+# exceed 5min — and a miss only costs one extra prefix re-write (cents, NOT a gate
+# issue). The per-turn telemetry keeps watching real runs, so the cutoff can be tuned
+# data-driven if a real >5min gap ever shows up. Env override AIR_HEADLESS_CACHE_TTL ∈
 # {5m,1h,auto}; thresholds tunable via AIR_HEADLESS_TTL_FILES / _BYTES.
-_HEAVY_TTL_FILES = int(os.environ.get("AIR_HEADLESS_TTL_FILES", "10"))
-_HEAVY_TTL_BYTES = int(os.environ.get("AIR_HEADLESS_TTL_BYTES", "80000"))
+_HEAVY_TTL_FILES = int(os.environ.get("AIR_HEADLESS_TTL_FILES", "25"))
+_HEAVY_TTL_BYTES = int(os.environ.get("AIR_HEADLESS_TTL_BYTES", "250000"))
 
 
 def _choose_cache_ttl(n_files: int, diff: str) -> str:

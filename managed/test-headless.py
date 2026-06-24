@@ -570,7 +570,7 @@ def test_choose_cache_ttl_auto_and_override(monkeypatch):
     small = "diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n"
     assert headless._choose_cache_ttl(3, small) == "5m"        # small PR → cheap 5m
     assert headless._choose_cache_ttl(25, small) == "1h"       # many files → safe 1h
-    assert headless._choose_cache_ttl(2, "x" * 200000) == "1h"  # big diff → 1h
+    assert headless._choose_cache_ttl(2, "x" * 300000) == "1h"  # big diff → 1h
     monkeypatch.setenv("AIR_HEADLESS_CACHE_TTL", "1h")
     assert headless._choose_cache_ttl(2, small) == "1h"        # override forces 1h
     monkeypatch.setenv("AIR_HEADLESS_CACHE_TTL", "5m")
