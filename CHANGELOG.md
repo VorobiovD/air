@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.38.0](https://github.com/VorobiovD/air/compare/v1.37.0...v1.38.0) (2026-06-24)
+
+
+### Features
+
+* **headless:** backfill a missing verdict on the already-reviewed-at-head skip ([#200](https://github.com/VorobiovD/air/issues/200)) ([68b8fe0](https://github.com/VorobiovD/air/commit/68b8fe034ad6c6c164b2c985dc1181c92b39b5d3))
+* **headless:** per-agent cost + cache-read telemetry ([#202](https://github.com/VorobiovD/air/issues/202)) ([6b8c96e](https://github.com/VorobiovD/air/commit/6b8c96e56344c4bafc339a960ce941673651e02b))
+* **headless:** wire promote fast-path — delta-review sibling staging-to-main promotes ([#205](https://github.com/VorobiovD/air/issues/205)) ([20209c7](https://github.com/VorobiovD/air/commit/20209c7f138631249efde7f575aeb1058d9a677a))
+
+
+### Bug Fixes
+
+* **headless:** raise diff cap to 500K (managed parity) — stop over-gating big promotes ([#206](https://github.com/VorobiovD/air/issues/206)) ([f087438](https://github.com/VorobiovD/air/commit/f087438bb5b8ff9df0a2649a206dbd50e57486b8))
+
+
+### Performance Improvements
+
+* **headless:** auto cache-TTL by PR weight (5m default, 1h heavy) — ~17% cheaper writes ([#204](https://github.com/VorobiovD/air/issues/204)) ([55a3ec4](https://github.com/VorobiovD/air/commit/55a3ec4dd60e79af3c502879a3aa87e17920fe17))
+* **headless:** effort=medium for advisory lenses + telemetry nit/None-guard ([#203](https://github.com/VorobiovD/air/issues/203)) ([16b4344](https://github.com/VorobiovD/air/commit/16b434449321e91a417381a5acf38968b08c64f1))
+
 ## [1.37.0](https://github.com/VorobiovD/air/compare/v1.36.0...v1.37.0) (2026-06-23)
 
 
