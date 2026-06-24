@@ -561,3 +561,26 @@ def test_usage_telemetry_guards_none_token_fields():
         log=lines.append)
     assert any("[cost] x" in l for l in lines)            # row printed, no TypeError
     assert any("cache-read" in l for l in lines)          # aggregate printed
+
+
+# ---- auto cache-TTL selection + write-multiplier pricing ----
+
+def test_choose_cache_ttl_auto_and_override(monkeypatch):
+    monkeypatch.delenv("AIR_HEADLESS_CACHE_TTL", raising=False)
+    small = "diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n"
+    assert headless._choose_cache_ttl(3, small) == "5m"        # small PR → cheap 5m
+    assert headless._choose_cache_ttl(25, small) == "1h"       # many files → safe 1h
+    assert headless._choose_cache_ttl(2, "x" * 200000) == "1h"  # big diff → 1h
+    monkeypatch.setenv("AIR_HEADLESS_CACHE_TTL", "1h")
+    assert headless._choose_cache_ttl(2, small) == "1h"        # override forces 1h
+    monkeypatch.setenv("AIR_HEADLESS_CACHE_TTL", "5m")
+    assert headless._choose_cache_ttl(50, "x" * 999999) == "5m"  # override beats heavy
+
+
+def test_usage_cost_write_mult():
+    al = headless.agent_loop
+    u = {"cache_creation_input_tokens": 1_000_000}  # 1M cache-write tokens, sonnet
+    assert abs(al.usage_cost(u, "sonnet", 2.0) - 6.0) < 1e-6    # 1h: 2x * $3/MTok
+    assert abs(al.usage_cost(u, "sonnet", 1.25) - 3.75) < 1e-6  # 5m: 1.25x * $3/MTok
+    assert al.cache_write_mult("5m") == 1.25 and al.cache_write_mult("1h") == 2.0
+    assert al.cache_write_mult("weird") == 2.0                  # unknown → safe default

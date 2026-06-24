@@ -237,6 +237,22 @@ def _specialist_task() -> str:
 
 BLOCKER_LENSES = ("air-security-auditor", "air-code-reviewer")
 
+# Auto cache-TTL thresholds. 5m-TTL cache writes cost 1.25x base input vs 1h's 2x,
+# and the TTL refreshes on each read — so 5m gives the SAME hit rate as long as
+# between-turn gaps stay < 5min (measured max ~2.8min on a 7-file PR). A heavy PR
+# risks a > 5min generation stall mid-agent (which would expire 5m and force a
+# re-write), so it gets 1h. Tunable; env override AIR_HEADLESS_CACHE_TTL ∈ {5m,1h,auto}.
+_HEAVY_TTL_FILES = int(os.environ.get("AIR_HEADLESS_TTL_FILES", "20"))
+_HEAVY_TTL_BYTES = int(os.environ.get("AIR_HEADLESS_TTL_BYTES", "150000"))
+
+
+def _choose_cache_ttl(n_files: int, diff: str) -> str:
+    override = os.environ.get("AIR_HEADLESS_CACHE_TTL", "auto").strip().lower()
+    if override in ("5m", "1h"):
+        return override
+    heavy = n_files >= _HEAVY_TTL_FILES or len(diff.encode("utf-8", "replace")) >= _HEAVY_TTL_BYTES
+    return "1h" if heavy else "5m"
+
 
 def _blocker_lens_incomplete(agent: str, r) -> bool:
     """True if a blocker-class specialist did NOT complete — never ran, produced no
@@ -250,7 +266,7 @@ def _blocker_lens_incomplete(agent: str, r) -> bool:
     return r.get("stop") not in (None, "end_turn")
 
 
-def _log_usage_telemetry(rows, log=print):
+def _log_usage_telemetry(rows, log=print, write_mult=2.0):
     """Per-agent token + $ breakdown + an aggregate CACHE-READ RATIO. The single
     `cost≈$` line hid both per-agent cost AND the question this mode hinges on:
     is the 1h prompt cache yielding CROSS-agent reuse? Each specialist + the
@@ -272,7 +288,7 @@ def _log_usage_telemetry(rows, log=print):
             tot[k] += u[k]
         log(f"  [cost] {label:<16} {tier:<6} in={u['input_tokens']:>7} "
             f"out={u['output_tokens']:>6} cw={u['cache_creation_input_tokens']:>8} "
-            f"cr={u['cache_read_input_tokens']:>9}  ${agent_loop.usage_cost(u, tier):.2f}")
+            f"cr={u['cache_read_input_tokens']:>9}  ${agent_loop.usage_cost(u, tier, write_mult):.2f}")
     served = tot["cache_read_input_tokens"]
     base = served + tot["cache_creation_input_tokens"] + tot["input_tokens"]
     ratio = (100.0 * served / base) if base else 0.0
@@ -526,6 +542,9 @@ async def run_headless_review(args, bot_token: str) -> dict:
         turn_budget = int(os.environ.get("AIR_HEADLESS_MAX_TURNS")
                           or min(150, 45 + 3 * max(n_files, 1)))
         print(f"[headless] turn budget: {turn_budget} ({n_files} changed files)")
+        cache_ttl = _choose_cache_ttl(n_files, diff)
+        write_mult = agent_loop.cache_write_mult(cache_ttl)
+        print(f"[headless] cache TTL: {cache_ttl} (cheaper 5m writes when gaps stay <5min; 1h for heavy PRs)")
 
         # UI/copy reviewer dispatch (P3) — the conditional 5th specialist, mirroring
         # review.py's gate: dispatch only when the diff touches a user-facing surface
@@ -583,7 +602,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
                 client, model=model, persona=persona, pr_context=pr_context,
                 task=_specialist_task(), sandbox=sandbox,
                 effort="high" if agent in BLOCKER_LENSES else "medium",
-                label=agent.replace("air-", ""), max_turns=turn_budget)
+                label=agent.replace("air-", ""), max_turns=turn_budget, cache_ttl=cache_ttl)
             r["agent"], r["tier"] = agent, tier
             return r
 
@@ -657,7 +676,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
             agent_loop.run_agent, client, **{
                 "model": vmodel, "persona": vpersona, "pr_context": pr_context,
                 "task": verifier_input, "sandbox": sandbox, "effort": "high", "label": "verifier",
-                "max_turns": turn_budget})
+                "max_turns": turn_budget, "cache_ttl": cache_ttl})
     finally:
         # Patterns were read during the specialist + verifier loops and aren't needed
         # past this point — remove the staged dir UNCONDITIONALLY (any exception in the
@@ -670,13 +689,13 @@ async def run_headless_review(args, bot_token: str) -> dict:
 
     # ---- DETERMINISTIC TAIL (reused verbatim) ----------------------------
     review_body, extracted = _extract_review_body(review_body_raw, head_sha)
-    cost = (agent_loop.usage_cost(vres["usage"], vtier)
-            + sum(agent_loop.usage_cost(r["usage"], r["tier"])
+    cost = (agent_loop.usage_cost(vres["usage"], vtier, write_mult)
+            + sum(agent_loop.usage_cost(r["usage"], r["tier"], write_mult)
                   for r in specialist_results.values() if r))
     _telemetry_rows = [(r.get("agent", "?").replace("air-", ""), r["tier"], r["usage"])
                        for r in specialist_results.values() if r]
     _telemetry_rows.append(("verifier", vtier, vres["usage"]))
-    _log_usage_telemetry(_telemetry_rows)
+    _log_usage_telemetry(_telemetry_rows, write_mult=write_mult)
     print(f"\n[headless] complete in {wall:.1f}s  cost≈${cost:.2f}  verifier_extracted={extracted}")
 
     if not extracted:
