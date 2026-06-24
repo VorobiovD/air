@@ -347,6 +347,7 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
         monkeypatch.setattr(headless.shutil, "which", lambda name: None)  # no codex binary
 
     def fake_run_agent(client, **kw):
+        calls.setdefault("efforts", {})[kw.get("label", "")] = kw.get("effort")
         if kw.get("label") == "verifier":
             calls["verifier_task"] = kw.get("task", "")
             body = f"## Code Review\n\nClean.\n\nNo blockers.\n\nReviewed at: {head}\n"
@@ -576,6 +577,63 @@ def test_usage_telemetry_guards_none_token_fields():
         log=lines.append)
     assert any("[cost] x" in l for l in lines)            # row printed, no TypeError
     assert any("cache-read" in l for l in lines)          # aggregate printed
+
+
+# ---- auto cache-TTL selection + write-multiplier pricing ----
+
+def test_choose_cache_ttl_auto_and_override(monkeypatch):
+    for v in ("AIR_HEADLESS_CACHE_TTL", "AIR_HEADLESS_TTL_FILES", "AIR_HEADLESS_TTL_BYTES"):
+        monkeypatch.delenv(v, raising=False)
+    # signature is (n_files, RAW diff bytes) — defaults 25 files / 250KB
+    assert headless._choose_cache_ttl(3, 5_000) == "5m"        # small PR → cheap 5m
+    assert headless._choose_cache_ttl(24, 5_000) == "5m"       # just under the file cutoff
+    assert headless._choose_cache_ttl(25, 5_000) == "1h"       # file cutoff → safe 1h
+    assert headless._choose_cache_ttl(2, 300_000) == "1h"      # big raw diff → 1h (byte arm reachable)
+    monkeypatch.setenv("AIR_HEADLESS_CACHE_TTL", "1h")
+    assert headless._choose_cache_ttl(2, 5_000) == "1h"        # override forces 1h
+    monkeypatch.setenv("AIR_HEADLESS_CACHE_TTL", "5m")
+    assert headless._choose_cache_ttl(50, 999_999) == "5m"     # override beats heavy
+    # thresholds are read at CALL time (not module load) → monkeypatch-able + bad-input-safe
+    monkeypatch.delenv("AIR_HEADLESS_CACHE_TTL", raising=False)
+    monkeypatch.setenv("AIR_HEADLESS_TTL_FILES", "5")
+    assert headless._choose_cache_ttl(6, 1_000) == "1h"        # tuned-down cutoff applies live
+    monkeypatch.setenv("AIR_HEADLESS_TTL_FILES", "oops")       # bad value → default (25), no crash
+    assert headless._choose_cache_ttl(6, 1_000) == "5m"
+
+
+def test_advisory_lenses_use_medium_effort(tmp_path, monkeypatch):
+    # The effort split (blocker lenses high, advisory medium) is load-bearing for cost.
+    # Assert the ACTUAL effort passed to run_agent per specialist (via the harness), so a
+    # refactor can't silently collapse it to a uniform value.
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[])  # fresh → all 4 core + verifier
+    eff = calls["efforts"]
+    assert eff["code-reviewer"] == "high" and eff["security-auditor"] == "high"   # blocker lenses
+    assert eff["simplify"] == "medium" and eff["git-history-reviewer"] == "medium"  # advisory
+    assert eff["verifier"] == "high"
+
+
+def test_usage_cost_write_mult():
+    al = headless.agent_loop
+    u = {"cache_creation_input_tokens": 1_000_000}  # 1M cache-write tokens, sonnet
+    assert abs(al.usage_cost(u, "sonnet", 2.0) - 6.0) < 1e-6    # 1h: 2x * $3/MTok
+    assert abs(al.usage_cost(u, "sonnet", 1.25) - 3.75) < 1e-6  # 5m: 1.25x * $3/MTok
+    assert al.cache_write_mult("5m") == 1.25 and al.cache_write_mult("1h") == 2.0
+    assert al.cache_write_mult("weird") == 2.0                  # unknown → safe default
+
+
+def test_analyze_cache_ttl_reprices_and_flags_misses(tmp_path):
+    import analyze_cache_ttl as az
+    log = tmp_path / "run.log"
+    log.write_text(
+        "[headless] cache TTL: 1h\n"
+        "  [turn] code-reviewer t=1 tc=2 gap=20.0s in=100 out=0 cw=50000 cr=0\n"
+        "  [turn] code-reviewer t=2 tc=0 gap=400.0s in=0 out=0 cw=0 cr=100000\n"
+        "[headless] complete in 60.0s\n")
+    r = az.analyze(str(log))
+    assert r["turns"] == 2 and r["miss_turns"] == 1     # the 400s-gap read would expire on 5m
+    assert r["miss_pct"] == 100.0
+    # miss re-write (1.25x) >> warm read (0.1x), so on this miss-heavy run 5m costs MORE
+    assert r["c1h"] < r["c5m"]
 
 
 # ---- promote fast-path (qai staging-to-main delta reviews) ----

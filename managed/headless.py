@@ -244,6 +244,43 @@ def _specialist_task() -> str:
 
 BLOCKER_LENSES = ("air-security-auditor", "air-code-reviewer")
 
+# Auto cache-TTL thresholds. 5m-TTL cache writes cost 1.25x base input vs 1h's 2x,
+# and the TTL refreshes on each read — so 5m gives the SAME hit rate, at ~17-22% lower
+# cost, as long as between-turn gaps stay < 5min. LIVE per-turn measurement (the
+# [turn] gap telemetry → analyze_cache_ttl.py) shows that's the norm, because a single
+# turn's generation is bounded by max_tokens (~2-4min), NOT by file count:
+#   3 files → max gap 1.9min · 7 files → 2.8min · 13 files → 37 turns, 0 gaps >5min,
+#   exact 5m-vs-1h = $3.87 vs $4.95 (5m saves $1.08 / 22%, zero misses).
+# So a heavy PR is NOT inherently miss-prone; the 1h fallback is a loose net for a
+# genuinely-huge PR (>=25 files / 250KB) where a pathological long thinking turn could
+# exceed 5min — and a miss only costs one extra prefix re-write (cents, NOT a gate
+# issue). The per-turn telemetry keeps watching real runs, so the cutoff can be tuned
+# data-driven if a real >5min gap ever shows up. Env override AIR_HEADLESS_CACHE_TTL ∈
+# {5m,1h,auto}; thresholds tunable via AIR_HEADLESS_TTL_FILES / _BYTES.
+_DEFAULT_TTL_FILES = 25
+_DEFAULT_TTL_BYTES = 250_000
+
+
+def _int_env(name: str, default: int) -> int:
+    """Tolerant int env read — a misconfigured value logs + falls back, never crashes."""
+    try:
+        return int(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        print(f"  [warn] {name}={os.environ.get(name)!r} is not an int — using {default}", file=sys.stderr)
+        return default
+
+
+def _choose_cache_ttl(n_files: int, diff_bytes: int) -> str:
+    """5m unless the PR is heavy. All three knobs are read at CALL time (tolerant of
+    bad input, monkeypatch-able in tests). `diff_bytes` is the RAW (pre-truncation)
+    diff size, so the byte arm is reachable on a big PR (the truncated diff never is)."""
+    override = os.environ.get("AIR_HEADLESS_CACHE_TTL", "auto").strip().lower()
+    if override in ("5m", "1h"):
+        return override
+    heavy = (n_files >= _int_env("AIR_HEADLESS_TTL_FILES", _DEFAULT_TTL_FILES)
+             or diff_bytes >= _int_env("AIR_HEADLESS_TTL_BYTES", _DEFAULT_TTL_BYTES))
+    return "1h" if heavy else "5m"
+
 
 def _blocker_lens_incomplete(agent: str, r) -> bool:
     """True if a blocker-class specialist did NOT complete — never ran, produced no
@@ -257,7 +294,7 @@ def _blocker_lens_incomplete(agent: str, r) -> bool:
     return r.get("stop") not in (None, "end_turn")
 
 
-def _log_usage_telemetry(rows, log=print):
+def _log_usage_telemetry(rows, log=print, write_mult=2.0):
     """Per-agent token + $ breakdown + an aggregate CACHE-READ RATIO. The single
     `cost≈$` line hid both per-agent cost AND the question this mode hinges on:
     is the 1h prompt cache yielding CROSS-agent reuse? Each specialist + the
@@ -279,7 +316,7 @@ def _log_usage_telemetry(rows, log=print):
             tot[k] += u[k]
         log(f"  [cost] {label:<16} {tier:<6} in={u['input_tokens']:>7} "
             f"out={u['output_tokens']:>6} cw={u['cache_creation_input_tokens']:>8} "
-            f"cr={u['cache_read_input_tokens']:>9}  ${agent_loop.usage_cost(u, tier):.2f}")
+            f"cr={u['cache_read_input_tokens']:>9}  ${agent_loop.usage_cost(u, tier, write_mult):.2f}")
     served = tot["cache_read_input_tokens"]
     base = served + tot["cache_creation_input_tokens"] + tot["input_tokens"]
     ratio = (100.0 * served / base) if base else 0.0
@@ -458,6 +495,12 @@ async def run_headless_review(args, bot_token: str) -> dict:
             diff = inter
     else:
         diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
+    # PR-weight signals from the RAW diff, BEFORE truncation — the cache-TTL
+    # heavy-detection (and the turn budget) must see the true size: a >120KB diff
+    # capped to _DIFF_CAP would otherwise never trip the byte arm (dead threshold),
+    # and a huge PR truncated to fewer `diff --git` markers would undercount files.
+    n_files = diff.count("\ndiff --git ") + (1 if diff.startswith("diff --git ") else 0)
+    raw_diff_bytes = len(diff.encode("utf-8", "replace"))
     diff_truncated = len(diff) > _DIFF_CAP
     if diff_truncated:
         diff = diff[:_DIFF_CAP] + f"\n[air: diff truncated at {_DIFF_CAP} chars — v1 guard]\n"
@@ -576,10 +619,13 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # 4-file PR starves a 30+-file one mid-investigation (the agent hits the cap
         # before emitting findings; the verifier then never sees them — observed in
         # A/B testing: two specialists hit a 45-turn cap and produced nothing).
-        n_files = diff.count("\ndiff --git ") + (1 if diff.startswith("diff --git ") else 0)
+        # n_files + raw_diff_bytes were computed on the RAW diff above (pre-truncation).
         turn_budget = int(os.environ.get("AIR_HEADLESS_MAX_TURNS")
                           or min(150, 45 + 3 * max(n_files, 1)))
         print(f"[headless] turn budget: {turn_budget} ({n_files} changed files)")
+        cache_ttl = _choose_cache_ttl(n_files, raw_diff_bytes)
+        write_mult = agent_loop.cache_write_mult(cache_ttl)
+        print(f"[headless] cache TTL: {cache_ttl} (cheaper 5m writes when gaps stay <5min; 1h for heavy PRs)")
 
         # UI/copy reviewer dispatch (P3) — the conditional 5th specialist, mirroring
         # review.py's gate: dispatch only when the diff touches a user-facing surface
@@ -637,7 +683,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
                 client, model=model, persona=persona, pr_context=pr_context,
                 task=_specialist_task(), sandbox=sandbox,
                 effort="high" if agent in BLOCKER_LENSES else "medium",
-                label=agent.replace("air-", ""), max_turns=turn_budget)
+                label=agent.replace("air-", ""), max_turns=turn_budget, cache_ttl=cache_ttl)
             r["agent"], r["tier"] = agent, tier
             return r
 
@@ -711,7 +757,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
             agent_loop.run_agent, client, **{
                 "model": vmodel, "persona": vpersona, "pr_context": pr_context,
                 "task": verifier_input, "sandbox": sandbox, "effort": "high", "label": "verifier",
-                "max_turns": turn_budget})
+                "max_turns": turn_budget, "cache_ttl": cache_ttl})
     finally:
         # Patterns were read during the specialist + verifier loops and aren't needed
         # past this point — remove the staged dir UNCONDITIONALLY (any exception in the
@@ -724,13 +770,13 @@ async def run_headless_review(args, bot_token: str) -> dict:
 
     # ---- DETERMINISTIC TAIL (reused verbatim) ----------------------------
     review_body, extracted = _extract_review_body(review_body_raw, head_sha)
-    cost = (agent_loop.usage_cost(vres["usage"], vtier)
-            + sum(agent_loop.usage_cost(r["usage"], r["tier"])
+    cost = (agent_loop.usage_cost(vres["usage"], vtier, write_mult)
+            + sum(agent_loop.usage_cost(r["usage"], r["tier"], write_mult)
                   for r in specialist_results.values() if r))
     _telemetry_rows = [(r.get("agent", "?").replace("air-", ""), r["tier"], r["usage"])
                        for r in specialist_results.values() if r]
     _telemetry_rows.append(("verifier", vtier, vres["usage"]))
-    _log_usage_telemetry(_telemetry_rows)
+    _log_usage_telemetry(_telemetry_rows, write_mult=write_mult)
     print(f"\n[headless] complete in {wall:.1f}s  cost≈${cost:.2f}  verifier_extracted={extracted}")
 
     if not extracted:
