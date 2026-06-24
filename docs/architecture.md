@@ -152,7 +152,7 @@ VorobiovD/air/
 ```
 PR opened (or air-machine requested as reviewer) → GitHub Action → managed/review.py
   │
-  ├── [1] Sync 6 specialist agents + air-coordinator (+ air-solo-reviewer on solo/both runs,
+  ├── [1] Sync 6 specialist agents + air-coordinator (+ air-solo-reviewer on solo runs,
   │       + air-coordinator-ma on AIR_MULTIAGENT=1 runs) (setup.py: find by name → create or PATCH)
   ├── [2] Fetch PR metadata + diff from GitHub API (via AIR_BOT_TOKEN on the runner)
   ├── [3] Build PR Context block (Python)
@@ -187,7 +187,7 @@ PR opened (or air-machine requested as reviewer) → GitHub Action → managed/r
 
 The Python driver does upstream prep (fetch PR data, state gates, build context, optionally run codex), then hands off to a single **`air-coordinator` session** that dispatches the specialists in parallel + verifier as `callable_agents` sub-agents within one Anthropic session — mirroring the local CLI's Claude Code orchestrator. This replaced v1.7's client-side `asyncio.gather` over 5 separate sessions once Anthropic granted research-preview access for `callable_agents` on 2026-04-25 (beta header `managed-agents-2026-04-01-research-preview`).
 
-**Review-architecture axis (`AIR_REVIEW_MODE` / `review_mode` input / `review.py --mode`):** `full` (default) runs the coordinator above; `solo` replaces step [5] with ONE `air-solo-reviewer` session (its system prompt assembled at sync from the 6 specialist `.md` files — `solo_prompt.py:assemble_solo_prompt()` (imported by setup.py), zero-drift, no standalone file; the agent is created only when a run uses solo/both), which applies all lenses + self-verifies + folds Codex in one pass (~$2–4 / ~7 min vs ~$10 / ~25 min on repo-A #994); `both` runs the coordinator AND the solo session **concurrently** (wall-clock ≈ the slower of the two — keeps it inside the GHA cap; a solo failure can't take down the gating coordinator review), with the coordinator review gating + driving the verdict/learn and the solo review posted alongside as a non-gating `## Code Review (solo — experimental)` comment for comparison. Solo posts the same `APPROVE`/`REQUEST_CHANGES` verdict as full (it can gate/approve), but is **not gate-safe** — it downgrades blocker severity, so that verdict isn't a trustworthy hard gate; enable only where a single agent's verdict is acceptable. Default is `full`. The `both` mode is managed-only; the CLI has its own `--solo` (v1.31.0, `commands/review-solo.md`) — the SAME assembled prompt run as ONE Fable agent via the user's Claude Code subscription ($0 API spend), advisory by default (`--solo --gate` opts into gating). `air-solo-reviewer` is not pinnable. The required-agents gate is conditional on the mode (full-only repos never require the solo agent).
+**Review-architecture axis (`AIR_REVIEW_MODE` / `review_mode` input / `review.py --mode`):** `full` (default) runs the coordinator above; `solo` replaces step [5] with ONE `air-solo-reviewer` session (its system prompt assembled at sync from the 6 specialist `.md` files — `solo_prompt.py:assemble_solo_prompt()` (imported by setup.py), zero-drift, no standalone file; the agent is created only when a run uses solo), which applies all lenses + self-verifies + folds Codex in one pass (~$2–4 / ~7 min vs ~$10 / ~25 min on repo-A #994). Solo posts the same `APPROVE`/`REQUEST_CHANGES` verdict as full (it can gate/approve), but is **not gate-safe** — it downgrades blocker severity, so that verdict isn't a trustworthy hard gate; enable only where a single agent's verdict is acceptable. Default is `full`. `messages-api` self-hosts the agent loop client-side on the raw Messages API with no coordinator session (now the fleet default — see CLAUDE.md → "`messages-api` (headless) review mode"). The CLI has its own `--solo` (v1.31.0, `commands/review-solo.md`) — the SAME assembled prompt run as ONE Fable agent via the user's Claude Code subscription ($0 API spend), advisory by default (`--solo --gate` opts into gating). `air-solo-reviewer` is not pinnable. The required-agents gate is conditional on the mode (full-only repos never require the solo agent).
 
 ---
 
@@ -300,7 +300,7 @@ Managed-only: the CLI has no store render, so a CLI-only store repo sees a stale
 | air-ui-copy-reviewer | Sonnet | read, grep, glob | UI/business-audience copy + static UX/a11y (user-facing diffs) |
 | air-review-verifier | Sonnet | read, grep, glob, bash | False-positive filtering + confidence scoring |
 | air-coordinator | Sonnet | bash, read, grep, glob | Managed-mode delegator — fans the specialists out as callable_agents, then verifier, assembles + posts |
-| air-solo-reviewer | Opus (fast) | read, grep, glob, bash | All 6 lenses + self-verify in one session (created only on solo/both) |
+| air-solo-reviewer | Opus (fast) | read, grep, glob, bash | All 6 lenses + self-verify in one session (created only on solo) |
 | air-learner | Sonnet | all (agent_toolset) | Wiki maintenance |
 | air-test | Sonnet | all (agent_toolset) | Quick 9-test verification |
 
