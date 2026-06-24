@@ -103,7 +103,9 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
     usage: dict = {}
     tool_calls = 0
     t0 = time.monotonic()
-    t_prev = t0  # start of the previous turn — gap to this turn drives 5m-TTL expiry analysis
+    t_prev = t0  # end of the previous turn (run start for turn 1); the per-turn gap below
+                 # thus overestimates by ~the current API-call duration — conservative for
+                 # 5m-TTL miss analysis (flags more potential misses than reality, never fewer)
     final_text = ""
     stop = "max_turns"
     turn_cap = max_turns or MAX_TURNS  # caller scales it by PR size; MAX_TURNS is the floor/default
@@ -169,8 +171,14 @@ _PRICES = {
 }
 
 
+def price_for_tier(tier: str) -> tuple:
+    """(input, output) $/MTok for a model tier — public so cost tools (analyze_cache_ttl)
+    don't reach into the private _PRICES dict."""
+    return _PRICES.get(tier, _PRICES["sonnet"])
+
+
 def usage_cost(usage: dict, tier: str, write_mult: float = 2.0) -> float:
-    pin, pout = _PRICES.get(tier, _PRICES["sonnet"])
+    pin, pout = price_for_tier(tier)
     it = usage.get("input_tokens", 0) or 0
     ot = usage.get("output_tokens", 0) or 0
     cw = usage.get("cache_creation_input_tokens", 0) or 0

@@ -30,6 +30,9 @@ _TURN = re.compile(
     r"\[turn\]\s+(\S+)\s+t=(\d+)\s+tc=(\d+)\s+gap=([\d.]+)s\s+"
     r"in=(\d+)\s+out=(\d+)\s+cw=(\d+)\s+cr=(\d+)")
 _TTL = re.compile(r"cache TTL:\s+(\w+)")
+# per-agent cost line carries the ACTUAL tier used: `[cost] <label> <tier> in=…`
+# (the `[cost] TOTAL in=…` aggregate has no tier between the label and `in=`, so it's skipped)
+_COST = re.compile(r"\[cost\]\s+(\S+)\s+(haiku|sonnet|opus)\s+in=")
 _COMPLETE = re.compile(r"\[headless\] complete in ([\d.]+)s")
 _HAIKU_LABELS = {"git-history-reviewer"}   # the only Haiku-tier lens; rest are Sonnet
 _EXPIRY_S = 300.0
@@ -37,29 +40,36 @@ _FIVE_MIN_MULT = agent_loop.cache_write_mult("5m")   # 1.25
 _ONE_HR_MULT = agent_loop.cache_write_mult("1h")     # 2.0
 
 
-def _tier(label: str) -> str:
-    return "haiku" if label in _HAIKU_LABELS else "sonnet"
+def _tier(label: str, tier_map: dict) -> str:
+    # Prefer the tier the run ITSELF reported (the [cost] lines), so pricing stays
+    # correct when code-reviewer/security-auditor revert from the temporary Sonnet
+    # tier (#169) back to Opus. Fall back to the label snapshot for partial logs.
+    return tier_map.get(label) or ("haiku" if label in _HAIKU_LABELS else "sonnet")
 
 
 def analyze(path: str) -> dict | None:
-    turns, ttl, wall = [], "?", None
-    for line in open(path, errors="replace"):
-        m = _TURN.search(line)
-        if m:
-            turns.append((m.group(1), float(m.group(4)),
-                          int(m.group(5)), int(m.group(6)), int(m.group(7)), int(m.group(8))))
-        t = _TTL.search(line)
-        if t:
-            ttl = t.group(1)
-        c = _COMPLETE.search(line)
-        if c:
-            wall = float(c.group(1))
+    turns, ttl, wall, tier_map = [], "?", None, {}
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            m = _TURN.search(line)
+            if m:
+                turns.append((m.group(1), float(m.group(4)),
+                              int(m.group(5)), int(m.group(6)), int(m.group(7)), int(m.group(8))))
+            cst = _COST.search(line)
+            if cst:
+                tier_map[cst.group(1)] = cst.group(2)   # label -> actual tier this run used
+            t = _TTL.search(line)
+            if t:
+                ttl = t.group(1)
+            c = _COMPLETE.search(line)
+            if c:
+                wall = float(c.group(1))
     if not turns:
         return None
     c1h = c5m = 0.0
     cr_total = cr_miss = miss_turns = 0
     for label, gap, inp, out, cw, cr in turns:
-        pin, pout = agent_loop._PRICES.get(_tier(label), agent_loop._PRICES["sonnet"])
+        pin, pout = agent_loop.price_for_tier(_tier(label, tier_map))
         base = (inp * pin + out * pout) / 1e6
         c1h += base + (cw * pin * _ONE_HR_MULT + cr * pin * 0.1) / 1e6
         miss = gap > _EXPIRY_S and cr > 0          # 5m would have expired → re-write the read

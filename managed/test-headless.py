@@ -332,6 +332,7 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
         monkeypatch.setattr(headless.shutil, "which", lambda name: None)  # no codex binary
 
     def fake_run_agent(client, **kw):
+        calls.setdefault("efforts", {})[kw.get("label", "")] = kw.get("effort")
         if kw.get("label") == "verifier":
             calls["verifier_task"] = kw.get("task", "")
             body = f"## Code Review\n\nClean.\n\nNo blockers.\n\nReviewed at: {head}\n"
@@ -566,15 +567,34 @@ def test_usage_telemetry_guards_none_token_fields():
 # ---- auto cache-TTL selection + write-multiplier pricing ----
 
 def test_choose_cache_ttl_auto_and_override(monkeypatch):
-    monkeypatch.delenv("AIR_HEADLESS_CACHE_TTL", raising=False)
-    small = "diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n"
-    assert headless._choose_cache_ttl(3, small) == "5m"        # small PR → cheap 5m
-    assert headless._choose_cache_ttl(25, small) == "1h"       # many files → safe 1h
-    assert headless._choose_cache_ttl(2, "x" * 300000) == "1h"  # big diff → 1h
+    for v in ("AIR_HEADLESS_CACHE_TTL", "AIR_HEADLESS_TTL_FILES", "AIR_HEADLESS_TTL_BYTES"):
+        monkeypatch.delenv(v, raising=False)
+    # signature is (n_files, RAW diff bytes) — defaults 25 files / 250KB
+    assert headless._choose_cache_ttl(3, 5_000) == "5m"        # small PR → cheap 5m
+    assert headless._choose_cache_ttl(24, 5_000) == "5m"       # just under the file cutoff
+    assert headless._choose_cache_ttl(25, 5_000) == "1h"       # file cutoff → safe 1h
+    assert headless._choose_cache_ttl(2, 300_000) == "1h"      # big raw diff → 1h (byte arm reachable)
     monkeypatch.setenv("AIR_HEADLESS_CACHE_TTL", "1h")
-    assert headless._choose_cache_ttl(2, small) == "1h"        # override forces 1h
+    assert headless._choose_cache_ttl(2, 5_000) == "1h"        # override forces 1h
     monkeypatch.setenv("AIR_HEADLESS_CACHE_TTL", "5m")
-    assert headless._choose_cache_ttl(50, "x" * 999999) == "5m"  # override beats heavy
+    assert headless._choose_cache_ttl(50, 999_999) == "5m"     # override beats heavy
+    # thresholds are read at CALL time (not module load) → monkeypatch-able + bad-input-safe
+    monkeypatch.delenv("AIR_HEADLESS_CACHE_TTL", raising=False)
+    monkeypatch.setenv("AIR_HEADLESS_TTL_FILES", "5")
+    assert headless._choose_cache_ttl(6, 1_000) == "1h"        # tuned-down cutoff applies live
+    monkeypatch.setenv("AIR_HEADLESS_TTL_FILES", "oops")       # bad value → default (25), no crash
+    assert headless._choose_cache_ttl(6, 1_000) == "5m"
+
+
+def test_advisory_lenses_use_medium_effort(tmp_path, monkeypatch):
+    # The effort split (blocker lenses high, advisory medium) is load-bearing for cost.
+    # Assert the ACTUAL effort passed to run_agent per specialist (via the harness), so a
+    # refactor can't silently collapse it to a uniform value.
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[])  # fresh → all 4 core + verifier
+    eff = calls["efforts"]
+    assert eff["code-reviewer"] == "high" and eff["security-auditor"] == "high"   # blocker lenses
+    assert eff["simplify"] == "medium" and eff["git-history-reviewer"] == "medium"  # advisory
+    assert eff["verifier"] == "high"
 
 
 def test_usage_cost_write_mult():
