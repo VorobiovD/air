@@ -250,6 +250,33 @@ def _blocker_lens_incomplete(agent: str, r) -> bool:
     return r.get("stop") not in (None, "end_turn")
 
 
+def _log_usage_telemetry(rows, log=print):
+    """Per-agent token + $ breakdown + an aggregate CACHE-READ RATIO. The single
+    `cost≈$` line hid both per-agent cost AND the question this mode hinges on:
+    is the 1h prompt cache yielding CROSS-agent reuse? Each specialist + the
+    verifier is a separate self-hosted loop over the SAME large PR context; if the
+    shared prefix is cached once and reused, cache_read dominates and cache_write
+    is paid once. A cache-read ratio near 0 (cache_write ≫ cache_read) means each
+    agent is paying a full write for identical context — the lever to fix. rows =
+    [(label, tier, usage_dict)]. Anthropic agents only (codex is OpenAI, separate).
+    """
+    keys = ("input_tokens", "output_tokens",
+            "cache_creation_input_tokens", "cache_read_input_tokens")
+    tot = dict.fromkeys(keys, 0)
+    for label, tier, usage in rows:
+        for k in keys:
+            tot[k] += usage.get(k, 0) or 0
+        log(f"  [cost] {label:<16} {tier:<6} in={usage.get('input_tokens',0):>7} "
+            f"out={usage.get('output_tokens',0):>6} cw={usage.get('cache_creation_input_tokens',0):>8} "
+            f"cr={usage.get('cache_read_input_tokens',0):>9}  ${agent_loop.usage_cost(usage, tier):.2f}")
+    served = tot["cache_read_input_tokens"]
+    base = served + tot["cache_creation_input_tokens"] + tot["input_tokens"]
+    ratio = (100.0 * served / base) if base else 0.0
+    log(f"  [cost] TOTAL in={tot['input_tokens']} out={tot['output_tokens']} "
+        f"cw={tot['cache_creation_input_tokens']} cr={tot['cache_read_input_tokens']} "
+        f"— cache-read {ratio:.0f}% of input tokens (low ⇒ per-agent context re-write)")
+
+
 async def run_headless_review(args, bot_token: str) -> dict:
     api_key = os.environ["ANTHROPIC_API_KEY"]
     checkout = os.environ.get("AIR_TARGET_REPO") or os.getcwd()
@@ -633,6 +660,10 @@ async def run_headless_review(args, bot_token: str) -> dict:
     cost = (agent_loop.usage_cost(vres["usage"], vtier)
             + sum(agent_loop.usage_cost(r["usage"], r["tier"])
                   for r in specialist_results.values() if r))
+    _telemetry_rows = [(r.get("agent", "?").replace("air-", ""), r["tier"], r["usage"])
+                       for r in specialist_results.values() if r]
+    _telemetry_rows.append(("verifier", vtier, vres["usage"]))
+    _log_usage_telemetry(_telemetry_rows)
     print(f"\n[headless] complete in {wall:.1f}s  cost≈${cost:.2f}  verifier_extracted={extracted}")
 
     if not extracted:
