@@ -262,11 +262,17 @@ def _log_usage_telemetry(rows, log=print):
     """
     tot = dict.fromkeys(agent_loop._USAGE_KEYS, 0)
     for label, tier, usage in rows:
+        # Guard every value with `or 0`: the SDK can report a token field as None
+        # (not absent), and `f"{None:>7}"` raises TypeError under an alignment spec —
+        # which would crash the telemetry before the `complete` line prints. (The
+        # accumulated dict is already None-guarded upstream, but the display must not
+        # assume that of an arbitrary caller.)
+        u = {k: (usage.get(k, 0) or 0) for k in agent_loop._USAGE_KEYS}
         for k in agent_loop._USAGE_KEYS:
-            tot[k] += usage.get(k, 0) or 0
-        log(f"  [cost] {label:<16} {tier:<6} in={usage.get('input_tokens',0):>7} "
-            f"out={usage.get('output_tokens',0):>6} cw={usage.get('cache_creation_input_tokens',0):>8} "
-            f"cr={usage.get('cache_read_input_tokens',0):>9}  ${agent_loop.usage_cost(usage, tier):.2f}")
+            tot[k] += u[k]
+        log(f"  [cost] {label:<16} {tier:<6} in={u['input_tokens']:>7} "
+            f"out={u['output_tokens']:>6} cw={u['cache_creation_input_tokens']:>8} "
+            f"cr={u['cache_read_input_tokens']:>9}  ${agent_loop.usage_cost(u, tier):.2f}")
     served = tot["cache_read_input_tokens"]
     base = served + tot["cache_creation_input_tokens"] + tot["input_tokens"]
     ratio = (100.0 * served / base) if base else 0.0
@@ -283,12 +289,6 @@ async def run_headless_review(args, bot_token: str) -> dict:
     client = anthropic.Anthropic(api_key=api_key, max_retries=6)
     sandbox = Sandbox(checkout)
     floor = os.environ.get("AIR_CATEGORY_FLOOR", "1").strip().lower() not in ("0", "false", "no")
-    # EXPERIMENTAL (default off): lead each agent's prompt with the IDENTICAL PR
-    # context as a shared cacheable prefix so specialists 2..N + the verifier read
-    # it at 0.1x instead of each re-writing it (cache_write is ~52% of run cost).
-    # Moves the untrusted diff into the system block (guarded) — measured + injection-
-    # probed before any default flip. Applies to every self-hosted loop this run.
-    shared_cache = os.environ.get("AIR_HEADLESS_SHARED_CACHE", "").strip().lower() in ("1", "true", "yes")
 
     # ---- PREP (reused helpers) -------------------------------------------
     print(f"[headless] fetching PR #{args.pr_number} on {args.repo} …")
@@ -583,8 +583,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
                 client, model=model, persona=persona, pr_context=pr_context,
                 task=_specialist_task(), sandbox=sandbox,
                 effort="high" if agent in BLOCKER_LENSES else "medium",
-                label=agent.replace("air-", ""), max_turns=turn_budget,
-                shared_context=shared_cache)
+                label=agent.replace("air-", ""), max_turns=turn_budget)
             r["agent"], r["tier"] = agent, tier
             return r
 
@@ -658,7 +657,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
             agent_loop.run_agent, client, **{
                 "model": vmodel, "persona": vpersona, "pr_context": pr_context,
                 "task": verifier_input, "sandbox": sandbox, "effort": "high", "label": "verifier",
-                "max_turns": turn_budget, "shared_context": shared_cache})
+                "max_turns": turn_budget})
     finally:
         # Patterns were read during the specialist + verifier loops and aren't needed
         # past this point — remove the staged dir UNCONDITIONALLY (any exception in the
