@@ -180,12 +180,6 @@ def test_required_agents_solo_never_needs_ma(monkeypatch):
     assert review._required_agents("solo") == [review.SOLO_AGENT]
 
 
-def test_required_agents_both_with_flag(monkeypatch):
-    monkeypatch.setenv("AIR_MULTIAGENT", "1")
-    req = review._required_agents("both")
-    assert review.SOLO_AGENT in req and review.COORDINATOR_MA_AGENT in req
-
-
 # ---------------------------------------------------------------------------
 # TURN-0 heredoc sentinel — the injection guard
 # ---------------------------------------------------------------------------
@@ -556,13 +550,15 @@ _SPECIALIST = (
 )
 
 
-def test_direct_post_flag_off_by_default(monkeypatch):
+def test_direct_post_flag_on_by_default(monkeypatch):
+    # Default ON for managed MA full; "" (the value the workflow passes for an
+    # unset caller var) also resolves to ON under the kill-switch grammar.
     monkeypatch.delenv("AIR_POST_VERIFIER_BODY", raising=False)
-    assert review._post_verifier_body_enabled() is False
-    for v in ("1", "true", "YES"):
+    assert review._post_verifier_body_enabled() is True
+    for v in ("1", "true", "YES", ""):
         monkeypatch.setenv("AIR_POST_VERIFIER_BODY", v)
         assert review._post_verifier_body_enabled() is True
-    for v in ("0", "false", ""):
+    for v in ("0", "false", "no"):
         monkeypatch.setenv("AIR_POST_VERIFIER_BODY", v)
         assert review._post_verifier_body_enabled() is False
 

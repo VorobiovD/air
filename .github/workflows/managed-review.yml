@@ -158,9 +158,7 @@ on:
           Review architecture (opt-in): 'full' (default — the 6-agent
           coordinator), 'solo' (one merged-lens agent — ~70% cheaper/faster
           but NOT gate-safe: it can downgrade a blocker's severity, so use
-          only where an advisory review is acceptable), 'both' (run both;
-          the full review gates as usual and the solo review posts alongside,
-          labeled and non-blocking, for comparison), or 'messages-api'
+          only where an advisory review is acceptable), or 'messages-api'
           (EXPERIMENTAL — air self-hosts the agent loop client-side instead of
           a managed session, eliminating the runtime's between-turn scheduling
           stall; supports fresh + same-PR re-review + the learn-counter
@@ -168,8 +166,8 @@ on:
           'full' is byte-identical to today. Set
           per-request via workflow_dispatch, or persistently by setting a
           repo/org VARIABLE `AIR_REVIEW_MODE` on the CALLER repo (it wins over
-          this input — handy for running 'both' or 'messages-api' over a
-          data-collection window with no workflow edit; delete it to revert).
+          this input — handy for running 'messages-api' over a
+          window with no workflow edit; delete it to revert).
         required: false
         type: string
         default: 'full'
@@ -466,8 +464,8 @@ jobs:
           AIR_EXPECTED_REVIEWER: ${{ inputs.expected_reviewer }}
           # Resolved from a caller repo/org VARIABLE first, then the input,
           # then 'full'. `vars` in a reusable workflow reads the CALLER's
-          # repo+org variables, so a caller sets AIR_REVIEW_MODE=both to run
-          # the comparison fleet-lessly (no workflow edit) and deletes it to
+          # repo+org variables, so a caller sets AIR_REVIEW_MODE=messages-api
+          # (no workflow edit) and deletes it to
           # revert. The variable wins because callers commonly pass a literal
           # `review_mode: ${{ inputs.review_mode || 'full' }}`, which would
           # otherwise pin the input to 'full' on review_requested events. An
@@ -505,9 +503,10 @@ jobs:
           AIR_CATEGORY_FLOOR: ${{ vars.AIR_CATEGORY_FLOOR }}
           # Direct-post: post the verifier's body verbatim instead of the
           # coordinator's relay (bypasses the relay-drop failure mode for any
-          # coordinator model). Default OFF; set a caller repo/org VARIABLE
-          # AIR_POST_VERIFIER_BODY=1 to opt a repo in. Safe-by-construction —
-          # falls back to the coordinator relay on any ambiguity.
+          # coordinator model). Default ON for MA full; set a caller repo/org
+          # VARIABLE AIR_POST_VERIFIER_BODY=0 to opt OUT. An unset var passes ""
+          # through, which review.py reads as ON. Safe-by-construction — falls
+          # back to the coordinator relay on any ambiguity.
           AIR_POST_VERIFIER_BODY: ${{ vars.AIR_POST_VERIFIER_BODY }}
           # Absolute path to the local checkout. review.py uses it for
           # both `codex review` (when enabled) and client-side

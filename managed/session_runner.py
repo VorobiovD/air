@@ -405,10 +405,10 @@ async def run_session(
     dict — branch name for open PRs, commit SHA for closed/merged PRs) plus
     the pattern source: the repo's memory store (read-only, /mnt/memory/)
     when `store_id` is set, otherwise the legacy wiki git mount at
-    /workspace/wiki. `file_resources` carries the file-handoff mounts
-    (PR context / diff / verifier task under /workspace/context/) built
-    by _upload_handoff_files. Auth tokens go in the resource config (API
-    request body), never in the session transcript or agent message text.
+    /workspace/wiki. `file_resources` is an optional list of extra session
+    resources to mount (generic hook; callers pass None today). Auth tokens
+    go in the resource config (API request body), never in the session
+    transcript or agent message text.
     The wiki resource mounts empty if the repo has no wiki (Managed Agents
     treats a 404 on push-only wikis as an empty mount).
     """

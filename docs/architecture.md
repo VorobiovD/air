@@ -158,14 +158,9 @@ PR opened (or air-machine requested as reviewer) → GitHub Action → managed/r
   ├── [3] Build PR Context block (Python)
   ├── [4] Optional codex pass (Pattern B, GHA-side sequential): `codex review --base <sha>`
   │       output html-escaped + length-capped (prompt-injection blast radius), bundled into
-  │       verifier-task.md (file-handoff) or the coordinator user message (inline fallback)
+  │       the coordinator user message (inline) or /workspace/context/ (workspace-handoff)
   │
-  ├── [4.5] File-handoff upload (v1.18.0, EXPERIMENTAL — AIR_FILE_HANDOFF=1, off by default;
-  │       DEAD END, do not flip): Files-API mounts don't materialize on the current runtime
-  │       at all (probe 3, 2026-06-11 — not in sub-threads, not in the primary). Superseded
-  │       by the multiagent workspace-handoff below; ignored when AIR_MULTIAGENT is set.
-  │
-  ├── [4.6] Multiagent workspace-handoff (EXPERIMENTAL — AIR_MULTIAGENT=1, off by default):
+  ├── [4.5] Multiagent workspace-handoff (EXPERIMENTAL — AIR_MULTIAGENT=1, off by default):
   │       step [5] runs through air-coordinator-ma (GA `multiagent` roster — sub-agent
   │       threads SHARE /workspace, unlike callable_agents). MODE: WORKSPACE-HANDOFF adds a
   │       TURN 0: one bash call writes pr-context/pr.diff/verifier-task to /workspace/context/
