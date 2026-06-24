@@ -547,3 +547,17 @@ def test_usage_telemetry_handles_zero_and_empty():
     lines = []
     headless._log_usage_telemetry([("x", "haiku", {})], log=lines.append)
     assert any("cache-read 0%" in l for l in lines)
+
+
+def test_usage_telemetry_guards_none_token_fields():
+    # The SDK can report a token field as None (present, not absent); a bare
+    # f"{None:>7}" raises TypeError under an alignment spec and would crash the
+    # telemetry before the complete line. Guard with `or 0`.
+    lines = []
+    headless._log_usage_telemetry(
+        [("x", "sonnet", {"input_tokens": None, "output_tokens": 5,
+                          "cache_creation_input_tokens": None,
+                          "cache_read_input_tokens": 90})],
+        log=lines.append)
+    assert any("[cost] x" in l for l in lines)            # row printed, no TypeError
+    assert any("cache-read" in l for l in lines)          # aggregate printed

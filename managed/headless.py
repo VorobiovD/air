@@ -260,21 +260,27 @@ def _log_usage_telemetry(rows, log=print):
     agent is paying a full write for identical context — the lever to fix. rows =
     [(label, tier, usage_dict)]. Anthropic agents only (codex is OpenAI, separate).
     """
-    keys = ("input_tokens", "output_tokens",
-            "cache_creation_input_tokens", "cache_read_input_tokens")
-    tot = dict.fromkeys(keys, 0)
+    tot = dict.fromkeys(agent_loop._USAGE_KEYS, 0)
     for label, tier, usage in rows:
-        for k in keys:
-            tot[k] += usage.get(k, 0) or 0
-        log(f"  [cost] {label:<16} {tier:<6} in={usage.get('input_tokens',0):>7} "
-            f"out={usage.get('output_tokens',0):>6} cw={usage.get('cache_creation_input_tokens',0):>8} "
-            f"cr={usage.get('cache_read_input_tokens',0):>9}  ${agent_loop.usage_cost(usage, tier):.2f}")
+        # Guard every value with `or 0`: the SDK can report a token field as None
+        # (not absent), and `f"{None:>7}"` raises TypeError under an alignment spec —
+        # which would crash the telemetry before the `complete` line prints. (The
+        # accumulated dict is already None-guarded upstream, but the display must not
+        # assume that of an arbitrary caller.)
+        u = {k: (usage.get(k, 0) or 0) for k in agent_loop._USAGE_KEYS}
+        for k in agent_loop._USAGE_KEYS:
+            tot[k] += u[k]
+        log(f"  [cost] {label:<16} {tier:<6} in={u['input_tokens']:>7} "
+            f"out={u['output_tokens']:>6} cw={u['cache_creation_input_tokens']:>8} "
+            f"cr={u['cache_read_input_tokens']:>9}  ${agent_loop.usage_cost(u, tier):.2f}")
     served = tot["cache_read_input_tokens"]
     base = served + tot["cache_creation_input_tokens"] + tot["input_tokens"]
     ratio = (100.0 * served / base) if base else 0.0
+    # ratio = cache_read / (cache_read + cache_write + raw input) — the share of ALL
+    # prompt-input tokens served from cache. Low ⇒ each agent re-writes identical context.
     log(f"  [cost] TOTAL in={tot['input_tokens']} out={tot['output_tokens']} "
         f"cw={tot['cache_creation_input_tokens']} cr={tot['cache_read_input_tokens']} "
-        f"— cache-read {ratio:.0f}% of input tokens (low ⇒ per-agent context re-write)")
+        f"— cache-read {ratio:.0f}% of total prompt tokens (low ⇒ per-agent context re-write)")
 
 
 async def run_headless_review(args, bot_token: str) -> dict:
@@ -567,9 +573,16 @@ async def run_headless_review(args, bot_token: str) -> dict:
 
         def _run_specialist(agent: str):
             persona, model, tier = _persona_model(agent)
+            # Blocker lenses (code-reviewer, security-auditor) feed the gate → keep
+            # full effort. Advisory lenses (simplify, ui-copy, git-history) reach the
+            # verdict only through the verifier → medium effort trims their spend with
+            # no gate impact (Haiku ignores effort anyway). max_turns unchanged — a
+            # tighter cap risks truncating an advisory lens for no critical-path win
+            # (they finish well under the slowest-blocker floor).
             r = agent_loop.run_agent(
                 client, model=model, persona=persona, pr_context=pr_context,
-                task=_specialist_task(), sandbox=sandbox, effort="high",
+                task=_specialist_task(), sandbox=sandbox,
+                effort="high" if agent in BLOCKER_LENSES else "medium",
                 label=agent.replace("air-", ""), max_turns=turn_budget)
             r["agent"], r["tier"] = agent, tier
             return r
