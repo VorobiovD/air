@@ -547,3 +547,49 @@ def test_usage_telemetry_handles_zero_and_empty():
     lines = []
     headless._log_usage_telemetry([("x", "haiku", {})], log=lines.append)
     assert any("cache-read 0%" in l for l in lines)
+
+
+# ---- cache reorder (shared_context) layout + safety ----
+
+def test_shared_context_cache_layout(monkeypatch):
+    al = headless.agent_loop
+    cap = {}
+
+    class _U:  # usage stub
+        input_tokens = output_tokens = cache_creation_input_tokens = cache_read_input_tokens = 0
+
+    class _Msg:
+        content = []
+        stop_reason = "end_turn"
+        usage = _U()
+
+    class _Stream:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get_final_message(self): return _Msg()
+
+    class _Client:
+        class messages:
+            @staticmethod
+            def stream(**kw):
+                cap.clear(); cap.update(kw); return _Stream()
+
+    # shared_context=True: [guard, pr_context(cached), persona, tool_guard] in system,
+    # task alone in the user message. The untrusted PR context is guarded + the
+    # divergent persona is AFTER the cache breakpoint (so the prefix is shared).
+    al.run_agent(_Client(), model="claude-sonnet-4-6", persona="PERSONA_X",
+                 pr_context="PRCTX", task="TASK", sandbox=object(),
+                 label="t", max_turns=1, shared_context=True)
+    sysb = cap["system"]
+    assert sysb[0]["text"] == al._SHARED_CONTEXT_GUARD          # untrusted-data guard leads
+    assert sysb[1]["text"] == "PRCTX" and "cache_control" in sysb[1]   # shared cached prefix
+    assert sysb[2]["text"] == "PERSONA_X" and "cache_control" not in sysb[2]  # divergent, after bp
+    assert "PRCTX" not in [b.get("text") for b in cap["messages"][0]["content"]]  # not duplicated
+    assert cap["messages"][0]["content"][0]["text"] == "TASK"
+
+    # default (shared_context=False): persona leads system (cached), pr_context in user msg.
+    al.run_agent(_Client(), model="claude-sonnet-4-6", persona="PERSONA_X",
+                 pr_context="PRCTX", task="TASK", sandbox=object(),
+                 label="t", max_turns=1, shared_context=False)
+    assert cap["system"][0]["text"] == "PERSONA_X" and "cache_control" in cap["system"][0]
+    assert cap["messages"][0]["content"][0]["text"] == "PRCTX"
