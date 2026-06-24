@@ -239,11 +239,16 @@ BLOCKER_LENSES = ("air-security-auditor", "air-code-reviewer")
 
 # Auto cache-TTL thresholds. 5m-TTL cache writes cost 1.25x base input vs 1h's 2x,
 # and the TTL refreshes on each read — so 5m gives the SAME hit rate as long as
-# between-turn gaps stay < 5min (measured max ~2.8min on a 7-file PR). A heavy PR
-# risks a > 5min generation stall mid-agent (which would expire 5m and force a
-# re-write), so it gets 1h. Tunable; env override AIR_HEADLESS_CACHE_TTL ∈ {5m,1h,auto}.
-_HEAVY_TTL_FILES = int(os.environ.get("AIR_HEADLESS_TTL_FILES", "20"))
-_HEAVY_TTL_BYTES = int(os.environ.get("AIR_HEADLESS_TTL_BYTES", "150000"))
+# between-turn gaps stay < 5min, at ~17% lower cost (measured: a 3-file PR held a 91%
+# cache-read ratio on 5m, saving ~$0.59/run). Calibration of the heavy cutoff (live):
+#   3 files → max gap 1.9min · 7 files → 2.8min (both safe on 5m, 91% ratio)
+#   13 files → cache-read ratio fell to 81% + cw ~1.7x — 5m starts expiring (long turns)
+# so >= 10 files / 80KB switches to 1h, keeping a margin below the 13-file fall-off.
+# A 5m miss only costs one extra prefix re-write on one agent (cents, NOT a gate issue),
+# so the cutoff favors the common small-PR win. Env override AIR_HEADLESS_CACHE_TTL ∈
+# {5m,1h,auto}; thresholds tunable via AIR_HEADLESS_TTL_FILES / _BYTES.
+_HEAVY_TTL_FILES = int(os.environ.get("AIR_HEADLESS_TTL_FILES", "10"))
+_HEAVY_TTL_BYTES = int(os.environ.get("AIR_HEADLESS_TTL_BYTES", "80000"))
 
 
 def _choose_cache_ttl(n_files: int, diff: str) -> str:
