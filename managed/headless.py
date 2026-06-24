@@ -79,9 +79,15 @@ AGENTS_DIR = _LIB.parent / "agents"
 SPECIALISTS = ["air-code-reviewer", "air-simplify", "air-security-auditor", "air-git-history-reviewer"]
 UI_SPECIALIST = "air-ui-copy-reviewer"
 VERIFIER = "air-review-verifier"
-_DIFF_CAP = int(os.environ.get("AIR_HEADLESS_DIFF_CAP", "120000"))  # chars; v1 guard
-                             # (managed has apply_diff_hygiene — a follow-up). Tunable so a
-                             # big-PR run can match the diff the managed coordinator saw.
+_DIFF_CAP = int(os.environ.get("AIR_HEADLESS_DIFF_CAP", "500000"))  # chars — managed parity
+                             # (= managed's AIR_DIFF_MAX_BYTES). The diff is already
+                             # apply_diff_hygiene'd (generated/vendored stubbed) before this
+                             # cap, so this only bounds real-code diffs. The old 120K "v1
+                             # guard" systematically truncated real staging→main promotes
+                             # (2000+ lines) → spurious fail-closed REQUEST_CHANGES; raising
+                             # to managed's 500K fixes the gate at ~no cost change (validated
+                             # 2026-06-24: qai-be #1243 2455L flipped RC→APPROVE, $7.56→$7.05).
+                             # Truncation + fail-close stays as the backstop for >500K diffs.
 _TIERS = frozenset(MODEL_ALIASES)   # known model-alias tiers; unknown → "sonnet"
 
 # ---- learned-pattern staging (P1 context parity) ------------------------
