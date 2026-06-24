@@ -103,6 +103,7 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
     usage: dict = {}
     tool_calls = 0
     t0 = time.monotonic()
+    t_prev = t0  # start of the previous turn — gap to this turn drives 5m-TTL expiry analysis
     final_text = ""
     stop = "max_turns"
     turn_cap = max_turns or MAX_TURNS  # caller scales it by PR size; MAX_TURNS is the floor/default
@@ -115,6 +116,19 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
         text_now = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")
         if text_now:
             final_text = text_now  # the last text block is the agent's answer
+        # Per-turn telemetry (every turn incl. the final one): the gap since the prior
+        # turn + THIS turn's own usage. A turn whose gap > 300s would miss the 5m cache
+        # (TTL refreshes on each read), turning its cache_read into a re-write — so this
+        # line is what analyze_cache_ttl.py reprices to compute exact 5m-vs-1h cost +
+        # the heavy-PR cache-miss %. Emitted inline (gap precomputed) so a plain redirect
+        # captures it without an external timestamper.
+        _u = msg.usage
+        _now = time.monotonic()
+        log(f"  [turn] {label} t={turn} tc={len(tool_uses)} gap={_now - t_prev:.1f}s "
+            f"in={getattr(_u, 'input_tokens', 0) or 0} out={getattr(_u, 'output_tokens', 0) or 0} "
+            f"cw={getattr(_u, 'cache_creation_input_tokens', 0) or 0} "
+            f"cr={getattr(_u, 'cache_read_input_tokens', 0) or 0}")
+        t_prev = _now
         if msg.stop_reason != "tool_use":
             stop = msg.stop_reason
             break
@@ -142,7 +156,6 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
                         blk.pop("cache_control", None)
         results[-1]["cache_control"] = {"type": "ephemeral", "ttl": cache_ttl}
         messages.append({"role": "user", "content": results})
-        log(f"  [{label}] turn {turn}: {len(tool_uses)} tool call(s)")
     wall = time.monotonic() - t0
     log(f"  [{label}] done: {turn} turns, {tool_calls} tool calls, {wall:.1f}s, stop={stop}")
     return {"text": final_text, "usage": usage, "turns": turn,

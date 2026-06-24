@@ -584,3 +584,18 @@ def test_usage_cost_write_mult():
     assert abs(al.usage_cost(u, "sonnet", 1.25) - 3.75) < 1e-6  # 5m: 1.25x * $3/MTok
     assert al.cache_write_mult("5m") == 1.25 and al.cache_write_mult("1h") == 2.0
     assert al.cache_write_mult("weird") == 2.0                  # unknown → safe default
+
+
+def test_analyze_cache_ttl_reprices_and_flags_misses(tmp_path):
+    import analyze_cache_ttl as az
+    log = tmp_path / "run.log"
+    log.write_text(
+        "[headless] cache TTL: 1h\n"
+        "  [turn] code-reviewer t=1 tc=2 gap=20.0s in=100 out=0 cw=50000 cr=0\n"
+        "  [turn] code-reviewer t=2 tc=0 gap=400.0s in=0 out=0 cw=0 cr=100000\n"
+        "[headless] complete in 60.0s\n")
+    r = az.analyze(str(log))
+    assert r["turns"] == 2 and r["miss_turns"] == 1     # the 400s-gap read would expire on 5m
+    assert r["miss_pct"] == 100.0
+    # miss re-write (1.25x) >> warm read (0.1x), so on this miss-heavy run 5m costs MORE
+    assert r["c1h"] < r["c5m"]
