@@ -520,3 +520,30 @@ def test_backfill_not_called_on_normal_rereview(tmp_path, monkeypatch):
                                inter_diff="diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n",
                                head="a" * 40)
     assert out["ok"] and calls["inter"] == 1 and n["backfill"] == 0
+
+
+def test_usage_telemetry_reports_per_agent_and_cache_ratio():
+    # The cost-telemetry helper must surface per-agent tokens + the aggregate
+    # cache-read ratio (the number that answers "is the 1h cache giving cross-agent
+    # reuse?"). cache-read% = cr / (cr + cw + in).
+    rows = [
+        ("code-reviewer", "sonnet", {"input_tokens": 1000, "output_tokens": 500,
+                                     "cache_creation_input_tokens": 2000,
+                                     "cache_read_input_tokens": 7000}),
+        ("verifier", "sonnet", {"input_tokens": 0, "output_tokens": 200,
+                                "cache_creation_input_tokens": 0,
+                                "cache_read_input_tokens": 9000}),
+    ]
+    lines = []
+    headless._log_usage_telemetry(rows, log=lines.append)
+    assert any("code-reviewer" in l and "cr=" in l for l in lines)   # per-agent line
+    agg = [l for l in lines if "TOTAL" in l][0]
+    # cr=16000, cw=2000, in=1000 → 16000/19000 = 84%
+    assert "cache-read 84%" in agg
+
+
+def test_usage_telemetry_handles_zero_and_empty():
+    # No tokens at all (e.g. an all-failed run) must not ZeroDivisionError.
+    lines = []
+    headless._log_usage_telemetry([("x", "haiku", {})], log=lines.append)
+    assert any("cache-read 0%" in l for l in lines)
