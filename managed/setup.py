@@ -567,15 +567,15 @@ def main():
             )
 
     # 5. Solo reviewer agent. One agent applying all 6 lenses + self-verify in
-    # a single session — the opt-in AIR_REVIEW_MODE=solo|both path in review.py.
+    # a single session — the opt-in AIR_REVIEW_MODE=solo path in review.py.
     # Its prompt is assembled from the same specialist .md files (zero drift),
     # so it is deliberately NOT in PINNABLE_AGENTS (pin the specialists).
     #
-    # Synced ONLY when the run actually uses it (AIR_REVIEW_MODE in solo|both;
+    # Synced ONLY when the run actually uses it (AIR_REVIEW_MODE=solo;
     # review.py passes the resolved mode through sync_agents). A full-only run
     # never creates it — so an at-capacity workspace or a transient create
     # failure can't abort a default review that never touches the solo agent.
-    solo_mode = os.environ.get("AIR_REVIEW_MODE", "full") in ("solo", "both")
+    solo_mode = os.environ.get("AIR_REVIEW_MODE", "full") == "solo"
     solo: dict | None = None
     if not solo_mode:
         print("[5] Solo reviewer agent — skipped (review_mode=full)")

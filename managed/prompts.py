@@ -328,7 +328,7 @@ def build_verifier_task(
 
         verifier_task = f"""You have raw findings from the specialist reviewers
 (embedded in your task message, or read from /workspace/findings/ plus the labeled
-inline blocks in file-handoff mode).
+inline blocks in workspace-handoff mode).
 They were run in RE-REVIEW MODE — each result contains both (a) a classification of
 each prior finding and (b) any NEW findings in the inter-diff.
 
@@ -408,7 +408,7 @@ Reviewed at: {head_sha}
     else:
         verifier_task = f"""You have raw findings from the specialist reviewers
 (embedded in your task message, or read from /workspace/findings/ plus the labeled
-inline blocks in file-handoff mode).
+inline blocks in workspace-handoff mode).
 Verify each one per your system prompt (CONFIRMED / DOWNGRADED / IMPROVEMENT /
 PRE-EXISTING / ACCEPTED PATTERN / FALSE POSITIVE with a confidence score). Drop
 FALSE POSITIVE / below-threshold findings.
