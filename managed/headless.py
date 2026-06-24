@@ -28,15 +28,16 @@ affects the posted verdict).
 The UI/copy reviewer (conditional 5th lens) and Codex (external second opinion)
 are dispatched here too — full specialist-set parity with the managed path.
 
-DEFERRED: promote fast-path only — sensible but with no current consumer (only the
-promote/staging-to-main-* repos use it, and they run the managed/MA path, not
-headless). It re-reviews a fresh promote PR as a delta against the last sibling
-promote; port review.py's _detect_promote_fastpath when a headless repo adopts the
-convention. (The earlier "cross-repo re-review" omission was a mislabel of this same
-promote item; "both-mode" is not a headless concept — review_arch resolves to ONE
-mutually-exclusive value, so messages-api dispatches and returns before the both
-branch, never composing with it.) The already-reviewed-at-head skip now backfills a
-missing verdict (review.py's _backfill_verdict_if_missing), at full gate parity.
+PROMOTE FAST-PATH: wired (opt-in, AIR_PROMOTE_FASTPATH). A fresh promote/staging-to-main-*
+PR has no prior review of its own, so it re-reviews against its last-merged sibling
+promote's reviewed SHA (a tiny inter-diff) when the two overlap >=80% — reusing review.py's
+_detect_promote_fastpath VERBATIM + the same re-review engine (inter-diff, carry-forward
+ledger with sibling=True number-identity pinning, pin_and_resurrect). Self-gating: not a
+promote branch / no merged+reviewed sibling / <80% overlap / any fetch failure → full
+review. ("both-mode" is not a headless concept — review_arch resolves to ONE mutually-
+exclusive value, so messages-api dispatches and returns before the both branch, never
+composing with it.) The already-reviewed-at-head skip backfills a missing verdict
+(review.py's _backfill_verdict_if_missing), at full gate parity.
 """
 import asyncio
 import html
@@ -78,9 +79,15 @@ AGENTS_DIR = _LIB.parent / "agents"
 SPECIALISTS = ["air-code-reviewer", "air-simplify", "air-security-auditor", "air-git-history-reviewer"]
 UI_SPECIALIST = "air-ui-copy-reviewer"
 VERIFIER = "air-review-verifier"
-_DIFF_CAP = int(os.environ.get("AIR_HEADLESS_DIFF_CAP", "120000"))  # chars; v1 guard
-                             # (managed has apply_diff_hygiene — a follow-up). Tunable so a
-                             # big-PR run can match the diff the managed coordinator saw.
+_DIFF_CAP = int(os.environ.get("AIR_HEADLESS_DIFF_CAP", "500000"))  # chars — managed parity
+                             # (= managed's AIR_DIFF_MAX_BYTES). The diff is already
+                             # apply_diff_hygiene'd (generated/vendored stubbed) before this
+                             # cap, so this only bounds real-code diffs. The old 120K "v1
+                             # guard" systematically truncated real staging→main promotes
+                             # (2000+ lines) → spurious fail-closed REQUEST_CHANGES; raising
+                             # to managed's 500K fixes the gate at ~no cost change (validated
+                             # 2026-06-24: qai-be #1243 2455L flipped RC→APPROVE, $7.56→$7.05).
+                             # Truncation + fail-close stays as the backstop for >500K diffs.
 _TIERS = frozenset(MODEL_ALIASES)   # known model-alias tiers; unknown → "sonnet"
 
 # ---- learned-pattern staging (P1 context parity) ------------------------
@@ -355,7 +362,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
         filter_comments_after, format_developer_responses, _ledger_pin_enabled,
         _update_learn_counter, _maybe_render_mirror, _backfill_verdict_if_missing,
         _collect_changed_paths, _path_is_ui, _user_facing_copy_globs, _path_matches_globs,
-        run_codex_session, _codex_skip_tiny_delta)
+        run_codex_session, _codex_skip_tiny_delta,
+        _detect_promote_fastpath, _git, _air_bot_logins)
     from session_runner import SESSION_TIMEOUT_SECS  # noqa: E402  (codex wall-clock cap)
     author = meta["user"]["login"]
     have_checkout = bool(checkout and os.path.isdir(checkout))
@@ -433,6 +441,25 @@ async def run_headless_review(args, bot_token: str) -> dict:
         return {"ok": True, "verdict": None, "reason": "already reviewed at head",
                 "wall": 0.0, "cost": 0.0}
 
+    # Promote fast-path (opt-in, AIR_PROMOTE_FASTPATH) — mirror review.py, placed AFTER
+    # the same-PR at-head skip so that skip only ever sees a genuine same-PR prior, never
+    # a sibling's SHA. A fresh promote/staging-to-main-* PR has no prior review of ITS
+    # OWN, so it would fall to a full re-read; but it almost entirely overlaps its last-
+    # merged sibling promote, which air already reviewed. Re-review against the sibling's
+    # reviewed SHA instead (a tiny inter-diff). Only when there's no genuine same-PR prior
+    # (a real prior always wins). _detect_promote_fastpath self-gates: not a promote
+    # branch / no merged+reviewed sibling / <80% overlap / any fetch failure → None →
+    # full review. An empty inter-diff falls back to full (handled in DIFF SELECTION).
+    promote_sibling_pr = None
+    if prior is None and os.environ.get("AIR_PROMOTE_FASTPATH", "") in ("1", "true"):
+        fp = _detect_promote_fastpath(
+            args.repo, args.pr_number, meta, head_sha, bot_login, bot_token)
+        if fp:
+            prior, prior_sha, promote_sibling_pr = fp
+            mode = "re-review"
+            print(f"  [promote] fast-path: re-review vs sibling #{promote_sibling_pr} "
+                  f"@ {prior_sha[:8]}")
+
     # ---- DIFF SELECTION (full vs re-review inter-diff) -------------------
     # Re-review reviews the INTER-DIFF (prior_sha...head via GitHub three-dot
     # compare), not the whole PR. None = API failure (incl. a force-push-GC'd base) →
@@ -450,9 +477,19 @@ async def run_headless_review(args, bot_token: str) -> dict:
             diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
             mode, prior, prior_sha = "full", None, None
         elif not inter.strip():  # empty/whitespace-only successful compare (parity w/ review.py)
-            print(f"  [gate] no changes since the prior review at {prior_sha[:8]} — skipping")
-            return {"ok": True, "verdict": None, "reason": "no changes since last review",
-                    "wall": 0.0, "cost": 0.0}
+            if promote_sibling_pr is not None:
+                # Fast-path with an empty inter-diff: this promote's tree already
+                # matches the sibling's reviewed tree, but THIS PR has no review of
+                # its own — skipping would let it merge entirely unreviewed. Fall
+                # back to a full review so the PR still gets covered.
+                print(f"  [promote] empty inter-diff vs sibling #{promote_sibling_pr} — "
+                      "PR has no review of its own; full review", file=sys.stderr)
+                diff = fetch_pr_diff(args.repo, args.pr_number, bot_token)
+                mode, prior, prior_sha, promote_sibling_pr = "full", None, None, None
+            else:
+                print(f"  [gate] no changes since the prior review at {prior_sha[:8]} — skipping")
+                return {"ok": True, "verdict": None, "reason": "no changes since last review",
+                        "wall": 0.0, "cost": 0.0}
         else:
             print(f"  [re-review] inter-diff {prior_sha[:8]}..{head_sha[:8]} ({len(inter.splitlines())} lines)")
             diff = inter
@@ -471,7 +508,11 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # Developer responses since the prior review (same-PR re-review only) — lets the
     # verifier classify prior findings against what the developer actually said.
     dev_context = ""
-    if mode == "re-review" and prior:
+    if mode == "re-review" and prior and promote_sibling_pr is None:
+        # promote_sibling_pr set ⇒ prior["id"] is the SIBLING PR's review comment,
+        # which is NOT in THIS PR's `ic`; its id predates every comment here, so
+        # filter_comments_after would surface the whole current thread as fake
+        # "developer responses to the prior review" — a context leak. Emit none.
         try:
             dev_context = format_developer_responses(filter_comments_after(ic, prior["id"]))
         except Exception as e:
@@ -483,6 +524,18 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # (the inter-diff's old side) so blame/churn/status describe what changed since
     # the last review, matching the inter-diff the agents see.
     precomp_base = prior_sha if mode == "re-review" else f"origin/{meta['base']['ref']}"
+
+    # Promote fast-path: the sibling's reviewed SHA lived on a now-merged (often
+    # deleted) branch, so under squash/rebase merges it isn't an ancestor of head and
+    # the precomp/codex `git … <sha>` calls below would silently return nothing. Best-
+    # effort fetch the sibling PR head (GitHub keeps refs/pull/<n>/head post-merge) so
+    # the SHA resolves locally; the review diff itself uses the compare API regardless.
+    if have_checkout and promote_sibling_pr is not None and mode == "re-review":
+        if not _git(checkout, "rev-parse", "--verify", "--quiet", f"{prior_sha}^{{commit}}"):
+            _git(checkout, "fetch", "origin", f"pull/{promote_sibling_pr}/head", timeout=60.0)
+            if not _git(checkout, "rev-parse", "--verify", "--quiet", f"{prior_sha}^{{commit}}"):
+                print(f"  [promote] sibling SHA {prior_sha[:8]} unreachable in local checkout "
+                      "— precomp/codex context degraded (review diff unaffected)", file=sys.stderr)
 
     def _precomp():
         if not have_checkout:
@@ -530,7 +583,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
     ledger = []
     if mode == "re-review" and _ledger_pin_enabled():
         try:
-            ledger = build_carry_forward_ledger(prior.get("body", ""), diff, prior_sha, sibling=False)
+            ledger = build_carry_forward_ledger(prior.get("body", ""), diff, prior_sha,
+                                                sibling=(promote_sibling_pr is not None))
         except Exception as e:
             print(f"  [warn] ledger build failed: {type(e).__name__}: {e} — no severity pin", file=sys.stderr)
 
@@ -543,7 +597,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
                     meta, args.repo, mode=mode,
                     prior_review_body=(prior.get("body", "") if prior else ""),
                     prior_sha=prior_sha,
-                    prior_pr_number=None,   # promote-fastpath only — deferred (P3)
+                    prior_pr_number=promote_sibling_pr,   # set ⇒ carried from a sibling promote
                     dev_context=dev_context,
                     pr_conv_block=pr_conv_block,
                     file_statuses=file_statuses,
@@ -800,7 +854,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # makes the skip-self guard falsy and dismisses the verdict we just posted,
         # silently un-gating a REQUEST_CHANGES (the dogfood-caught gate-safety bug).
         if bot_login:
-            dismiss_stale_air_verdicts(args.repo, args.pr_number, bot_token, bot_login)
+            dismiss_stale_air_verdicts(args.repo, args.pr_number, bot_token, bot_login, _air_bot_logins())
         else:
             print("  [warn] bot login unresolved — skipping stale-verdict dismissal "
                   "(won't risk clearing our own verdict)", file=sys.stderr)

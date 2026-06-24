@@ -97,7 +97,7 @@ def test_unpack_passthrough_tuple():
 
 def test_unpack_exception_coerced():
     # A raised exception (gather return_exceptions=True) → ("", reason) so the
-    # both-mode crash-isolation contract holds — the other session survives.
+    # session crash-isolation contract holds — a gathered session survives.
     out, reason = _unpack_session_result(TimeoutError("slow"), "solo")
     assert out == ""
     assert "solo session error" in reason and "TimeoutError" in reason
