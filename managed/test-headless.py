@@ -266,7 +266,7 @@ def _prior_comment(prior_sha):
 def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc=None,
                   head="a" * 40, fresh=False, ledger=None, pin=None,
                   ledger_pin_env=None, ledger_calls=None, full_diff=None, codex=None,
-                  no_codex=False):
+                  no_codex=False, promote_env=None, promote_fp=None):
     """Drive run_headless_review (dry-run) for re-review-path tests. Returns
     (result, calls) where calls counts which diff fetcher fired. inter_diff is the
     fetch_inter_diff RETURN (str / "" / None); inter_exc, if set, makes it RAISE.
@@ -278,6 +278,10 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
         monkeypatch.delenv("AIR_LEDGER_PIN", raising=False)  # default → pin enabled
     else:
         monkeypatch.setenv("AIR_LEDGER_PIN", ledger_pin_env)
+    if promote_env is None:
+        monkeypatch.delenv("AIR_PROMOTE_FASTPATH", raising=False)  # default → fast-path off
+    else:
+        monkeypatch.setenv("AIR_PROMOTE_FASTPATH", promote_env)
     meta = {"number": 7, "user": {"login": "alice"}, "title": "T", "body": "b",
             "base": {"ref": "main"}, "head": {"ref": "feat", "sha": head},
             "additions": 1, "deletions": 0, "changed_files": 1, "commits": 2,
@@ -294,12 +298,22 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
     for fn in ("compute_blame_summaries", "compute_churn_data", "compute_diff_check_warnings"):
         monkeypatch.setattr(review, fn, lambda *a, **k: "")
 
+    # Promote fast-path: spy _detect_promote_fastpath (lazy-imported from review inside
+    # run_headless_review, so patch the review attr) — records calls + returns promote_fp.
+    # _git no-op so the sibling-SHA local-fetch never spawns real git on tmp_path.
+    def _fp_spy(*a, **k):
+        calls["fp_called"] = calls.get("fp_called", 0) + 1
+        return promote_fp
+    monkeypatch.setattr(review, "_detect_promote_fastpath", _fp_spy)
+    monkeypatch.setattr(review, "_git", lambda *a, **k: "")
+
     def _full(*a, **k):
         calls["full"] += 1
         return full_diff or "diff --git a/f.py b/f.py\n@@ -1 +1 @@\n-x\n+y\n"
 
     def _inter(*a, **k):
         calls["inter"] += 1
+        calls["inter_base"] = a[1] if len(a) > 1 else None  # fetch_inter_diff(repo, prior_sha, ...)
         if inter_exc is not None:
             raise inter_exc
         return inter_diff
@@ -309,6 +323,7 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
     if ledger_calls is not None:  # spy: detect whether the ledger is built at all
         def _spy_ledger(*a, **k):
             ledger_calls.append(True)
+            calls["ledger_sibling"] = k.get("sibling")  # number-identity pin flag
             return ledger or []
         monkeypatch.setattr(headless, "build_carry_forward_ledger", _spy_ledger)
     elif ledger is not None:
@@ -561,3 +576,53 @@ def test_usage_telemetry_guards_none_token_fields():
         log=lines.append)
     assert any("[cost] x" in l for l in lines)            # row printed, no TypeError
     assert any("cache-read" in l for l in lines)          # aggregate printed
+
+
+# ---- promote fast-path (qai staging-to-main delta reviews) ----
+# A fresh promote PR has NO review of its own (comments=[] → prior is None). The
+# fast-path resolves a last-merged sibling promote and re-reviews against ITS SHA.
+# _detect_promote_fastpath is spied in the harness (returns promote_fp); these assert
+# the WIRING: off ⇒ full; on+sibling ⇒ delta vs sibling SHA + sibling-pinned ledger;
+# on+no-sibling ⇒ full; on+empty-inter ⇒ full (never skip — PR has no review yet).
+def _sibling(sha="b" * 40):
+    return {"id": 99, "user": {"login": "air-bot"},
+            "body": f"## Code Review\n\nNo issues.\n\nReviewed at: {sha}\n"}
+
+
+def test_promote_fastpath_off_is_full_review(tmp_path, monkeypatch):
+    # AIR_PROMOTE_FASTPATH unset → detection never attempted, byte-identical full path.
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[],
+                               promote_env=None, promote_fp=(_sibling(), "b" * 40, 1240))
+    assert out["ok"] and calls["full"] == 1 and calls["inter"] == 0
+    assert calls.get("fp_called", 0) == 0            # env off ⇒ short-circuits before detection
+
+
+def test_promote_fastpath_on_reviews_sibling_delta(tmp_path, monkeypatch):
+    # On + high-overlap sibling → re-review the inter-diff anchored on the SIBLING SHA,
+    # ledger built with sibling=True (number-identity pin for a cross-PR prior).
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[],
+                               promote_env="true", promote_fp=(_sibling("b" * 40), "b" * 40, 1240),
+                               inter_diff="diff --git a/f b/f\n@@ -1 +1 @@\n-a\n+b\n",
+                               ledger_calls=[])
+    assert out["ok"] and calls["fp_called"] == 1
+    assert calls["inter"] == 1 and calls["full"] == 0      # reviewed the delta, not the whole PR
+    assert calls["inter_base"] == "b" * 40                 # anchored on the sibling's reviewed SHA
+    assert calls["ledger_sibling"] is True                 # cross-PR prior → number-identity pin
+
+
+def test_promote_fastpath_on_no_sibling_is_full(tmp_path, monkeypatch):
+    # On but detection finds nothing (not a promote branch / no sibling / <80% overlap).
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[],
+                               promote_env="true", promote_fp=None)
+    assert out["ok"] and calls["fp_called"] == 1
+    assert calls["full"] == 1 and calls["inter"] == 0
+
+
+def test_promote_fastpath_empty_inter_falls_back_to_full(tmp_path, monkeypatch):
+    # An empty inter-diff on the fast-path must FULL-review, never skip — the promote
+    # has no review of its own, so skipping would let it merge unreviewed.
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[],
+                               promote_env="true", promote_fp=(_sibling("b" * 40), "b" * 40, 1240),
+                               inter_diff="")
+    assert out["ok"] and out["verdict"] in ("APPROVE", "REQUEST_CHANGES")  # reviewed, not skipped
+    assert calls["inter"] == 1 and calls["full"] == 1                      # empty inter → full fetch
