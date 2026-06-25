@@ -1,7 +1,5 @@
 ## Respond Flow (--respond mode)
 
-All `gh` commands below are written for GitHub. On GitLab, translate using `commands/platform-gitlab.md` — same as the main review.md.
-
 When `--respond` is passed, this flow automates the developer's side of the review cycle. It reads the existing review, classifies each finding based on local code changes, verifies fixes are correct, runs a self-check on the fix diff, detects additional changes, and posts a structured response that the reviewer's next re-review (Step 6) can parse directly.
 
 ### Respond Step 0: Initialize Session Temp Directory
@@ -389,9 +387,9 @@ git push 2>&1
 ```
 If push fails (no upstream, permissions): print the error and suggest `git push --set-upstream origin <branch>`. Do NOT force-push.
 
-3. **Re-request the bot reviewer** (GitHub only). **If `PLATFORM` is `gitlab`: skip this sub-step entirely** — managed CI is GitHub-only and `gh` would fail silently here; the summary line prints `n/a (GitLab)`. Callers on the request-driven trigger model (`pull_request: types: [..., review_requested]` — see `managed/README.md` "Enable on a repo") get their re-review fired exactly when this response lands, instead of on every push. **Reuse `$BOT_LOGIN` from Respond Step 1.5** — it was already resolved there from `conv-issues.json` with the anchored `startswith("## Code Review\n")` form; do NOT re-paginate the comments endpoint. Guard against requesting yourself (Step 1.5's `gh api user` fallback path makes `BOT_LOGIN` equal your own login — the guard catches it; GitHub also 422s on requesting the PR author):
+3. **Re-request the bot reviewer.** Callers on the request-driven trigger model (`pull_request: types: [..., review_requested]` — see `managed/README.md` "Enable on a repo") get their re-review fired exactly when this response lands, instead of on every push. **Reuse `$BOT_LOGIN` from Respond Step 1.5** — it was already resolved there from `conv-issues.json` with the anchored `startswith("## Code Review\n")` form; do NOT re-paginate the comments endpoint. Guard against requesting yourself (Step 1.5's `gh api user` fallback path makes `BOT_LOGIN` equal your own login — the guard catches it; GitHub also 422s on requesting the PR author):
 ```bash
-if [ "$PLATFORM" = "github" ] && [ -n "$BOT_LOGIN" ]; then
+if [ -n "$BOT_LOGIN" ]; then
   SELF_LOGIN=$(gh api user --jq '.login' 2>/dev/null)
   if [ "$BOT_LOGIN" != "$SELF_LOGIN" ]; then
     gh api -X POST "repos/<owner>/<repo>/pulls/$PR_NUMBER/requested_reviewers" \
@@ -410,7 +408,7 @@ Response posted to PR #<PR_NUMBER>:
 - Additional changes: <N items or "none">
 - Self-check: <clean / N non-blocking notes>
 - Branch pushed.
-- Re-review requested from <BOT_LOGIN, or "n/a (GitLab)" / "n/a">.
+- Re-review requested from <BOT_LOGIN, or "n/a">.
 
 The reviewer can now run /air:review to re-review (request-driven CI callers re-review automatically).
 ```

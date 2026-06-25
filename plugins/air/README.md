@@ -4,7 +4,6 @@
 [![Version](https://img.shields.io/badge/version-1.39.0)](.claude-plugin/plugin.json) <!-- x-release-please-version -->
 [![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-8A2BE2.svg)](https://claude.ai/code)
 [![GitHub](https://img.shields.io/badge/GitHub-supported-black.svg)](https://github.com)
-[![GitLab](https://img.shields.io/badge/GitLab-supported-orange.svg)](https://gitlab.com)
 
 ## Why
 
@@ -30,10 +29,10 @@ Two commands become available: `/air:review` and `/air:learn`. To enable auto-up
 ## Prerequisites
 
 - **Claude Code** — installed and running
-- **GitHub CLI** (`gh`) or **GitLab CLI** (`glab`) — authenticated. Platform is auto-detected from the git remote URL. GitLab also requires `jq` installed.
-- **Repo access** — must be able to view PRs/MRs on the target repo
+- **GitHub CLI** (`gh`) — authenticated
+- **Repo access** — must be able to view PRs on the target repo
 - **Codex plugin** (optional) — if installed, runs as an additional reviewer. Skips gracefully if not available
-- **Wiki** — auto-created on first run if missing. Used to store learned review patterns. Works with both GitHub and GitLab wikis.
+- **Wiki** — auto-created on first run if missing. Used to store learned review patterns.
 
 ## Usage
 
@@ -51,8 +50,7 @@ Two commands become available: `/air:review` and `/air:learn`. To enable auto-up
 /air:review --dry-run                  # Print to console, don't post online
 /air:review --no-codex                 # Skip Codex review pass
 /air:review --solo                     # One Fable agent, all six lenses, self-verified — fast, $0 API
-/air:review https://github.com/org/repo/pull/45        # Cross-repo review (GitHub)
-/air:review https://gitlab.com/group/project/-/merge_requests/45  # Cross-repo review (GitLab)
+/air:review https://github.com/org/repo/pull/45        # Cross-repo review
 ```
 
 ### Smart Default (no flags)
@@ -206,7 +204,7 @@ Posted as a single PR comment. Here's a real example from [PR #1](https://github
 
 ### Wiki-Backed Storage
 
-Patterns are stored on the repo's wiki (GitHub or GitLab) for legacy repos. **Store-backed repos** (migrated to a per-repo Anthropic memory store — see CLAUDE.md "Pattern storage") treat the wiki as an exported read-only mirror; the store is the source of truth. Wiki/mirror pages:
+Patterns are stored on the repo's wiki for legacy repos. **Store-backed repos** (migrated to a per-repo Anthropic memory store — see CLAUDE.md "Pattern storage") treat the wiki as an exported read-only mirror; the store is the source of truth. Wiki/mirror pages:
 - **No PRs needed** to update patterns — anyone can push directly
 - **No merge conflicts** on pattern files
 - **Every team member's reviews contribute** automatically
@@ -271,7 +269,6 @@ Review PRs from other repos without switching directories:
 
 ```bash
 /air:review https://github.com/org/other-repo/pull/45
-/air:review https://gitlab.com/group/other-project/-/merge_requests/45
 ```
 
 Gracefully skips data that requires a local checkout (blame, churn, file statuses) and falls back to API-only data. Wiki patterns are skipped (repo-specific).

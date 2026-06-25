@@ -144,7 +144,7 @@ If `--fix` was NOT passed:
 
 **Self-review learns the same as regular review.** The full pipeline ran — patterns are just as valuable regardless of whether they came from a PR or a self-check.
 
-1. Add new patterns from this review to REVIEW.md (same as Step 13 sub-steps 2 and 2.5 — author pattern lifecycle with clean-PR tracking, semantic dedup, all severity levels). For self-review, resolve the author using the same method as the own-PR guard: `gh api user --jq '.login'` (GitHub) or `glab api user 2>/dev/null | jq -r '.username'` (GitLab). This ensures the heading matches `### <author.login>` used in regular PR reviews.
+1. Add new patterns from this review to REVIEW.md (same as Step 13 sub-steps 2 and 2.5 — author pattern lifecycle with clean-PR tracking, semantic dedup, all severity levels). For self-review, resolve the author using the same method as the own-PR guard: `gh api user --jq '.login'`. This ensures the heading matches `### <author.login>` used in regular PR reviews.
 2. Record any `WIKI DRIFT:` notes in `## Pending Drift` section
 3. Bump the shared wiki-backed review counter BEFORE the push so `.air-meta.json` is up-to-date in the same commit. Counter state lives in `.air-meta.json` at the wiki root so CLI and managed runs share the same number — both contribute to the cadence:
 

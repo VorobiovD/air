@@ -501,7 +501,6 @@ Things that should be tracked but currently aren't captured in any doc/issue/tas
 
 - **Phase 3 from cost-optimization-plan.md (parallel_sessions_haiku, $0.63/round).** Skipping multi-agent saves $1.7K/year but loses architectural parity with local CLI. Not worth the divergence.
 - **Phase 2 from cost-optimization-plan.md (Haiku on specialists, $4K/year).** Quality watchpoint stalled — never set up the A/B that compares Haiku-specialist findings to Opus-specialist findings. Until that A/B exists, savings are speculative against documented quality risk. (See Conflict #10.)
-- **GitLab managed agent.** CLI plugin supports GitLab via `platform-gitlab.md`. Managed agent stays GitHub-only until a GitLab consumer asks.
 - **Slack / Confluence integrations** (from expansion-plan §3.4) — Deferred.
 - **Paste-diff companion plugin** — Deferred in air's scope (external request, tracked internally).
 
