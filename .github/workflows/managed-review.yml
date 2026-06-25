@@ -153,6 +153,19 @@ on:
         required: false
         type: string
         default: ''
+      requested_reviewer:
+        description: |
+          Optional, NAMING-ONLY (distinct from expected_reviewer — it never
+          asserts and never blocks). Pass the GitHub LOGIN of the requested
+          reviewer so the auth-preflight + bot-fallback messages can NAME whose
+          PAT is missing/expired ("air: @alice's review token … — add/rotate via
+          air-rotate") instead of a generic "the review token". Unlike
+          expected_reviewer it is passed even when the reviewer's <STEM>_PAT is
+          ABSENT — the case worth surfacing. Empty (default) => unnamed messages,
+          byte-identical to before.
+        required: false
+        type: string
+        default: ''
       review_mode:
         description: |
           Review architecture (opt-in): 'full' (default — the 6-agent
@@ -293,15 +306,31 @@ jobs:
         env:
           AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
           REPO: ${{ github.repository }}
+          # Naming-only (Tier 1 PAT visibility): who was requested, and whether
+          # their own <STEM>_PAT was present (expected_reviewer is set only then).
+          REQUESTED_REVIEWER: ${{ inputs.requested_reviewer }}
+          EXPECTED_REVIEWER: ${{ inputs.expected_reviewer }}
         run: |
+          # Prefix the messages with the named reviewer when the caller passed one
+          # (multi-reviewer PAT model) — turns a generic "the review token" into
+          # "@alice's review token", so a missing/expired PAT is named + actionable.
+          who="the "; [ -n "${REQUESTED_REVIEWER}" ] && who="@${REQUESTED_REVIEWER}'s "
           code=$(curl -sS -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer ${AIR_BOT_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/${REPO}" 2>/dev/null || echo 000)
           case "$code" in
-            200) echo "auth preflight OK — review token can access ${REPO}" ;;
-            401|403|404) echo "::error::air: the review token for ${REPO} is missing, expired, or has no access (HTTP ${code}). No review ran — \$0 spent. Fix this repo's review-PAT secret (the per-reviewer *_PAT, or AIR_BOT_TOKEN) or its rotation fan-out." ; exit 1 ;;
+            200)
+              echo "auth preflight OK — review token can access ${REPO}"
+              # Reviewer was requested but their own <STEM>_PAT isn't set (the run
+              # fell back to the shared AIR_BOT_TOKEN, which happened to work).
+              # Surface it — named, on the PR's Checks tab — but never block.
+              if [ -n "${REQUESTED_REVIEWER}" ] && [ -z "${EXPECTED_REVIEWER}" ]; then
+                echo "::warning::air: @${REQUESTED_REVIEWER} has no PAT on ${REPO} — reviewing under the shared bot. Add/rotate it via air-rotate to review under your own identity."
+              fi
+              ;;
+            401|403|404) echo "::error::air: ${who}review token for ${REPO} is missing, expired, or has no access (HTTP ${code}). No review ran — \$0 spent. Add/rotate ${who}*_PAT via air-rotate (or fix AIR_BOT_TOKEN / its rotation fan-out)." ; exit 1 ;;
             *) echo "::warning::air: auth preflight got HTTP ${code} for ${REPO} (transient?) — proceeding without blocking." ;;
           esac
 
