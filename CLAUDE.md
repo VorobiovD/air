@@ -27,8 +27,7 @@ plugins/air/
 │   ├── review-self.md         # Self-review flow (--self mode)
 │   ├── review-respond.md      # Respond flow (--respond mode)
 │   ├── review-solo.md         # Solo flow (--solo mode — one Fable agent, all lenses, gate-capable)
-│   ├── learn.md               # Wiki maintenance
-│   └── platform-gitlab.md     # GitLab CLI/API/field mappings (reference, not a command)
+│   └── learn.md               # Wiki maintenance
 ├── hooks/               # Pre-commit drift-check hook (v1.6.0+)
 │   ├── hooks.json             # PreToolUse hook registration
 │   ├── pre-commit-drift.py    # Wrapper: narrows to `git commit`, routes custom/built-in
@@ -81,7 +80,7 @@ managed/                          # Managed Agent (CI automation)
 
 ## Architecture
 
-**Review pipeline** (`commands/review.md`): Parses args, detects platform (GitHub/GitLab) from git remote, fetches PR/MR data via `gh` or `glab` CLI, runs up to 6 agents + optional Codex in parallel (the UI/copy reviewer joins only on user-facing diffs), passes results through a verification agent that filters false positives (confidence < 60 = dropped), then posts a consolidated comment. GitLab-specific command mappings are in `commands/platform-gitlab.md`.
+**Review pipeline** (`commands/review.md`): Parses args, fetches PR data via the `gh` CLI, runs up to 6 agents + optional Codex in parallel (the UI/copy reviewer joins only on user-facing diffs), passes results through a verification agent that filters false positives (confidence < 60 = dropped), then posts a consolidated comment.
 
 **Agents** (`agents/*.md`): Stateless markdown prompt files. Each is a specialized reviewer personality that receives the same rich context block (PR diff, blame data, wiki patterns, project memory). Tiered models: code-reviewer and security-auditor run on Opus 4.8 with fast-mode speed (~2× faster generation; the fast-mode premium is not billed on Managed Agents sessions — "inference speed is managed by the runtime" per the pricing docs — but on the raw Messages API fast Opus 4.8 bills $10/$50 per MTok vs $5/$25 standard); review-verifier, simplify, and ui-copy-reviewer run on Sonnet 4.6; git-history-reviewer runs on Haiku 4.5. Each agent declares its model (and optional `speed:`) in frontmatter; managed resolves aliases via `MODEL_ALIASES` in `managed/setup.py`.
 

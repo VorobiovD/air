@@ -34,8 +34,7 @@ VorobiovD/air/
 │   │   ├── review-self.md            Self-review flow (--self mode, extracted)
 │   │   ├── review-respond.md         Respond flow (--respond mode, extracted)
 │   │   ├── review-solo.md            Solo flow (--solo mode — one Fable agent, all lenses, --gate-capable)
-│   │   ├── learn.md                  Wiki maintenance + KAIROS history
-│   │   └── platform-gitlab.md       GitLab CLI/API mappings
+│   │   └── learn.md                  Wiki maintenance + KAIROS history
 │   ├── hooks/                      ← CLI-only pre-commit drift check (v1.6.0+)
 │   │   ├── hooks.json                PreToolUse registration on Bash
 │   │   ├── pre-commit-drift.py       Narrows to `git commit`, routes custom/built-in
@@ -103,7 +102,6 @@ VorobiovD/air/
 | Respond self-check | Scales by diff size: < 50 lines = code-reviewer + verifier only | Same (in orchestrator) | YES — same logic |
 | Cross-repo wiki | Reads TARGET repo's wiki (skip write only) | N/A | Changed in v1.4.0 |
 | Codex (GPT-5.4) | Optional 5th reviewer (CLI subprocess) | Optional 5th source — GHA subprocess, output bundled into the mounted verifier-task.md (inline fallback: coordinator user message) | YES — both gated on OPENAI_API_KEY |
-| GitLab | Supported via platform-gitlab.md | Not yet | CLI only |
 
 ---
 
@@ -409,7 +407,7 @@ Cost ranges span Sonnet-rate (floor) to Opus-rate (ceiling) bounds — sub-agent
 - GH_TOKEN visible in Anthropic session logs (mitigated by bot account minimal permissions, rotatable).
 - Wiki push can timeout in sandbox (5-min command limit). The coordinator's TURN 3 bash has a one-shot rebase-retry to recover from concurrent reviewer pushes; failures are logged, not fatal (the review comment is already posted).
 - Codex (GPT-5.4) runs as a GHA-side subprocess sequentially before the coordinator (Pattern B); output is html-escaped and length-capped before being bundled into the mounted verifier-task.md (or the coordinator's user message on inline fallback). Gated on `OPENAI_API_KEY` GHA secret.
-- GitHub-only — no GitLab support yet.
+- GitHub-only by design.
 - `github_repository` resource only clones the PR branch — base branch must be fetched separately (`git fetch origin main`).
 
 **CLI Plugin:**
@@ -445,7 +443,6 @@ Subagents cannot nest in Claude Code — only the main session can use the Agent
 | **Future** | CLI Step 13 sub-steps 2 + 2.5 migration to Python | ~2 days | Deterministic author-pattern lifecycle; saves ~15–20K tokens per CLI review | Depends on the module expansion landing first |
 | **Future** | LLM-sanitization helper for disputed findings | ~1 day | Closes CLI/managed asymmetry on ACCEPTED-PATTERNS.md (sub-step 3) | Small Python helper calling Anthropic API; both orchestrators call it |
 | **Future** | Inter-diff + respond + self-review logic unification | ~3 days | Shared helpers for non-orchestration logic paths | Modular — can ship one at a time |
-| **Future** | GitLab platform support in managed | ~1 week | Managed works on GitLab MRs | Abstract `fetch_pr_*` + `github_repository` resource shape |
 | **Done** | Orphan-session cleanup on driver shutdown | 0.5 day | Token savings + cleaner ops | v1.8.0 — atexit + SIGTERM/SIGHUP interrupts tracked session ids |
 | **Done** | Auto-detect re-review mode (managed) | 1 day | Cost + feedback loop | v1.8.0 — inter-diff + prior review + dev comments as context |
 | **Done** | `--closed` opt-in for closed/merged PRs | 0.5 day | Post-merge audit, pattern backfill | v1.8.0 — state gate + commit-checkout + workflow_dispatch |
@@ -460,7 +457,6 @@ Subagents cannot nest in Claude Code — only the main session can use the Agent
 | **Done** | Respond --dry-run | 0.5 day | Preview | v1.4.0 |
 | **High** | Reduce orchestrator duplication | 1 day | Maintenance burden | |
 | **High** | Further slim review.md (~1170 → ~300) | 1 day | CLI consistency | Extract verbose sections to reference file |
-| **Medium** | GitLab in managed agent | 2-3 days | Platform coverage | |
 | **Medium** | Wiki push reliability | 1 day | Sandbox timeout handling | |
 | **Low** | Codex in managed agent | 1 day | Second model opinion | |
 | **Deferred** | CLI triggers Managed Agent | 1 week | Unified execution model | |

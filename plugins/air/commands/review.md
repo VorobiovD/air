@@ -5,36 +5,15 @@ argument-hint: [<pr-number-or-url>] [--self] [--fix] [--fresh] [--rewrite] [--re
 
 Review code using specialized agents. If a PR number is given, review that PR. If no arguments, auto-detect: review the current branch's PR if one exists, or self-review local changes if not.
 
-## Platform Detection
+## Setup
 
-Detect the hosting platform before anything else:
+air reviews GitHub PRs via the `gh` CLI (must be authenticated — `gh auth login`).
 
 ```bash
 REMOTE_URL=$(git remote get-url origin 2>/dev/null)
 ```
 
-Classify:
-- Contains `github.com` → `PLATFORM=github`
-- Contains `gitlab.com` or `gitlab.` (self-hosted) → `PLATFORM=gitlab`
-- If `glab` CLI is available and `gh` is not → `PLATFORM=gitlab`
-- Otherwise → `PLATFORM=github` (default)
-
-**Override:** If auto-detection fails for self-hosted GitLab with a non-standard domain (e.g., `code.company.com`), the user can set `PLATFORM=gitlab` by running `export AIR_PLATFORM=gitlab` before invoking the command. Check this env var first: if `AIR_PLATFORM` is set, use it and skip auto-detection.
-
-Set the CLI tool and domain:
-- github: `CLI=gh`, `PLATFORM_DOMAIN=github.com`
-- gitlab: `CLI=glab`, `PLATFORM_DOMAIN=<extracted from remote URL hostname>`
-
-If `PLATFORM=gitlab`:
-1. Verify `glab` is installed: `glab --version 2>/dev/null`. If not: "glab CLI is required for GitLab repos. Install from https://gitlab.com/gitlab-org/cli and run `glab auth login`." and STOP.
-2. Read the GitLab Platform Reference at `plugins/air/commands/platform-gitlab.md` for all command mappings, field name translations, and behavioral differences. Apply those mappings to every `gh` command throughout this file.
-
-All `gh` commands below are written for GitHub. On GitLab, translate using platform-gitlab.md. Key translations: `gh pr` → `glab mr`, `number` → `iid`, `nameWithOwner` → `path_with_namespace`, `headRefOid` → `sha`, API paths use `projects/$PROJECT_ID/merge_requests/` instead of `repos/<owner>/<repo>/pulls/`.
-
-**GitLab project ID:** After `CURRENT_REPO` is set (in Step 1), resolve the numeric project ID for API calls:
-```bash
-PROJECT_ID=$(glab api "projects/$(echo $CURRENT_REPO | sed 's|/|%2F|g')" 2>/dev/null | jq -r '.id')
-```
+Set `CLI=gh` and `PLATFORM_DOMAIN` to the remote's host (`github.com`, or your GitHub Enterprise host) — it builds the wiki and finding-link URLs below.
 
 ## Step 0: Initialize Session Temp Directory
 
@@ -72,7 +51,7 @@ Substitution convention: every `$AIR_TMP/<name>` reference below resolves to the
 ## Step 1: Parse Arguments
 
 Extract from `$ARGUMENTS`:
-- **PR/MR identifier**: a number (e.g. `96`) or a full URL (GitHub PR or GitLab MR). If a URL, extract the PR/MR number AND repo.
+- **PR identifier**: a number (e.g. `96`) or a full GitHub PR URL. If a URL, extract the PR number AND repo.
 - **--self**: self-review mode — review your local changes (staged + unstaged), no PR needed. Output a fix plan to console. Never posts a PR comment. Wiki pattern updates still push.
 - **--fix**: (only with `--self`) auto-apply fixes after self-review instead of just planning them.
 - **--fresh**: full review from scratch, post a NEW comment regardless of existing reviews.
@@ -130,19 +109,15 @@ git diff --cached --stat 2>/dev/null
 
 5. If no PR and no local changes (both diffs empty): print "Nothing to review. Create a PR or make some changes first." and STOP.
 
-**Cross-repo and cross-platform detection:**
+**Cross-repo detection:**
 ```bash
 CURRENT_REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)
 ```
-If a PR/MR was given as a URL:
-1. **Detect the target platform from the URL** (not from local remote):
-   - URL contains `github.com` → target is GitHub, use `gh`
-   - URL contains `gitlab.com` or `gitlab.` → target is GitLab, use `glab`
-   - Override `PLATFORM`, `PLATFORM_DOMAIN`, and `CLI` to match the target URL's platform
-2. Extract `owner/repo` (GitHub) or `group/project` (GitLab — parse before `/-/merge_requests/`)
-3. Compare with `$CURRENT_REPO`. Set `CROSS_REPO=true` if they differ.
+If a PR was given as a URL:
+1. Extract `owner/repo` from the URL.
+2. Compare with `$CURRENT_REPO`. Set `CROSS_REPO=true` if they differ.
 
-Bare numbers = always same-repo, same platform as local remote.
+Bare numbers = always same-repo.
 
 If `CROSS_REPO=true`, set `REPO_FLAG="--repo <owner/name>"` and include on ALL `gh` commands. Cross-repo affects:
 - Step 3: read TARGET repo's wiki (for pattern context), skip local repo's wiki
@@ -207,7 +182,7 @@ fi
 ```
 
 
-If the clone failed (no `.git` directory): print "Wiki not found for $CURRENT_REPO - create at https://$PLATFORM_DOMAIN/$CURRENT_REPO/-/wikis (GitLab) or https://$PLATFORM_DOMAIN/$CURRENT_REPO/wiki (GitHub) to enable pattern learning."
+If the clone failed (no `.git` directory): print "Wiki not found for $CURRENT_REPO - create at https://$PLATFORM_DOMAIN/$CURRENT_REPO/wiki to enable pattern learning."
 
 If `CROSS_REPO=true`: clone the TARGET repo's wiki for pattern context (read-only — no writes in Step 13):
 ```bash
@@ -351,14 +326,12 @@ gh api repos/<owner>/<repo>/pulls/<number>/commits --jq '.[] | "\(.sha[:8]) \(.c
 
 Save diff to `$AIR_TMP/pr<number>.diff`. Include `$REPO_FLAG` on all `gh` commands if cross-repo.
 
-**GitLab note:** `statusCheckRollup` and `reviewDecision` are not available via `glab mr view`. Fetch CI status and approval state separately — see platform-gitlab.md Behavioral Differences #2 and #3.
-
 Extract from the batched response and retain for later steps:
-- `headRefOid` — HEAD SHA for review footer (`sha` on GitLab)
-- `files` — per-file path + additions + deletions (`changes[].new_path` on GitLab)
-- `statusCheckRollup` — CI check results (GitLab: separate pipeline endpoint)
-- `reviewDecision` — APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED (GitLab: separate approval endpoint)
-- `isDraft`, `state` — used in Step 5 pre-flight (`draft` on GitLab; state values differ: `OPEN` → `opened`)
+- `headRefOid` — HEAD SHA for review footer
+- `files` — per-file path + additions + deletions
+- `statusCheckRollup` — CI check results
+- `reviewDecision` — APPROVED / CHANGES_REQUESTED / REVIEW_REQUIRED
+- `isDraft`, `state` — used in Step 5 pre-flight
 - `commits` — commit count (for commit-ratio flag)
 - `author.login` — PR author name (passed to agents for pattern lookup)
 
@@ -446,7 +419,7 @@ while IFS=$'\t' read -r PR_NUM TITLE; do
 done < "$AIR_TMP/open-prs.tsv"
 ```
 
-For each shared file, when cheap, also check whether the hunks collide (not just the filename): `git diff origin/<base>...HEAD -- <file>` vs the sibling's diff region — if the same line ranges are edited, mark it a **same-region conflict** (near-certain rebase), otherwise a **same-file** overlap. Save as `RELATED_PRS` (default `"none"`). Same-repo only; skip entirely cross-repo. On GitLab, use `glab mr list --state opened` + the per-MR changes endpoint. If the scan errors or is rate-limited, `RELATED_PRS` stays empty and the section is omitted — indistinguishable from "no siblings" by design (non-load-bearing background context). **Managed parity note:** `managed/review.py`'s `build_pr_context` does not yet emit `<related-prs>` — this probe is CLI-only for now (gap tracked in `docs/improvement-roadmap.md`).
+For each shared file, when cheap, also check whether the hunks collide (not just the filename): `git diff origin/<base>...HEAD -- <file>` vs the sibling's diff region — if the same line ranges are edited, mark it a **same-region conflict** (near-certain rebase), otherwise a **same-file** overlap. Save as `RELATED_PRS` (default `"none"`). Same-repo only; skip entirely cross-repo. If the scan errors or is rate-limited, `RELATED_PRS` stays empty and the section is omitted — indistinguishable from "no siblings" by design (non-load-bearing background context). **Managed parity note:** `managed/review.py`'s `build_pr_context` does not yet emit `<related-prs>` — this probe is CLI-only for now (gap tracked in `docs/improvement-roadmap.md`).
 
 **Current PR conversation context** (works cross-repo, ~3s for three parallel fetches):
 
@@ -536,8 +509,6 @@ Extract and retain:
 ## Step 5: Pre-flight Checks
 
 All data comes from Step 4 — no additional API calls.
-
-**GitLab normalization:** Before running pre-flight checks, normalize GitLab field names to match the GitHub names used below: `state: "opened"` → `"OPEN"`, `state: "closed"` → `"CLOSED"`, `state: "merged"` → `"MERGED"`, `draft` → `isDraft`. This ensures the checks work identically on both platforms.
 
 1. **State:** If `state` is `CLOSED` or `MERGED` and `--closed` was NOT passed, print "PR is <state>. Pass --closed to review anyway." and STOP. If `--closed` was passed, print "Proceeding on <state> PR (verdict will be skipped)." and continue.
 2. **Draft:** If `isDraft` is true, print "Draft PR — proceeding with review" but continue.
@@ -809,14 +780,11 @@ Write ONE unified review. Incorporate security table. Deduplicate. Use severity:
 
 Write the formatted review to `$AIR_TMP/review-comment.md` — this file is consumed by Step 12 for posting.
 
-**Link format for findings:** In posted PR/MR comments (not console or self-review), every file reference must use a clickable link:
+**Link format for findings:** In posted PR comments (not console or self-review), every file reference must use a clickable link:
 ```
-GitHub: [`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>)
-GitLab: [`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/-/blob/<headRefOid>/<file>#L<start>-L<end>)
+[`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>)
 ```
 Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line: `#L<line>`. In `--self` mode or console output, use plain `file:line` (links are meaningless locally).
-
-**IMPORTANT:** The template below uses `/blob/` (GitHub format). On GitLab, replace `/blob/` with `/-/blob/` in every finding link. The instruction above shows both formats — apply the one matching `PLATFORM`.
 
 ```
 ## Code Review
@@ -953,10 +921,9 @@ The pinned body is now what Step 12 posts AND what Step 12's `--decide` gates on
 
 **Own-PR guard (check FIRST, before any posting path):** Determine if the PR author matches the current user:
 ```bash
-# GitHub: gh api user --jq '.login'
-# GitLab: glab api user 2>/dev/null | jq -r '.username'
+gh api user --jq '.login'
 ```
-Compare against the PR/MR author username from Step 4 metadata (`author.login` on GitHub, `author.username` on GitLab). If they match: set `OWN_PR=true`. When `OWN_PR=true`, **skip ALL review verdicts** (`gh pr review --approve`, `gh pr review --request-changes`, `glab mr approve`) in every posting path below. GitHub does not allow self-approval or self-requesting-changes, and attempting it will error. Only post the issue comment.
+Compare against the PR author from Step 4 metadata (`author.login`). If they match: set `OWN_PR=true`. When `OWN_PR=true`, **skip ALL review verdicts** (`gh pr review --approve`, `gh pr review --request-changes`) in every posting path below. GitHub does not allow self-approval or self-requesting-changes, and attempting it will error. Only post the issue comment.
 
 **Closed-PR guard:** If `--closed` was passed AND the PR's `state` is `CLOSED` or `MERGED`, skip ALL review verdicts. GitHub rejects verdicts on closed/merged PRs with a 422. Only post the issue comment. Treat this combination with the same verdict-suppression as `OWN_PR=true`. If `--closed` was passed on an OPEN PR (legal — the flag is permissive in Step 5), post verdicts normally as for any open PR.
 
@@ -1003,13 +970,11 @@ fi
 If `VERDICT` = `approve`:
 ```bash
 gh api repos/<owner>/<repo>/pulls/<number>/reviews -f commit_id="$headRefOid" -f event=APPROVE -f body="Approved — 0 gating findings."
-# GitLab: glab mr approve <number>  (no commit pinning available)
 ```
 
 If `VERDICT` = `request-changes`:
 ```bash
 gh api repos/<owner>/<repo>/pulls/<number>/reviews -f commit_id="$headRefOid" -f event=REQUEST_CHANGES -f body="Changes requested — $REASON. See review comment above."
-# GitLab: no request-changes equivalent. Skip this step — the review comment itself signals changes needed. Do NOT approve.
 ```
 
 The issue comment contains the full review body (searchable by Step 2 for re-review detection). The review verdict is a short summary that sets the GitHub approval state for branch protection rules — computed by the same `should_request_changes()` both modes share, so the CLI and CI can never gate the same body differently.
