@@ -40,6 +40,7 @@ plugins/air/
 │   ├── agent_loop.py          # Self-hosted Messages-API tool-use loop for headless mode (5m cache default, thinking round-trip)
 │   ├── tool_exec.py           # Read-only sandbox for headless agents (path-jailed Read/Grep/Glob + fixed-verb git, shell=False)
 │   ├── solo_prompt.py         # THE solo-prompt assembly (CLI --solo runs it; managed setup.py imports it)
+│   ├── agent_md.py            # THE agents/*.md frontmatter parser — single source for solo_prompt / setup / headless._persona_model
 │   ├── wiki_cap.py            # THE deterministic wiki bloat-cap (per-file byte ceilings; managed learn/render + CLI learn all call it)
 │   └── verdict.py             # THE review-gating contract (shared: CLI Step 12 runs it via --decide; managed imports it)
 └── .claude-plugin/

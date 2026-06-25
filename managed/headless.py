@@ -68,6 +68,7 @@ from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
 )
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
+from agent_md import split_frontmatter  # noqa: E402  (single-source frontmatter parser)
 
 import memory_store  # noqa: E402  (managed/ — client-side store reads for pattern staging)
 import pr_conversation  # noqa: E402  (plugins/air/lib)
@@ -208,14 +209,8 @@ def stage_patterns(repo: str, author: str, checkout: str, token: str,
 def _persona_model(agent: str) -> tuple[str, str, str]:
     """(persona_body, model_id, tier) from plugins/air/agents/<short>.md frontmatter."""
     short = agent.replace("air-", "")
-    text = (AGENTS_DIR / f"{short}.md").read_text()
-    body, alias = text, "sonnet"
-    end = text.index("---", 3) if text.startswith("---") and "---" in text[3:] else -1
-    if end != -1:
-        for line in text[3:end].splitlines():
-            if line.strip().startswith("model:"):
-                alias = line.split(":", 1)[1].split("#", 1)[0].strip()
-        body = text[end + 3:].strip()
+    fields, body = split_frontmatter(AGENTS_DIR / f"{short}.md")
+    alias = fields.get("model", "") or "sonnet"
     return body, MODEL_ALIASES.get(alias, MODEL_ALIASES["sonnet"]), (alias if alias in _TIERS else "sonnet")
 
 
