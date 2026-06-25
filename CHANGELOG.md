@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.39.0](https://github.com/VorobiovD/air/compare/v1.38.1...v1.39.0) (2026-06-25)
+
+
+### Features
+
+* **managed:** name the reviewer in PAT preflight + bot-fallback (Tier 1 visibility) ([#212](https://github.com/VorobiovD/air/issues/212)) ([7764326](https://github.com/VorobiovD/air/commit/77643265c91e735c20d164db2e5d4805e2f6e216))
+
 ## [1.38.1](https://github.com/VorobiovD/air/compare/v1.38.0...v1.38.1) (2026-06-25)
 
 
