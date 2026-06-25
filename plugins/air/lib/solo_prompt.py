@@ -17,6 +17,8 @@ Same anti-drift pattern as `lib/verdict.py`: one implementation, two paths.
 import sys
 from pathlib import Path
 
+from agent_md import read_prompt  # the single-source frontmatter parser
+
 # Lens order is part of the prompt contract (later lenses see earlier
 # framing); keep stable. This is also the canonical specialist roster —
 # managed/setup.py imports it as its SUB_AGENTS list.
@@ -52,36 +54,6 @@ SOLO_PREAMBLE = (
     "NON-security findings (perf, design, test-coverage, style); it does not "
     "license softening a confirmed security exposure.\n"
 )
-
-
-def _split_frontmatter(path: Path) -> tuple[dict, str]:
-    """Return ({key: value} for scalar frontmatter fields, body_text).
-    Empty dict if no frontmatter."""
-    text = path.read_text()
-    if not text.startswith("---"):
-        return {}, text.strip()
-    try:
-        end = text.index("---", 3)
-    except ValueError:
-        print(f"  Warning: {path.name} has unclosed frontmatter", file=sys.stderr)
-        return {}, text.strip()
-    fields: dict = {}
-    for line in text[3:end].split("\n"):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or ":" not in stripped:
-            continue
-        key, value = stripped.split(":", 1)
-        # Naive inline-comment strip — fine for the current scalar fields
-        # (name, model, tools); use a real YAML parser if quoted values
-        # with `#` become needed.
-        fields[key.strip()] = value.split("#", 1)[0].strip()
-    return fields, text[end + 3:].strip()
-
-
-def read_prompt(path: Path) -> str:
-    """Read a markdown prompt file, stripping YAML frontmatter."""
-    _, body = _split_frontmatter(path)
-    return body
 
 
 def assemble_solo_prompt(agents_dir: Path = AGENTS_DIR) -> str:

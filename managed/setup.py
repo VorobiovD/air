@@ -12,7 +12,6 @@ Usage:
     python setup.py
 """
 
-import functools
 import json
 import os
 import sys
@@ -32,6 +31,7 @@ _AIR_LIB_DIR = Path(__file__).resolve().parent.parent / "plugins" / "air" / "lib
 if str(_AIR_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_AIR_LIB_DIR))
 from solo_prompt import SUB_AGENTS, assemble_solo_prompt  # noqa: E402,F401
+from agent_md import read_prompt, split_frontmatter  # noqa: E402,F401
 
 # Agent names accepted in AIR_AGENT_VERSIONS pins (the review roster).
 # air-learner is deliberately NOT pinnable — learn is wiki maintenance,
@@ -124,45 +124,9 @@ MODEL_ALIASES = {
 DEFAULT_OPUS = MODEL_ALIASES["opus"]
 
 
-@functools.lru_cache(maxsize=None)
-def _split_frontmatter(path: Path) -> tuple[dict[str, str], str]:
-    """Return ({key: value} for scalar frontmatter fields, body_text). Empty dict if no frontmatter.
-
-    Cached per-path so the file is read once per run and warnings (e.g. unclosed
-    frontmatter) fire once, not once per consumer (read_prompt / parse_agent_tools /
-    parse_agent_model).
-    """
-    text = path.read_text()
-    if not text.startswith("---"):
-        return {}, text.strip()
-    try:
-        end = text.index("---", 3)
-    except ValueError:
-        print(f"  Warning: {path.name} has unclosed frontmatter")
-        return {}, text.strip()
-    fields: dict[str, str] = {}
-    for line in text[3:end].split("\n"):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or ":" not in stripped:
-            continue
-        key, value = stripped.split(":", 1)
-        # Strip inline YAML comments. Note: naive — a legitimate `#` inside a
-        # value (e.g. a URL fragment or quoted `#123` reference) will be truncated.
-        # Acceptable for the current scalar fields (name, model, tools); use a
-        # real YAML parser if quoted values with `#` become needed.
-        fields[key.strip()] = value.split("#", 1)[0].strip()
-    return fields, text[end + 3:].strip()
-
-
-def read_prompt(path: Path) -> str:
-    """Read a markdown prompt file, stripping YAML frontmatter."""
-    _, body = _split_frontmatter(path)
-    return body
-
-
 def parse_agent_tools(path: Path) -> list[str]:
     """Extract tool names from agent frontmatter."""
-    fields, _ = _split_frontmatter(path)
+    fields, _ = split_frontmatter(path)
     if "tools" not in fields:
         return ["bash", "read", "grep", "glob"]
     return [t.strip().lower() for t in fields["tools"].split(",")]
@@ -170,7 +134,7 @@ def parse_agent_tools(path: Path) -> list[str]:
 
 def parse_agent_model(path: Path, default: str = DEFAULT_OPUS) -> str:
     """Read `model:` from agent frontmatter, resolving aliases to API IDs."""
-    fields, _ = _split_frontmatter(path)
+    fields, _ = split_frontmatter(path)
     value = fields.get("model", "")
     if not value:
         return default
@@ -179,7 +143,7 @@ def parse_agent_model(path: Path, default: str = DEFAULT_OPUS) -> str:
 
 def parse_agent_speed(path: Path) -> str | None:
     """Return the `speed:` frontmatter value (e.g. "fast"), or None if absent."""
-    fields, _ = _split_frontmatter(path)
+    fields, _ = split_frontmatter(path)
     return fields.get("speed", "") or None
 
 
