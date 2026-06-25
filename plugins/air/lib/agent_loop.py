@@ -10,8 +10,10 @@ air owns the tool-use loop CLIENT-SIDE instead of the managed runtime hosting it
 
 Back-to-back synchronous calls in air's own loop = NO managed between-turn
 scheduling stall (the root cause of the 12-25 min wall-times). Thinking blocks
-are round-tripped verbatim. The shared PR-context prefix carries a 1h cache
-breakpoint so turns 2+ (and, when fanned out, sibling agents) read it at 0.1x.
+are round-tripped verbatim. The shared PR-context prefix carries a cache
+breakpoint (TTL per `cache_ttl`, default 5m) so an agent's OWN turns 2+ read it
+at 0.1x — cross-agent reuse is not attempted (concurrent specialists race cold;
+see run_agent).
 
 stdlib + the anthropic SDK (transport only — air owns the loop). Secrets live in
 this orchestrator and are never handed to the Sandbox's git subprocess.
@@ -23,7 +25,9 @@ from tool_exec import TOOL_SCHEMAS  # type: ignore
 MAX_TURNS = 45          # backstop: a runaway tool loop can't spin forever. Haiku
                         # (no thinking/effort) batches 1 tool/turn, so it needs
                         # more headroom than Sonnet (~12-18) to converge.
-_CACHE_TTL = "1h"       # GA on the raw Messages API (no beta header); managed can't reach it
+_CACHE_TTL = "5m"       # cheaper-write default (1.25x vs 1h's 2x); the live headless path always
+                        # passes cache_ttl= explicitly, so this only guards stray/future callers
+                        # against the 2x footgun. GA on the raw Messages API; managed can't reach it
 # Cache-WRITE price multiple over base input, by TTL (Anthropic pricing): a 1h-TTL
 # write costs 2x base input, a 5m-TTL write 1.25x. Reads are 0.1x either way. So a
 # run whose between-turn gaps stay < 5min (cache TTL refreshes on each read) gets the

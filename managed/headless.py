@@ -244,21 +244,10 @@ def _specialist_task() -> str:
 
 BLOCKER_LENSES = ("air-security-auditor", "air-code-reviewer")
 
-# Auto cache-TTL thresholds. 5m-TTL cache writes cost 1.25x base input vs 1h's 2x,
-# and the TTL refreshes on each read — so 5m gives the SAME hit rate, at ~17-22% lower
-# cost, as long as between-turn gaps stay < 5min. LIVE per-turn measurement (the
-# [turn] gap telemetry → analyze_cache_ttl.py) shows that's the norm, because a single
-# turn's generation is bounded by max_tokens (~2-4min), NOT by file count:
-#   3 files → max gap 1.9min · 7 files → 2.8min · 13 files → 37 turns, 0 gaps >5min,
-#   exact 5m-vs-1h = $3.87 vs $4.95 (5m saves $1.08 / 22%, zero misses).
-# So a heavy PR is NOT inherently miss-prone; the 1h fallback is a loose net for a
-# genuinely-huge PR (>=25 files / 250KB) where a pathological long thinking turn could
-# exceed 5min — and a miss only costs one extra prefix re-write (cents, NOT a gate
-# issue). The per-turn telemetry keeps watching real runs, so the cutoff can be tuned
-# data-driven if a real >5min gap ever shows up. Env override AIR_HEADLESS_CACHE_TTL ∈
-# {5m,1h,auto}; thresholds tunable via AIR_HEADLESS_TTL_FILES / _BYTES.
-_DEFAULT_TTL_FILES = 25
-_DEFAULT_TTL_BYTES = 250_000
+# Cache-TTL: see _choose_cache_ttl. 5m writes cost 1.25x base input vs 1h's 2x, and the
+# TTL refreshes on each read, so 5m holds the SAME hit rate when between-turn gaps stay
+# <5min — which, measured across every captured headless run, is always (gaps are bounded
+# by per-turn generation, not file count). Auto = 5m; the heavy->1h bump is opt-in.
 
 
 def _int_env(name: str, default: int) -> int:
@@ -271,14 +260,20 @@ def _int_env(name: str, default: int) -> int:
 
 
 def _choose_cache_ttl(n_files: int, diff_bytes: int) -> str:
-    """5m unless the PR is heavy. All three knobs are read at CALL time (tolerant of
-    bad input, monkeypatch-able in tests). `diff_bytes` is the RAW (pre-truncation)
-    diff size, so the byte arm is reachable on a big PR (the truncated diff never is)."""
+    """Auto = 5m — the measured-correct default. 1h only ever OVER-charges on the headless
+    loop: per-turn gaps are bounded by max_tokens generation (~2-4min), NOT file count
+    (back-to-back client-side, no managed stall), so 5m never expires and even a heavy PR
+    isn't miss-prone — confirmed across every captured run (3 files → 76 files, 0 gaps >5min;
+    ai-relay #268 at 76 files measured $11.82@1h vs $9.33@5m, 0/57 misses). So the old
+    heavy->1h auto-bump is now OPT-IN (default off): set AIR_HEADLESS_TTL_FILES / _BYTES to
+    re-enable a bump, or force the whole run with AIR_HEADLESS_CACHE_TTL ∈ {5m,1h}. All knobs
+    read at CALL time (bad-input-safe, monkeypatch-able). `diff_bytes` is the RAW size."""
     override = os.environ.get("AIR_HEADLESS_CACHE_TTL", "auto").strip().lower()
     if override in ("5m", "1h"):
         return override
-    heavy = (n_files >= _int_env("AIR_HEADLESS_TTL_FILES", _DEFAULT_TTL_FILES)
-             or diff_bytes >= _int_env("AIR_HEADLESS_TTL_BYTES", _DEFAULT_TTL_BYTES))
+    files_cut = _int_env("AIR_HEADLESS_TTL_FILES", 0)   # 0 = heavy-bump disabled (opt-in)
+    bytes_cut = _int_env("AIR_HEADLESS_TTL_BYTES", 0)
+    heavy = (files_cut and n_files >= files_cut) or (bytes_cut and diff_bytes >= bytes_cut)
     return "1h" if heavy else "5m"
 
 
@@ -625,7 +620,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
         print(f"[headless] turn budget: {turn_budget} ({n_files} changed files)")
         cache_ttl = _choose_cache_ttl(n_files, raw_diff_bytes)
         write_mult = agent_loop.cache_write_mult(cache_ttl)
-        print(f"[headless] cache TTL: {cache_ttl} (cheaper 5m writes when gaps stay <5min; 1h for heavy PRs)")
+        print(f"[headless] cache TTL: {cache_ttl} (5m default; 1h only when forced or opted-in via "
+              f"AIR_HEADLESS_CACHE_TTL / AIR_HEADLESS_TTL_FILES / _BYTES)")
 
         # UI/copy reviewer dispatch (P3) — the conditional 5th specialist, mirroring
         # review.py's gate: dispatch only when the diff touches a user-facing surface
