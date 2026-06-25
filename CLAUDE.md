@@ -131,7 +131,7 @@ managed/                          # Managed Agent (CI automation)
 - Findings must score 60+ confidence from verifier to appear in output
 - Conflict markers in PR diff = automatic blocker finding
 - Security auditor uses a 31-item checklist; PROJECT-PROFILE.md controls which items apply per repo
-- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.38.1) <!-- x-release-please-version -->
+- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.39.0) <!-- x-release-please-version -->
 - Install via `/plugin marketplace add VorobiovD/air` then `/plugin install air@air`
 
 ## Releases (automated via release-please)
