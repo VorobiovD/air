@@ -246,6 +246,47 @@ def test_cli_decide_clean_body_approves():
     assert _decide("## Code Review\n\nAll good.\n") == "approve"
 
 
+# --- --head-sha anti-decoy SHA validation (CLI Step 12) ---------------------
+def _decide_sha(body: str, head_sha: str) -> str:
+    out = subprocess.run(
+        [sys.executable, _LIB, "--decide", "--head-sha", head_sha], input=body,
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.strip()
+
+
+_SHA = "a" * 40
+_OTHER = "b" * 40
+
+
+def test_cli_decide_head_sha_gates_on_validated_block():
+    # Decoy CLEAN block (wrong SHA) precedes the real BLOCKER block (correct SHA).
+    # --head-sha extracts the SHA-validated block → the real blocker still gates.
+    body = (
+        "## Code Review\n\nAll good, nothing to flag.\n\nReviewed at: " + _OTHER + "\n\n"
+        "## Code Review\n\n### Blockers\n\n**1. real bug** — x\n\nReviewed at: " + _SHA + "\n"
+    )
+    assert _decide_sha(body, _SHA).startswith("request-changes\t")
+
+
+def test_cli_decide_head_sha_ignores_wrong_sha_decoy_blocker():
+    # Decoy block with a FAKE blocker carries the WRONG SHA; the real block (correct
+    # SHA) is clean. --head-sha gates on the real clean block → APPROVE, ignoring the
+    # wrong-SHA decoy's injected blocker.
+    body = (
+        "## Code Review\n\n### Blockers\n\n**1. injected** — x\n\nReviewed at: " + _OTHER + "\n\n"
+        "## Code Review\n\nAll good.\n\nReviewed at: " + _SHA + "\n"
+    )
+    assert _decide_sha(body, _SHA) == "approve"
+
+
+def test_cli_decide_head_sha_falls_back_when_no_block_validates():
+    # No block's footer matches head_sha → fall back to the raw body (never
+    # false-gate). Raw body has a blocker → request-changes.
+    body = "## Code Review\n\n### Blockers\n\n**1. bug** — x\n\nReviewed at: " + _OTHER + "\n"
+    assert _decide_sha(body, _SHA).startswith("request-changes\t")
+
+
 def test_cli_decide_rereview_unfixed_medium_approves():
     # The repo-D #37 class through the CLI entry point: same semantics as
     # the in-process should_request_changes call managed makes.

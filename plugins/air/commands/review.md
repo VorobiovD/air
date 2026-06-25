@@ -140,9 +140,9 @@ If no `--fresh`, `--rewrite`, or `--re-review` flag was passed, check for existi
 
 **Parsing note:** API responses containing comment bodies have markdown with newlines and special characters. When extracting fields that include `.body`, pipe the raw API output directly to a parser (`python3 -c "json.loads(sys.stdin.buffer.read())"`) rather than storing in a shell variable, which corrupts control characters. Extracting scalar fields like `.id` via `--jq` is safe.
 
-1. Look for an existing `## Code Review` comment on this PR:
+1. Look for an existing `## Code Review` comment on this PR. Select the **newest** air review explicitly via `sort_by(.created_at, .id) | last` — the GitHub issue-comments endpoint ignores `sort`/`direction` and returns oldest-first, so relying on array position is fragile; this matches managed's `find_prior_review` (newest by `created_at`, `id` tiebreak) and is the baseline a re-review pins against:
 ```bash
-gh api repos/<owner>/<repo>/issues/<number>/comments --jq '[.[] | select(.body | startswith("## Code Review"))] | last'
+gh api repos/<owner>/<repo>/issues/<number>/comments --jq '[.[] | select(.body | startswith("## Code Review"))] | sort_by(.created_at, .id) | last'
 ```
 
 2. If found, **cache these values** for reuse in Steps 6 and 12 (do NOT re-query):
@@ -333,6 +333,12 @@ gh api repos/<owner>/<repo>/pulls/<number>/commits --jq '.[] | "\(.sha[:8]) \(.c
 ```
 
 Save diff to `$AIR_TMP/pr<number>.diff`. Include `$REPO_FLAG` on all `gh` commands if cross-repo.
+
+Then apply **diff hygiene** — the SAME stub-generated/vendored + 500KB-cap pass managed runs inside its fetchers (`lib/diff_hygiene.py`, single-sourced with `github_client.apply_diff_hygiene`). It rewrites the file in place; it only ever omits generated churn (agents read the full source), so it's pure token savings. Best-effort — skip if the plugin lib isn't resolvable:
+```bash
+[ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" ] && \
+  python3 "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" --diff-file "$AIR_TMP/pr<number>.diff"
+```
 
 Extract from the batched response and retain for later steps:
 - `headRefOid` — HEAD SHA for review footer
@@ -544,7 +550,7 @@ All data comes from Step 4 — no additional API calls.
 
 1. Use `REVIEW_COMMENT_ID`, `REVIEW_COMMENT_BODY`, and `REVIEWED_AT_SHA` from Step 2 if available. If Step 2 was skipped (user passed `--re-review` directly), fetch the comment now:
 ```bash
-gh api repos/<owner>/<repo>/issues/<number>/comments --jq '[.[] | select(.body | startswith("## Code Review"))] | last'
+gh api repos/<owner>/<repo>/issues/<number>/comments --jq '[.[] | select(.body | startswith("## Code Review"))] | sort_by(.created_at, .id) | last'
 ```
 Cache `REVIEW_COMMENT_ID`, `REVIEW_COMMENT_BODY`, `REVIEW_COMMENT_CREATED`, and `REVIEWED_AT_SHA` from the result.
 2. Parse previous findings from `REVIEW_COMMENT_BODY` — each has a number (e.g. **1.**, **2.**).
@@ -552,6 +558,9 @@ Cache `REVIEW_COMMENT_ID`, `REVIEW_COMMENT_BODY`, `REVIEW_COMMENT_CREATED`, and 
 4. **Generate inter-diff** (same-repo only):
 ```bash
 git diff <REVIEWED_AT_SHA>..<headRefOid> > $AIR_TMP/inter-diff-<number>.diff 2>/dev/null
+# diff hygiene (same as the full diff in Step 4 — agents see the hygiene'd inter-diff)
+[ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" ] && [ -s "$AIR_TMP/inter-diff-<number>.diff" ] && \
+  python3 "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" --diff-file "$AIR_TMP/inter-diff-<number>.diff"
 ```
 Two-dot (`..`) gives the direct range from old SHA to new SHA — exactly what changed since the last review. Do NOT use three-dot (`...`) here — that uses merge-base semantics and would include base-branch changes the author didn't make if the base advanced.
 
@@ -885,9 +894,11 @@ fi
 ```
 If `REVIEW_COMMENT_ID` is unset or the file is empty (no prior comment), skip Step 11.5 — there is nothing to pin against.
 
-2. Generate the **three-dot** ledger inter-diff. This deliberately differs from Step 6's two-dot review diff: the ledger's CHANGED/UNCHANGED determination must match managed's exactly, and managed computes it from GitHub's three-dot compare (`<base>...<head>`). Three-dot here aligns the CLI ledger's "what moved" map with managed's; the agents still review the two-dot diff from Step 6 (unchanged — only the ledger uses this diff):
+2. Generate the **three-dot** ledger inter-diff. This deliberately differs from Step 6's two-dot review diff: the ledger's CHANGED/UNCHANGED determination must match managed's exactly, and managed computes it from GitHub's three-dot compare (`<base>...<head>`). Three-dot here aligns the CLI ledger's "what moved" map with managed's; the agents still review the two-dot diff from Step 6 (unchanged — only the ledger uses this diff). **Then apply the same diff hygiene** — managed computes the ledger from its `fetch_inter_diff`, which is hygiene'd; if the CLI ledger diff is NOT hygiene'd identically, the changed-line / CHANGED-vs-UNCHANGED map diverges and the severity-pin can silently mis-fire on a generated-file finding. So hygiene the ledger diff exactly as the PR diff:
 ```bash
 git diff <REVIEWED_AT_SHA>...<headRefOid> > $AIR_TMP/ledger-diff-<number>.diff 2>/dev/null
+[ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" ] && [ -s "$AIR_TMP/ledger-diff-<number>.diff" ] && \
+  python3 "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" --diff-file "$AIR_TMP/ledger-diff-<number>.diff"
 ```
 If this fails or produces nothing (cross-repo fallback, SHA not local): skip Step 11.5. Print "Step 11.5: ledger inter-diff unavailable — severity-pin skipped (no-op)." Number-identity pinning still needs both the prior body AND a parseable diff, so a missing diff is a clean no-op (the un-pinned body posts; the verdict is computed the pre-PR7 way).
 
@@ -942,7 +953,7 @@ If `--dry-run`: print to console. Skip Step 13 entirely (no wiki push on dry run
 If `--rewrite`:
 1. If `REVIEW_COMMENT_ID` is not set (Step 2 was skipped because `--rewrite` was passed directly), fetch it now:
 ```bash
-REVIEW_COMMENT_ID=$(gh api repos/<owner>/<repo>/issues/<number>/comments --jq '[.[] | select(.body | startswith("## Code Review"))] | last | .id')
+REVIEW_COMMENT_ID=$(gh api repos/<owner>/<repo>/issues/<number>/comments --jq '[.[] | select(.body | startswith("## Code Review"))] | sort_by(.created_at, .id) | last | .id')
 ```
 2. If `REVIEW_COMMENT_ID` is set, PATCH the existing comment:
 ```bash
@@ -958,11 +969,11 @@ Post in TWO steps — an issue comment (for re-review detection in Step 2) AND a
 gh pr comment <number> $REPO_FLAG --body-file $AIR_TMP/review-comment.md
 ```
 
-2. Decide the verdict with the SHARED gating contract — the exact code managed CI runs (`lib/verdict.py`: fresh = any blockers gate; re-review = new blockers OR unfixed/deferred PRIOR BLOCKERS gate, unfixed mediums/lows do NOT). Never re-derive the decision by reading the body yourself. The `AIR_PLUGIN_ROOT` guard wraps the call — an empty variable must take the fallback branch, not expand to `python3 "/lib/verdict.py"`:
+2. Decide the verdict with the SHARED gating contract — the exact code managed CI runs (`lib/verdict.py`: fresh = any blockers gate; re-review = new blockers OR unfixed/deferred PRIOR BLOCKERS gate, unfixed mediums/lows do NOT). Never re-derive the decision by reading the body yourself. Pass `--head-sha "$headRefOid"` so the gate runs on the **SHA-validated** `## Code Review` block (`_extract_review_body`) rather than whatever is piped — a prompt-injected decoy block with a wrong/absent footer SHA can't displace the real one; it falls back to the raw body when none validates, so it never false-gates. The `AIR_PLUGIN_ROOT` guard wraps the call — an empty variable must take the fallback branch, not expand to `python3 "/lib/verdict.py"`:
 
 ```bash
 if [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/verdict.py" ]; then
-  VERDICT_LINE=$(python3 "$AIR_PLUGIN_ROOT/lib/verdict.py" --decide < "$AIR_TMP/review-comment.md")
+  VERDICT_LINE=$(python3 "$AIR_PLUGIN_ROOT/lib/verdict.py" --decide --head-sha "$headRefOid" < "$AIR_TMP/review-comment.md")
   VERDICT=${VERDICT_LINE%%$'\t'*}     # "approve" or "request-changes"
   REASON=${VERDICT_LINE#*$'\t'}       # reason text (only set for request-changes)
 else
