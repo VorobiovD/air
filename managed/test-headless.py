@@ -584,20 +584,20 @@ def test_usage_telemetry_guards_none_token_fields():
 def test_choose_cache_ttl_auto_and_override(monkeypatch):
     for v in ("AIR_HEADLESS_CACHE_TTL", "AIR_HEADLESS_TTL_FILES", "AIR_HEADLESS_TTL_BYTES"):
         monkeypatch.delenv(v, raising=False)
-    # signature is (n_files, RAW diff bytes) — defaults 25 files / 250KB
-    assert headless._choose_cache_ttl(3, 5_000) == "5m"        # small PR → cheap 5m
-    assert headless._choose_cache_ttl(24, 5_000) == "5m"       # just under the file cutoff
-    assert headless._choose_cache_ttl(25, 5_000) == "1h"       # file cutoff → safe 1h
-    assert headless._choose_cache_ttl(2, 300_000) == "1h"      # big raw diff → 1h (byte arm reachable)
+    # auto = 5m at ANY file/byte count (heavy->1h auto-bump retired; measured 0 misses even
+    # at 76 files). signature is (n_files, RAW diff bytes).
+    assert headless._choose_cache_ttl(3, 5_000) == "5m"        # small PR
+    assert headless._choose_cache_ttl(25, 5_000) == "5m"       # used to bump to 1h — now 5m
+    assert headless._choose_cache_ttl(76, 300_000) == "5m"     # heavy PR — still 5m (the #268 case)
     monkeypatch.setenv("AIR_HEADLESS_CACHE_TTL", "1h")
-    assert headless._choose_cache_ttl(2, 5_000) == "1h"        # override forces 1h
+    assert headless._choose_cache_ttl(2, 5_000) == "1h"        # manual override forces 1h
     monkeypatch.setenv("AIR_HEADLESS_CACHE_TTL", "5m")
-    assert headless._choose_cache_ttl(50, 999_999) == "5m"     # override beats heavy
-    # thresholds are read at CALL time (not module load) → monkeypatch-able + bad-input-safe
+    assert headless._choose_cache_ttl(50, 999_999) == "5m"     # manual override forces 5m
+    # heavy-bump is OPT-IN: only fires when a threshold env is explicitly set (>0).
     monkeypatch.delenv("AIR_HEADLESS_CACHE_TTL", raising=False)
     monkeypatch.setenv("AIR_HEADLESS_TTL_FILES", "5")
-    assert headless._choose_cache_ttl(6, 1_000) == "1h"        # tuned-down cutoff applies live
-    monkeypatch.setenv("AIR_HEADLESS_TTL_FILES", "oops")       # bad value → default (25), no crash
+    assert headless._choose_cache_ttl(6, 1_000) == "1h"        # opted-in cutoff applies live
+    monkeypatch.setenv("AIR_HEADLESS_TTL_FILES", "oops")       # bad value → default 0 (disabled), no crash
     assert headless._choose_cache_ttl(6, 1_000) == "5m"
 
 
