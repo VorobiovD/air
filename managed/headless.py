@@ -620,7 +620,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
         print(f"[headless] turn budget: {turn_budget} ({n_files} changed files)")
         cache_ttl = _choose_cache_ttl(n_files, raw_diff_bytes)
         write_mult = agent_loop.cache_write_mult(cache_ttl)
-        print(f"[headless] cache TTL: {cache_ttl} (cheaper 5m writes when gaps stay <5min; 1h for heavy PRs)")
+        print(f"[headless] cache TTL: {cache_ttl} (5m default; 1h only when forced or opted-in via "
+              f"AIR_HEADLESS_CACHE_TTL / AIR_HEADLESS_TTL_FILES / _BYTES)")
 
         # UI/copy reviewer dispatch (P3) — the conditional 5th specialist, mirroring
         # review.py's gate: dispatch only when the diff touches a user-facing surface

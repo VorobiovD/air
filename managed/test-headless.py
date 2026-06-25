@@ -599,6 +599,11 @@ def test_choose_cache_ttl_auto_and_override(monkeypatch):
     assert headless._choose_cache_ttl(6, 1_000) == "1h"        # opted-in cutoff applies live
     monkeypatch.setenv("AIR_HEADLESS_TTL_FILES", "oops")       # bad value → default 0 (disabled), no crash
     assert headless._choose_cache_ttl(6, 1_000) == "5m"
+    # the bytes arm is opt-in too (symmetric with the files arm).
+    monkeypatch.delenv("AIR_HEADLESS_TTL_FILES", raising=False)
+    monkeypatch.setenv("AIR_HEADLESS_TTL_BYTES", "200000")
+    assert headless._choose_cache_ttl(2, 300_000) == "1h"      # raw diff over the opted-in byte cutoff
+    assert headless._choose_cache_ttl(2, 50_000) == "5m"       # under it
 
 
 def test_advisory_lenses_use_medium_effort(tmp_path, monkeypatch):
