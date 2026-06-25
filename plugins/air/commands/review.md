@@ -9,11 +9,19 @@ Review code using specialized agents. If a PR number is given, review that PR. I
 
 air reviews GitHub PRs via the `gh` CLI (must be authenticated — `gh auth login`).
 
+`PLATFORM_DOMAIN` builds the wiki + finding-link URLs below — derive it from the
+remote host so GitHub Enterprise (and SSH remotes) work, defaulting to `github.com`:
+
 ```bash
 REMOTE_URL=$(git remote get-url origin 2>/dev/null)
+if [[ "$REMOTE_URL" =~ ^https?://([^/]+)/ ]]; then
+  PLATFORM_DOMAIN="${BASH_REMATCH[1]}"
+elif [[ "$REMOTE_URL" =~ ^git@([^:]+): ]]; then
+  PLATFORM_DOMAIN="${BASH_REMATCH[1]}"
+else
+  PLATFORM_DOMAIN="github.com"
+fi
 ```
-
-Set `CLI=gh` and `PLATFORM_DOMAIN` to the remote's host (`github.com`, or your GitHub Enterprise host) — it builds the wiki and finding-link URLs below.
 
 ## Step 0: Initialize Session Temp Directory
 

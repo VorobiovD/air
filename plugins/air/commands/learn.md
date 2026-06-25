@@ -16,7 +16,14 @@ Note: `/air:review` auto-triggers this command every 15 reviews or every 14 days
 
 ## Setup
 
-Same as `/air:review` — set `CLI=gh` and `PLATFORM_DOMAIN` to the remote's host (`github.com`, or your GitHub Enterprise host). See review.md "Setup".
+air uses the `gh` CLI. Derive `PLATFORM_DOMAIN` from the remote host (same as review.md "Setup"):
+
+```bash
+REMOTE_URL=$(git remote get-url origin 2>/dev/null)
+if [[ "$REMOTE_URL" =~ ^https?://([^/]+)/ ]]; then PLATFORM_DOMAIN="${BASH_REMATCH[1]}"
+elif [[ "$REMOTE_URL" =~ ^git@([^:]+): ]]; then PLATFORM_DOMAIN="${BASH_REMATCH[1]}"
+else PLATFORM_DOMAIN="github.com"; fi
+```
 
 ## Step 0: Initialize Session Temp Directory
 
