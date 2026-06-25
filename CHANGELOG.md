@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.38.1](https://github.com/VorobiovD/air/compare/v1.38.0...v1.38.1) (2026-06-25)
+
+
+### Performance Improvements
+
+* **headless:** 5m cache TTL everywhere — fix default + retire the heavy→1h over-charge ([#209](https://github.com/VorobiovD/air/issues/209)) ([412b224](https://github.com/VorobiovD/air/commit/412b2242e015cc95bb36ba21d2b6ce96fe6ed8f9))
+
 ## [1.38.0](https://github.com/VorobiovD/air/compare/v1.37.0...v1.38.0) (2026-06-24)
 
 
