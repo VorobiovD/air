@@ -17,7 +17,7 @@ Same anti-drift pattern as `lib/verdict.py`: one implementation, two paths.
 import sys
 from pathlib import Path
 
-from agent_md import read_prompt  # the single-source frontmatter parser
+from agent_md import read_prompt  # import the parser, don't re-copy it (one source — see agent_md)
 
 # Lens order is part of the prompt contract (later lenses see earlier
 # framing); keep stable. This is also the canonical specialist roster —

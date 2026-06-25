@@ -46,6 +46,7 @@ VorobiovD/air/
 │   │   ├── pattern_lifecycle.py       Deterministic author-pattern lifecycle ops
 │   │   ├── pr_conversation.py         Merge GitHub PR comments/reviews into `<pr-conversation>` agent context
 │   │   ├── solo_prompt.py             THE solo-prompt assembly (`assemble_solo_prompt`; CLI `--solo` runs it, managed setup.py imports it)
+│   │   ├── agent_md.py                THE agents/*.md frontmatter parser (split_frontmatter/read_prompt; single source for solo_prompt.assemble_solo_prompt, setup.parse_agent_*, headless._persona_model)
 │   │   ├── wiki_cap.py                THE deterministic wiki bloat-cap (cap_files/cap_dir; per-file byte ceilings, safe class-aware trims, fail-open; managed learn/render + CLI learn all call it)
 │   │   └── verdict.py                 THE shared gating contract: blocker/prior-status parse, body extractor, re-review severity-pin + ledger (build_carry_forward_ledger, pin_and_resurrect, extract_fresh_findings, finding_changed)
 │   └── .claude-plugin/
@@ -67,7 +68,7 @@ VorobiovD/air/
 │   ├── render_store_to_wiki.py       Deterministic store→wiki mirror render (inverse of migrate split; throttled per-review + on learn)
 │   ├── salvage_review.py             Drain a finished orphaned session, post its review ($0 — job-cancel recovery)
 │   ├── test-session.py               9-test verification (repo, auth, blame, comment, wiki)
-│   ├── test-*.py                     Offline unit suites (pure, no API): test-verdict (gating + re-review ledger), test-headless (headless mode: post path, gate, stage_patterns, dry-run + re-review orchestration + at-head verdict backfill), test-reliability (extraction + HTTP), test-extract, test-precomp, test-cost-wins, test-multiagent, test-promote-fastpath, test-ui-scope, test-render, test-learn, test-parallel
+│   ├── test-*.py                     Offline unit suites (pure, no API): test-verdict (gating + re-review ledger), test-headless (headless mode: post path, gate, stage_patterns, dry-run + re-review orchestration + at-head verdict backfill), test-reliability (extraction + HTTP), test-extract, test-precomp, test-cost-wins, test-multiagent, test-promote-fastpath, test-ui-scope, test-render, test-learn, test-parallel, test-agent-md (frontmatter-parser dedup; pure parse tests live in plugins/air/lib/tests/test_agent_md.py)
 │   ├── prompts/
 │   │   └── learn-orchestrator.md     Learn pipeline for cloud (review orchestrator.md deleted in v1.7.0 — replaced by review.py)
 │   └── requirements.txt             anthropic>=0.93.0, requests>=2.28.0
