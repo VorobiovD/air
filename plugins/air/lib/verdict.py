@@ -1114,6 +1114,7 @@ def _main(argv: list[str]) -> int:
     parser.add_argument("--prior-body", help="Path to the prior review body (re-review ledger input).")
     parser.add_argument("--inter-diff", help="Path to the inter-diff (re-review ledger input).")
     parser.add_argument("--base-sha", default="", help="Prior-reviewed SHA (inter-diff base) for anchor validation.")
+    parser.add_argument("--head-sha", default="", help="Reviewed HEAD SHA; when set, --decide gates on the SHA-validated `## Code Review` block (anti-decoy), falling back to the raw body if none matches.")
     args = parser.parse_args(argv)
     if not (args.decide or args.count_blockers or args.pin):
         parser.print_usage(sys.stderr)
@@ -1147,7 +1148,21 @@ def _main(argv: list[str]) -> int:
     # grammar as AIR_LEDGER_PIN). The CLI's Step 12 `--decide` inherits it from
     # the environment, so managed CI and the CLI gate identically.
     floor = os.environ.get("AIR_CATEGORY_FLOOR", "1").strip().lower() not in ("0", "false", "no")
-    request_changes, reason = should_request_changes(_maybe_pin(body), floor_exposures=floor)
+    gate_body = _maybe_pin(body)
+    # Anti-decoy SHA validation (CLI Step 12 passes --head-sha): gate on the
+    # SHA-anchored `## Code Review` block, not whatever was piped — a prompt-injected
+    # decoy block with a wrong/absent footer SHA can't displace the real one. Falls
+    # back to pre-existing behavior (same gate risk as without --head-sha — a decoy
+    # blocker in the raw body still gates) when none validates, so it never introduces
+    # a NEW false gate; absent --head-sha it is a pure no-op.
+    if args.head_sha:
+        extracted, ok = _extract_review_body(gate_body, args.head_sha)
+        if ok:
+            gate_body = extracted
+        else:
+            print(f"  [gate] no ## Code Review block validated against head_sha "
+                  f"{args.head_sha[:12]} — gating on the raw body", file=sys.stderr)
+    request_changes, reason = should_request_changes(gate_body, floor_exposures=floor)
     print(f"request-changes\t{reason}" if request_changes else "approve")
     return 0
 
