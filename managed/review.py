@@ -86,6 +86,7 @@ from github_client import (  # noqa: E402,F401 — split modules; re-exported fo
     fetch_pr_review_comments,
     fetch_inter_diff,
     fetch_compare_status,
+    fetch_related_prs,
     count_diff_changed_lines,
     DIFF_TRUNCATION_MARKER,
 )
@@ -211,6 +212,15 @@ def _origin_anchor_enabled() -> bool:
     # baseline). Default ON; AIR_ORIGIN_ANCHOR=0/false/no is the kill switch
     # (caller/org var). Lives INSIDE the ledger, so AIR_LEDGER_PIN=0 disables it too.
     return os.environ.get("AIR_ORIGIN_ANCHOR", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _related_prs_enabled() -> bool:
+    # #3d concurrent-PR context (managed/headless parity with the CLI sibling
+    # scan). Default ON; AIR_RELATED_PRS=0/false/no disables (caller/org var, no
+    # deploy). It adds BOUNDED per-review GitHub REST calls (1 + 1 + up to
+    # max_scan files-per-sibling), so a repo that doesn't want the extra calls
+    # can turn it off. Advisory context only — never affects the gate.
+    return os.environ.get("AIR_RELATED_PRS", "1").strip().lower() not in ("0", "false", "no")
 
 
 def _build_review_chain(comments: list, bot_login) -> list:
@@ -2216,6 +2226,16 @@ async def run_review(args):
             ui_in_scope, ui_scope_reason = True, "declared copy paths"
     print(f"  ui-copy: {f'in scope ({ui_scope_reason})' if ui_in_scope else 'skipped (no user-facing files)'}")
 
+    # Concurrent open PRs touching the same files (#3d) — advisory context, never
+    # gates. Best-effort + bounded; off-loop so the codex/specialist pipes drain.
+    related_prs = "none"
+    if _related_prs_enabled():
+        related_prs = await asyncio.to_thread(
+            fetch_related_prs, args.repo, args.pr_number, bot_token
+        )
+        if related_prs != "none":
+            print(f"  related-prs: {len(related_prs.splitlines())} concurrent PR(s) overlap this PR's files")
+
     pr_context = build_pr_context(
         meta, args.repo,
         mode=mode,
@@ -2230,6 +2250,7 @@ async def run_review(args):
         blame_summaries=blame_summaries,
         churn_data=churn_data,
         diff_check_warnings=diff_check_warnings,
+        related_prs=related_prs,
         store_mounted=bool(store_id),
     )
 
