@@ -217,16 +217,23 @@ def _build_review_chain(comments: list, bot_login) -> list:
     """The air-review chain as [(body, reviewed_sha)] OLDEST-FIRST, for find_origin
     (#198). Only bot-authored `## Code Review` comments with a recoverable
     `Reviewed at:` SHA — a PR-author comment can't poison the origin (anti-spoof,
-    same author filter as find_prior_review). fetch_issue_comments returns
-    newest-first, so reverse to oldest-first."""
+    same author filter as find_prior_review, and FAIL-CLOSED: if the bot identity is
+    unresolvable we return [] rather than admit every comment). fetch_issue_comments
+    already returns OLDEST-FIRST (ascending by id — the per-issue endpoint ignores
+    sort/direction), which is exactly the order find_origin walks, so NO reversal:
+    find_origin returns the first matching anchor, which must be the oldest round
+    that raised #N (numbers restart every round, so a newest-first chain would
+    cross-wire a carried #N to a later round's unrelated #N)."""
     bots = _air_bot_logins() | ({bot_login} if bot_login else set())
+    if not bots:
+        return []   # bot identity unresolvable → v1 number-identity fallback (never fail open)
     chain = []
-    for c in reversed(comments or []):
+    for c in (comments or []):   # oldest-first from the API; find_origin needs oldest-first
         body = ((c or {}).get("body") or "")
         login = ((c or {}).get("user") or {}).get("login")
-        if not body.startswith("## Code Review"):
+        if not body.startswith(pr_conversation.BOT_REVIEW_PREFIXES):
             continue
-        if bots and login not in bots:
+        if login not in bots:
             continue
         sha = extract_reviewed_at_sha(body)
         if sha:
@@ -259,6 +266,9 @@ def make_origin_resolver(comments, bot_login, head_sha, repo, token):
                 diff = fetch_inter_diff(repo, origin_sha, head_sha, token)
                 if diff is not None:
                     idx = parse_changed_lines(diff)
+            elif status is None:
+                print(f"  [origin][warn] {origin_sha[:8]} — compare API error "
+                      f"(status unavailable); baseline fallback", file=sys.stderr)
             else:
                 print(f"  [origin] reject {origin_sha[:8]} — compare status {status} "
                       f"(not an ancestor of head); baseline fallback", file=sys.stderr)
