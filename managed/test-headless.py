@@ -725,11 +725,14 @@ def test_origin_resolver_ancestor_gate_unpoisons(monkeypatch):
 def test_origin_resolver_rejects_non_ancestor(monkeypatch):
     monkeypatch.setattr(review, "_air_bot_logins", lambda: frozenset({"air-machine"}))
     monkeypatch.setattr(review, "fetch_compare_status", lambda *a, **k: "diverged")  # rebase/force-push
-    def _boom(*a, **k):
-        raise AssertionError("must NOT fetch the diff for a non-ancestor origin")
-    monkeypatch.setattr(review, "fetch_inter_diff", _boom)
+    # Call-tracker, NOT a raising sentinel: _origin_index wraps the fetch in a broad
+    # `except Exception`, which would swallow an AssertionError — so the "must not
+    # fetch" invariant is asserted OUTSIDE the resolver, on the tracker list.
+    calls = []
+    monkeypatch.setattr(review, "fetch_inter_diff", lambda *a, **k: calls.append(True))
     resolver = review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD, "o/r", "tok")
     assert resolver(1) is None                                       # → v1 baseline fallback
+    assert not calls, "must NOT fetch the diff for a non-ancestor origin"
 
 
 def test_origin_resolver_disabled_by_kill_switch(monkeypatch):
@@ -791,11 +794,11 @@ def test_origin_resolver_handles_compare_api_error(monkeypatch):
     # NOT be treated as a topology rejection, and must NOT fetch the diff.
     monkeypatch.setattr(review, "_air_bot_logins", lambda: frozenset({"air-machine"}))
     monkeypatch.setattr(review, "fetch_compare_status", lambda *a, **k: None)
-    def _boom(*a, **k):
-        raise AssertionError("must NOT fetch the diff when compare status is unavailable")
-    monkeypatch.setattr(review, "fetch_inter_diff", _boom)
+    calls = []   # call-tracker (see test_origin_resolver_rejects_non_ancestor)
+    monkeypatch.setattr(review, "fetch_inter_diff", lambda *a, **k: calls.append(True))
     resolver = review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD, "o/r", "tok")
     assert resolver(1) is None                                       # → v1 baseline fallback
+    assert not calls, "must NOT fetch the diff when compare status is unavailable"
 
 
 def test_origin_resolver_handles_inter_diff_none(monkeypatch):
