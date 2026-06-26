@@ -902,6 +902,52 @@ git diff <REVIEWED_AT_SHA>...<headRefOid> > $AIR_TMP/ledger-diff-<number>.diff 2
 ```
 If this fails or produces nothing (cross-repo fallback, SHA not local): skip Step 11.5. Print "Step 11.5: ledger inter-diff unavailable — severity-pin skipped (no-op)." Number-identity pinning still needs both the prior body AND a parseable diff, so a missing diff is a clean no-op (the un-pinned body posts; the verdict is computed the pre-PR7 way).
 
+2.5. **Origin-anchor (#198) — round-3+ only, same-repo, best-effort.** This is the CLI half of the round-3+ un-poison managed/headless apply (`lib/verdict.py:find_origin` + `make_file_origin_resolver`). When the prior body is **itself a re-review** (round 3+), a blocker genuinely fixed in an *earlier* round is absent from the `baseline...head` ledger diff above, so number-identity pinning would rewrite the verifier's `FIXED` to `NOT FIXED` forever. Origin-anchor recovers each carried `#N`'s first-raise anchor by walking the bot-review chain and tests it against the wider `origin...head` window. **verdict.py stays pure (no network):** the orchestrator runs the **ancestor gate locally** (`git merge-base --is-ancestor`) and writes ONLY confirmed `origin...head` diffs — a diff file present ⟺ the origin is a confirmed ancestor of head ⇒ `origin...head` is a clean superset of `baseline...head` ⇒ `file_touched` can only widen (the same gate-safety proof as managed; it can never un-gate). Disabled by `AIR_ORIGIN_ANCHOR` ∈ `0`/`false`/`no` (and by `AIR_LEDGER_PIN=0`, since this only feeds the pin). Skip silently on cross-repo, when the prior body has no `### Previous Findings Status` block (round ≤ 2 — the round-2 hunk-evidence path already handles it), or on any error (→ number-identity fallback, conservative).
+```bash
+# Self-contained kill-switch reads (origin-anchor is gated by BOTH its own switch
+# and the ledger switch, since it only feeds the pin). Mirrors managed exactly.
+case "$(printf '%s' "${AIR_ORIGIN_ANCHOR:-1}" | tr '[:upper:]' '[:lower:]')" in
+  0|false|no) ORIGIN_OFF=1 ;; *) ORIGIN_OFF=0 ;;
+esac
+case "$(printf '%s' "${AIR_LEDGER_PIN:-1}" | tr '[:upper:]' '[:lower:]')" in
+  0|false|no) LEDGER_OFF=1 ;; *) LEDGER_OFF=0 ;;
+esac
+ORIGIN_CHAIN=""; ORIGIN_DIFFS=""
+if [ "$ORIGIN_OFF" = "0" ] && [ "$LEDGER_OFF" = "0" ] && [ "${CROSS_REPO:-false}" != "true" ] \
+   && grep -q '### Previous Findings Status' "$AIR_TMP/prior-body-<number>.md" 2>/dev/null; then
+  # Chain = prior `## Code Review` comments by the SAME author as the selected
+  # prior review (anti-spoof: a PR participant can't seed the origin), OLDEST-FIRST,
+  # each tagged with its Reviewed-at SHA. find_origin walks this to the first round
+  # that raised #N.
+  PRIOR_AUTHOR=$(gh api repos/<owner>/<repo>/issues/comments/$REVIEW_COMMENT_ID --jq '.user.login' 2>/dev/null)
+  CHAIN_JSON="$AIR_TMP/origin-chain-<number>.json"
+  ODIR="$AIR_TMP/origin-diffs-<number>"; mkdir -p "$ODIR"
+  if [ -n "$PRIOR_AUTHOR" ]; then
+    gh api repos/<owner>/<repo>/issues/<number>/comments --paginate --jq \
+      "[.[] | select((.body|startswith(\"## Code Review\")) and .user.login==\"$PRIOR_AUTHOR\")
+         | {body:.body, sha:(try (.body|capture(\"Reviewed at: (?<s>[0-9a-f]{40})\").s) catch null)}
+         | select(.sha != null)]" 2>/dev/null > "$CHAIN_JSON"
+    # For each DISTINCT chain SHA that is a confirmed ancestor of head, write the
+    # hygiene'd origin...head diff named <sha12>.diff. Present ⟺ ancestor-confirmed.
+    for SHA in $(jq -r '.[].sha' "$CHAIN_JSON" 2>/dev/null | sort -u); do
+      git merge-base --is-ancestor "$SHA" "<headRefOid>" 2>/dev/null || continue
+      if git diff "$SHA"...<headRefOid> > "$ODIR/${SHA:0:12}.diff" 2>/dev/null && [ -s "$ODIR/${SHA:0:12}.diff" ]; then
+        [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" ] && \
+          python3 "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" --diff-file "$ODIR/${SHA:0:12}.diff"
+      else
+        rm -f "$ODIR/${SHA:0:12}.diff"
+      fi
+    done
+  fi
+  # Only pass the flags if at least one confirmed origin diff exists.
+  if [ -s "$CHAIN_JSON" ] && [ -n "$(ls -A "$ODIR" 2>/dev/null)" ]; then
+    ORIGIN_CHAIN="$CHAIN_JSON"; ORIGIN_DIFFS="$ODIR"
+    echo "Step 11.5: origin-anchor active — $(ls "$ODIR" | wc -l | tr -d ' ') confirmed origin diff(s)." >&2
+  fi
+fi
+```
+`ORIGIN_CHAIN`/`ORIGIN_DIFFS` stay empty on any skip (disabled, cross-repo, round ≤ 2, no ancestor-confirmed origin, or any error), making the flags in step 3 a no-op — byte-identical to the pre-#198 CLI pin.
+
 3. Pipe the formatted body through `verdict.py --pin`, inside the same `$AIR_PLUGIN_ROOT` guard Step 12 uses (an empty variable must take the no-op branch, not expand to `python3 "/lib/verdict.py"`). Redirect stdout straight to a file (no command substitution — that strips the trailing newline and would break byte-parity with the parser); `mv` over the original only on success. **A non-zero exit must fail LOUD**, not silently revert to the un-pinned body — otherwise the "HARD deterministic guarantee" would silently degrade to advisory-only and Step 12 would gate on un-pinned content with no signal. Distinguish that failure from the clean disabled/missing-input skip:
 ```bash
 # Kill switch: mirror managed's _ledger_pin_enabled EXACTLY — 0/false/no
@@ -910,6 +956,12 @@ If this fails or produces nothing (cross-repo fallback, SHA not local): skip Ste
 case "$(printf '%s' "${AIR_LEDGER_PIN:-1}" | tr '[:upper:]' '[:lower:]')" in
   0|false|no) LEDGER_PIN_OFF=1 ;; *) LEDGER_PIN_OFF=0 ;;
 esac
+# Origin-anchor flags (#198) — set by step 2.5 ONLY when ≥1 ancestor-confirmed
+# origin diff exists; empty otherwise (no-op). Paths live under $AIR_TMP (mktemp,
+# no spaces), so the unquoted expansion below splits safely.
+ORIGIN_ARGS=""
+[ -n "${ORIGIN_CHAIN:-}" ] && [ -n "${ORIGIN_DIFFS:-}" ] && \
+  ORIGIN_ARGS="--origin-chain $ORIGIN_CHAIN --origin-diffs $ORIGIN_DIFFS"
 if [ "$LEDGER_PIN_OFF" = "0" ] \
    && [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/verdict.py" ] \
    && [ -s "$AIR_TMP/prior-body-<number>.md" ] && [ -s "$AIR_TMP/ledger-diff-<number>.diff" ]; then
@@ -917,6 +969,7 @@ if [ "$LEDGER_PIN_OFF" = "0" ] \
        --prior-body "$AIR_TMP/prior-body-<number>.md" \
        --inter-diff "$AIR_TMP/ledger-diff-<number>.diff" \
        --base-sha "<REVIEWED_AT_SHA>" \
+       $ORIGIN_ARGS \
        < "$AIR_TMP/review-comment.md" \
        > "$AIR_TMP/review-comment.pinned.md" 2> "$AIR_TMP/pin-log-<number>.txt"; then
     mv "$AIR_TMP/review-comment.pinned.md" "$AIR_TMP/review-comment.md"
