@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from agent_md import read_prompt  # import the parser, don't re-copy it (one source — see agent_md)
+from verdict import RESPOND_HINT  # single-source the --respond footer hint (shared with review.py)
 
 # Lens order is part of the prompt contract (later lenses see earlier
 # framing); keep stable. This is also the canonical specialist roster —
@@ -41,7 +42,8 @@ SOLO_PREAMBLE = (
     "You are reviewing ALONE in a single session — there is no separate verifier "
     "pass, so the verifier lens applies to your OWN findings in real time. Output "
     "exactly the `## Code Review` format the lenses describe, including the "
-    "`Reviewed at: <head_sha>` footer.\n\n"
+    "`Reviewed at: <head_sha>` footer and, as the final line after it, this "
+    f"exact blockquote: {RESPOND_HINT}\n\n"
     "SEVERITY DISCIPLINE — you are the only reviewer; there is no panel to restore "
     "a severity you rationalize away. When you self-verify you may DROP a finding "
     "as a false positive if the code is actually correct, but you may NOT talk a "

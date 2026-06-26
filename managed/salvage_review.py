@@ -38,6 +38,7 @@ from github_client import (  # noqa: E402
 )
 from session_runner import TERMINAL_SESSION_STATUSES  # noqa: E402
 from verdict import _extract_review_body, should_request_changes  # noqa: E402
+from review import _ensure_respond_footer  # noqa: E402  (same --respond footer restoration as managed/headless)
 
 # Exact coordinator labels (title shape: "{label} — {repo}"). Anchored
 # match — a prefix tuple was redundant ("air-coordinator-ma…" already
@@ -155,6 +156,11 @@ def main() -> int:
     verdict = "REQUEST_CHANGES" if request_changes else "APPROVE"
     print(f"extracted review: {len(body)} chars; verdict would be {verdict}"
           + (f" ({reason})" if reason else ""))
+
+    # `extracted` is guaranteed True here (early-return above otherwise), so the
+    # body is a real `## Code Review` — restore the --respond hint the extractor
+    # truncated (same fix as managed/headless).
+    body = _ensure_respond_footer(body)
 
     if not args.post:
         print("\n" + "=" * 60 + "\nDRY RUN — not posting. Review below:\n" + "=" * 60)

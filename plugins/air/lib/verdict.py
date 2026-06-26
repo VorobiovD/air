@@ -25,6 +25,13 @@ if _AIR_LIB_DIR not in sys.path:
 
 from pr_conversation import BOT_REVIEW_PREFIXES  # noqa: E402
 
+# The developer-response hint appended to a POSTED review body (after the
+# `Reviewed at:` footer). SINGLE SOURCE — review.py and solo_prompt.py both use
+# it, so a command rename (`--respond` → …) is one edit with a static link. NOT a
+# gating string: it sits after `Reviewed at:`, outside every _extract_review_body
+# / gate / skip-gate boundary.
+RESPOND_HINT = "> After fixing, run `/air:review --respond` to verify and reply."
+
 
 def count_blockers(review_body: str) -> int:
     """Count `**N. ...` numbered entries under a Blockers heading.
