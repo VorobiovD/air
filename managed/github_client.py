@@ -505,6 +505,9 @@ def fetch_compare_status(repo: str, base_sha: str, head_sha: str, token: str) ->
         return None
 
 
+_OWN_FILE_PAGES = 3   # #3d: cap this PR's own files at 300 — the overlap base set
+
+
 def fetch_related_prs(
     repo: str, pr_number: int, token: str, *, max_scan: int = 50, max_report: int = 10,
 ) -> str:
@@ -519,15 +522,20 @@ def fetch_related_prs(
     flagged; whether the hunks actually collide is left to the agent).
 
     Best-effort + BOUNDED: examines at most `max_scan` open PRs (newest-activity
-    first) and reports at most `max_report` overlapping siblings. ANY API error or
-    empty result → "none" — this is non-load-bearing background context and must
-    never block or fail a review (mirrors the CLI: a rate-limited scan is
-    indistinguishable from "no siblings" by design). Cost: 1 (this PR's files) + 1
-    (open-PR list) + up to `max_scan` (files-per-sibling) GitHub REST calls."""
+    first) and reports at most `max_report` overlapping siblings. EVERY file fetch
+    is page-capped so cost can't multiply: this PR's files at `_OWN_FILE_PAGES`
+    (300) and each sibling's at ONE page (100) — enough to detect overlap in
+    practice; a sibling touching >100 files is matched on its first 100 (a missed
+    overlap on a giant sibling is harmless for advisory context). ANY API error or
+    empty result → "none" — non-load-bearing background context that must never
+    block or fail a review (mirrors the CLI: a rate-limited scan is
+    indistinguishable from "no siblings" by design). Bounded cost: ≤
+    `_OWN_FILE_PAGES` (this PR's files) + 1 (open-PR list) + `max_scan` (one page
+    per sibling) GitHub REST calls."""
     try:
         own = _github_paginate(
             f"https://api.github.com/repos/{repo}/pulls/{pr_number}/files?per_page=100",
-            token,
+            token, max_pages=_OWN_FILE_PAGES,
         )
         own_files = {f.get("filename") for f in own if f.get("filename")}
         if not own_files:
@@ -540,7 +548,7 @@ def fetch_related_prs(
     except Exception:
         return "none"
 
-    siblings: list[tuple] = []
+    siblings: list[tuple[int, str, list[str]]] = []
     scanned = 0
     for pr in opens:
         num = pr.get("number")
@@ -552,7 +560,7 @@ def fetch_related_prs(
         try:
             files = _github_paginate(
                 f"https://api.github.com/repos/{repo}/pulls/{num}/files?per_page=100",
-                token,
+                token, max_pages=1,   # one page (100 files) is enough to detect overlap; bounds cost
             )
         except Exception:
             continue   # one unreadable sibling never aborts the scan

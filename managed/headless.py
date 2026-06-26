@@ -584,11 +584,6 @@ async def run_headless_review(args, bot_token: str) -> dict:
         except Exception as e:
             print(f"  [warn] ledger build failed: {type(e).__name__}: {e} — no severity pin", file=sys.stderr)
 
-    # html.escape the diff before interpolating: it's attacker-controlled (the PR
-    # author writes it), and a raw `</diff>` line would close the XML wrapper and
-    # smuggle untagged prompt-injection text to every specialist + the verifier.
-    # build_pr_context escapes every other untrusted field (title/body/blame/codex);
-    # the diff must match (PROJECT-PROFILE check 9). Truncation (above) is pre-escape.
     # Concurrent open PRs touching the same files (#3d) — advisory context, never
     # gates. Best-effort + bounded; off-loop so nothing blocks on the scan.
     related_prs = "none"
@@ -598,7 +593,13 @@ async def run_headless_review(args, bot_token: str) -> dict:
         )
         if related_prs != "none":
             print(f"  [headless] related-prs: {len(related_prs.splitlines())} concurrent PR(s) "
-                  "overlap this PR's files", file=sys.stderr)
+                  "overlap this PR's files")   # stdout — matches other [headless] precomp telemetry
+
+    # html.escape the diff before interpolating: it's attacker-controlled (the PR
+    # author writes it), and a raw `</diff>` line would close the XML wrapper and
+    # smuggle untagged prompt-injection text to every specialist + the verifier.
+    # build_pr_context escapes every other untrusted field (title/body/blame/codex);
+    # the diff must match (PROJECT-PROFILE check 9). Truncation (above) is pre-escape.
 
     pr_context = (build_pr_context(
                     meta, args.repo, mode=mode,
