@@ -910,3 +910,36 @@ def test_sigint_registered_only_in_ci(monkeypatch):
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     session_runner._install_shutdown_handlers()
     assert registered[_signal.SIGINT] is session_runner._shutdown_signal_handler
+
+
+# ---------------------------------------------------------------------------
+# --respond footer restoration: _extract_review_body slices the body to end at
+# the `Reviewed at:` line (anti-spoof anchor), stripping the verifier-emitted
+# `/air:review --respond` hint from every managed/headless posted comment. We
+# re-append it deterministically at the POST/print site — gate-neutral.
+# ---------------------------------------------------------------------------
+
+def test_ensure_respond_footer_appends_when_absent():
+    body = f"## Code Review\n\nLGTM.\n\nReviewed at: {HEAD}"
+    out = review._ensure_respond_footer(body)
+    assert "/air:review --respond" in out
+    assert out.rstrip().endswith("to verify and reply.")
+    # hint sits AFTER the Reviewed at: footer (so the extractor still truncates it
+    # cleanly on any downstream re-parse)
+    assert out.index("Reviewed at:") < out.index("--respond")
+
+
+def test_ensure_respond_footer_idempotent():
+    body = (f"## Code Review\n\nLGTM.\n\nReviewed at: {HEAD}\n\n"
+            "> After fixing, run `/air:review --respond` to verify and reply.\n")
+    assert review._ensure_respond_footer(body) == body   # already present → unchanged
+
+
+def test_ensure_respond_footer_is_gate_neutral():
+    from verdict import should_request_changes
+    blocker = (f"## Code Review\n\n### Blockers\n\n**1. sqli** — raw query\n\n"
+               f"Reviewed at: {HEAD}\n")
+    clean = f"## Code Review\n\nAll good.\n\nReviewed at: {HEAD}\n"
+    for b in (blocker, clean):
+        assert (should_request_changes(review._ensure_respond_footer(b))[0]
+                == should_request_changes(b)[0])

@@ -352,7 +352,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
         filter_comments_after, format_developer_responses, _ledger_pin_enabled,
         _update_learn_counter, _maybe_render_mirror, _backfill_verdict_if_missing,
         _collect_changed_paths, _path_is_ui, _user_facing_copy_globs, _path_matches_globs,
-        run_codex_session, _codex_skip_tiny_delta,
+        run_codex_session, _codex_skip_tiny_delta, _ensure_respond_footer,
         _detect_promote_fastpath, _git, _air_bot_logins, make_origin_resolver)
     from session_runner import SESSION_TIMEOUT_SECS  # noqa: E402  (codex wall-clock cap)
     author = meta["user"]["login"]
@@ -825,7 +825,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
 
     if getattr(args, "dry_run", False):
         print(f"\n===== DRY RUN — verdict: {verdict} ({reason or 'clean'}) =====\n")
-        print(review_body)
+        print(_ensure_respond_footer(review_body))
         return {"ok": True, "verdict": verdict, "reason": reason, "body": review_body,
                 "wall": wall, "cost": cost, "dry_run": True,
                 "specialists": {a: (r["tool_calls"] if r else None) for a, r in specialist_results.items()}}
@@ -833,7 +833,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # If the comment POST fails (e.g. a second 422), don't proceed to submit a formal
     # verdict — that would gate the PR with no visible review. Fail the run instead
     # (mirrors managed review.py, which checks resp.ok and exits non-zero).
-    resp = _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
+    resp = _post_review_comment_with_retry(args.repo, args.pr_number, _ensure_respond_footer(review_body), bot_token)
     if not getattr(resp, "ok", True):
         print(f"  [gate] review comment POST failed: HTTP {getattr(resp, 'status_code', '?')} "
               "— not submitting a verdict", file=sys.stderr)

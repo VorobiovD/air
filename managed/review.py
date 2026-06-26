@@ -340,6 +340,25 @@ def _finding_titles(body: str) -> list[str]:
     return out
 
 
+_RESPOND_HINT = "> After fixing, run `/air:review --respond` to verify and reply."
+
+
+def _ensure_respond_footer(body: str) -> str:
+    """Append the developer-response hint to a body about to be POSTED/printed, if
+    absent. The verifier emits this line AFTER `Reviewed at:`, but
+    `_extract_review_body` slices the body to END at the `Reviewed at:` line (the
+    anti-spoof anchor), so the hint is stripped from the posted comment on every
+    managed/headless path (the CLI is exempt — it posts its template verbatim and
+    only extracts for gating). Re-append it deterministically at the POST/print
+    site — NOT the gate input: it sits after `Reviewed at:`, so it's invisible to
+    the blocker gate, the re-review skip-gate, and any downstream
+    `_extract_review_body` re-parse (all key on / truncate at `Reviewed at:`).
+    Idempotent (a body that already carries the hint is returned unchanged)."""
+    if "/air:review --respond" in body:
+        return body
+    return f"{body.rstrip()}\n\n{_RESPOND_HINT}\n"
+
+
 def _append_review_footer(body: str, head_sha: str) -> str:
     """The verifier delivers review CONTENT without the `Reviewed at:` footer
     (the coordinator appends it on relay). For direct-post we append it
@@ -348,7 +367,7 @@ def _append_review_footer(body: str, head_sha: str) -> str:
     _extract_review_body + the re-review skip-gate."""
     return (
         f"{body.rstrip()}\n\n---\n\nReviewed at: {head_sha}\n\n"
-        "> After fixing, run `/air:review --respond` to verify and reply.\n"
+        f"{_RESPOND_HINT}\n"
     )
 
 
@@ -2569,7 +2588,7 @@ async def run_review(args):
         print("\n" + "=" * 60)
         print("DRY RUN — not posting. Review comment below:")
         print("=" * 60 + "\n")
-        print(review_body)
+        print(_ensure_respond_footer(review_body))
         if not review_extracted:
             _exit_nonzero_on_failed_run(args.pr_number, coordinator_failure_reason, posted=False)
         return
@@ -2609,7 +2628,7 @@ async def run_review(args):
 
     print(f"\n[5] Posting review comment to PR #{args.pr_number}...")
     try:
-        resp = _post_review_comment_with_retry(args.repo, args.pr_number, review_body, bot_token)
+        resp = _post_review_comment_with_retry(args.repo, args.pr_number, _ensure_respond_footer(review_body), bot_token)
     except RequestException as e:
         print(
             f"::error::air: review comment POST failed after retries ({e}) — "
