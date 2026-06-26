@@ -342,6 +342,7 @@ from verdict import (  # noqa: E402
     finding_changed,
     extract_fresh_findings,
     build_carry_forward_ledger,
+    find_origin,
     pin_and_resurrect,
     LedgerEntry,
     CHANGED, UNCHANGED, INDETERMINATE,
@@ -668,6 +669,96 @@ def test_cross_region_exemption_emits_pin_log():
     e = _ledger_entry(1, "blocker", "NOT FIXED", change=UNCHANGED, file_touched=True)
     _, log = pin_and_resurrect(_rr_body("- **#1** [blocker] — FIXED — upstream fix"), [e])
     assert any("cross-region FIXED trusted" in l for l in log)
+
+
+# --- #198 origin-anchor: un-poison round-3+ carried fixes (gate-safe) -------
+# A blocker carried in a round-3+ status block, GENUINELY fixed in an EARLIER
+# round, so absent from baseline..head. v1 pins it INDETERMINATE/file_touched=False
+# → rewrites the verifier FIXED to NOT FIXED FOREVER (the qai-be #1290 poison).
+# Origin-anchor recovers #N's first-raise anchor + tests it against origin..head.
+_OA_R3_PRIOR = (
+    "## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+    "- **#1** [blocker] — NOT FIXED — carried blocker, fixed in an earlier round\n\n"
+    "Reviewed at: dddd000000000000000000000000000000000000\n"
+)
+_OA_ORIGIN_SHA = "cccc000000000000000000000000000000000000"
+# origin..head touches svc.py in a DIFFERENT region than the anchor (svc.py:5).
+_OA_ORIGIN_DIFF = ("diff --git a/svc.py b/svc.py\n--- a/svc.py\n+++ b/svc.py\n"
+                   "@@ -40,3 +40,4 @@ def aggregate():\n ctx40\n+    return dedup(rows)\n ctx41\n")
+
+
+def _oa_resolver(num):
+    return (_OA_ORIGIN_SHA, ("svc.py", 5, 5), parse_changed_lines(_OA_ORIGIN_DIFF)) if num == 1 else None
+
+
+def test_origin_anchor_off_is_v1_number_identity():
+    # No resolver (kill switch off / caller not passing it) → round-3+ stays pure
+    # number-identity, byte-identical to v1: INDETERMINATE, file_touched=False, no origin.
+    led = build_carry_forward_ledger(_OA_R3_PRIOR, "", "dddd00000000")
+    assert [(e.change, e.file_touched, e.origin_sha) for e in led] == [(INDETERMINATE, False, None)]
+
+
+def test_origin_anchor_unpoisons_round3_carried_fix():
+    # THE #1290 un-poison. baseline..head does NOT touch svc.py (fix predates baseline).
+    baseline_diff = ("diff --git a/other.py b/other.py\n--- a/other.py\n+++ b/other.py\n"
+                     "@@ -1,1 +1,1 @@\n-x\n+y\n")
+    emitted = _rr_body("- **#1** [blocker] — FIXED — fixed two rounds ago, confirmed in source")
+    # v1 (no resolver): INDETERMINATE/file_touched=False → FIXED rewritten → false-block.
+    led_v1 = build_carry_forward_ledger(_OA_R3_PRIOR, baseline_diff, "dddd00000000")
+    assert led_v1[0].change == INDETERMINATE and led_v1[0].file_touched is False
+    assert _gates(pin_and_resurrect(emitted, led_v1)[0])
+    # v2 (origin-anchor): fix IS in origin..head (cross-region on svc.py) →
+    # UNCHANGED+file_touched=True → cross_region trust → verifier FIXED stands → APPROVE.
+    led_v2 = build_carry_forward_ledger(_OA_R3_PRIOR, baseline_diff, "dddd00000000", origin_resolver=_oa_resolver)
+    assert led_v2[0].change == UNCHANGED and led_v2[0].file_touched is True
+    assert led_v2[0].origin_sha == _OA_ORIGIN_SHA
+    pinned, log = pin_and_resurrect(emitted, led_v2)
+    assert not _gates(pinned)                                     # un-poisoned → APPROVE
+    assert any("cross-region FIXED trusted" in l for l in log)
+
+
+def test_origin_anchor_holds_when_file_untouched_in_origin_window():
+    # The fix is NOT in origin..head (file absent) → file_touched=False → the
+    # verifier FIXED is still rewritten to NOT FIXED (gate holds — NEVER un-gates
+    # on no evidence, even with origin-anchor on).
+    def resolver(num):
+        d = ("diff --git a/elsewhere.py b/elsewhere.py\n--- a/elsewhere.py\n"
+             "+++ b/elsewhere.py\n@@ -1,1 +1,1 @@\n-x\n+y\n")
+        return (_OA_ORIGIN_SHA, ("svc.py", 5, 5), parse_changed_lines(d)) if num == 1 else None
+    led = build_carry_forward_ledger(_OA_R3_PRIOR, "", "dddd00000000", origin_resolver=resolver)
+    assert led[0].change == UNCHANGED and led[0].file_touched is False
+    out, plog = pin_and_resurrect(_rr_body("- **#1** [blocker] — FIXED — claims fixed"), led)
+    assert _gates(out) and any("FIXED->NOT FIXED" in l for l in plog)
+
+
+def test_origin_anchor_line_changed_is_honored():
+    # Fix lands AT the anchor line in origin..head → finding_changed=CHANGED → the
+    # FIXED→NOT FIXED rewrite never fires (change==CHANGED) → honored.
+    def resolver(num):
+        d = "diff --git a/svc.py b/svc.py\n--- a/svc.py\n+++ b/svc.py\n@@ -5,1 +5,1 @@\n-old5\n+new5\n"
+        return (_OA_ORIGIN_SHA, ("svc.py", 5, 5), parse_changed_lines(d)) if num == 1 else None
+    led = build_carry_forward_ledger(_OA_R3_PRIOR, "", "dddd00000000", origin_resolver=resolver)
+    assert led[0].change == CHANGED
+    assert not _gates(pin_and_resurrect(_rr_body("- **#1** [blocker] — FIXED — fixed at the flagged line"), led)[0])
+
+
+def test_origin_anchor_skipped_on_sibling_promote():
+    # Promote sibling: even WITH a resolver, the sibling path stays number-identity
+    # (its origin SHA isn't an ancestor of this head; the caller's ancestor gate
+    # rejects it). Origin-anchor is a no-op on promote, by design.
+    led = build_carry_forward_ledger(_OA_R3_PRIOR, "", "dddd00000000", sibling=True, origin_resolver=_oa_resolver)
+    assert [(e.change, e.file_touched, e.origin_sha) for e in led] == [(INDETERMINATE, False, None)]
+
+
+def test_find_origin_walks_chain_to_oldest_anchor():
+    r1 = ("## Code Review\n\n### Blockers\n\n**1. flaw**\n\n"
+          "[`svc.py#L5`](https://github.com/o/r/blob/aaaa00000000/svc.py#L5) — x\n\n"
+          "Reviewed at: aaaa000000000000000000000000000000000000\n")
+    chain = [(r1, "aaaa000000000000000000000000000000000000"),
+             (_OA_R3_PRIOR, "dddd000000000000000000000000000000000000")]
+    sha, loc = find_origin(chain, 1)
+    assert sha == "aaaa000000000000000000000000000000000000" and loc[0] == "svc.py"
+    assert find_origin(chain, 99) == (None, None)               # no anchor → fall back
 
 
 def test_stubbed_file_fixed_still_gates_despite_file_touched():

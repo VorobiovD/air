@@ -481,3 +481,25 @@ def fetch_inter_diff(
     # changed-line count by the other, so both sides must see the same
     # stubbing or generated churn would skew the gate.
     return apply_diff_hygiene(resp.text)
+
+
+def fetch_compare_status(repo: str, base_sha: str, head_sha: str, token: str) -> str | None:
+    """GitHub's compare `status` for base...head ('ahead'|'behind'|'diverged'|
+    'identical', HEAD relative to BASE), or None on API error.
+
+    The origin-anchor ancestor gate (#198): origin is a SAFE ancestor of head iff
+    status in {'ahead','identical'} (head is at or past origin → origin..head is a
+    clean superset window, so file_touched can only widen monotonically). A
+    'diverged'/'behind'/error result REJECTS the origin so the wider window can
+    never pull in unrelated history (a rebase/force-push that rewrote the origin
+    commit). JSON accept (default) — distinct from fetch_inter_diff's .v3.diff."""
+    resp = _gh_request(
+        "GET", f"https://api.github.com/repos/{repo}/compare/{base_sha}...{head_sha}",
+        token=token,
+    )
+    if not resp.ok:
+        return None
+    try:
+        return resp.json().get("status")
+    except (ValueError, AttributeError):
+        return None

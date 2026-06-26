@@ -780,10 +780,10 @@ def extract_fresh_finding_locations(body: str, base_sha: str) -> dict:
 
 class LedgerEntry:
     __slots__ = ("num", "prior_severity", "prior_status", "location", "change",
-                 "file_touched")
+                 "file_touched", "origin_sha")
 
     def __init__(self, num, prior_severity, prior_status, location, change,
-                 file_touched=False):
+                 file_touched=False, origin_sha=None):
         self.num = num
         self.prior_severity = prior_severity
         self.prior_status = prior_status
@@ -797,10 +797,40 @@ class LedgerEntry:
         # number-identity rounds (no inter-diff index — INDETERMINATE, which the
         # pin trusts anyway).
         self.file_touched = file_touched
+        # Origin-anchor (#198): the SHA at which this finding was FIRST raised. Set
+        # only on round-3+ carried findings whose origin was recovered AND the
+        # origin..head window resolved (else None → v1 number-identity). For
+        # [pin][origin] telemetry only — the gate decision flows through
+        # change/file_touched (computed against the origin window) exactly as round-2.
+        self.origin_sha = origin_sha
+
+
+def find_origin(chain, finding_num: int):
+    """Origin-anchor (#198): walk the prior-review CHAIN oldest-first and return
+    `(origin_sha, location)` for the OLDEST round that raised `#N` as a finding with
+    a recoverable `**N.**` anchor (`extract_fresh_finding_locations`). The
+    carry-forward contract preserves a finding's NUMBER across rounds, so a round-3+
+    carried `#N` traces to the same `#N` where it was first a NEW finding. Returns
+    `(None, None)` when no anchor is recoverable → caller falls back to
+    number-identity (conservative).
+
+    `chain` is a list of `(review_body, reviewed_sha)` OLDEST-FIRST. Pure — the
+    caller (which holds the comments + git/API) builds the chain, runs the
+    ancestor check, and resolves the `origin..head` diff; this only does the anchor
+    archaeology. Mis-attribution under per-round renumbering is bounded safe: the
+    origin only ever widens `file_touched` (False->True) feeding pin_and_resurrect's
+    already-validated cross_region trust — it cannot un-gate beyond that class."""
+    for body, sha in chain:
+        if not sha:
+            continue
+        locs = extract_fresh_finding_locations(body, sha)
+        if finding_num in locs:
+            return sha, locs[finding_num]
+    return None, None
 
 
 def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
-                               *, sibling: bool = False) -> list:
+                               *, sibling: bool = False, origin_resolver=None) -> list:
     """One LedgerEntry per prior finding, keyed on #N. The change-state depends
     on which round we're carrying from — and that distinction is load-bearing:
 
@@ -826,10 +856,36 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
     `sibling=True` (promote fast-path, a different PR's tree) → number-identity,
     no fresh fallback. Empty list when there's nothing to carry → no-op."""
     triples = extract_prior_statuses(prior_body)
-    if triples or sibling:
-        # Round 3+ (carried status block) or promote sibling: number-identity.
+    if sibling:
+        # Promote fast-path (a DIFFERENT PR's tree): number-identity, never
+        # origin-anchored — the sibling's origin SHA isn't an ancestor of this
+        # head, so the caller's ancestor gate would reject it anyway. Conservative.
         return [LedgerEntry(num, sev, status, None, INDETERMINATE)
                 for num, sev, status in triples]
+    if triples:
+        # Round 3+: carried #N has NO anchor in this body. ORIGIN-ANCHOR (#198):
+        # when origin_resolver is supplied, recover #N's first-raise anchor + test
+        # it against the WIDER origin..head window, so a fix that landed BEFORE the
+        # current baseline un-poisons (the qai-be #1290 class: file absent from
+        # baseline..head -> file_touched=False -> FIXED rewritten to NOT FIXED
+        # forever). Same change/file_touched semantics as round-2, just over the
+        # origin window. No resolver / unresolved origin -> v1 number-identity
+        # (INDETERMINATE, file_touched=False) -> conservative pin. GATE-SAFE: the
+        # origin window is a SUPERSET of baseline (origin is an ancestor of head,
+        # enforced by the caller's ancestor check), so file_touched can only flip
+        # False->True, and it feeds ONLY pin_and_resurrect's already-validated
+        # cross_region trust (0 fleet un-gates) — never a new trust class.
+        out = []
+        for num, sev, status in triples:
+            loc, change, file_touched, origin_sha = None, INDETERMINATE, False, None
+            if origin_resolver is not None:
+                res = origin_resolver(num)   # (origin_sha, location, ChangedIndex) | None
+                if res:
+                    origin_sha, loc, oidx = res
+                    change = finding_changed(loc, oidx) if loc else INDETERMINATE
+                    file_touched = bool(loc) and bool(oidx.hunk_old.get(loc[0]))
+            out.append(LedgerEntry(num, sev, status, loc, change, file_touched, origin_sha))
+        return out
     # Round 2: fresh prior — line evidence is safe and honors real fixes.
     fresh = extract_fresh_findings(prior_body)
     if not fresh:

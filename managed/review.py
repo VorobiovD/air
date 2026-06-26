@@ -85,6 +85,7 @@ from github_client import (  # noqa: E402,F401 — split modules; re-exported fo
     fetch_pr_reviews,
     fetch_pr_review_comments,
     fetch_inter_diff,
+    fetch_compare_status,
     count_diff_changed_lines,
     DIFF_TRUNCATION_MARKER,
 )
@@ -110,6 +111,8 @@ from verdict import (  # noqa: E402,F401 — split modules; re-exported for test
     _SHA_PREFIX_LEN,
     _extract_review_body,
     build_carry_forward_ledger,
+    find_origin,
+    parse_changed_lines,
     pin_and_resurrect,
 )
 from session_runner import (  # noqa: E402,F401 — split modules; re-exported for tests/callers
@@ -201,6 +204,88 @@ def _ledger_pin_enabled() -> bool:
     # ledger block AND the deterministic pin_and_resurrect guard — so there's
     # never a half-on state.
     return os.environ.get("AIR_LEDGER_PIN", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _origin_anchor_enabled() -> bool:
+    # #198 origin-anchor (un-poisons round-3+ chains where the fix predates the
+    # baseline). Default ON; AIR_ORIGIN_ANCHOR=0/false/no is the kill switch
+    # (caller/org var). Lives INSIDE the ledger, so AIR_LEDGER_PIN=0 disables it too.
+    return os.environ.get("AIR_ORIGIN_ANCHOR", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _build_review_chain(comments: list, bot_login) -> list:
+    """The air-review chain as [(body, reviewed_sha)] OLDEST-FIRST, for find_origin
+    (#198). Only bot-authored `## Code Review` comments with a recoverable
+    `Reviewed at:` SHA — a PR-author comment can't poison the origin (anti-spoof,
+    same author filter as find_prior_review, and FAIL-CLOSED: if the bot identity is
+    unresolvable we return [] rather than admit every comment). fetch_issue_comments
+    already returns OLDEST-FIRST (ascending by id — the per-issue endpoint ignores
+    sort/direction), which is exactly the order find_origin walks, so NO reversal:
+    find_origin returns the first matching anchor, which must be the oldest round
+    that raised #N (numbers restart every round, so a newest-first chain would
+    cross-wire a carried #N to a later round's unrelated #N)."""
+    bots = _air_bot_logins() | ({bot_login} if bot_login else set())
+    if not bots:
+        return []   # bot identity unresolvable → v1 number-identity fallback (never fail open)
+    chain = []
+    for c in (comments or []):   # oldest-first from the API; find_origin needs oldest-first
+        body = ((c or {}).get("body") or "")
+        login = ((c or {}).get("user") or {}).get("login")
+        if not body.startswith(pr_conversation.BOT_REVIEW_PREFIXES):
+            continue
+        if login not in bots:
+            continue
+        sha = extract_reviewed_at_sha(body)
+        if sha:
+            chain.append((body, sha))
+    return chain
+
+
+def make_origin_resolver(comments, bot_login, head_sha, repo, token):
+    """Build the per-finding origin_resolver for build_carry_forward_ledger (#198),
+    or None when disabled / no head_sha / no chain. For each carried #N,
+    find_origin recovers its first-raise (origin_sha, anchor); per distinct origin
+    SHA the ANCESTOR GATE runs (fetch_compare_status must be ahead/identical — the
+    monotone superset guard) then the hygiene'd origin..head diff is parsed. A
+    non-ancestor / API-fail origin → None for that finding → v1 number-identity
+    fallback (conservative, never un-gates). Index cached per origin SHA."""
+    if not (_origin_anchor_enabled() and head_sha):
+        return None
+    chain = _build_review_chain(comments, bot_login)
+    if not chain:
+        return None
+    index_cache: dict = {}
+
+    def _origin_index(origin_sha):
+        if origin_sha in index_cache:
+            return index_cache[origin_sha]
+        idx = None
+        try:
+            status = fetch_compare_status(repo, origin_sha, head_sha, token)
+            if status in ("ahead", "identical"):     # origin is an ancestor of head
+                diff = fetch_inter_diff(repo, origin_sha, head_sha, token)
+                if diff is not None:
+                    idx = parse_changed_lines(diff)
+            elif status is None:
+                print(f"  [origin][warn] {origin_sha[:8]} — compare API error "
+                      f"(status unavailable); baseline fallback", file=sys.stderr)
+            else:
+                print(f"  [origin] reject {origin_sha[:8]} — compare status {status} "
+                      f"(not an ancestor of head); baseline fallback", file=sys.stderr)
+        except Exception as e:
+            print(f"  [origin][warn] {origin_sha[:8]}..{(head_sha or '')[:8]} "
+                  f"failed ({type(e).__name__}: {e}) — baseline fallback", file=sys.stderr)
+        index_cache[origin_sha] = idx
+        return idx
+
+    def resolver(num):
+        origin_sha, loc = find_origin(chain, num)
+        if not (origin_sha and loc):
+            return None
+        idx = _origin_index(origin_sha)
+        return (origin_sha, loc, idx) if idx is not None else None
+
+    return resolver
 
 
 def _category_floor_enabled() -> bool:
@@ -1981,9 +2066,18 @@ async def run_review(args):
     # only). Kill switch / fresh mode → empty ledger → every consumer no-op.
     carry_forward_ledger = []
     if mode == "re-review" and _ledger_pin_enabled():
+        # #198 origin-anchor: round-3+ carried findings test their first-raise
+        # anchor against origin..head (un-poisons a fix that predates baseline).
+        # None on the promote sibling path (a different PR's tree — number-identity
+        # only; build_carry_forward_ledger ignores the resolver under sibling=True
+        # anyway, but skipping the chain-walk + compare API calls is cleaner).
+        origin_resolver = (None if promote_sibling_pr is not None
+                           else make_origin_resolver(all_comments, bot_login, head_sha,
+                                                      args.repo, bot_token))
         carry_forward_ledger = build_carry_forward_ledger(
             (prior or {}).get("body", ""), diff, prior_sha or "",
             sibling=(promote_sibling_pr is not None),
+            origin_resolver=origin_resolver,
         )
 
     # Codex enablement is resolved BEFORE precomp so the codex session can
