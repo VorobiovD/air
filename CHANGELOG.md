@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.40.0](https://github.com/VorobiovD/air/compare/v1.39.0...v1.40.0) (2026-06-26)
+
+
+### Features
+
+* **cli:** wire [#198](https://github.com/VorobiovD/air/issues/198) origin-anchor into the CLI re-review pin ([#220](https://github.com/VorobiovD/air/issues/220)) ([ca47e36](https://github.com/VorobiovD/air/commit/ca47e36a8602074d0a6234c2408eb83ef4e3fff0))
+* **context:** surface concurrent open PRs in managed/headless reviews ([#3](https://github.com/VorobiovD/air/issues/3)d) ([#219](https://github.com/VorobiovD/air/issues/219)) ([5ffb21b](https://github.com/VorobiovD/air/commit/5ffb21b6915b8e7ebaaf73176f82ec8382e90d48))
+* remove experimental GitLab CLI support (GitHub-only) ([#215](https://github.com/VorobiovD/air/issues/215)) ([0668c21](https://github.com/VorobiovD/air/commit/0668c214d91a196f8cd953666bcb1b7d4e571580))
+* share diff-hygiene with the CLI + SHA-validate the CLI gate ([#217](https://github.com/VorobiovD/air/issues/217)) ([c4e9ca8](https://github.com/VorobiovD/air/commit/c4e9ca8efce8b2c2a461e4cfcb88b10250b1f90a))
+* **verdict:** [#198](https://github.com/VorobiovD/air/issues/198) origin-anchor — un-poison round-3+ re-review chains ([#218](https://github.com/VorobiovD/air/issues/218)) ([a1321cd](https://github.com/VorobiovD/air/commit/a1321cd688a69e0e0b111ad5b1c9f642df9dc884))
+
+
+### Bug Fixes
+
+* **review:** restore the --respond footer on managed/headless/solo reviews ([#221](https://github.com/VorobiovD/air/issues/221)) ([e9d4cfb](https://github.com/VorobiovD/air/commit/e9d4cfb361011acf57839f030e4c31813a698439))
+
 ## [1.39.0](https://github.com/VorobiovD/air/compare/v1.38.1...v1.39.0) (2026-06-25)
 
 
