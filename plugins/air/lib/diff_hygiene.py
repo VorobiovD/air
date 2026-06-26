@@ -215,8 +215,25 @@ def _main(argv: list) -> int:
         print(f"diff_hygiene: cannot read {args.diff_file}: {e}", file=sys.stderr)
         return 1
     cleaned = apply_diff_hygiene(raw, max_bytes=args.max_bytes)
-    with open(args.diff_file, "w", encoding="utf-8") as fh:
-        fh.write(cleaned)
+    # Atomic write: hygiene to a sibling temp then os.replace, so a mid-write OSError
+    # (full tmpfs, stale handle) leaves the ORIGINAL diff intact rather than truncating
+    # it to empty — which would silently feed the agents an empty diff and produce no
+    # findings. On failure the un-hygiene'd-but-intact diff stands and the run proceeds.
+    import tempfile
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(args.diff_file) or ".", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(cleaned)
+        os.replace(tmp, args.diff_file)
+    except OSError as e:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        print(f"diff_hygiene: cannot write {args.diff_file}: {e}", file=sys.stderr)
+        return 1
     return 0
 
 

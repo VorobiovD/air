@@ -336,7 +336,7 @@ Save diff to `$AIR_TMP/pr<number>.diff`. Include `$REPO_FLAG` on all `gh` comman
 
 Then apply **diff hygiene** — the SAME stub-generated/vendored + 500KB-cap pass managed runs inside its fetchers (`lib/diff_hygiene.py`, single-sourced with `github_client.apply_diff_hygiene`). It rewrites the file in place; it only ever omits generated churn (agents read the full source), so it's pure token savings. Best-effort — skip if the plugin lib isn't resolvable:
 ```bash
-[ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" ] && \
+[ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" ] && [ -s "$AIR_TMP/pr<number>.diff" ] && \
   python3 "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" --diff-file "$AIR_TMP/pr<number>.diff"
 ```
 

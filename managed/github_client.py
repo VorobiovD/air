@@ -20,11 +20,8 @@ import requests as req
 _LIB = Path(__file__).resolve().parent.parent / "plugins" / "air" / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-from diff_hygiene import (  # noqa: E402,F401  (re-export)
-    DIFF_MAX_BYTES, DIFF_TRUNCATION_MARKER, apply_diff_hygiene,
-    count_diff_changed_lines, _is_generated_path, _should_stub,
-    _stub_decision, _segment_path,
-    _LOCKFILE_MANIFESTS, _GENERATED_SUFFIXES, _GENERATED_SEGMENTS,
+from diff_hygiene import (  # noqa: E402,F401  (re-export — these four are imported from github_client by review.py / the test suites)
+    DIFF_TRUNCATION_MARKER, apply_diff_hygiene, count_diff_changed_lines, _is_generated_path,
 )
 
 

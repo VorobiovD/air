@@ -1152,8 +1152,9 @@ def _main(argv: list[str]) -> int:
     # Anti-decoy SHA validation (CLI Step 12 passes --head-sha): gate on the
     # SHA-anchored `## Code Review` block, not whatever was piped — a prompt-injected
     # decoy block with a wrong/absent footer SHA can't displace the real one. Falls
-    # back to the raw body (pre-existing behavior) when none validates, so it never
-    # false-gates; absent --head-sha it is a pure no-op.
+    # back to pre-existing behavior (same gate risk as without --head-sha — a decoy
+    # blocker in the raw body still gates) when none validates, so it never introduces
+    # a NEW false gate; absent --head-sha it is a pure no-op.
     if args.head_sha:
         extracted, ok = _extract_review_body(gate_body, args.head_sha)
         if ok:
