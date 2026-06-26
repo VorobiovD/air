@@ -857,8 +857,8 @@ def make_file_origin_resolver(chain, diffs_dir):
             try:
                 text = (Path(diffs_dir) / f"{key}.diff").read_text()
                 cache[key] = parse_changed_lines(text)
-            except OSError:
-                cache[key] = None        # diff absent ⇒ origin not ancestor-confirmed
+            except (OSError, UnicodeDecodeError):
+                cache[key] = None        # diff absent/unreadable ⇒ origin not ancestor-confirmed
         idx = cache[key]
         return (sha, loc, idx) if idx is not None else None
 
@@ -1235,7 +1235,7 @@ def _main(argv: list[str]) -> int:
             try:
                 chain = [(e["body"], e["sha"])
                          for e in json.loads(Path(args.origin_chain).read_text())
-                         if isinstance(e, dict) and e.get("sha")]
+                         if isinstance(e, dict) and e.get("sha") and e.get("body")]
                 if chain:
                     origin_resolver = make_file_origin_resolver(chain, args.origin_diffs)
             except (OSError, ValueError, TypeError, KeyError) as exc:

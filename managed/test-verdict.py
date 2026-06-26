@@ -223,8 +223,8 @@ def test_conflict_marker_empty_inputs():
 # CLI and managed modes provably share one decision implementation.
 # ---------------------------------------------------------------------------
 
-import subprocess
 import json
+import subprocess
 
 _LIB = str(Path(__file__).parent.parent / "plugins" / "air" / "lib" / "verdict.py")
 

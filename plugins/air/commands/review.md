@@ -923,10 +923,16 @@ if [ "$ORIGIN_OFF" = "0" ] && [ "$LEDGER_OFF" = "0" ] && [ "${CROSS_REPO:-false}
   CHAIN_JSON="$AIR_TMP/origin-chain-<number>.json"
   ODIR="$AIR_TMP/origin-diffs-<number>"; mkdir -p "$ODIR"
   if [ -n "$PRIOR_AUTHOR" ]; then
+    # `--paginate` + a `[...]`-array `--jq` emits ONE array PER PAGE; pipe through
+    # `jq -s 'add // []'` to merge them into a single valid array (else json.loads
+    # in verdict.py chokes on multi-array input — exactly on the long-lived,
+    # many-comment PRs this targets). startswith uses the trailing `\n` (both
+    # prefixes), matching managed's `BOT_REVIEW_PREFIXES` so `## Code Reviewers
+    # Guide`-style lookalikes can't match.
     gh api repos/<owner>/<repo>/issues/<number>/comments --paginate --jq \
-      "[.[] | select((.body|startswith(\"## Code Review\")) and .user.login==\"$PRIOR_AUTHOR\")
+      "[.[] | select(((.body|startswith(\"## Code Review\\n\")) or (.body|startswith(\"## Code Review (Re-review)\\n\"))) and .user.login==\"$PRIOR_AUTHOR\")
          | {body:.body, sha:(try (.body|capture(\"Reviewed at: (?<s>[0-9a-f]{40})\").s) catch null)}
-         | select(.sha != null)]" 2>/dev/null > "$CHAIN_JSON"
+         | select(.sha != null)]" 2>/dev/null | jq -s 'add // []' > "$CHAIN_JSON"
     # For each DISTINCT chain SHA that is a confirmed ancestor of head, write the
     # hygiene'd origin...head diff named <sha12>.diff. Present ⟺ ancestor-confirmed.
     for SHA in $(jq -r '.[].sha' "$CHAIN_JSON" 2>/dev/null | sort -u); do
@@ -957,11 +963,11 @@ case "$(printf '%s' "${AIR_LEDGER_PIN:-1}" | tr '[:upper:]' '[:lower:]')" in
   0|false|no) LEDGER_PIN_OFF=1 ;; *) LEDGER_PIN_OFF=0 ;;
 esac
 # Origin-anchor flags (#198) — set by step 2.5 ONLY when ≥1 ancestor-confirmed
-# origin diff exists; empty otherwise (no-op). Paths live under $AIR_TMP (mktemp,
-# no spaces), so the unquoted expansion below splits safely.
-ORIGIN_ARGS=""
+# origin diff exists; empty array otherwise (no-op). Bash array (not a string) so
+# the call site quotes each element — no whitespace/splitting assumption on $AIR_TMP.
+ORIGIN_ARGS=()
 [ -n "${ORIGIN_CHAIN:-}" ] && [ -n "${ORIGIN_DIFFS:-}" ] && \
-  ORIGIN_ARGS="--origin-chain $ORIGIN_CHAIN --origin-diffs $ORIGIN_DIFFS"
+  ORIGIN_ARGS=(--origin-chain "$ORIGIN_CHAIN" --origin-diffs "$ORIGIN_DIFFS")
 if [ "$LEDGER_PIN_OFF" = "0" ] \
    && [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/verdict.py" ] \
    && [ -s "$AIR_TMP/prior-body-<number>.md" ] && [ -s "$AIR_TMP/ledger-diff-<number>.diff" ]; then
@@ -969,7 +975,7 @@ if [ "$LEDGER_PIN_OFF" = "0" ] \
        --prior-body "$AIR_TMP/prior-body-<number>.md" \
        --inter-diff "$AIR_TMP/ledger-diff-<number>.diff" \
        --base-sha "<REVIEWED_AT_SHA>" \
-       $ORIGIN_ARGS \
+       "${ORIGIN_ARGS[@]}" \
        < "$AIR_TMP/review-comment.md" \
        > "$AIR_TMP/review-comment.pinned.md" 2> "$AIR_TMP/pin-log-<number>.txt"; then
     mv "$AIR_TMP/review-comment.pinned.md" "$AIR_TMP/review-comment.md"
