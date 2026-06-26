@@ -503,3 +503,78 @@ def fetch_compare_status(repo: str, base_sha: str, head_sha: str, token: str) ->
         return resp.json().get("status")
     except (ValueError, AttributeError):
         return None
+
+
+_OWN_FILE_PAGES = 3   # #3d: cap this PR's own files at 300 — the overlap base set
+
+
+def fetch_related_prs(
+    repo: str, pr_number: int, token: str, *, max_scan: int = 50, max_report: int = 10,
+) -> str:
+    """Concurrent OPEN PRs touching the same files as this PR — the managed/headless
+    parity for the CLI's sibling-PR overlap scan (#3d). Returns a rendered block body
+    (one line per overlapping sibling, file-level) for `<related-prs>`, or "none".
+
+    Purpose: let specialists flag merge/rebase conflicts, interacting subsystem
+    changes, and reference implementations in other in-flight work. File-level
+    overlap only — the CLI's same-region hunk-collision check needs local diffs we
+    don't fetch here, so this is the conservative subset (a same-file overlap is
+    flagged; whether the hunks actually collide is left to the agent).
+
+    Best-effort + BOUNDED: examines at most `max_scan` open PRs (newest-activity
+    first) and reports at most `max_report` overlapping siblings. EVERY file fetch
+    is page-capped so cost can't multiply: this PR's files at `_OWN_FILE_PAGES`
+    (300) and each sibling's at ONE page (100) — enough to detect overlap in
+    practice; a sibling touching >100 files is matched on its first 100 (a missed
+    overlap on a giant sibling is harmless for advisory context). ANY API error or
+    empty result → "none" — non-load-bearing background context that must never
+    block or fail a review (mirrors the CLI: a rate-limited scan is
+    indistinguishable from "no siblings" by design). Bounded cost: ≤
+    `_OWN_FILE_PAGES` (this PR's files) + 1 (open-PR list) + `max_scan` (one page
+    per sibling) GitHub REST calls."""
+    try:
+        own = _github_paginate(
+            f"https://api.github.com/repos/{repo}/pulls/{pr_number}/files?per_page=100",
+            token, max_pages=_OWN_FILE_PAGES,
+        )
+        own_files = {f.get("filename") for f in own if f.get("filename")}
+        if not own_files:
+            return "none"
+        opens = _github_paginate(
+            f"https://api.github.com/repos/{repo}/pulls"
+            f"?state=open&per_page=100&sort=updated&direction=desc",
+            token, max_pages=max(1, (max_scan + 99) // 100),
+        )
+    except Exception:
+        return "none"
+
+    siblings: list[tuple[int, str, list[str]]] = []
+    scanned = 0
+    for pr in opens:
+        num = pr.get("number")
+        if num is None or num == pr_number:
+            continue
+        if scanned >= max_scan:
+            break
+        scanned += 1
+        try:
+            files = _github_paginate(
+                f"https://api.github.com/repos/{repo}/pulls/{num}/files?per_page=100",
+                token, max_pages=1,   # one page (100 files) is enough to detect overlap; bounds cost
+            )
+        except Exception:
+            continue   # one unreadable sibling never aborts the scan
+        overlap = sorted(own_files & {f.get("filename") for f in files if f.get("filename")})
+        if overlap:
+            siblings.append((num, pr.get("title") or "", overlap))
+            if len(siblings) >= max_report:
+                break
+    if not siblings:
+        return "none"
+
+    lines = []
+    for num, title, overlap in siblings:
+        shown = overlap[:5]
+        more = f" (+{len(overlap) - len(shown)} more)" if len(overlap) > len(shown) else ""
+        lines.append(f"- #{num} ({title}) — same-file overlap: {', '.join(shown)}{more}")
+    return "\n".join(lines)

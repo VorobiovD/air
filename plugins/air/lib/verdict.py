@@ -10,6 +10,7 @@ decision (only unfixed BLOCKERS gate; DEFERRED-on-blocker gates as defense
 in depth), the deterministic conflict-marker gate, and the SHA-validated
 `## Code Review` body extractor.
 """
+import json
 import os
 import re
 import sys
@@ -836,6 +837,41 @@ def find_origin(chain, finding_num: int):
     return None, None
 
 
+def make_file_origin_resolver(chain, diffs_dir):
+    """PURE (no network) origin_resolver for the CLI path (#198) — the managed
+    analogue is `review.make_origin_resolver`, but the CLI orchestrator
+    (review.md Step 11.5) has ALREADY run the ancestor gate locally
+    (`git merge-base --is-ancestor`) and written ONLY confirmed `origin..head`
+    diffs into `diffs_dir` as `<sha[:12]>.diff`. So the gate-safety invariant is
+    identical — a diff file present ⟺ the origin is a confirmed ancestor of head ⇒
+    `origin..head` is a clean superset of `baseline..head` ⇒ `file_touched` only
+    widens — without verdict.py ever touching the network (the stdlib-only
+    contract). A missing/unreadable diff → None for that finding → v1
+    number-identity fallback (conservative, never un-gates).
+
+    `chain` is `[(body, reviewed_sha)]` OLDEST-FIRST (the orchestrator builds it
+    from the prior bot-review comments, same anti-spoof author filter as the
+    baseline selection). Returns a `resolver(num) -> (origin_sha, location,
+    ChangedIndex) | None` matching `build_carry_forward_ledger`'s contract."""
+    cache: dict = {}
+
+    def resolver(num):
+        sha, loc = find_origin(chain, num)
+        if not (sha and loc):
+            return None
+        key = sha[:_SHA_PREFIX_LEN]
+        if key not in cache:
+            try:
+                text = (Path(diffs_dir) / f"{key}.diff").read_text()
+                cache[key] = parse_changed_lines(text)
+            except (OSError, UnicodeDecodeError):
+                cache[key] = None        # diff absent/unreadable ⇒ origin not ancestor-confirmed
+        idx = cache[key]
+        return (sha, loc, idx) if idx is not None else None
+
+    return resolver
+
+
 def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
                                *, sibling: bool = False, origin_resolver=None) -> list:
     """One LedgerEntry per prior finding, keyed on #N. The change-state depends
@@ -1177,6 +1213,8 @@ def _main(argv: list[str]) -> int:
     parser.add_argument("--prior-body", help="Path to the prior review body (re-review ledger input).")
     parser.add_argument("--inter-diff", help="Path to the inter-diff (re-review ledger input).")
     parser.add_argument("--base-sha", default="", help="Prior-reviewed SHA (inter-diff base) for anchor validation.")
+    parser.add_argument("--origin-chain", help="Path to a JSON array [{\"body\":..,\"sha\":..}] of prior bot reviews OLDEST-FIRST (#198 origin-anchor; CLI Step 11.5).")
+    parser.add_argument("--origin-diffs", help="Directory of ancestor-confirmed origin..head diffs named <sha12>.diff (#198 origin-anchor; pairs with --origin-chain).")
     parser.add_argument("--head-sha", default="", help="Reviewed HEAD SHA; when set, --decide gates on the SHA-validated `## Code Review` block (anti-decoy), falling back to the raw body if none matches.")
     args = parser.parse_args(argv)
     if not (args.decide or args.count_blockers or args.pin):
@@ -1195,7 +1233,23 @@ def _main(argv: list[str]) -> int:
         except OSError as exc:
             print(f"  [warn] ledger inputs unreadable ({exc}); skipping pin", file=sys.stderr)
             return b
-        ledger = build_carry_forward_ledger(prior, inter, args.base_sha)
+        # #198 origin-anchor (CLI Step 11.5): when the orchestrator supplies the
+        # prior-review chain + a dir of ancestor-confirmed origin..head diffs, build
+        # the pure file-backed resolver so round-3+ carried findings un-poison
+        # exactly as managed/headless do. Absent either flag → v1 number-identity.
+        origin_resolver = None
+        if args.origin_chain and args.origin_diffs:
+            try:
+                chain = [(e["body"], e["sha"])
+                         for e in json.loads(Path(args.origin_chain).read_text())
+                         if isinstance(e, dict) and e.get("sha") and e.get("body")]
+                if chain:
+                    origin_resolver = make_file_origin_resolver(chain, args.origin_diffs)
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                print(f"  [pin][origin][warn] origin-chain unreadable ({exc}); "
+                      f"number-identity pin", file=sys.stderr)
+        ledger = build_carry_forward_ledger(prior, inter, args.base_sha,
+                                            origin_resolver=origin_resolver)
         pinned, log = pin_and_resurrect(b, ledger)
         for line in log:
             print(f"  {line}", file=sys.stderr)

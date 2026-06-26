@@ -223,6 +223,7 @@ def test_conflict_marker_empty_inputs():
 # CLI and managed modes provably share one decision implementation.
 # ---------------------------------------------------------------------------
 
+import json
 import subprocess
 
 _LIB = str(Path(__file__).parent.parent / "plugins" / "air" / "lib" / "verdict.py")
@@ -343,6 +344,7 @@ from verdict import (  # noqa: E402
     extract_fresh_findings,
     build_carry_forward_ledger,
     find_origin,
+    make_file_origin_resolver,
     pin_and_resurrect,
     LedgerEntry,
     CHANGED, UNCHANGED, INDETERMINATE,
@@ -759,6 +761,75 @@ def test_find_origin_walks_chain_to_oldest_anchor():
     sha, loc = find_origin(chain, 1)
     assert sha == "aaaa000000000000000000000000000000000000" and loc[0] == "svc.py"
     assert find_origin(chain, 99) == (None, None)               # no anchor → fall back
+
+
+# --- #198 CLI origin-anchor wiring: file-backed resolver (review.md Step 11.5) --
+# The CLI keeps verdict.py PURE: the orchestrator pre-runs the ancestor gate
+# locally and writes ONLY confirmed origin..head diffs as <sha12>.diff. A diff
+# present ⟺ ancestor-confirmed, so make_file_origin_resolver reproduces managed's
+# gate-safe un-poison with zero network.
+_OA_FILE_R1 = (
+    "## Code Review\n\n### Blockers\n\n**1. flaw**\n\n"
+    "[`svc.py#L5`](https://github.com/o/r/blob/cccc00000000/svc.py#L5) — x\n\n"
+    "Reviewed at: " + _OA_ORIGIN_SHA + "\n"
+)
+_OA_FILE_CHAIN = [(_OA_FILE_R1, _OA_ORIGIN_SHA),
+                  (_OA_R3_PRIOR, "dddd000000000000000000000000000000000000")]
+
+
+def test_file_origin_resolver_present_diff_unpoisons(tmp_path):
+    # Confirmed origin diff present → resolver resolves #1 to its first-raise
+    # anchor + the origin..head ChangedIndex → cross-region un-poison (parity with
+    # the in-memory _oa_resolver).
+    (tmp_path / "cccc00000000.diff").write_text(_OA_ORIGIN_DIFF)
+    resolver = make_file_origin_resolver(_OA_FILE_CHAIN, str(tmp_path))
+    res = resolver(1)
+    assert res and res[0] == _OA_ORIGIN_SHA and res[1] == ("svc.py", 5, 5)
+    led = build_carry_forward_ledger(_OA_R3_PRIOR, "", "dddd00000000", origin_resolver=resolver)
+    assert led[0].change == UNCHANGED and led[0].file_touched is True
+    pinned, log = pin_and_resurrect(
+        _rr_body("- **#1** [blocker] — FIXED — fixed earlier round"), led)
+    assert not _gates(pinned) and any("cross-region FIXED trusted" in l for l in log)
+
+
+def test_file_origin_resolver_missing_diff_is_number_identity(tmp_path):
+    # No diff file (origin NOT ancestor-confirmed by the orchestrator) → None →
+    # round-3+ falls back to number-identity (conservative, never un-gates).
+    resolver = make_file_origin_resolver(_OA_FILE_CHAIN, str(tmp_path))   # empty dir
+    assert resolver(1) is None
+    led = build_carry_forward_ledger(_OA_R3_PRIOR, "", "dddd00000000", origin_resolver=resolver)
+    assert led[0].change == INDETERMINATE and led[0].file_touched is False
+
+
+def _pin_cli(tmp_path, body, *, origin):
+    """Run `verdict.py --pin` as a real subprocess, with or without the origin
+    flags, returning stdout. Exercises the exact CLI Step 11.5 entry point."""
+    prior = tmp_path / "prior.md"; prior.write_text(_OA_R3_PRIOR)
+    # baseline..head touches other.py only (the fix predates baseline → not here).
+    inter = tmp_path / "inter.diff"
+    inter.write_text("diff --git a/other.py b/other.py\n--- a/other.py\n+++ b/other.py\n"
+                     "@@ -1,1 +1,1 @@\n-x\n+y\n")
+    argv = [sys.executable, _LIB, "--pin", "--prior-body", str(prior),
+            "--inter-diff", str(inter), "--base-sha", "dddd00000000"]
+    if origin:
+        chain = tmp_path / "chain.json"
+        chain.write_text(json.dumps([{"body": b, "sha": s} for b, s in _OA_FILE_CHAIN]))
+        ddir = tmp_path / "odiffs"; ddir.mkdir()
+        (ddir / "cccc00000000.diff").write_text(_OA_ORIGIN_DIFF)
+        argv += ["--origin-chain", str(chain), "--origin-diffs", str(ddir)]
+    return subprocess.run(argv, input=body, capture_output=True, text=True, check=True).stdout
+
+
+def test_pin_cli_origin_anchor_subprocess(tmp_path):
+    emitted = _rr_body("- **#1** [blocker] — FIXED — fixed earlier round, confirmed in source")
+    # Without origin flags: the fix predates baseline → file_touched=False → the
+    # FIXED is rewritten to NOT FIXED (the #1290 poison reproduced on the CLI).
+    no_origin = _pin_cli(tmp_path, emitted, origin=False)
+    assert "NOT FIXED" in no_origin
+    # With origin flags: the orchestrator's confirmed origin diff un-poisons it →
+    # the verifier FIXED stands.
+    with_origin = _pin_cli(tmp_path, emitted, origin=True)
+    assert "FIXED" in with_origin and "NOT FIXED" not in with_origin
 
 
 def test_stubbed_file_fixed_still_gates_despite_file_touched():
