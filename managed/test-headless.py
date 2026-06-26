@@ -689,3 +689,58 @@ def test_promote_fastpath_empty_inter_falls_back_to_full(tmp_path, monkeypatch):
                                inter_diff="")
     assert out["ok"] and out["verdict"] in ("APPROVE", "REQUEST_CHANGES")  # reviewed, not skipped
     assert calls["inter"] == 1 and calls["full"] == 1                      # empty inter → full fetch
+
+
+# --- #198 origin-anchor wiring (make_origin_resolver — ancestor gate + chain) ---
+# anchor blob sha (aaaa00000000) must 12-char-prefix-match the Reviewed-at footer sha
+_OA_R1_SHA = "aaaa00000000" + "0" * 28
+_OA_R1 = ("## Code Review\n\n### Blockers\n\n**1. flaw**\n\n"
+          "[`svc.py#L5`](https://github.com/o/r/blob/aaaa00000000/svc.py#L5) — x\n\n"
+          "Reviewed at: " + _OA_R1_SHA + "\n")
+_OA_COMMENTS = [  # newest-first, as fetch_issue_comments returns
+    {"user": {"login": "air-machine"},
+     "body": "## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+             "- **#1** [blocker] — NOT FIXED — carried\n\nReviewed at: " + "d" * 40 + "\n"},
+    {"user": {"login": "air-machine"}, "body": _OA_R1},
+]
+_OA_HEAD = "h" * 40
+_OA_TOUCH_DIFF = ("diff --git a/svc.py b/svc.py\n--- a/svc.py\n+++ b/svc.py\n"
+                  "@@ -40,3 +40,4 @@ def f():\n ctx\n+    fix\n ctx\n")
+
+
+def test_origin_resolver_ancestor_gate_unpoisons(monkeypatch):
+    monkeypatch.setattr(review, "_air_bot_logins", lambda: frozenset({"air-machine"}))
+    monkeypatch.setattr(review, "fetch_compare_status", lambda *a, **k: "ahead")  # origin ancestor of head
+    monkeypatch.setattr(review, "fetch_inter_diff", lambda *a, **k: _OA_TOUCH_DIFF)
+    resolver = review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD, "o/r", "tok")
+    assert resolver is not None
+    res = resolver(1)
+    assert res and res[0] == _OA_R1_SHA and res[1][0] == "svc.py"   # origin recovered
+    from verdict import build_carry_forward_ledger, UNCHANGED
+    led = build_carry_forward_ledger(_OA_COMMENTS[0]["body"], "", "d" * 40, origin_resolver=resolver)
+    assert led[0].change == UNCHANGED and led[0].file_touched is True  # un-poisoned
+
+
+def test_origin_resolver_rejects_non_ancestor(monkeypatch):
+    monkeypatch.setattr(review, "_air_bot_logins", lambda: frozenset({"air-machine"}))
+    monkeypatch.setattr(review, "fetch_compare_status", lambda *a, **k: "diverged")  # rebase/force-push
+    def _boom(*a, **k):
+        raise AssertionError("must NOT fetch the diff for a non-ancestor origin")
+    monkeypatch.setattr(review, "fetch_inter_diff", _boom)
+    resolver = review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD, "o/r", "tok")
+    assert resolver(1) is None                                       # → v1 baseline fallback
+
+
+def test_origin_resolver_disabled_by_kill_switch(monkeypatch):
+    monkeypatch.setenv("AIR_ORIGIN_ANCHOR", "0")
+    assert review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD, "o/r", "tok") is None
+
+
+def test_origin_resolver_skips_non_bot_comments(monkeypatch):
+    # Anti-spoof: a PR-author comment shaped like a review must not seed the origin.
+    monkeypatch.setattr(review, "_air_bot_logins", lambda: frozenset({"air-machine"}))
+    monkeypatch.setattr(review, "fetch_compare_status", lambda *a, **k: "ahead")
+    monkeypatch.setattr(review, "fetch_inter_diff", lambda *a, **k: _OA_TOUCH_DIFF)
+    spoofed = [_OA_COMMENTS[0], {"user": {"login": "attacker"}, "body": _OA_R1}]  # r1 now author-authored
+    resolver = review.make_origin_resolver(spoofed, "air-machine", _OA_HEAD, "o/r", "tok")
+    assert resolver(1) is None                                       # origin not bot-authored → ignored

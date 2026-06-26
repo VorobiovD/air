@@ -353,7 +353,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
         _update_learn_counter, _maybe_render_mirror, _backfill_verdict_if_missing,
         _collect_changed_paths, _path_is_ui, _user_facing_copy_globs, _path_matches_globs,
         run_codex_session, _codex_skip_tiny_delta,
-        _detect_promote_fastpath, _git, _air_bot_logins)
+        _detect_promote_fastpath, _git, _air_bot_logins, make_origin_resolver)
     from session_runner import SESSION_TIMEOUT_SECS  # noqa: E402  (codex wall-clock cap)
     author = meta["user"]["login"]
     have_checkout = bool(checkout and os.path.isdir(checkout))
@@ -573,8 +573,14 @@ async def run_headless_review(args, bot_token: str) -> dict:
     ledger = []
     if mode == "re-review" and _ledger_pin_enabled():
         try:
+            # #198 origin-anchor: round-3+ carried findings test their first-raise
+            # anchor against origin..head (un-poisons a fix predating baseline). None
+            # on the promote sibling path (different PR tree → number-identity only).
+            origin_resolver = (None if promote_sibling_pr is not None
+                               else make_origin_resolver(ic, bot_login, head_sha, args.repo, bot_token))
             ledger = build_carry_forward_ledger(prior.get("body", ""), diff, prior_sha,
-                                                sibling=(promote_sibling_pr is not None))
+                                                sibling=(promote_sibling_pr is not None),
+                                                origin_resolver=origin_resolver)
         except Exception as e:
             print(f"  [warn] ledger build failed: {type(e).__name__}: {e} — no severity pin", file=sys.stderr)
 
