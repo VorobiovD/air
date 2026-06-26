@@ -59,7 +59,7 @@ import requests  # noqa: E402  (RequestException wrap for fetch_inter_diff — i
 
 from github_client import (  # noqa: E402
     fetch_pr_metadata, fetch_pr_diff, fetch_inter_diff, fetch_bot_login,
-    fetch_issue_comments, fetch_pr_reviews, fetch_pr_review_comments,
+    fetch_issue_comments, fetch_pr_reviews, fetch_pr_review_comments, fetch_related_prs,
     _post_review_comment_with_retry, submit_review_verdict, dismiss_stale_air_verdicts,
 )
 from prompts import build_pr_context, build_verifier_task  # noqa: E402
@@ -352,7 +352,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
         filter_comments_after, format_developer_responses, _ledger_pin_enabled,
         _update_learn_counter, _maybe_render_mirror, _backfill_verdict_if_missing,
         _collect_changed_paths, _path_is_ui, _user_facing_copy_globs, _path_matches_globs,
-        run_codex_session, _codex_skip_tiny_delta,
+        run_codex_session, _codex_skip_tiny_delta, _related_prs_enabled,
         _detect_promote_fastpath, _git, _air_bot_logins, make_origin_resolver)
     from session_runner import SESSION_TIMEOUT_SECS  # noqa: E402  (codex wall-clock cap)
     author = meta["user"]["login"]
@@ -584,11 +584,23 @@ async def run_headless_review(args, bot_token: str) -> dict:
         except Exception as e:
             print(f"  [warn] ledger build failed: {type(e).__name__}: {e} — no severity pin", file=sys.stderr)
 
+    # Concurrent open PRs touching the same files (#3d) — advisory context, never
+    # gates. Best-effort + bounded; off-loop so nothing blocks on the scan.
+    related_prs = "none"
+    if _related_prs_enabled():
+        related_prs = await asyncio.to_thread(
+            fetch_related_prs, args.repo, args.pr_number, bot_token
+        )
+        if related_prs != "none":
+            print(f"  [headless] related-prs: {len(related_prs.splitlines())} concurrent PR(s) "
+                  "overlap this PR's files")   # stdout — matches other [headless] precomp telemetry
+
     # html.escape the diff before interpolating: it's attacker-controlled (the PR
     # author writes it), and a raw `</diff>` line would close the XML wrapper and
     # smuggle untagged prompt-injection text to every specialist + the verifier.
     # build_pr_context escapes every other untrusted field (title/body/blame/codex);
     # the diff must match (PROJECT-PROFILE check 9). Truncation (above) is pre-escape.
+
     pr_context = (build_pr_context(
                     meta, args.repo, mode=mode,
                     prior_review_body=(prior.get("body", "") if prior else ""),
@@ -600,6 +612,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
                     blame_summaries=blame_summaries,
                     churn_data=churn_data,
                     diff_check_warnings=diff_check_warnings,
+                    related_prs=related_prs,
                     patterns_dir=patterns_rel or "")
                   + f"\n\n<diff>\n{html.escape(diff)}\n</diff>\n")
 
