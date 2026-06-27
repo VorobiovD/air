@@ -1018,3 +1018,46 @@ def test_ensure_respond_footer_is_gate_neutral():
     for b in (blocker, clean):
         assert (should_request_changes(review._ensure_respond_footer(b))[0]
                 == should_request_changes(b)[0])
+
+
+# ---------------------------------------------------------------------------
+# Billing preflight: the configured org/workspace usage cap surfaces as a raw
+# Messages-API 400 "specified API usage limits" — NOT a BetaManagedAgentsBilling
+# Error — so it slipped the hint set and the preflight logged "inconclusive —
+# proceeding" while the whole fleet 400'd every call (2026-06-27). It must $0
+# fail-fast like any other billing exhaustion, while a transient canary blip
+# must still proceed (never block a review on canary flakiness).
+# ---------------------------------------------------------------------------
+
+def _fake_anthropic_raising(message):
+    class _Msgs:
+        def create(self, **kw):
+            raise Exception(message)
+    class _Client:
+        def __init__(self, *a, **k):
+            self.messages = _Msgs()
+    return _Client
+
+
+def test_billing_preflight_fails_fast_on_usage_limit(monkeypatch):
+    err = ("Error code: 400 - {'type': 'error', 'error': {'type': "
+           "'invalid_request_error', 'message': 'You have reached your specified "
+           "API usage limits. You will regain access on 2026-07-01 at 00:00 UTC.'}}")
+    monkeypatch.setattr(review, "Anthropic", _fake_anthropic_raising(err))
+    with pytest.raises(SystemExit) as ei:
+        review._billing_preflight()
+    assert ei.value.code == 1
+
+
+def test_billing_preflight_proceeds_on_transient(monkeypatch):
+    # A non-billing canary failure (network blip / model rename) must NOT block —
+    # the preflight warns and returns normally.
+    monkeypatch.setattr(review, "Anthropic", _fake_anthropic_raising("Connection error: timed out"))
+    review._billing_preflight()  # must NOT raise
+
+
+def test_usage_limit_string_in_billing_hints():
+    # Single-sourced contract: the confirmed prod cap phrase is in the hint set
+    # all four billing-classification sites read.
+    from session_runner import _BILLING_REASON_HINTS
+    assert "specified api usage limits" in _BILLING_REASON_HINTS
