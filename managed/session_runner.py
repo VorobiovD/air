@@ -195,6 +195,14 @@ class SpecialistSessionError(Exception):
 _BILLING_REASON_HINTS: tuple[str, ...] = (
     "betamanagedagentsbillingerror",
     "credit balance is too low",
+    # Configured org/workspace monthly usage cap. Surfaces on the RAW Messages
+    # API (headless + the preflight canary) as a 400 invalid_request_error
+    # "You have reached your specified API usage limits. You will regain access
+    # on <date>" — NOT a BetaManagedAgentsBillingError, so it slipped the two
+    # hints above and the billing preflight logged "inconclusive — proceeding"
+    # while the whole fleet 400'd every call (2026-06-15 and again 06-27).
+    # Distinctive + stable; won't false-positive on unrelated SDK errors.
+    "specified api usage limits",
 )
 
 
