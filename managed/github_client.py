@@ -23,6 +23,7 @@ if str(_LIB) not in sys.path:
 from diff_hygiene import (  # noqa: E402,F401  (re-export — these four are imported from github_client by review.py / the test suites)
     DIFF_TRUNCATION_MARKER, apply_diff_hygiene, count_diff_changed_lines, _is_generated_path,
 )
+from pr_conversation import BOT_REVIEW_PREFIXES  # noqa: E402  (canonical ## Code Review prefixes incl. re-review)
 
 
 def _gh_message(resp) -> str | None:
@@ -449,9 +450,15 @@ def fetch_recent_review_bodies(repo: str, token: str, limit: int = 30,
     except PartialPageError:
         return []
     out: list[dict] = []
-    for pr in prs[:limit]:
+    for pr in prs:
+        if len(out) >= limit:
+            break
         num = pr.get("number")
         if not num:
+            continue
+        # Merged-only (parity with managed's "last N merged"): a closed-unmerged
+        # PR is noise that crowds out reviewed PRs and wastes a comments fetch.
+        if not pr.get("merged_at"):
             continue
         try:
             comments = fetch_issue_comments(repo, num, token)
@@ -461,7 +468,9 @@ def fetch_recent_review_bodies(repo: str, token: str, limit: int = 30,
         review = None
         for c in comments:
             body = c.get("body") or ""
-            if not body.startswith("## Code Review\n"):
+            # Canonical set (fresh + re-review); a strict "## Code Review\n" would
+            # miss "## Code Review (Re-review)" and undercount the history.
+            if not body.startswith(BOT_REVIEW_PREFIXES):
                 continue
             if bot_login and (c.get("user") or {}).get("login") != bot_login:
                 continue
