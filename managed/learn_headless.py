@@ -659,6 +659,14 @@ def refresh_project_profile(repo, *, checkout_dir=".", complete=None, log=print,
     if not all(s in new_profile for s in ("## Overview", "## Applicable Security Checks")):
         log("  [learn] profile refresh dropped a required section — REFUSED")
         return {"profile": "refused"}
+    # Overflow-marker guard: if the current profile spilled older detail into
+    # /archive/*-overflow-*.md chunks, the regen MUST keep the `-overflow-`
+    # reference — else render's reassemble() stops prepending the chunks and the
+    # archived detail orphans (same class as the curation chunk-skip).
+    if "-overflow-" in (current_profile or "") and "-overflow-" not in new_profile:
+        log("  [learn] profile refresh dropped the /archive overflow reference — "
+            "REFUSED (would orphan chunked detail)")
+        return {"profile": "refused"}
     if dry_run:
         log(f"  [learn] (dry-run) would write PROJECT-PROFILE.md ({len(new_profile)} bytes)")
         return {"profile": "dry-run", "bytes": len(new_profile)}

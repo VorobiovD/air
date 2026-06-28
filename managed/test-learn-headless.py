@@ -509,3 +509,25 @@ def test_run_headless_uses_batch_when_enabled(fake, monkeypatch):
     assert "/authors/alice.md" in out["written"]
     assert "**batch marker**" in store.files["/authors/alice.md"]
     assert calls["render"] == 1 and calls["reset_argv"] is not None
+
+
+def test_profile_refused_when_overflow_marker_dropped():
+    # If the current profile references /archive overflow chunks, the regen must
+    # keep the reference — dropping it would orphan the archived detail.
+    cur = "## Overview\n<!-- older detail in /archive/project-profile-overflow-1.md -->\n## Applicable Security Checks\nChecks: 1"
+
+    def complete(persona, content, *, label=""):
+        return "## Overview\nrewritten, no overflow ref\n## Applicable Security Checks\nChecks: 1"
+    out = L.refresh_project_profile("o/r", complete=complete, dry_run=True,
+                                    store_id="memstore_x", current_profile=cur, signals="s")
+    assert out["profile"] == "refused"
+
+
+def test_profile_ok_when_overflow_marker_kept():
+    cur = "## Overview\n<!-- older detail in /archive/project-profile-overflow-1.md -->\n## Applicable Security Checks\nChecks: 1"
+
+    def complete(persona, content, *, label=""):
+        return "## Overview\nrefreshed <!-- older detail in /archive/project-profile-overflow-1.md -->\n## Applicable Security Checks\nChecks: 1,2"
+    out = L.refresh_project_profile("o/r", complete=complete, dry_run=True,
+                                    store_id="memstore_x", current_profile=cur, signals="s")
+    assert out["profile"] == "dry-run"   # marker preserved → allowed
