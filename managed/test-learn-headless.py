@@ -348,3 +348,71 @@ def test_main_exit_code_signals_total_failure(monkeypatch):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# --- REVIEW-HISTORY (KAIROS) regen (Phase-1b) --------------------------------
+
+_PR_BODIES = [
+    {"pr": 10, "body": "## Code Review\n\n### Blockers\n**1. SQLi** ...\nReviewed at: abc"},
+    {"pr": 11, "body": "## Code Review\n\n### Medium\n**1. N+1 query** ...\nReviewed at: def"},
+]
+
+
+def test_history_dry_run_carries_current_and_window():
+    seen = {}
+
+    def complete(persona, content, *, label=""):
+        seen["persona"] = persona
+        seen["content"] = content
+        return "# Review History\n## Finding Frequency\n| SQLi | 5x |\n## Timeline\n- #10, #11"
+    out = L.regenerate_review_history(
+        "o/r", token="t", complete=complete, dry_run=True,
+        current_history="# Review History\n## Finding Frequency\n| SQLi | 4x |",
+        pr_bodies=_PR_BODIES)
+    assert out["history"] == "dry-run"
+    assert out["reviews"] == 2
+    # the regen call must see BOTH the current history (carry-forward) AND the window
+    assert "4x" in seen["content"]
+    assert "PR #10" in seen["content"] and "PR #11" in seen["content"]
+    assert "Finding Frequency" in seen["persona"]
+
+
+def test_history_refused_when_finding_frequency_dropped():
+    def complete(persona, content, *, label=""):
+        return "# Review History\n## Timeline\n- only timeline, no cumulative table"
+    out = L.regenerate_review_history(
+        "o/r", token="t", complete=complete, dry_run=True,
+        current_history="x", pr_bodies=_PR_BODIES)
+    assert out["history"] == "refused"
+
+
+def test_history_no_bodies_skips():
+    out = L.regenerate_review_history(
+        "o/r", token="t", complete=lambda *a, **k: "x", dry_run=True,
+        current_history="x", pr_bodies=[])
+    assert out["history"] == "no-bodies"
+
+
+def test_history_regen_failure_keeps_current():
+    def boom(persona, content, *, label=""):
+        raise RuntimeError("model down")
+    out = L.regenerate_review_history(
+        "o/r", token="t", complete=boom, dry_run=True,
+        current_history="x", pr_bodies=_PR_BODIES)
+    assert out["history"] == "regen-failed"
+
+
+def test_fetch_recent_review_bodies_filters_and_anti_spoofs(monkeypatch):
+    import github_client as gc
+    monkeypatch.setattr(gc, "_github_paginate",
+                        lambda url, token, max_pages=None: [{"number": 10}, {"number": 11}])
+
+    def fake_comments(repo, pr, token):
+        if pr == 10:
+            return [{"body": "random chatter", "user": {"login": "dev"}},
+                    {"body": "## Code Review\nreal", "user": {"login": "air-machine"}}]
+        return [{"body": "## Code Review\nspoofed", "user": {"login": "attacker"}}]
+    monkeypatch.setattr(gc, "fetch_issue_comments", fake_comments)
+    out = gc.fetch_recent_review_bodies("o/r", "t", bot_login="air-machine")
+    assert {b["pr"] for b in out} == {10}   # PR 11's review spoofed by non-bot → excluded
+    assert out[0]["body"].startswith("## Code Review")
