@@ -157,6 +157,21 @@ _HISTORY_PERSONA = (
 )
 
 
+_PROFILE_PERSONA = (
+    "You refresh air's PROJECT-PROFILE.md — the per-repo review-context profile. "
+    "You are given the CURRENT profile plus fresh repo SIGNALS (file tree, "
+    "language histogram, README/CLAUDE/AGENTS excerpts). Produce the COMPLETE "
+    "updated profile, same section shape: `## Overview`, `## Languages`, "
+    "`## Architecture`, `## Services / Components`, `## CI/CD Setup`, "
+    "`## Test Locations`, `## Review Focus Rules`, `## Applicable Security "
+    "Checks` (list which of the 31 checks apply + skipped-with-reason). Update "
+    "to match the signals (new languages/services/CI); preserve any "
+    "`## User-Facing Copy Paths` and `## Voice & Copy` sections verbatim if "
+    "present (they're opt-in overrides). Terse; no per-pass narrative. Return "
+    "only the file."
+)
+
+
 def _persona_for(path: str) -> str:
     if path.startswith(memory_store.AUTHOR_PREFIX):
         return _AUTHOR_PERSONA
@@ -477,13 +492,106 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
             "dry_run": dry_run}
 
 
+def _gather_repo_signals(checkout_dir: str, log=print) -> str:
+    """Deterministic repo signals for a scan-lite profile refresh (no agentic
+    repo exploration): tracked-file tree + language histogram + top-level dirs
+    + README/CLAUDE/AGENTS excerpts. Bounded so the single regen call stays
+    cheap. (Lighter than managed's Opus deep-scan agent — Phase-1b accepts the
+    signal-fed single call; a fuller agentic scan is a later option.)"""
+    import subprocess
+    from collections import Counter
+    try:
+        files = subprocess.run(
+            ["git", "-C", checkout_dir, "ls-files"],
+            capture_output=True, text=True, timeout=30).stdout.splitlines()
+    except Exception as e:
+        log(f"  [learn] profile: git ls-files failed ({e}); using empty tree")
+        files = []
+    ext = Counter(os.path.splitext(f)[1] for f in files if os.path.splitext(f)[1])
+    tops = Counter(f.split("/")[0] for f in files if "/" in f)
+    sig = [f"FILE COUNT: {len(files)}",
+           "TOP EXTENSIONS: " + ", ".join(f"{e}:{n}" for e, n in ext.most_common(15)),
+           "TOP-LEVEL DIRS: " + ", ".join(f"{d}({n})" for d, n in tops.most_common(20))]
+    for doc in ("README.md", "CLAUDE.md", "AGENTS.md"):
+        p = os.path.join(checkout_dir, doc)
+        if os.path.isfile(p):
+            try:
+                sig.append(f"=== {doc} (first 4KB) ===\n"
+                           + open(p, errors="replace").read()[:4000])
+            except Exception:
+                pass
+    return "\n".join(sig)
+
+
+def refresh_project_profile(repo, *, checkout_dir=".", complete=None, log=print,
+                            dry_run=False, store_id=None, current_profile=None,
+                            signals=None) -> dict:
+    """Refresh PROJECT-PROFILE.md (store-backed) from scan-lite repo signals — a
+    single streaming regen call (current profile + signals → refreshed), a
+    structural guard (the `## Overview` + `## Applicable Security Checks`
+    sections must survive), then a store write (the mirror render exports it).
+    OPT-IN (the default learn doesn't touch the profile — parity with managed's
+    --refresh-profile). Inputs injectable for offline tests."""
+    complete = complete or _default_complete
+    store_id = store_id or memory_store.get_store_id(repo, flow="learn")
+    if not store_id:
+        log("  [learn] profile refresh: no store — skip")
+        return {"profile": "no-store"}
+    if current_profile is None:
+        got = memory_store.read_memory(store_id, memory_store.PROJECT_PROFILE_PATH)
+        current_profile = got[0] if got else ""
+    if signals is None:
+        signals = _gather_repo_signals(checkout_dir, log)
+    inp = (f"CURRENT PROJECT-PROFILE.md:\n{current_profile or '(none yet — create it)'}"
+           f"\n\n=== REPO SIGNALS ===\n{signals}")
+    try:
+        new_profile = (complete(_PROFILE_PERSONA, inp, label="project-profile") or "").strip()
+    except Exception as e:
+        log(f"  [learn] profile refresh failed: {type(e).__name__}: {e} — keeping current")
+        return {"profile": "regen-failed"}
+    if not all(s in new_profile for s in ("## Overview", "## Applicable Security Checks")):
+        log("  [learn] profile refresh dropped a required section — REFUSED")
+        return {"profile": "refused"}
+    if dry_run:
+        log(f"  [learn] (dry-run) would write PROJECT-PROFILE.md ({len(new_profile)} bytes)")
+        return {"profile": "dry-run", "bytes": len(new_profile)}
+    try:
+        memory_store.update_with(store_id, memory_store.PROJECT_PROFILE_PATH,
+                                 lambda _cur, _new=new_profile: _new)
+        log(f"  [learn] wrote PROJECT-PROFILE.md to store ({len(new_profile)} bytes)")
+        return {"profile": "written", "bytes": len(new_profile)}
+    except Exception as e:
+        log(f"  [learn] profile write failed: {type(e).__name__}: {e}")
+        return {"profile": "write-failed"}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="MA-independent headless learn (store-backed repos)")
     p.add_argument("repo", help="owner/repo")
     p.add_argument("--dry-run", action="store_true", help="curate + diff, do not write/render")
+    p.add_argument("--refresh-profile", action="store_true",
+                   help="OPT-IN: refresh PROJECT-PROFILE.md from repo signals (parity with learn.py --refresh-profile); skips the default curation")
     args = p.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
+
+    if args.refresh_profile:
+        # Opt-in, like managed's --refresh-profile: refresh the profile (store)
+        # then render the mirror so it reaches the wiki. The default learn does
+        # NOT touch the profile (parity).
+        checkout = os.environ.get("AIR_TARGET_REPO") or "."
+        prof = refresh_project_profile(args.repo, checkout_dir=checkout, dry_run=args.dry_run)
+        if not args.dry_run and prof.get("profile") == "written":
+            sid = memory_store.get_store_id(args.repo, flow="learn")
+            if sid:
+                try:
+                    render_store_to_wiki.render_push_and_stamp(
+                        sid, args.repo, os.environ.get("AIR_BOT_TOKEN", ""))
+                except Exception as e:
+                    print(f"  [warn] mirror render failed: {e}", file=sys.stderr)
+        print(f"[learn] profile-refresh done: {prof}", file=sys.stderr)
+        return 0
+
     summary = run_headless_learn(args.repo, dry_run=args.dry_run)
     print(f"[learn] done: {summary}", file=sys.stderr)
     # Non-zero on a total outage (every curation failed, nothing written) so
