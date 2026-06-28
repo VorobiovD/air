@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.43.0](https://github.com/VorobiovD/air/compare/v1.42.0...v1.43.0) (2026-06-28)
+
+
+### Features
+
+* **learn:** cost/cache/token telemetry for headless learn (air-stats parity) ([#229](https://github.com/VorobiovD/air/issues/229)) ([f518a32](https://github.com/VorobiovD/air/commit/f518a328ad345cf910a17b4dd3f0e371c55bbef0))
+
 ## [1.42.0](https://github.com/VorobiovD/air/compare/v1.41.0...v1.42.0) (2026-06-28)
 
 
