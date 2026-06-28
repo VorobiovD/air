@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.42.0](https://github.com/VorobiovD/air/compare/v1.41.0...v1.42.0) (2026-06-28)
+
+
+### Features
+
+* **learn:** Phase-2 — Batch API for headless learn (opt-in, 50%) + profile overflow guard ([#227](https://github.com/VorobiovD/air/issues/227)) ([b37b95c](https://github.com/VorobiovD/air/commit/b37b95cfb97048ec56a4696a691c68da3ddd9aca))
+
 ## [1.41.0](https://github.com/VorobiovD/air/compare/v1.40.0...v1.41.0) (2026-06-28)
 
 
