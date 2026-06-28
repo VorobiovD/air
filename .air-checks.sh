@@ -148,6 +148,19 @@ else
   fail "$WIKI_CAP_LIB missing — the deterministic wiki bloat-cap contract is gone"
 fi
 
+# Check H: the store-mirror banner substring must stay byte-identical across the
+# render that WRITES it (render_store_to_wiki.py MIRROR_BANNER) and the two CLI
+# detectors that GREP it (review.md Step 3, learn.md Step 1). If the banner is
+# reworded without updating the greps, the CLI silently stops detecting store
+# mirrors and re-opens the clobber bug (#224) — so lock the shared substring.
+BANNER_SUBSTR='source of truth is the air pattern memory store'
+for f in managed/render_store_to_wiki.py plugins/air/commands/review.md plugins/air/commands/learn.md; do
+  if [ -f "$f" ]; then
+    grep -qF "$BANNER_SUBSTR" "$f" \
+      || fail "$f missing the store-mirror banner substring (Check H: render MIRROR_BANNER ↔ CLI mirror detection)"
+  fi
+done
+
 if [ "$status" -eq 0 ]; then
   printf 'air drift-check: all checks passed.\n'
 fi

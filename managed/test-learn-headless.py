@@ -63,6 +63,7 @@ def fake(monkeypatch):
         "/authors/bob.md": "# bob\n- **Y** (1x: #9 | new): wide except",
         memory_store.GLOSSARY_PATH: "| `Octane` | worker model | AGENTS.md |",
         memory_store.COMMON_FINDINGS_PATH: "- empty-array guard before implode",
+        memory_store.SERVICE_PATTERNS_PATH: "- service: retry policy on the gateway",
         # These two MUST be ignored by the curator (staged, not on the hot path):
         "/review-misc.md": "## Author Patterns\nintro",
         "/meta/air-meta.json": "{}",
@@ -111,9 +112,10 @@ def test_only_curatable_files_are_targeted(fake):
         seen.append(label)
         return content + "\n- **m**"
     L.run_headless_learn("o/r", token="t", complete=complete)
-    # authors + glossary + common-findings — NOT review-misc / meta / history / profile
+    # authors + glossary + common + service — NOT review-misc / meta / history / profile
     assert set(seen) == {"/authors/alice.md", "/authors/bob.md",
-                         memory_store.GLOSSARY_PATH, memory_store.COMMON_FINDINGS_PATH}
+                         memory_store.GLOSSARY_PATH, memory_store.COMMON_FINDINGS_PATH,
+                         memory_store.SERVICE_PATTERNS_PATH}
     assert "/review-misc.md" not in seen
     assert "/meta/air-meta.json" not in seen
 
@@ -122,9 +124,11 @@ def test_changed_files_written_rendered_reset(fake):
     store, calls = fake
     out = L.run_headless_learn("o/r", token="t", complete=_curate_appending)
     assert set(out["written"]) == {"/authors/alice.md", "/authors/bob.md",
-                                   memory_store.GLOSSARY_PATH, memory_store.COMMON_FINDINGS_PATH}
+                                   memory_store.GLOSSARY_PATH, memory_store.COMMON_FINDINGS_PATH,
+                                   memory_store.SERVICE_PATTERNS_PATH}
     assert calls["render"] == 1
     assert calls["reset_argv"][:2] == ["reset", "--store-id"]
+    assert out["reset"] is True
     assert "**curated marker**" in store.files["/authors/alice.md"]
 
 
@@ -210,6 +214,111 @@ def test_no_store_repo_skips(monkeypatch):
     out = L.run_headless_learn("o/r", token="t", complete=_curate_appending)
     assert out["skipped"] == "no-store"
     assert out["curated"] == []
+
+
+def test_all_curations_failed_does_not_reset(fake):
+    # A total model outage (every map-call raises) must NOT consume the cadence —
+    # otherwise the next learn waits a full interval with nothing curated.
+    store, calls = fake
+
+    def all_fail(persona, content, *, label=""):
+        raise RuntimeError("model outage")
+    out = L.run_headless_learn("o/r", token="t", complete=all_fail)
+    assert out["written"] == []
+    assert out["failures"] > 0
+    assert out["reset"] is False
+    assert calls["reset_argv"] is None     # counter NOT reset → re-arms next review
+    assert calls["render"] == 0
+
+
+def test_overflow_chunked_file_is_skipped(fake):
+    # A primary memory split into /archive overflow chunks must NOT be curated
+    # (curating it alone could drop the marker and orphan the chunks).
+    store, calls = fake
+    store.files["/authors/alice.md"] = (
+        "<!-- older content: see /archive/alice-overflow-1.md -->\n"
+        "# alice\n- **X** (3x: #1 | last 0 PRs: 0 clean): skips null checks")
+    seen = []
+
+    def complete(persona, content, *, label=""):
+        seen.append(label)
+        return content + "\n- **m**"
+    out = L.run_headless_learn("o/r", token="t", complete=complete)
+    assert "/authors/alice.md" not in seen          # never curated
+    assert "/authors/alice.md" not in out["written"]
+    assert out["skipped_chunked"] == 1
+    assert "older content: see" in store.files["/authors/alice.md"]  # untouched
+
+
+def test_fidelity_refuses_dropping_a_pattern_or_lowering_a_count(fake):
+    store, calls = fake
+
+    def lossy(persona, content, *, label=""):
+        if label == "/authors/alice.md":
+            # drops pattern X entirely
+            return "# alice\n- **Z** (1x: #5 | new): something else"
+        if label == "/authors/bob.md":
+            # lowers Y's count 1 -> 0 (well, rewrites to 0x — a count regression)
+            return "# bob\n- **Y** (0x: | new): wide except"
+        return content + "\n- **ok**"
+    out = L.run_headless_learn("o/r", token="t", complete=lossy)
+    assert "/authors/alice.md" not in out["written"]   # dropped-pattern → refused
+    assert "/authors/bob.md" not in out["written"]      # lowered-count → refused
+    assert store.files["/authors/alice.md"].startswith("# alice\n- **X**")  # original kept
+
+
+def test_fidelity_refuses_dropping_a_glossary_term(fake):
+    store, calls = fake
+    store.files[memory_store.GLOSSARY_PATH] = "| `Octane` | a | s |\n| `Pennant` | b | s |"
+
+    def drop_term(persona, content, *, label=""):
+        if label == memory_store.GLOSSARY_PATH:
+            return "| `Octane` | a | s |"   # dropped Pennant
+        return content + "\n- **ok**"
+    out = L.run_headless_learn("o/r", token="t", complete=drop_term)
+    assert memory_store.GLOSSARY_PATH not in out["written"]
+    assert "Pennant" in store.files[memory_store.GLOSSARY_PATH]
+
+
+# --- pure-function guards ---------------------------------------------------
+
+def test_fidelity_allows_legit_dedup_and_count_increase():
+    orig = "# a\n- **X** (3x: #1,#2,#3 | last 0): t\n- **Y** (1x: #9): u"
+    # merge narrows refs + bumps X's count; keeps both patterns
+    cur = "# a\n- **X** (4x: #1,#2,#3,#4 | last 0): t\n- **Y** (1x: #9): u"
+    assert L._fidelity_violation("/authors/a.md", orig, cur) is None
+
+
+def test_fidelity_findings_file_allows_merge():
+    # findings files may drop/merge entries — byte-floor only, no structural check
+    orig = "- a\n- b\n- c"
+    assert L._fidelity_violation(memory_store.COMMON_FINDINGS_PATH, orig, "- a") is None
+
+
+def test_is_chunked_detects_overflow_marker():
+    assert L._is_chunked("<!-- older content: see /archive/x-overflow-2.md -->\nbody")
+    assert not L._is_chunked("# normal file\n- **X** (1x): t")
+
+
+def test_default_complete_raises_on_max_tokens(monkeypatch):
+    # A curation that hits max_tokens must raise (so _curate_one isolates it),
+    # never return a half-formed file that could pass the size floor.
+    class _Block:
+        type = "text"
+        text = "truncated..."
+
+    class _Msg:
+        stop_reason = "max_tokens"
+        content = [_Block()]
+
+    class _FakeClient:
+        class messages:
+            @staticmethod
+            def create(**kw):
+                return _Msg()
+    monkeypatch.setattr(L, "_client", _FakeClient())
+    with pytest.raises(ValueError, match="max_tokens"):
+        L._default_complete("persona", "x" * 1000, label="/glossary.md")
 
 
 if __name__ == "__main__":

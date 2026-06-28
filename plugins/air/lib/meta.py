@@ -40,8 +40,10 @@ Usage (CLI or managed):
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -299,10 +301,19 @@ READ_AUTHOR_ABSENT = 3
 READ_AUTHOR_UNKNOWN = 2
 
 
+_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")  # GitHub login charset
+
+
 def cmd_read_author(args) -> int:
     """Print a store-backed author's pattern file (/authors/<login>.md) to stdout.
     Lets the CLI read author patterns from the store directly — the same source
     headless uses — instead of grepping the wiki mirror by heading level."""
+    # The login reaches the store API query string; validate it against the
+    # GitHub login charset (and percent-encode below) so a crafted/malformed
+    # value can't alter the query or widen the path_prefix match.
+    if not _LOGIN_RE.match(args.login or ""):
+        print(f"  [warn] meta: invalid author login {args.login!r}", file=sys.stderr)
+        return READ_AUTHOR_UNKNOWN
     try:
         store_id = _find_store_id(args.repo)
     except Exception as e:
@@ -311,9 +322,10 @@ def cmd_read_author(args) -> int:
     if not store_id:
         return READ_AUTHOR_UNKNOWN  # not a store-backed repo (or no key)
     path = f"/authors/{args.login}.md"
+    q = urllib.parse.quote(path, safe="")
     try:
         listing = _store_api(
-            "GET", f"/memory_stores/{store_id}/memories?path_prefix={path}")
+            "GET", f"/memory_stores/{store_id}/memories?path_prefix={q}")
         for item in listing.get("data", []):
             if item.get("type") in ("memory", "memory_metadata") \
                     and item.get("path") == path:
