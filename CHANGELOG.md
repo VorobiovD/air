@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.41.0](https://github.com/VorobiovD/air/compare/v1.40.0...v1.41.0) (2026-06-28)
+
+
+### Features
+
+* **learn:** MA-independent headless learn + CLI store-awareness ([#224](https://github.com/VorobiovD/air/issues/224)) ([3b7760f](https://github.com/VorobiovD/air/commit/3b7760f80b7191d61b2deffed036e8292350822c))
+* **learn:** Phase-1b — headless REVIEW-HISTORY + PROJECT-PROFILE parity ([#226](https://github.com/VorobiovD/air/issues/226)) ([8f7be57](https://github.com/VorobiovD/air/commit/8f7be57b9b7b0844436f819a5ff506e0a3c18f20))
+
+
+### Bug Fixes
+
+* **billing:** preflight fail-fast on the "specified API usage limits" cap ([#222](https://github.com/VorobiovD/air/issues/222)) ([bac20bb](https://github.com/VorobiovD/air/commit/bac20bbc0c82f442072d38dc64ec7339e73bdb6b))
+
 ## [1.40.0](https://github.com/VorobiovD/air/compare/v1.39.0...v1.40.0) (2026-06-26)
 
 
