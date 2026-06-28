@@ -406,7 +406,7 @@ def test_history_regen_failure_keeps_current():
 def test_fetch_recent_review_bodies_filters_and_anti_spoofs(monkeypatch):
     import github_client as gc
     monkeypatch.setattr(gc, "_github_paginate",
-                        lambda url, token, max_pages=None: [{"number": 10}, {"number": 11}])
+                        lambda url, token, max_pages=None: [{"number": 10, "merged_at": "t"}, {"number": 11, "merged_at": "t"}])
 
     def fake_comments(repo, pr, token):
         if pr == 10:
@@ -450,3 +450,16 @@ def test_gather_repo_signals_real_checkout():
     sig = L._gather_repo_signals(".")
     assert "FILE COUNT:" in sig and "TOP EXTENSIONS:" in sig
     assert ".py" in sig   # air has Python
+
+
+def test_fetch_recent_review_bodies_matches_re_reviews(monkeypatch):
+    # A "## Code Review (Re-review)" body must be matched too (canonical prefix
+    # set), else multi-round PRs are silently dropped from the history.
+    import github_client as gc
+    monkeypatch.setattr(gc, "_github_paginate",
+                        lambda url, token, max_pages=None: [{"number": 20, "merged_at": "t"}])
+    monkeypatch.setattr(gc, "fetch_issue_comments", lambda repo, pr, token: [
+        {"body": "## Code Review (Re-review)\nround 2 ...", "user": {"login": "air-machine"}}])
+    out = gc.fetch_recent_review_bodies("o/r", "t")  # no bot_login → prefix is the signal
+    assert {b["pr"] for b in out} == {20}
+    assert "Re-review" in out[0]["body"]
