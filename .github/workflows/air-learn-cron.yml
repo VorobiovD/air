@@ -1,0 +1,78 @@
+name: air learn (cron)
+
+# Out-of-band headless learn — decoupled from any PR's CI job (autonomy "Option A").
+# It enumerates store-backed repos whose learn counter is DUE and runs
+# managed/learn_cron.py for each. This NEVER rides a review job's tail.
+#
+# TRIAL-SAFE BY DEFAULT: every run is --dry-run (enumerate + curate-diff, write
+# nothing) UNLESS you opt into real curation by setting the repo variable
+# AIR_LEARN_CRON_LIVE=true (Settings → Variables), or pass dry_run=false on a
+# manual run. Real (non-dry) runs need ANTHROPIC_API_KEY (read stores + curate)
+# AND AIR_BOT_TOKEN with wiki-push on the target store-backed repos.
+#
+# GO-LIVE (separate step, after this trial proves out): set AIR_LEARN_CRON_LIVE=true
+# AND stop reviews from running learn in-job (the review path's _run_learn_sync) so
+# the cron is the sole executor — otherwise both would curate.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run (enumerate + curate-diff, write nothing)'
+        type: boolean
+        default: true
+      repos:
+        description: 'Comma-separated owner/repo filter (blank = all due)'
+        default: ''
+      limit:
+        description: 'Max repos to learn this run (0 = no cap)'
+        default: '0'
+  schedule:
+    - cron: '23 6 * * *'   # daily 06:23 UTC (offset minute dodges the top-of-hour GHA backlog)
+
+# One learn-cron at a time; a long run never stacks on the next tick.
+concurrency:
+  group: air-learn-cron
+  cancel-in-progress: false
+
+jobs:
+  learn:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: pip install -r managed/requirements.txt
+      - name: Run scheduled learn
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
+          AIR_LEARN_BATCH: ${{ vars.AIR_LEARN_BATCH }}
+          # inputs via env (NOT inline ${{ }} in run:) to avoid shell injection
+          EVENT: ${{ github.event_name }}
+          IN_DRY: ${{ github.event.inputs.dry_run }}
+          IN_REPOS: ${{ github.event.inputs.repos }}
+          IN_LIMIT: ${{ github.event.inputs.limit }}
+          CRON_LIVE: ${{ vars.AIR_LEARN_CRON_LIVE }}
+        run: |
+          set -euo pipefail
+          # Mode selection (trial-safe):
+          #  - AIR_LEARN_CRON_LIVE=true        → real curation (the go-live switch)
+          #  - manual dispatch, dry_run=false  → real curation (explicit override)
+          #  - manual dispatch, dry_run=true   → --dry-run (curates, makes model calls, writes nothing)
+          #  - scheduled tick, not live        → --list (enumerate ONLY, ZERO model calls / cost)
+          if [ "${CRON_LIVE:-}" = "true" ]; then
+            MODE=""
+          elif [ "$EVENT" = "workflow_dispatch" ]; then
+            if [ "${IN_DRY:-}" = "false" ]; then MODE=""; else MODE="--dry-run"; fi
+          else
+            MODE="--list"
+          fi
+          ARGS="$MODE"
+          if [ -n "${IN_REPOS:-}" ]; then ARGS="$ARGS --repos $IN_REPOS"; fi
+          if [ -n "${IN_LIMIT:-}" ] && [ "${IN_LIMIT}" != "0" ]; then ARGS="$ARGS --limit $IN_LIMIT"; fi
+          echo "running: python managed/learn_cron.py $ARGS"
+          python managed/learn_cron.py $ARGS

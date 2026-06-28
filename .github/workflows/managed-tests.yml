@@ -41,4 +41,4 @@ jobs:
       - name: Run pure managed tests
         working-directory: managed
         # Only the network-free suites (others need AIR_BOT_TOKEN / a live API).
-        run: python -m pytest test-extract.py test-ui-scope.py test-promote-fastpath.py test-render.py test-reliability.py test-verdict.py test-cost-wins.py test-precomp.py test-multiagent.py test-headless.py test-agent-md.py test-learn-headless.py -v
+        run: python -m pytest test-extract.py test-ui-scope.py test-promote-fastpath.py test-render.py test-reliability.py test-verdict.py test-cost-wins.py test-precomp.py test-multiagent.py test-headless.py test-agent-md.py test-learn-headless.py test-learn-cron.py -v
