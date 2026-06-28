@@ -139,6 +139,24 @@ _FINDINGS_PERSONA = (
 )
 
 
+_HISTORY_FILE = "REVIEW-HISTORY.md"  # wiki-only (NOT in the store; render skips it)
+_HISTORY_PERSONA = (
+    "You regenerate air's REVIEW-HISTORY.md — a wiki analytics doc built from PR "
+    "`## Code Review` comments. You are given the CURRENT REVIEW-HISTORY.md plus "
+    "the most-recent reviews. Produce the COMPLETE updated file, same section "
+    "shape: `# Review History`, `## Finding Frequency` (a CUMULATIVE lifetime "
+    "aggregate — CARRY FORWARD the current file's counts and ADD the new "
+    "window's findings; one row per pattern; NEVER reset to just the window), "
+    "`## File Hot Spots`, `## Author Trends`, `## Timeline` (windowed to the most "
+    "recent ~30 PRs — older per-PR narrative is dropped, but the cumulative "
+    "tables above are NOT), `## Reconciliation`. Aggregate tables are bounded by "
+    "pattern/author/file count, so they stay cumulative; only the per-PR Timeline "
+    "narrative is windowed. NO per-pass changelog narrative ('Nth pass', 'since "
+    "last time'); a single date/HEAD header line, replaced each pass. Return only "
+    "the file."
+)
+
+
 def _persona_for(path: str) -> str:
     if path.startswith(memory_store.AUTHOR_PREFIX):
         return _AUTHOR_PERSONA
@@ -253,6 +271,95 @@ def _curate_one(path: str, content: str, complete, log) -> tuple[str, str, str |
     return path, original, curated, "ok"
 
 
+def regenerate_review_history(repo, *, token, complete=None, log=print,
+                              dry_run=False, current_history=None,
+                              pr_bodies=None, bot_login=None) -> dict:
+    """Regenerate the wiki-only REVIEW-HISTORY.md (KAIROS) from recent PR review
+    bodies — one streaming regen call (current history + the new window →
+    updated history), a structural guard (the cumulative `## Finding Frequency`
+    section must survive), wiki_cap, then a wiki write/push. Best-effort: any
+    failure keeps the current history. Inputs are injectable for offline tests.
+    Sequenced BEFORE the store→wiki mirror render (disjoint single-file push
+    first, avoiding a non-ff race) — same as managed learn.
+    """
+    complete = complete or _default_complete
+    if pr_bodies is None:
+        import github_client
+        try:
+            pr_bodies = github_client.fetch_recent_review_bodies(
+                repo, token, bot_login=bot_login)
+        except Exception as e:
+            log(f"  [learn] REVIEW-HISTORY: review-body fetch failed: {e}")
+            return {"history": "fetch-failed"}
+    if not pr_bodies:
+        log("  [learn] REVIEW-HISTORY: no prior ## Code Review comments — skip")
+        return {"history": "no-bodies"}
+
+    wiki_url = f"https://x-access-token:{token}@github.com/{repo}.wiki.git"
+    tmp = wiki_dir = None
+    if current_history is None:
+        import tempfile
+        from pathlib import Path
+        sys.path.insert(0, _LIB)
+        import wiki_git
+        tmp = tempfile.mkdtemp(prefix="air-hist-")
+        wiki_dir = Path(tmp) / "wiki"
+        if not wiki_git.clone_wiki(wiki_url, wiki_dir):
+            log("  [learn] REVIEW-HISTORY: wiki clone failed — skip")
+            return {"history": "clone-failed"}
+        hp = wiki_dir / _HISTORY_FILE
+        current_history = hp.read_text() if hp.is_file() else ""
+
+    blocks = "\n\n".join(f"=== PR #{b['pr']} ===\n{b['body']}" for b in pr_bodies)
+    inp = (f"CURRENT {_HISTORY_FILE} (carry forward cumulative tables):\n"
+           f"{current_history or '(none yet — create it)'}\n\n"
+           f"=== RECENT REVIEWS ({len(pr_bodies)}) ===\n{blocks}")
+    try:
+        new_history = (complete(_HISTORY_PERSONA, inp, label=_HISTORY_FILE) or "").strip()
+    except Exception as e:
+        log(f"  [learn] REVIEW-HISTORY regen failed: {type(e).__name__}: {e} — keeping current")
+        return {"history": "regen-failed"}
+    if "## Finding Frequency" not in new_history:
+        log("  [learn] REVIEW-HISTORY regen dropped '## Finding Frequency' — REFUSED")
+        return {"history": "refused"}
+    try:  # hard byte-ceiling backstop (same cap the render path uses)
+        sys.path.insert(0, _LIB)
+        import wiki_cap
+        capped, _caplog = wiki_cap.cap_files({_HISTORY_FILE: new_history})
+        new_history = capped[_HISTORY_FILE]
+    except Exception:
+        pass
+    if dry_run:
+        log(f"  [learn] (dry-run) would write {_HISTORY_FILE} "
+            f"({len(new_history)} bytes from {len(pr_bodies)} reviews)")
+        return {"history": "dry-run", "bytes": len(new_history), "reviews": len(pr_bodies)}
+
+    from pathlib import Path
+    sys.path.insert(0, _LIB)
+    import wiki_git
+    if wiki_dir is None:
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="air-hist-")
+        wiki_dir = Path(tmp) / "wiki"
+        if not wiki_git.clone_wiki(wiki_url, wiki_dir):
+            log("  [learn] REVIEW-HISTORY: wiki clone failed — skip write")
+            return {"history": "clone-failed"}
+    try:
+        wiki_git.configure_identity(wiki_dir, "air-machine", "air-machine@users.noreply.github.com")
+        (wiki_dir / _HISTORY_FILE).write_text(new_history)
+        wiki_git.commit_paths(wiki_dir, [_HISTORY_FILE],
+                              f"learn: regenerate {_HISTORY_FILE} ({len(pr_bodies)} reviews)")
+        log(f"  [learn] wrote {_HISTORY_FILE} ({len(new_history)} bytes)")
+        return {"history": "written", "bytes": len(new_history)}
+    except Exception as e:
+        log(f"  [learn] REVIEW-HISTORY write/push failed: {type(e).__name__}: {e}")
+        return {"history": "push-failed"}
+    finally:
+        if tmp:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
                        dry_run=False, log=print) -> dict:
     """Curate the pattern store for `repo` client-side, render the wiki mirror,
@@ -324,6 +431,19 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
             except Exception as e:
                 log(f"  [learn] write failed for {path}: {type(e).__name__}: {e}")
 
+    # --- REVIEW-HISTORY (KAIROS) regen — wiki-only, BEFORE the mirror render ---
+    # (disjoint single-file push first, avoiding a non-ff race with the render).
+    # Kill switch AIR_HEADLESS_HISTORY=0; independent of the store curation above.
+    history = "disabled"
+    if os.environ.get("AIR_HEADLESS_HISTORY", "1").lower() not in ("0", "false", "no"):
+        try:
+            history = regenerate_review_history(
+                repo, token=token, complete=complete, log=log, dry_run=dry_run
+            ).get("history")
+        except Exception as e:
+            log(f"  [learn] REVIEW-HISTORY regen errored: {type(e).__name__}: {e}")
+            history = "errored"
+
     # --- RENDER mirror (deterministic) + RESET counter — best-effort ---
     rendered = False
     if not dry_run and written:
@@ -353,7 +473,8 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
     return {"store_id": store_id, "curated": sorted(proposals),
             "written": written, "rendered": rendered, "reset": reset,
             "attempted": attempted, "failures": failures,
-            "skipped_chunked": skipped_chunked, "dry_run": dry_run}
+            "skipped_chunked": skipped_chunked, "history": history,
+            "dry_run": dry_run}
 
 
 def main(argv=None) -> int:
