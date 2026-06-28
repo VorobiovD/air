@@ -887,7 +887,9 @@ async def run_headless_review(args, bot_token: str) -> dict:
         except Exception as e:
             print(f"  [warn] mirror render failed: {type(e).__name__}: {e}", file=sys.stderr)
     try:
-        _update_learn_counter(args.repo, args.pr_number, bot_token, store_id=store_id)
+        # headless IS the messages-api arch — route a store-backed learn to learn_headless.
+        _update_learn_counter(args.repo, args.pr_number, bot_token, store_id=store_id,
+                              review_arch="messages-api")
     except Exception as e:
         print(f"  [warn] learn-counter update failed: {type(e).__name__}: {e}", file=sys.stderr)
 

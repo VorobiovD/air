@@ -139,6 +139,39 @@ _FINDINGS_PERSONA = (
 )
 
 
+_HISTORY_FILE = "REVIEW-HISTORY.md"  # wiki-only (NOT in the store; render skips it)
+_HISTORY_PERSONA = (
+    "You regenerate air's REVIEW-HISTORY.md — a wiki analytics doc built from PR "
+    "`## Code Review` comments. You are given the CURRENT REVIEW-HISTORY.md plus "
+    "the most-recent reviews. Produce the COMPLETE updated file, same section "
+    "shape: `# Review History`, `## Finding Frequency` (a CUMULATIVE lifetime "
+    "aggregate — CARRY FORWARD the current file's counts and ADD the new "
+    "window's findings; one row per pattern; NEVER reset to just the window), "
+    "`## File Hot Spots`, `## Author Trends`, `## Timeline` (windowed to the most "
+    "recent ~30 PRs — older per-PR narrative is dropped, but the cumulative "
+    "tables above are NOT), `## Reconciliation`. Aggregate tables are bounded by "
+    "pattern/author/file count, so they stay cumulative; only the per-PR Timeline "
+    "narrative is windowed. NO per-pass changelog narrative ('Nth pass', 'since "
+    "last time'); a single date/HEAD header line, replaced each pass. Return only "
+    "the file."
+)
+
+
+_PROFILE_PERSONA = (
+    "You refresh air's PROJECT-PROFILE.md — the per-repo review-context profile. "
+    "You are given the CURRENT profile plus fresh repo SIGNALS (file tree, "
+    "language histogram, README/CLAUDE/AGENTS excerpts). Produce the COMPLETE "
+    "updated profile, same section shape: `## Overview`, `## Languages`, "
+    "`## Architecture`, `## Services / Components`, `## CI/CD Setup`, "
+    "`## Test Locations`, `## Review Focus Rules`, `## Applicable Security "
+    "Checks` (list which of the 31 checks apply + skipped-with-reason). Update "
+    "to match the signals (new languages/services/CI); preserve any "
+    "`## User-Facing Copy Paths` and `## Voice & Copy` sections verbatim if "
+    "present (they're opt-in overrides). Terse; no per-pass narrative. Return "
+    "only the file."
+)
+
+
 def _persona_for(path: str) -> str:
     if path.startswith(memory_store.AUTHOR_PREFIX):
         return _AUTHOR_PERSONA
@@ -159,7 +192,10 @@ def _client_get():
     with _client_lock:
         if _client is None:
             from anthropic import Anthropic
-            _client = Anthropic()
+            # Per-call timeout so a single stalled stream can't pin a pool thread
+            # for the SDK's 600s default (×MAP_PARALLELISM = wasted runner time;
+            # ThreadPoolExecutor can't cancel a running future).
+            _client = Anthropic(timeout=float(os.environ.get("AIR_LEARN_CALL_TIMEOUT", "300")))
         return _client
 
 
@@ -250,6 +286,95 @@ def _curate_one(path: str, content: str, complete, log) -> tuple[str, str, str |
     return path, original, curated, "ok"
 
 
+def regenerate_review_history(repo, *, token, complete=None, log=print,
+                              dry_run=False, current_history=None,
+                              pr_bodies=None, bot_login=None) -> dict:
+    """Regenerate the wiki-only REVIEW-HISTORY.md (KAIROS) from recent PR review
+    bodies — one streaming regen call (current history + the new window →
+    updated history), a structural guard (the cumulative `## Finding Frequency`
+    section must survive), wiki_cap, then a wiki write/push. Best-effort: any
+    failure keeps the current history. Inputs are injectable for offline tests.
+    Sequenced BEFORE the store→wiki mirror render (disjoint single-file push
+    first, avoiding a non-ff race) — same as managed learn.
+    """
+    complete = complete or _default_complete
+    if pr_bodies is None:
+        import github_client
+        try:
+            pr_bodies = github_client.fetch_recent_review_bodies(
+                repo, token, bot_login=bot_login)
+        except Exception as e:
+            log(f"  [learn] REVIEW-HISTORY: review-body fetch failed: {e}")
+            return {"history": "fetch-failed"}
+    if not pr_bodies:
+        log("  [learn] REVIEW-HISTORY: no prior ## Code Review comments — skip")
+        return {"history": "no-bodies"}
+
+    wiki_url = f"https://x-access-token:{token}@github.com/{repo}.wiki.git"
+    tmp = wiki_dir = None
+    if current_history is None:
+        import tempfile
+        from pathlib import Path
+        sys.path.insert(0, _LIB)
+        import wiki_git
+        tmp = tempfile.mkdtemp(prefix="air-hist-")
+        wiki_dir = Path(tmp) / "wiki"
+        if not wiki_git.clone_wiki(wiki_url, wiki_dir):
+            log("  [learn] REVIEW-HISTORY: wiki clone failed — skip")
+            return {"history": "clone-failed"}
+        hp = wiki_dir / _HISTORY_FILE
+        current_history = hp.read_text() if hp.is_file() else ""
+
+    blocks = "\n\n".join(f"=== PR #{b['pr']} ===\n{b['body']}" for b in pr_bodies)
+    inp = (f"CURRENT {_HISTORY_FILE} (carry forward cumulative tables):\n"
+           f"{current_history or '(none yet — create it)'}\n\n"
+           f"=== RECENT REVIEWS ({len(pr_bodies)}) ===\n{blocks}")
+    try:
+        new_history = (complete(_HISTORY_PERSONA, inp, label=_HISTORY_FILE) or "").strip()
+    except Exception as e:
+        log(f"  [learn] REVIEW-HISTORY regen failed: {type(e).__name__}: {e} — keeping current")
+        return {"history": "regen-failed"}
+    if "## Finding Frequency" not in new_history:
+        log("  [learn] REVIEW-HISTORY regen dropped '## Finding Frequency' — REFUSED")
+        return {"history": "refused"}
+    try:  # hard byte-ceiling backstop (same cap the render path uses)
+        sys.path.insert(0, _LIB)
+        import wiki_cap
+        capped, _caplog = wiki_cap.cap_files({_HISTORY_FILE: new_history})
+        new_history = capped[_HISTORY_FILE]
+    except Exception:
+        pass
+    if dry_run:
+        log(f"  [learn] (dry-run) would write {_HISTORY_FILE} "
+            f"({len(new_history)} bytes from {len(pr_bodies)} reviews)")
+        return {"history": "dry-run", "bytes": len(new_history), "reviews": len(pr_bodies)}
+
+    from pathlib import Path
+    sys.path.insert(0, _LIB)
+    import wiki_git
+    if wiki_dir is None:
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="air-hist-")
+        wiki_dir = Path(tmp) / "wiki"
+        if not wiki_git.clone_wiki(wiki_url, wiki_dir):
+            log("  [learn] REVIEW-HISTORY: wiki clone failed — skip write")
+            return {"history": "clone-failed"}
+    try:
+        wiki_git.configure_identity(wiki_dir, "air-machine", "air-machine@users.noreply.github.com")
+        (wiki_dir / _HISTORY_FILE).write_text(new_history)
+        wiki_git.commit_paths(wiki_dir, [_HISTORY_FILE],
+                              f"learn: regenerate {_HISTORY_FILE} ({len(pr_bodies)} reviews)")
+        log(f"  [learn] wrote {_HISTORY_FILE} ({len(new_history)} bytes)")
+        return {"history": "written", "bytes": len(new_history)}
+    except Exception as e:
+        log(f"  [learn] REVIEW-HISTORY write/push failed: {type(e).__name__}: {e}")
+        return {"history": "push-failed"}
+    finally:
+        if tmp:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
                        dry_run=False, log=print) -> dict:
     """Curate the pattern store for `repo` client-side, render the wiki mirror,
@@ -321,6 +446,19 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
             except Exception as e:
                 log(f"  [learn] write failed for {path}: {type(e).__name__}: {e}")
 
+    # --- REVIEW-HISTORY (KAIROS) regen — wiki-only, BEFORE the mirror render ---
+    # (disjoint single-file push first, avoiding a non-ff race with the render).
+    # Kill switch AIR_HEADLESS_HISTORY=0; independent of the store curation above.
+    history = "disabled"
+    if os.environ.get("AIR_HEADLESS_HISTORY", "1").lower() not in ("0", "false", "no"):
+        try:
+            history = regenerate_review_history(
+                repo, token=token, complete=complete, log=log, dry_run=dry_run
+            ).get("history")
+        except Exception as e:
+            log(f"  [learn] REVIEW-HISTORY regen errored: {type(e).__name__}: {e}")
+            history = "errored"
+
     # --- RENDER mirror (deterministic) + RESET counter — best-effort ---
     rendered = False
     if not dry_run and written:
@@ -334,6 +472,9 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
     # curated). A clean no-op run (nothing to dedup) still resets.
     reset = False
     if not dry_run:
+        # Reset on a clean run OR an all-refused run (a refusal means the guard
+        # WORKED and the file stays safe — distinct from a model OUTAGE, which
+        # is what `failures` counts; only an outage that wrote nothing re-arms).
         if failures > 0 and not written:
             log(f"  [learn] {failures} curation(s) failed and nothing written — "
                 f"NOT resetting counter (re-arm next review)")
@@ -346,20 +487,117 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
 
     return {"store_id": store_id, "curated": sorted(proposals),
             "written": written, "rendered": rendered, "reset": reset,
-            "failures": failures, "skipped_chunked": skipped_chunked,
+            "attempted": attempted, "failures": failures,
+            "skipped_chunked": skipped_chunked, "history": history,
             "dry_run": dry_run}
+
+
+def _gather_repo_signals(checkout_dir: str, log=print) -> str:
+    """Deterministic repo signals for a scan-lite profile refresh (no agentic
+    repo exploration): tracked-file tree + language histogram + top-level dirs
+    + README/CLAUDE/AGENTS excerpts. Bounded so the single regen call stays
+    cheap. (Lighter than managed's Opus deep-scan agent — Phase-1b accepts the
+    signal-fed single call; a fuller agentic scan is a later option.)"""
+    import subprocess
+    from collections import Counter
+    try:
+        files = subprocess.run(
+            ["git", "-C", checkout_dir, "ls-files"],
+            capture_output=True, text=True, timeout=30).stdout.splitlines()
+    except Exception as e:
+        log(f"  [learn] profile: git ls-files failed ({e}); using empty tree")
+        files = []
+    ext = Counter(os.path.splitext(f)[1] for f in files if os.path.splitext(f)[1])
+    tops = Counter(f.split("/")[0] for f in files if "/" in f)
+    sig = [f"FILE COUNT: {len(files)}",
+           "TOP EXTENSIONS: " + ", ".join(f"{e}:{n}" for e, n in ext.most_common(15)),
+           "TOP-LEVEL DIRS: " + ", ".join(f"{d}({n})" for d, n in tops.most_common(20))]
+    for doc in ("README.md", "CLAUDE.md", "AGENTS.md"):
+        p = os.path.join(checkout_dir, doc)
+        if os.path.isfile(p):
+            try:
+                sig.append(f"=== {doc} (first 4KB) ===\n"
+                           + open(p, errors="replace").read()[:4000])
+            except Exception:
+                pass
+    return "\n".join(sig)
+
+
+def refresh_project_profile(repo, *, checkout_dir=".", complete=None, log=print,
+                            dry_run=False, store_id=None, current_profile=None,
+                            signals=None) -> dict:
+    """Refresh PROJECT-PROFILE.md (store-backed) from scan-lite repo signals — a
+    single streaming regen call (current profile + signals → refreshed), a
+    structural guard (the `## Overview` + `## Applicable Security Checks`
+    sections must survive), then a store write (the mirror render exports it).
+    OPT-IN (the default learn doesn't touch the profile — parity with managed's
+    --refresh-profile). Inputs injectable for offline tests."""
+    complete = complete or _default_complete
+    store_id = store_id or memory_store.get_store_id(repo, flow="learn")
+    if not store_id:
+        log("  [learn] profile refresh: no store — skip")
+        return {"profile": "no-store"}
+    if current_profile is None:
+        got = memory_store.read_memory(store_id, memory_store.PROJECT_PROFILE_PATH)
+        current_profile = got[0] if got else ""
+    if signals is None:
+        signals = _gather_repo_signals(checkout_dir, log)
+    inp = (f"CURRENT PROJECT-PROFILE.md:\n{current_profile or '(none yet — create it)'}"
+           f"\n\n=== REPO SIGNALS ===\n{signals}")
+    try:
+        new_profile = (complete(_PROFILE_PERSONA, inp, label="project-profile") or "").strip()
+    except Exception as e:
+        log(f"  [learn] profile refresh failed: {type(e).__name__}: {e} — keeping current")
+        return {"profile": "regen-failed"}
+    if not all(s in new_profile for s in ("## Overview", "## Applicable Security Checks")):
+        log("  [learn] profile refresh dropped a required section — REFUSED")
+        return {"profile": "refused"}
+    if dry_run:
+        log(f"  [learn] (dry-run) would write PROJECT-PROFILE.md ({len(new_profile)} bytes)")
+        return {"profile": "dry-run", "bytes": len(new_profile)}
+    try:
+        memory_store.update_with(store_id, memory_store.PROJECT_PROFILE_PATH,
+                                 lambda _cur, _new=new_profile: _new)
+        log(f"  [learn] wrote PROJECT-PROFILE.md to store ({len(new_profile)} bytes)")
+        return {"profile": "written", "bytes": len(new_profile)}
+    except Exception as e:
+        log(f"  [learn] profile write failed: {type(e).__name__}: {e}")
+        return {"profile": "write-failed"}
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="MA-independent headless learn (store-backed repos)")
     p.add_argument("repo", help="owner/repo")
     p.add_argument("--dry-run", action="store_true", help="curate + diff, do not write/render")
+    p.add_argument("--refresh-profile", action="store_true",
+                   help="OPT-IN: refresh PROJECT-PROFILE.md from repo signals (parity with learn.py --refresh-profile); skips the default curation")
     args = p.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
+
+    if args.refresh_profile:
+        # Opt-in, like managed's --refresh-profile: refresh the profile (store)
+        # then render the mirror so it reaches the wiki. The default learn does
+        # NOT touch the profile (parity).
+        checkout = os.environ.get("AIR_TARGET_REPO") or "."
+        prof = refresh_project_profile(args.repo, checkout_dir=checkout, dry_run=args.dry_run)
+        if not args.dry_run and prof.get("profile") == "written":
+            sid = memory_store.get_store_id(args.repo, flow="learn")
+            if sid:
+                try:
+                    render_store_to_wiki.render_push_and_stamp(
+                        sid, args.repo, os.environ.get("AIR_BOT_TOKEN", ""))
+                except Exception as e:
+                    print(f"  [warn] mirror render failed: {e}", file=sys.stderr)
+        print(f"[learn] profile-refresh done: {prof}", file=sys.stderr)
+        return 0
+
     summary = run_headless_learn(args.repo, dry_run=args.dry_run)
     print(f"[learn] done: {summary}", file=sys.stderr)
-    return 0
+    # Non-zero on a total outage (every curation failed, nothing written) so
+    # review.py's `_run_learn_sync` surfaces the visible `[warn] … exited N`
+    # line — parity with `learn.py --poll`. A clean/all-refused run is exit 0.
+    return 1 if summary.get("failures", 0) > 0 and not summary.get("written") else 0
 
 
 if __name__ == "__main__":

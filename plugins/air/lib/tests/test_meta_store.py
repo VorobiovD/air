@@ -286,6 +286,20 @@ def test_read_author_allows_bot_login(monkeypatch, capsys):
     assert "dependabot" in capsys.readouterr().out
 
 
+def test_read_author_rejects_trailing_hyphen_login(monkeypatch):
+    # GitHub disallows a trailing hyphen; the regex must reject it (→ UNKNOWN),
+    # not treat it as a valid-but-absent author (which would read as exit 3).
+    called = {"n": 0}
+
+    def spy(*a, **k):
+        called["n"] += 1
+        return {"data": []}
+    monkeypatch.setattr(meta, "_store_api", spy)
+    rc = meta.main(["read-author", "--repo", "owner/repo", "--login", "alice-"])
+    assert rc == meta.READ_AUTHOR_UNKNOWN
+    assert called["n"] == 0
+
+
 def test_read_author_rejects_injection_login(monkeypatch):
     # An injection-y login must be rejected BEFORE any API call (returns UNKNOWN).
     called = {"n": 0}
