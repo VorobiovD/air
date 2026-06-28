@@ -252,27 +252,82 @@ def should_trigger_learn(meta: dict, now: datetime | None = None) -> tuple[bool,
     return False, f"reviews_since={reviews}, days_since_cleanup={days:.1f} — below threshold"
 
 
+def _find_store_id(repo: str) -> str | None:
+    """Resolve the repo's pattern-store id, or None if not migrated/unreachable.
+    Name convention mirrors managed/memory_store.py: 'air-patterns <owner>/<repo>'.
+    Raises on a transport/auth error so callers can distinguish 'no store' (None)
+    from 'store unreachable' (exception) — find-store swallows, read-author does not."""
+    wanted = f"air-patterns {repo}"
+    page = "/memory_stores"
+    while True:
+        data = _store_api("GET", page)
+        for s in data.get("data", []):
+            if s.get("name") == wanted and not s.get("archived_at"):
+                return s["id"]
+        nxt = data.get("next_page")
+        if not nxt:
+            return None
+        page = f"/memory_stores?page={nxt}"
+
+
 def cmd_find_store(args) -> int:
     """Print the repo's pattern-store id (empty + exit 0 when the repo has
-    not migrated — callers treat empty as 'use the wiki backend'). Name
-    convention mirrors managed/memory_store.py: 'air-patterns <owner>/<repo>'."""
-    wanted = f"air-patterns {args.repo}"
+    not migrated — callers treat empty as 'use the wiki backend'). Errors are
+    swallowed to the same empty/exit-0 (a counter on the wiki is the safe
+    fallback); read-author below deliberately does NOT swallow."""
     try:
-        page = "/memory_stores"
-        while True:
-            data = _store_api("GET", page)
-            for s in data.get("data", []):
-                if s.get("name") == wanted and not s.get("archived_at"):
-                    print(s["id"])
-                    return 0
-            nxt = data.get("next_page")
-            if not nxt:
-                break
-            page = f"/memory_stores?page={nxt}"
+        sid = _find_store_id(args.repo)
+        if sid:
+            print(sid)
     except Exception as e:
         print(f"  [warn] meta: store lookup failed ({e}) — falling back to wiki backend",
               file=sys.stderr)
     return 0
+
+
+# Exit codes for read-author (the CLI branches on these so it never misreports
+# a known author as new — the ai-relay 2026-06-27 bug, where the store→wiki
+# render emits per-author blocks under a heading the CLI's `### <login>` grep
+# missed, so a dominant author read as "new author"):
+#   0 → stdout carries the author's pattern file (found)
+#   3 → store reachable, but /authors/<login>.md is absent → genuinely new author
+#   2 → no store for this repo, or the store is unreachable (e.g. the local
+#       ANTHROPIC_API_KEY points at the wrong workspace) → UNKNOWN; the caller
+#       must say "patterns unavailable", NOT "new author"
+READ_AUTHOR_FOUND = 0
+READ_AUTHOR_ABSENT = 3
+READ_AUTHOR_UNKNOWN = 2
+
+
+def cmd_read_author(args) -> int:
+    """Print a store-backed author's pattern file (/authors/<login>.md) to stdout.
+    Lets the CLI read author patterns from the store directly — the same source
+    headless uses — instead of grepping the wiki mirror by heading level."""
+    try:
+        store_id = _find_store_id(args.repo)
+    except Exception as e:
+        print(f"  [warn] meta: store unreachable for {args.repo} ({e})", file=sys.stderr)
+        return READ_AUTHOR_UNKNOWN
+    if not store_id:
+        return READ_AUTHOR_UNKNOWN  # not a store-backed repo (or no key)
+    path = f"/authors/{args.login}.md"
+    try:
+        listing = _store_api(
+            "GET", f"/memory_stores/{store_id}/memories?path_prefix={path}")
+        for item in listing.get("data", []):
+            if item.get("type") in ("memory", "memory_metadata") \
+                    and item.get("path") == path:
+                mem = _store_api(
+                    "GET", f"/memory_stores/{store_id}/memories/{item['id']}")
+                content = mem.get("content", "")
+                if content.strip():
+                    sys.stdout.write(content)
+                    return READ_AUTHOR_FOUND
+                return READ_AUTHOR_ABSENT  # present but empty == no patterns yet
+        return READ_AUTHOR_ABSENT  # store reachable, author has no file → new author
+    except Exception as e:
+        print(f"  [warn] meta: author read failed for {args.login} ({e})", file=sys.stderr)
+        return READ_AUTHOR_UNKNOWN
 
 
 def _bump_fn(pr: int):
@@ -540,6 +595,11 @@ def main(argv: list[str] | None = None) -> int:
     p_find.add_argument("--repo", required=True, help="owner/repo")
     p_find.set_defaults(fn=cmd_find_store)
 
+    p_rauth = sub.add_parser("read-author", help="Print a store-backed author's /authors/<login>.md (exit 3=new author, 2=unknown/no store)")
+    p_rauth.add_argument("--repo", required=True, help="owner/repo")
+    p_rauth.add_argument("--login", required=True, help="author GitHub login")
+    p_rauth.set_defaults(fn=cmd_read_author)
+
     p_mdue = sub.add_parser("mirror-due", help="Decide whether to re-render the wiki mirror (exit 1 = due)")
     add_backend_args(p_mdue)
     p_mdue.set_defaults(fn=cmd_mirror_due)
@@ -549,7 +609,8 @@ def main(argv: list[str] | None = None) -> int:
     p_mrendered.set_defaults(fn=cmd_mirror_rendered)
 
     args = parser.parse_args(argv)
-    if args.cmd != "find-store" and not args.wiki_dir and not getattr(args, "store_id", None):
+    # find-store / read-author resolve the store from --repo and take no backend arg.
+    if args.cmd not in ("find-store", "read-author") and not args.wiki_dir and not getattr(args, "store_id", None):
         parser.error("one of --wiki-dir or --store-id is required")
     return args.fn(args)
 

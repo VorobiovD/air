@@ -208,3 +208,90 @@ def test_store_reset_clears_lock(fake):
     data = json.loads(fake.content)
     assert data["reviews_since"] == 0
     assert data["learn_claimed_at"] == ""
+
+
+# --- read-author: store-backed author-pattern read (CLI Fix 1) -------------
+# The ai-relay 2026-06-27 bug: the store→wiki render emits per-author blocks
+# under a heading the CLI's `### <login>` grep missed, so a dominant author
+# read as "new author". The CLI now reads /authors/<login>.md from the store.
+# Exit codes are the contract the CLI branches on: 0=found, 3=new, 2=unknown.
+
+class FakeAuthorAPI:
+    """Fake for the find-store scan + author-memory read sequence.
+
+    `store_name` None → no store for the repo (find returns nothing).
+    `author_content` None → author file absent.
+    """
+
+    def __init__(self, store_name="air-patterns owner/repo",
+                 author_path="/authors/alice.md", author_content="# alice\n- **X** (3x)"):
+        self.store_name = store_name
+        self.author_path = author_path
+        self.author_content = author_content
+        self.store_id = "memstore_z"
+        self.mem_id = "mem_author"
+
+    def __call__(self, method, path, body=None):
+        if method == "GET" and path == "/memory_stores":
+            data = []
+            if self.store_name is not None:
+                data = [{"name": self.store_name, "id": self.store_id}]
+            return {"data": data}
+        if method == "GET" and "/memories?path_prefix=" in path:
+            if self.author_content is None:
+                return {"data": []}
+            return {"data": [{"type": "memory_metadata",
+                              "path": self.author_path, "id": self.mem_id}]}
+        if method == "GET" and self.mem_id in path:
+            return {"content": self.author_content,
+                    "content_sha256": "sha-a", "id": self.mem_id}
+        raise AssertionError(f"unexpected call {method} {path}")
+
+
+def test_read_author_found_prints_content(monkeypatch, capsys):
+    monkeypatch.setattr(meta, "_store_api", FakeAuthorAPI())
+    rc = meta.main(["read-author", "--repo", "owner/repo", "--login", "alice"])
+    assert rc == meta.READ_AUTHOR_FOUND  # 0
+    assert "# alice" in capsys.readouterr().out
+
+
+def test_read_author_absent_is_new_author(monkeypatch):
+    # Store exists, but this author has no file → genuinely new author (exit 3).
+    monkeypatch.setattr(meta, "_store_api", FakeAuthorAPI(author_content=None))
+    rc = meta.main(["read-author", "--repo", "owner/repo", "--login", "bob"])
+    assert rc == meta.READ_AUTHOR_ABSENT  # 3
+
+
+def test_read_author_empty_file_is_new_author(monkeypatch):
+    monkeypatch.setattr(meta, "_store_api", FakeAuthorAPI(author_content="   \n"))
+    rc = meta.main(["read-author", "--repo", "owner/repo", "--login", "alice"])
+    assert rc == meta.READ_AUTHOR_ABSENT  # 3 — present but no patterns
+
+
+def test_read_author_no_store_is_unknown(monkeypatch):
+    # No store for this repo (legacy, or local key sees the wrong workspace) →
+    # UNKNOWN (exit 2), NOT "new author" — the CLI must not misreport.
+    monkeypatch.setattr(meta, "_store_api", FakeAuthorAPI(store_name=None))
+    rc = meta.main(["read-author", "--repo", "owner/repo", "--login", "alice"])
+    assert rc == meta.READ_AUTHOR_UNKNOWN  # 2
+
+
+def test_read_author_store_unreachable_is_unknown(monkeypatch):
+    # The ai-relay failure mode: the local ANTHROPIC_API_KEY can't reach the
+    # store (wrong workspace / revoked) → transport error → UNKNOWN (exit 2).
+    def boom(*a, **k):
+        raise RuntimeError("401 invalid x-api-key")
+    monkeypatch.setattr(meta, "_store_api", boom)
+    rc = meta.main(["read-author", "--repo", "owner/repo", "--login", "alice"])
+    assert rc == meta.READ_AUTHOR_UNKNOWN  # 2 — never claim "new author" on failure
+
+
+def test_read_author_no_backend_arg_required():
+    # read-author resolves the store from --repo; it must NOT demand --wiki-dir/--store-id.
+    import io
+    import contextlib
+    # Missing --login should still be an argparse error, but --repo alone must
+    # pass the backend guard (regression for the main() exemption).
+    with contextlib.redirect_stderr(io.StringIO()):
+        with pytest.raises(SystemExit):
+            meta.main(["read-author", "--repo", "owner/repo"])  # no --login
