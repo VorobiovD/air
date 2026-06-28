@@ -2832,7 +2832,7 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
                       "--pr-number", str(pr_number))
         sys.stderr.write(claim.stderr)
         if claim.returncode == 1:
-            _run_learn_sync(air_root, repo)
+            _run_learn_sync(air_root, repo, store_id=store_id)
         return
 
     sys.path.insert(0, str(lib_dir))
@@ -2858,28 +2858,41 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
         wiki_git.commit_meta(wiki_dir, f"meta: bump counter for PR #{pr_number}")
 
 
-def _run_learn_sync(air_root: Path, repo: str) -> None:
-    """Threshold fired — run managed/learn.py SYNCHRONOUSLY in this same
+def _run_learn_sync(air_root: Path, repo: str, store_id: str | None = None) -> None:
+    """Threshold fired — run the learn curation SYNCHRONOUSLY in this same
     GitHub Actions job (a detached Popen would get torn down when the
-    runner VM stops). learn.py typically takes 3-5 min; the review comment
-    has already posted, so we're just extending the CI job's tail.
+    runner VM stops). Typically 3-5 min; the review comment has already
+    posted, so we're just extending the CI job's tail.
 
-    learn.py calls `meta.py reset` on success (see
-    managed/learn.py::_reset_learn_counter). If it errors, the counter
-    stays elevated and the next review retriggers it.
+    Routing: a headless (`AIR_REVIEW_MODE=messages-api`) review on a
+    store-backed repo runs the MA-independent `learn_headless.py` (no managed
+    session) — that's what makes a 100%-headless fleet free of the managed
+    learn dependency. Every other case (legacy-wiki repo, or full/managed
+    mode) runs the managed-session `learn.py` unchanged. learn_headless is
+    store-only by construction, so the `store_id` guard keeps a legacy repo
+    on learn.py even under messages-api.
 
-    Output handling: capture and re-emit so the failure mode "learn.py
-    exited 1" surfaces an actionable reason (repo-A #635 — diagnostics
-    invisible until log archive with direct streaming); stdout streams
-    through immediately, stderr dumps only on failure.
+    Both call `meta.py reset` on success; on error the counter stays elevated
+    and the next review retriggers (the claim-lock ages out via TTL).
+
+    Output handling: capture and re-emit so the failure mode "learn exited 1"
+    surfaces an actionable reason (repo-A #635); stdout streams through
+    immediately, stderr dumps only on failure.
     """
-    learn_script = air_root / "managed" / "learn.py"
+    review_arch = os.environ.get("AIR_REVIEW_MODE", "").strip() or "full"
+    if review_arch == "messages-api" and store_id:
+        learn_script = air_root / "managed" / "learn_headless.py"
+        learn_argv = [sys.executable, str(learn_script), repo]
+    else:
+        learn_script = air_root / "managed" / "learn.py"
+        learn_argv = [sys.executable, str(learn_script), repo, "--poll"]
     if not learn_script.is_file():
-        print(f"  [warn] learn.py not found at {learn_script}", file=sys.stderr)
+        print(f"  [warn] learn script not found at {learn_script}", file=sys.stderr)
         return
-    print(f"  [learn] running synchronously: {learn_script} {repo}", file=sys.stderr)
+    print(f"  [learn] running synchronously: {learn_script.name} {repo} "
+          f"(arch={review_arch})", file=sys.stderr)
     learn_result = subprocess.run(
-        [sys.executable, str(learn_script), repo, "--poll"],
+        learn_argv,
         capture_output=True, text=True,
         # No check=True — we want to finish this review cleanly even if
         # learn errors out.
@@ -2890,7 +2903,7 @@ def _run_learn_sync(air_root: Path, repo: str) -> None:
         sys.stderr.write(learn_result.stderr)
         sys.stderr.flush()
         print(
-            f"  [warn] learn.py exited {learn_result.returncode} — "
+            f"  [warn] {learn_script.name} exited {learn_result.returncode} — "
             f"counter not reset (stderr above)",
             file=sys.stderr,
         )

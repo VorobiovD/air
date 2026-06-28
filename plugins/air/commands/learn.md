@@ -7,7 +7,7 @@ Fetch REVIEW.md from the wiki, clean it up using AI, generate REVIEW-HISTORY.md 
 
 Note: `/air:review` auto-triggers this command every 15 reviews or every 14 days (whichever comes first). You can also run it manually for immediate cleanup.
 
-> **Store-backed repos (managed-agent fleet):** when a repo's patterns live in an Anthropic memory store (the source of truth), the canonical `/air:learn` is the managed `air-learner` session, which curates the store; a deterministic Python step (`managed/render_store_to_wiki.py`) then exports the git-wiki mirror. **This CLI command never reads or renders the store** — it operates on the git wiki directly. On a store-backed repo it still works on whatever the wiki holds, but the store stays untouched and the managed render will overwrite the wiki on its next run. For store repos, run the managed learn; reserve this CLI flow for legacy wiki-only repos.
+> **Store-backed repos (managed/headless fleet):** when a repo's patterns live in an Anthropic memory store (the source of truth), the canonical learn is the cloud/client `air-learner` (managed `learn.py`, or the MA-independent `managed/learn_headless.py`), which curates the store; a deterministic Python step (`managed/render_store_to_wiki.py`) then exports the git-wiki mirror. **This CLI command never reads or renders the store** — it operates on the git wiki directly, so on a store-backed repo its writes would be overwritten by the next render. Step 1 now DETECTS a store mirror (via the render's banner — no API key needed) and STOPS, instead of relying on `find-store` (which is blank when the local `ANTHROPIC_API_KEY` can't see the repo's store). Reserve this CLI flow for legacy wiki-only repos.
 
 **Flags:**
 - `--dry-run` — preview changes without pushing to wiki
@@ -72,6 +72,16 @@ fi
 ```
 
 If the clone failed (no `.git` directory): print "Wiki not found — create at https://$PLATFORM_DOMAIN/$CURRENT_REPO/wiki" and STOP.
+
+**Store-backed repo guard (key-independent).** If the cloned wiki is a READ-ONLY mirror of an Anthropic memory store, this CLI learn must NOT push to it — the canonical learn is the managed/headless `air-learner`, and a deterministic render overwrites whatever the CLI pushes here (the ai-relay 2026-06-27 incident: `find-store` was blank because the local `ANTHROPIC_API_KEY` saw the wrong workspace, so the repo was misread as legacy and the CLI learn nearly clobbered the mirror). Detect it via the render's banner (no API key needed):
+```bash
+# Keep the banner substring in sync with managed/render_store_to_wiki.py:MIRROR_BANNER
+IS_STORE_MIRROR=0
+if [ -d "$WIKI_DIR/.git" ] && grep -rqs "source of truth is the air pattern memory store" "$WIKI_DIR" 2>/dev/null; then
+  IS_STORE_MIRROR=1
+fi
+```
+**If `IS_STORE_MIRROR=1`: print "store-backed repo — the canonical learn is the managed/headless air-learner; this CLI learn would be overwritten by the next render. Skipping. Run the managed/headless learn instead." and STOP** (do not curate or push). Discard any generated files; the repo must be left exactly as found.
 
 If `--history-only` was passed, skip to Step 4 (only regenerate history, don't touch REVIEW.md).
 
