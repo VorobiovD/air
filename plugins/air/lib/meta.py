@@ -301,7 +301,11 @@ READ_AUTHOR_ABSENT = 3
 READ_AUTHOR_UNKNOWN = 2
 
 
-_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")  # GitHub login charset
+# GitHub login charset, plus the `[bot]` suffix GitHub App authors carry
+# (e.g. `dependabot[bot]`). The brackets are URL-special but are
+# percent-encoded by urllib.parse.quote(safe="") below, so the injection
+# property holds; rejecting them would silently lose bot authors' patterns.
+_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$")
 
 
 def cmd_read_author(args) -> int:

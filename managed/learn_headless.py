@@ -113,11 +113,12 @@ _GLOSSARY_TERM_RE = re.compile(r"^\s*\|\s*`(?P<term>[^`]+)`", re.M)
 _AUTHOR_PERSONA = (
     "You curate ONE air author-pattern file (lifecycle format: "
     "`- **<name>** (<Nx>: <PR refs> | last <N> PRs: <M> clean): <tendency>`).\n"
-    "ONLY valid operations: merge SEMANTIC DUPLICATES within this author "
-    "(combine counts + PR refs, keep the higher clean counter), fix formatting "
-    "to the lifecycle shape, window an over-long PR-ref list to the most-recent "
-    "~8 (the COUNT is preserved), and trim per-entry narrative to the 3 most "
-    "recent examples. NEVER drop a pattern, NEVER lower a count, NEVER remove an "
+    "ONLY valid operations: fix formatting to the lifecycle shape, window an "
+    "over-long PR-ref list to the most-recent ~8 (the COUNT is preserved), and "
+    "trim per-entry narrative to the 3 most recent examples. **Do NOT merge "
+    "across different pattern names** (cross-name semantic dedup is deferred to "
+    "the managed learn pass — the headless fidelity guard preserves every "
+    "pattern name). NEVER drop a pattern, NEVER lower a count, NEVER remove an "
     "(archived)/(declining) tag, NEVER invent a pattern. No per-pass changelog "
     "narrative. Return the COMPLETE curated file and nothing else."
 )

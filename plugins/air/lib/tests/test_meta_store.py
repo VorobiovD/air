@@ -276,6 +276,29 @@ def test_read_author_no_store_is_unknown(monkeypatch):
     assert rc == meta.READ_AUTHOR_UNKNOWN  # 2
 
 
+def test_read_author_allows_bot_login(monkeypatch, capsys):
+    # GitHub App authors carry a `[bot]` suffix — must reach their store file.
+    api = FakeAuthorAPI(author_path="/authors/dependabot[bot].md",
+                        author_content="# dependabot[bot]\n- **deps** (2x)")
+    monkeypatch.setattr(meta, "_store_api", api)
+    rc = meta.main(["read-author", "--repo", "owner/repo", "--login", "dependabot[bot]"])
+    assert rc == meta.READ_AUTHOR_FOUND
+    assert "dependabot" in capsys.readouterr().out
+
+
+def test_read_author_rejects_injection_login(monkeypatch):
+    # An injection-y login must be rejected BEFORE any API call (returns UNKNOWN).
+    called = {"n": 0}
+
+    def spy(*a, **k):
+        called["n"] += 1
+        return {"data": []}
+    monkeypatch.setattr(meta, "_store_api", spy)
+    rc = meta.main(["read-author", "--repo", "owner/repo", "--login", "bob&admin=1"])
+    assert rc == meta.READ_AUTHOR_UNKNOWN
+    assert called["n"] == 0   # rejected before touching the API
+
+
 def test_read_author_store_unreachable_is_unknown(monkeypatch):
     # The ai-relay failure mode: the local ANTHROPIC_API_KEY can't reach the
     # store (wrong workspace / revoked) → transport error → UNKNOWN (exit 2).
