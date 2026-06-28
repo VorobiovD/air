@@ -91,6 +91,7 @@ def _store_module(store):
         GLOSSARY_PATH=memory_store.GLOSSARY_PATH,
         COMMON_FINDINGS_PATH=memory_store.COMMON_FINDINGS_PATH,
         SERVICE_PATTERNS_PATH=memory_store.SERVICE_PATTERNS_PATH,
+        PROJECT_PROFILE_PATH=memory_store.PROJECT_PROFILE_PATH,
         get_store_id=store.get_store_id,
         list_memories=store.list_memories,
         read_memory=store.read_memory,
@@ -416,3 +417,36 @@ def test_fetch_recent_review_bodies_filters_and_anti_spoofs(monkeypatch):
     out = gc.fetch_recent_review_bodies("o/r", "t", bot_login="air-machine")
     assert {b["pr"] for b in out} == {10}   # PR 11's review spoofed by non-bot → excluded
     assert out[0]["body"].startswith("## Code Review")
+
+
+# --- PROJECT-PROFILE refresh (Phase-1b, opt-in) ------------------------------
+
+def test_profile_dry_run_carries_current_and_signals():
+    seen = {}
+
+    def complete(persona, content, *, label=""):
+        seen["content"] = content
+        return "## Overview\nA service.\n## Applicable Security Checks\nChecks: 1,2,3"
+    out = L.refresh_project_profile(
+        "o/r", complete=complete, dry_run=True, store_id="memstore_x",
+        current_profile="## Overview\nOld.\n## Applicable Security Checks\nChecks: 1",
+        signals="FILE COUNT: 42\nTOP EXTENSIONS: .py:30")
+    assert out["profile"] == "dry-run"
+    assert "Old." in seen["content"]            # current profile carried in
+    assert "FILE COUNT: 42" in seen["content"]  # signals carried in
+
+
+def test_profile_refused_when_required_section_dropped():
+    def complete(persona, content, *, label=""):
+        return "## Overview\nonly overview, no security-checks section"
+    out = L.refresh_project_profile(
+        "o/r", complete=complete, dry_run=True, store_id="memstore_x",
+        current_profile="x", signals="y")
+    assert out["profile"] == "refused"
+
+
+def test_gather_repo_signals_real_checkout():
+    # Run against air's own checkout — deterministic, no network.
+    sig = L._gather_repo_signals(".")
+    assert "FILE COUNT:" in sig and "TOP EXTENSIONS:" in sig
+    assert ".py" in sig   # air has Python
