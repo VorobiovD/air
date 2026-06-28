@@ -463,3 +463,71 @@ def test_fetch_recent_review_bodies_matches_re_reviews(monkeypatch):
     out = gc.fetch_recent_review_bodies("o/r", "t")  # no bot_login → prefix is the signal
     assert {b["pr"] for b in out} == {20}
     assert "Re-review" in out[0]["body"]
+
+
+# --- Phase-2 Batch API ------------------------------------------------------
+
+def test_apply_guards_matrix():
+    lg = lambda *a, **k: None
+    A = "/authors/a.md"
+    orig = "# a\n- **X** (3x: #1): t"
+    assert L._apply_guards(A, orig, "", lg) == (None, "failed")          # empty
+    assert L._apply_guards(A, orig, "x", lg) == (None, "refused")        # size floor
+    assert L._apply_guards(A, orig, "# a\n- **Z** (1x): u", lg)[1] == "refused"  # dropped X
+    assert L._apply_guards(A, orig, orig, lg) == (None, "noop")          # unchanged
+    good = orig + "\n- **Y** (1x: #2): more"
+    assert L._apply_guards(A, orig, good, lg) == (good, "ok")            # valid change
+
+
+def test_batch_curate_applies_guards_and_isolates(monkeypatch):
+    lg = lambda *a, **k: None
+    pending = [("/authors/a.md", "# a\n- **X** (3x: #1): tends to skip"),
+               (memory_store.GLOSSARY_PATH, "| `T` | def | s |"),
+               (memory_store.COMMON_FINDINGS_PATH, "- finding one")]
+
+    def fake_submit(items, log):
+        return {"/authors/a.md": "# a\n- **X** (3x: #1): tends to skip\n- **NEW** (1x): n",  # ok
+                memory_store.GLOSSARY_PATH: "| `OTHER` | x | s |",   # dropped term T → refused
+                memory_store.COMMON_FINDINGS_PATH: None}              # request failed
+    monkeypatch.setattr(L, "_submit_batch", fake_submit)
+    out = L._batch_curate(pending, lg)
+    assert out["/authors/a.md"][2] == "ok"
+    assert out[memory_store.GLOSSARY_PATH][2] == "refused"
+    assert out[memory_store.COMMON_FINDINGS_PATH][2] == "failed"
+
+
+def test_run_headless_uses_batch_when_enabled(fake, monkeypatch):
+    store, calls = fake
+    monkeypatch.setattr(L, "_BATCH_ENABLED", True)
+
+    def fake_submit(items, log):
+        # one batch call for ALL files; return a real change per file
+        return {p: c + "\n- **batch marker**" for p, persona, c in items}
+    monkeypatch.setattr(L, "_submit_batch", fake_submit)
+    # no `complete` injected → complete is _default_complete → batch path eligible
+    out = L.run_headless_learn("o/r", token="t")
+    assert "/authors/alice.md" in out["written"]
+    assert "**batch marker**" in store.files["/authors/alice.md"]
+    assert calls["render"] == 1 and calls["reset_argv"] is not None
+
+
+def test_profile_refused_when_overflow_marker_dropped():
+    # If the current profile references /archive overflow chunks, the regen must
+    # keep the reference — dropping it would orphan the archived detail.
+    cur = "## Overview\n<!-- older detail in /archive/project-profile-overflow-1.md -->\n## Applicable Security Checks\nChecks: 1"
+
+    def complete(persona, content, *, label=""):
+        return "## Overview\nrewritten, no overflow ref\n## Applicable Security Checks\nChecks: 1"
+    out = L.refresh_project_profile("o/r", complete=complete, dry_run=True,
+                                    store_id="memstore_x", current_profile=cur, signals="s")
+    assert out["profile"] == "refused"
+
+
+def test_profile_ok_when_overflow_marker_kept():
+    cur = "## Overview\n<!-- older detail in /archive/project-profile-overflow-1.md -->\n## Applicable Security Checks\nChecks: 1"
+
+    def complete(persona, content, *, label=""):
+        return "## Overview\nrefreshed <!-- older detail in /archive/project-profile-overflow-1.md -->\n## Applicable Security Checks\nChecks: 1,2"
+    out = L.refresh_project_profile("o/r", complete=complete, dry_run=True,
+                                    store_id="memstore_x", current_profile=cur, signals="s")
+    assert out["profile"] == "dry-run"   # marker preserved → allowed
