@@ -19,9 +19,12 @@ Step 4) — its #1 cost. This driver is stateless: each curatable file is ONE
 single-shot `complete()` call (content fed in-prompt, no exploratory tool loop),
 run concurrently; Python reduces + writes. Benefits over the session:
   * MA-independent  — plain Messages API, no session/coordinator/scheduling stall.
-  * cheaper         — kills the thread-re-read multiplier; caches the shared
-                      persona prefix (5m TTL); single-shot calls can move to the
-                      Batch API for a 50% discount (Phase 2 — not yet done here).
+  * cheaper         — kills the thread-re-read multiplier; the single-shot curation
+                      calls run through the Batch API for a 50% discount when
+                      AIR_LEARN_BATCH=1 (opt-in; default concurrent streaming).
+                      Caching is a NO-OP for learn (no shared prefix across calls
+                      like reviews have; the persona is below the cacheable min) —
+                      its levers are the cheaper model + no-session + Batch-50%.
   * reliable        — deterministic orchestration; one flaky file-curation is
                       isolated + skipped, never aborts the run; sha256-
                       preconditioned writes; no 25-min-session-timeout-kills-all;
@@ -63,6 +66,7 @@ _LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins",
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 import meta  # noqa: E402  (plugins/air/lib — shared counter, stdlib)
+import agent_loop  # noqa: E402  (plugins/air/lib — usage pricing helpers; _LIB on sys.path above)
 
 # Model default derives from setup.py's MODEL_ALIASES (single source of truth
 # across the managed stack — learn.py imports it the same way), so a tier bump
@@ -232,39 +236,40 @@ def _tier_of(model: str) -> str:
 
 _TIER = _tier_of(MODEL)
 _usage_lock = threading.Lock()
-_usage_rows: list = []  # [(label, tier, usage_dict)] — reset per run_headless_learn
+_usage_rows: list = []  # [(label, tier, usage_dict, batched)] — reset per run_headless_learn
 
 
-def _record_usage(label: str, usage) -> None:
-    """Thread-safe accumulate one call's token usage (SDK Usage obj or dict)."""
-    sys.path.insert(0, _LIB)
-    import agent_loop  # noqa: E402
+def _record_usage(label: str, usage, batched: bool = False) -> None:
+    """Thread-safe accumulate one call's token usage (SDK Usage obj or dict).
+    `batched` is per-CALL: only the curation map-calls go through the Batch API
+    (50% off); the history/profile regen calls stream at full price even when
+    AIR_LEARN_BATCH is on — so pricing must be per-row, not per-run."""
     row = {k: (getattr(usage, k, None) if not isinstance(usage, dict) else usage.get(k))
            or 0 for k in agent_loop._USAGE_KEYS}
     with _usage_lock:
-        _usage_rows.append((label, _TIER, row))
+        _usage_rows.append((label, _TIER, row, batched))
 
 
-def _log_learn_cost(rows, *, batch: bool, wall_s: float, log=print) -> dict:
+def _log_learn_cost(rows, *, wall_s: float, log=print) -> dict:
     """Emit token/cache/$ telemetry in the SAME format air-stats parses for
     reviews: per-call `[cost]` lines, a `[cost] TOTAL … cache-read X% of total
     prompt tokens` line, and a `[learn] complete in <wall>s cost≈$<cost>` line.
-    Batch runs are priced at 50%."""
-    sys.path.insert(0, _LIB)
-    import agent_loop  # noqa: E402
+    Each row is priced with ITS OWN batch multiplier (batched curation = 50%;
+    streamed history/profile = full)."""
     KEYS = agent_loop._USAGE_KEYS
     wmult = agent_loop.cache_write_mult("5m")
-    bmult = 0.5 if batch else 1.0
     tot = dict.fromkeys(KEYS, 0)
     cost = 0.0
-    for label, tier, u in rows:
+    any_batched = False
+    for label, tier, u, batched in rows:
+        any_batched = any_batched or batched
         for k in KEYS:
             tot[k] += u[k]
-        c = agent_loop.usage_cost(u, tier, wmult) * bmult
+        c = agent_loop.usage_cost(u, tier, wmult) * (0.5 if batched else 1.0)
         cost += c
         log(f"  [cost] {label:<24} {tier:<6} in={u['input_tokens']:>7} "
             f"out={u['output_tokens']:>6} cw={u['cache_creation_input_tokens']:>7} "
-            f"cr={u['cache_read_input_tokens']:>8}  ${c:.4f}")
+            f"cr={u['cache_read_input_tokens']:>8}  ${c:.4f}{' (batch)' if batched else ''}")
     served = tot["cache_read_input_tokens"]
     base = served + tot["cache_creation_input_tokens"] + tot["input_tokens"]
     ratio = (100.0 * served / base) if base else 0.0
@@ -272,7 +277,7 @@ def _log_learn_cost(rows, *, batch: bool, wall_s: float, log=print) -> dict:
         f"cw={tot['cache_creation_input_tokens']} cr={tot['cache_read_input_tokens']} "
         f"— cache-read {ratio:.0f}% of total prompt tokens")
     log(f"  [learn] complete in {wall_s:.0f}s  cost≈${cost:.4f}  "
-        f"files={len(rows)} batch={'1' if batch else '0'}")
+        f"calls={len(rows)} batch={'1' if any_batched else '0'}")
     return {"cost": round(cost, 4), "in": tot["input_tokens"],
             "out": tot["output_tokens"], "cache_pct": round(ratio), "wall_s": round(wall_s)}
 
@@ -407,7 +412,7 @@ def _submit_batch(items, log) -> dict:
                 continue
             msg = getattr(res, "message", None)
             if getattr(msg, "usage", None) is not None:
-                _record_usage(path, msg.usage)
+                _record_usage(path, msg.usage, batched=True)  # batch-priced (50%)
             if getattr(msg, "stop_reason", None) == "max_tokens":
                 out[path] = None  # truncation guard — never write a half file
                 continue
@@ -659,7 +664,7 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
     with _usage_lock:
         _rows = list(_usage_rows)
     if _rows:
-        cost = _log_learn_cost(_rows, batch=use_batch, wall_s=_time.monotonic() - _t0, log=log)
+        cost = _log_learn_cost(_rows, wall_s=_time.monotonic() - _t0, log=log)
 
     return {"store_id": store_id, "curated": sorted(proposals),
             "written": written, "rendered": rendered, "reset": reset,
