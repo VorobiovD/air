@@ -272,6 +272,9 @@ On a **store-backed** repo running headless (`AIR_REVIEW_MODE=messages-api`), a 
 - **`AIR_LEARN_MAX_TOKENS`** — per-curation output cap (default `32000`); a curation that hits it raises (truncation guard) rather than writing a half-formed file.
 - **`AIR_LEARN_MIN_KEEP`** — size-floor fraction (default `0.5`); a curation collapsing a file below this is refused.
 - **`AIR_LEARN_CALL_TIMEOUT`** — per-call SDK timeout in seconds (default `300`) so a stalled stream can't pin a pool thread for the SDK's 600s default.
+- **`AIR_LEARN_BATCH`** — `1` routes the curation map-calls through the Anthropic **Message Batches API** (50% off; async, results usually in minutes — trades wall-time for cost). Default `0` (concurrent streaming). `AIR_LEARN_BATCH_POLL` (default `20`s) / `AIR_LEARN_BATCH_TIMEOUT` (default `1800`s) tune the poll.
+
+**Cost/cache telemetry (output contract).** Like the review path, learn emits, at the end of a run: a per-call `[cost] <file> <tier> in/out/cw/cr $X` breakdown (the `(batch)` rows are 50%-priced), a `[cost] TOTAL … cache-read X% of total prompt tokens` line, and a `[learn] complete in <wall>s  cost≈$<cost>  calls=N batch=0/1` line. `air-stats` parses the latter two into `learn_cost`/`learn_wall_s`/`learn_cache_pct`. **cache-read reads ~0% for learn by design** — each curation's content is unique (no cross-call shared prefix to cache, unlike reviews), and the persona is below the cacheable minimum; learn's cost levers are the cheaper model + the no-session shape + the opt-in Batch-50%.
 
 ### Diff hygiene & cost caps (managed-only)
 
