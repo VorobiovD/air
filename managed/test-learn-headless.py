@@ -303,6 +303,8 @@ def test_is_chunked_detects_overflow_marker():
 def test_default_complete_raises_on_max_tokens(monkeypatch):
     # A curation that hits max_tokens must raise (so _curate_one isolates it),
     # never return a half-formed file that could pass the size floor.
+    # _default_complete STREAMS (required by the SDK at high max_tokens), so the
+    # fake models messages.stream() as a context manager with get_final_message().
     class _Block:
         type = "text"
         text = "truncated..."
@@ -311,11 +313,19 @@ def test_default_complete_raises_on_max_tokens(monkeypatch):
         stop_reason = "max_tokens"
         content = [_Block()]
 
+    class _FakeStream:
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def get_final_message(self):
+            return _Msg()
+
     class _FakeClient:
         class messages:
             @staticmethod
-            def create(**kw):
-                return _Msg()
+            def stream(**kw):
+                return _FakeStream()
     monkeypatch.setattr(L, "_client", _FakeClient())
     with pytest.raises(ValueError, match="max_tokens"):
         L._default_complete("persona", "x" * 1000, label="/glossary.md")
