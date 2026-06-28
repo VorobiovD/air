@@ -224,6 +224,59 @@ def _curate_params(persona: str, content: str) -> dict:
     }
 
 
+# --- cost/cache telemetry (parity with the headless review path) -----------
+def _tier_of(model: str) -> str:
+    m = (model or "").lower()
+    return "opus" if "opus" in m else "haiku" if "haiku" in m else "sonnet"
+
+
+_TIER = _tier_of(MODEL)
+_usage_lock = threading.Lock()
+_usage_rows: list = []  # [(label, tier, usage_dict)] — reset per run_headless_learn
+
+
+def _record_usage(label: str, usage) -> None:
+    """Thread-safe accumulate one call's token usage (SDK Usage obj or dict)."""
+    sys.path.insert(0, _LIB)
+    import agent_loop  # noqa: E402
+    row = {k: (getattr(usage, k, None) if not isinstance(usage, dict) else usage.get(k))
+           or 0 for k in agent_loop._USAGE_KEYS}
+    with _usage_lock:
+        _usage_rows.append((label, _TIER, row))
+
+
+def _log_learn_cost(rows, *, batch: bool, wall_s: float, log=print) -> dict:
+    """Emit token/cache/$ telemetry in the SAME format air-stats parses for
+    reviews: per-call `[cost]` lines, a `[cost] TOTAL … cache-read X% of total
+    prompt tokens` line, and a `[learn] complete in <wall>s cost≈$<cost>` line.
+    Batch runs are priced at 50%."""
+    sys.path.insert(0, _LIB)
+    import agent_loop  # noqa: E402
+    KEYS = agent_loop._USAGE_KEYS
+    wmult = agent_loop.cache_write_mult("5m")
+    bmult = 0.5 if batch else 1.0
+    tot = dict.fromkeys(KEYS, 0)
+    cost = 0.0
+    for label, tier, u in rows:
+        for k in KEYS:
+            tot[k] += u[k]
+        c = agent_loop.usage_cost(u, tier, wmult) * bmult
+        cost += c
+        log(f"  [cost] {label:<24} {tier:<6} in={u['input_tokens']:>7} "
+            f"out={u['output_tokens']:>6} cw={u['cache_creation_input_tokens']:>7} "
+            f"cr={u['cache_read_input_tokens']:>8}  ${c:.4f}")
+    served = tot["cache_read_input_tokens"]
+    base = served + tot["cache_creation_input_tokens"] + tot["input_tokens"]
+    ratio = (100.0 * served / base) if base else 0.0
+    log(f"  [cost] TOTAL in={tot['input_tokens']} out={tot['output_tokens']} "
+        f"cw={tot['cache_creation_input_tokens']} cr={tot['cache_read_input_tokens']} "
+        f"— cache-read {ratio:.0f}% of total prompt tokens")
+    log(f"  [learn] complete in {wall_s:.0f}s  cost≈${cost:.4f}  "
+        f"files={len(rows)} batch={'1' if batch else '0'}")
+    return {"cost": round(cost, 4), "in": tot["input_tokens"],
+            "out": tot["output_tokens"], "cache_pct": round(ratio), "wall_s": round(wall_s)}
+
+
 def _default_complete(persona: str, content: str, *, label: str = "") -> str:
     """Single-shot curation call. STREAMS (required by the SDK once max_tokens is
     high enough to risk a >10-min non-streaming request — a plain messages.create
@@ -233,6 +286,8 @@ def _default_complete(persona: str, content: str, *, label: str = "") -> str:
     file rather than writing a half-formed curation."""
     with _client_get().messages.stream(**_curate_params(persona, content)) as stream:
         msg = stream.get_final_message()
+    if getattr(msg, "usage", None) is not None:
+        _record_usage(label or "curate", msg.usage)
     if getattr(msg, "stop_reason", None) == "max_tokens":
         raise ValueError(f"curation truncated at max_tokens ({MAX_OUTPUT_TOKENS})")
     return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
@@ -351,6 +406,8 @@ def _submit_batch(items, log) -> dict:
                 out[path] = None  # errored / expired / canceled → isolate
                 continue
             msg = getattr(res, "message", None)
+            if getattr(msg, "usage", None) is not None:
+                _record_usage(path, msg.usage)
             if getattr(msg, "stop_reason", None) == "max_tokens":
                 out[path] = None  # truncation guard — never write a half file
                 continue
@@ -486,6 +543,10 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
 
     log(f"  [learn] headless curation for {repo} (store {store_id}, dry_run={dry_run})")
     log(f"  [learn] {_STAGED}")
+    import time as _time
+    _t0 = _time.monotonic()
+    with _usage_lock:           # fresh accumulator per run (cost/cache telemetry)
+        _usage_rows.clear()
 
     listing = memory_store.list_memories(store_id, "/")
     targets = [p for p in listing
@@ -519,7 +580,8 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
         if curated is not None:
             proposals[path] = (original, curated)
 
-    if _BATCH_ENABLED and complete is _default_complete:
+    use_batch = _BATCH_ENABLED and complete is _default_complete
+    if use_batch:
         log(f"  [learn] MAP via Batch API ({attempted} files, 50%-priced)")
         for path, (original, curated, status) in _batch_curate(pending, log).items():
             _record(path, original, curated, status)
@@ -592,11 +654,18 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
             except Exception as e:
                 log(f"  [learn] counter reset failed: {type(e).__name__}: {e}")
 
+    # --- cost/cache/token telemetry — same format air-stats parses for reviews ---
+    cost = {}
+    with _usage_lock:
+        _rows = list(_usage_rows)
+    if _rows:
+        cost = _log_learn_cost(_rows, batch=use_batch, wall_s=_time.monotonic() - _t0, log=log)
+
     return {"store_id": store_id, "curated": sorted(proposals),
             "written": written, "rendered": rendered, "reset": reset,
             "attempted": attempted, "failures": failures,
             "skipped_chunked": skipped_chunked, "history": history,
-            "dry_run": dry_run}
+            "cost": cost, "dry_run": dry_run}
 
 
 def _gather_repo_signals(checkout_dir: str, log=print) -> str:

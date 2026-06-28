@@ -531,3 +531,33 @@ def test_profile_ok_when_overflow_marker_kept():
     out = L.refresh_project_profile("o/r", complete=complete, dry_run=True,
                                     store_id="memstore_x", current_profile=cur, signals="s")
     assert out["profile"] == "dry-run"   # marker preserved → allowed
+
+
+# --- cost/cache telemetry (parity with reviews) ------------------------------
+
+def test_log_learn_cost_format_and_batch_pricing():
+    logs = []
+    rows = [("/authors/x.md", "sonnet",
+             {"input_tokens": 29044, "output_tokens": 26936,
+              "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0})]
+    out = L._log_learn_cost(rows, batch=True, wall_s=514, log=logs.append)
+    text = "\n".join(logs)
+    # air-stats parses these two line shapes:
+    assert "cache-read 0% of total prompt tokens" in text   # RE_CACHE
+    assert "[learn] complete in 514s" in text and "cost≈$" in text  # RE_LEARN
+    # batch halves cost vs full price
+    full = L._log_learn_cost(rows, batch=False, wall_s=514, log=lambda *_: None)
+    assert abs(out["cost"] - full["cost"] / 2) < 1e-6
+    assert out["cache_pct"] == 0 and out["in"] == 29044
+
+
+def test_record_usage_accumulates_threadsafe():
+    L._usage_rows.clear()
+    class U:  # SDK-style usage object
+        input_tokens = 100; output_tokens = 50
+        cache_creation_input_tokens = 0; cache_read_input_tokens = 0
+    L._record_usage("/glossary.md", U())
+    assert len(L._usage_rows) == 1
+    label, tier, u = L._usage_rows[0]
+    assert label == "/glossary.md" and u["input_tokens"] == 100
+    L._usage_rows.clear()
