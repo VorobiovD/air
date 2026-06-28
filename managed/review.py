@@ -2756,7 +2756,7 @@ async def run_review(args):
                 print(f"  [warn] mirror render failed: {e}", file=sys.stderr)
         try:
             _update_learn_counter(args.repo, args.pr_number, bot_token,
-                                  store_id=store_id)
+                                  store_id=store_id, review_arch=review_arch)
         except Exception as e:
             print(f"  [warn] counter update failed: {e}", file=sys.stderr)
     else:
@@ -2798,7 +2798,8 @@ def _maybe_render_mirror(repo: str, store_id: str, bot_token: str) -> None:
 
 
 def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
-                          store_id: str | None = None) -> None:
+                          store_id: str | None = None,
+                          review_arch: str = "full") -> None:
     """Bump the shared counter, trigger learn subprocess on threshold.
 
     Store-backed repos mutate `/meta/air-meta.json` in the memory store
@@ -2832,7 +2833,7 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
                       "--pr-number", str(pr_number))
         sys.stderr.write(claim.stderr)
         if claim.returncode == 1:
-            _run_learn_sync(air_root, repo, store_id=store_id)
+            _run_learn_sync(air_root, repo, store_id=store_id, review_arch=review_arch)
         return
 
     sys.path.insert(0, str(lib_dir))
@@ -2851,14 +2852,15 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
                       "--pr-number", str(pr_number))
         sys.stderr.write(claim.stderr)
         if claim.returncode == 1:
-            _run_learn_sync(air_root, repo)
+            _run_learn_sync(air_root, repo, review_arch=review_arch)
 
         # 2. Push the meta change (the bump + any lock stamp). learn.py's reset
         #    will push a follow-up commit that clears the lock + zeroes the count.
         wiki_git.commit_meta(wiki_dir, f"meta: bump counter for PR #{pr_number}")
 
 
-def _run_learn_sync(air_root: Path, repo: str, store_id: str | None = None) -> None:
+def _run_learn_sync(air_root: Path, repo: str, store_id: str | None = None,
+                    review_arch: str | None = None) -> None:
     """Threshold fired — run the learn curation SYNCHRONOUSLY in this same
     GitHub Actions job (a detached Popen would get torn down when the
     runner VM stops). Typically 3-5 min; the review comment has already
@@ -2879,7 +2881,9 @@ def _run_learn_sync(air_root: Path, repo: str, store_id: str | None = None) -> N
     surfaces an actionable reason (repo-A #635); stdout streams through
     immediately, stderr dumps only on failure.
     """
-    review_arch = os.environ.get("AIR_REVIEW_MODE", "").strip() or "full"
+    # Prefer the threaded review_arch (carries `--mode` even with no env var);
+    # fall back to the env for callers that don't pass it.
+    review_arch = review_arch or os.environ.get("AIR_REVIEW_MODE", "").strip() or "full"
     if review_arch == "messages-api" and store_id:
         learn_script = air_root / "managed" / "learn_headless.py"
         learn_argv = [sys.executable, str(learn_script), repo]

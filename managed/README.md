@@ -263,6 +263,16 @@ The learn-orchestrator's size caps are advisory prose an LLM applies inconsisten
 
 `AIR_LEARN_TIMEOUT_S` (default 1500 = 25 min) is the unified poll/stream ceiling for a learn session — set generously so a large knowledge base's first curation can finish (apply the caps, shrink, reset the counter) instead of being killed mid-flight.
 
+### MA-independent headless learn (`learn_headless.py`)
+
+On a **store-backed** repo running headless (`AIR_REVIEW_MODE=messages-api`), a threshold-fired learn routes to `managed/learn_headless.py` instead of the managed-session `learn.py` — `review.py:_run_learn_sync` branches on `(review_arch == "messages-api" and store_id)`. It curates the pattern store client-side as a map/reduce (one streaming `messages.create` per file, concurrent, then deterministic sha256-preconditioned writes) with the size-floor + structural-fidelity + truncation + race-yield guards (see CLAUDE.md → "MA-independent headless learn"). Legacy-wiki repos and `full`/managed mode keep `learn.py`. Knobs (all optional, sensible defaults):
+
+- **`AIR_LEARN_MODEL`** — curation model (default `setup.MODEL_ALIASES["sonnet"]`).
+- **`AIR_LEARN_PARALLELISM`** — concurrent map-call cap (default `8`, mirrors `PRECOMP_PARALLELISM`).
+- **`AIR_LEARN_MAX_TOKENS`** — per-curation output cap (default `32000`); a curation that hits it raises (truncation guard) rather than writing a half-formed file.
+- **`AIR_LEARN_MIN_KEEP`** — size-floor fraction (default `0.5`); a curation collapsing a file below this is refused.
+- **`AIR_LEARN_CALL_TIMEOUT`** — per-call SDK timeout in seconds (default `300`) so a stalled stream can't pin a pool thread for the SDK's 600s default.
+
 ### Diff hygiene & cost caps (managed-only)
 
 Three knobs trim per-review context spend. All of them leave **visible markers** — nothing is dropped silently — and none of them changes gating:

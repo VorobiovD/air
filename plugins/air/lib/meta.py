@@ -305,7 +305,7 @@ READ_AUTHOR_UNKNOWN = 2
 # (e.g. `dependabot[bot]`). The brackets are URL-special but are
 # percent-encoded by urllib.parse.quote(safe="") below, so the injection
 # property holds; rejecting them would silently lose bot authors' patterns.
-_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})(?:\[bot\])?$")
+_LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:\[bot\])?$")
 
 
 def cmd_read_author(args) -> int:
