@@ -60,7 +60,8 @@ VorobiovD/air/
 │   ├── verdict.py                    Thin re-export shim of plugins/air/lib/verdict.py (the shared gating contract + re-review severity-pin/ledger — implementation lives in lib/)
 │   ├── session_runner.py             Session lifecycle: run_session, REST drain, billing retry, SIGTERM cleanup
 │   ├── prompts.py                    Prompt builders: PR context block + verifier-task templates
-│   ├── learn.py                      Triggers wiki maintenance sessions (single-agent)
+│   ├── learn.py                      Triggers wiki maintenance sessions (single-agent, managed)
+│   ├── learn_headless.py             MA-independent learn: client-side map/reduce store curation (AIR_REVIEW_MODE=messages-api + store-backed → routed here by review.py:_run_learn_sync; else learn.py)
 │   ├── memory_store.py               Per-repo pattern store: discovery, reads, sha256-preconditioned writes
 │   ├── pattern_writer.py             Applies pattern_lifecycle ops to the store post-review
 │   ├── migrate_wiki_to_store.py      One-shot wiki → store migration (per-author split, --dry-run)
@@ -68,7 +69,7 @@ VorobiovD/air/
 │   ├── render_store_to_wiki.py       Deterministic store→wiki mirror render (inverse of migrate split; throttled per-review + on learn)
 │   ├── salvage_review.py             Drain a finished orphaned session, post its review ($0 — job-cancel recovery)
 │   ├── test-session.py               9-test verification (repo, auth, blame, comment, wiki)
-│   ├── test-*.py                     Offline unit suites (pure, no API): test-verdict (gating + re-review ledger), test-headless (headless mode: post path, gate, stage_patterns, dry-run + re-review orchestration + at-head verdict backfill), test-reliability (extraction + HTTP), test-extract, test-precomp, test-cost-wins, test-multiagent, test-promote-fastpath, test-ui-scope, test-render, test-learn, test-parallel, test-agent-md (frontmatter-parser dedup; pure parse tests live in plugins/air/lib/tests/test_agent_md.py)
+│   ├── test-*.py                     Offline unit suites (pure, no API): test-verdict (gating + re-review ledger), test-headless (headless mode: post path, gate, stage_patterns, dry-run + re-review orchestration + at-head verdict backfill), test-reliability (extraction + HTTP), test-extract, test-precomp, test-cost-wins, test-multiagent, test-promote-fastpath, test-ui-scope, test-render, test-learn, test-learn-headless (MA-independent learn: map/reduce orchestration, size-floor + fidelity + truncation + race-yield guards, overflow-skip, conditional reset), test-parallel, test-agent-md (frontmatter-parser dedup; pure parse tests live in plugins/air/lib/tests/test_agent_md.py)
 │   ├── prompts/
 │   │   └── learn-orchestrator.md     Learn pipeline for cloud (review orchestrator.md deleted in v1.7.0 — replaced by review.py)
 │   └── requirements.txt             anthropic>=0.93.0, requests>=2.28.0

@@ -331,5 +331,20 @@ def test_default_complete_raises_on_max_tokens(monkeypatch):
         L._default_complete("persona", "x" * 1000, label="/glossary.md")
 
 
+def test_main_exit_code_signals_total_failure(monkeypatch):
+    # main() returns non-zero only on a total outage (failures>0, nothing
+    # written) so review.py surfaces the visible `[warn] … exited N` line.
+    monkeypatch.setattr(L, "run_headless_learn",
+                        lambda *a, **k: {"failures": 3, "written": []})
+    assert L.main(["o/r"]) == 1
+    monkeypatch.setattr(L, "run_headless_learn",
+                        lambda *a, **k: {"failures": 0, "written": ["/glossary.md"]})
+    assert L.main(["o/r"]) == 0
+    # all-refused (failures=0, nothing written) is a clean exit 0 — guard worked
+    monkeypatch.setattr(L, "run_headless_learn",
+                        lambda *a, **k: {"failures": 0, "written": []})
+    assert L.main(["o/r"]) == 0
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

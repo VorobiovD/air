@@ -159,7 +159,10 @@ def _client_get():
     with _client_lock:
         if _client is None:
             from anthropic import Anthropic
-            _client = Anthropic()
+            # Per-call timeout so a single stalled stream can't pin a pool thread
+            # for the SDK's 600s default (×MAP_PARALLELISM = wasted runner time;
+            # ThreadPoolExecutor can't cancel a running future).
+            _client = Anthropic(timeout=float(os.environ.get("AIR_LEARN_CALL_TIMEOUT", "300")))
         return _client
 
 
@@ -334,6 +337,9 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
     # curated). A clean no-op run (nothing to dedup) still resets.
     reset = False
     if not dry_run:
+        # Reset on a clean run OR an all-refused run (a refusal means the guard
+        # WORKED and the file stays safe — distinct from a model OUTAGE, which
+        # is what `failures` counts; only an outage that wrote nothing re-arms).
         if failures > 0 and not written:
             log(f"  [learn] {failures} curation(s) failed and nothing written — "
                 f"NOT resetting counter (re-arm next review)")
@@ -346,8 +352,8 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
 
     return {"store_id": store_id, "curated": sorted(proposals),
             "written": written, "rendered": rendered, "reset": reset,
-            "failures": failures, "skipped_chunked": skipped_chunked,
-            "dry_run": dry_run}
+            "attempted": attempted, "failures": failures,
+            "skipped_chunked": skipped_chunked, "dry_run": dry_run}
 
 
 def main(argv=None) -> int:
@@ -359,7 +365,10 @@ def main(argv=None) -> int:
         sys.stdout.reconfigure(line_buffering=True)
     summary = run_headless_learn(args.repo, dry_run=args.dry_run)
     print(f"[learn] done: {summary}", file=sys.stderr)
-    return 0
+    # Non-zero on a total outage (every curation failed, nothing written) so
+    # review.py's `_run_learn_sync` surfaces the visible `[warn] … exited N`
+    # line — parity with `learn.py --poll`. A clean/all-refused run is exit 0.
+    return 1 if summary.get("failures", 0) > 0 and not summary.get("written") else 0
 
 
 if __name__ == "__main__":
