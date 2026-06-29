@@ -1,38 +1,59 @@
-name: air learn (cron)
+name: air learn (reusable)
 
-# Out-of-band headless learn — decoupled from any PR's CI job (autonomy "Option A").
-# It enumerates store-backed repos whose learn counter is DUE and runs
-# managed/learn_cron.py for each. This NEVER rides a review job's tail.
+# REUSABLE out-of-band learn — runs headless learn for ONE repo's pattern store,
+# off the PR critical path (autonomy "Option A").
 #
-# TRIAL-SAFE BY DEFAULT: every run is --dry-run (enumerate + curate-diff, write
-# nothing) UNLESS you opt into real curation by setting the repo variable
-# AIR_LEARN_CRON_LIVE=true (Settings → Variables), or pass dry_run=false on a
-# manual run. Real (non-dry) runs need ANTHROPIC_API_KEY (read stores + curate)
-# AND AIR_BOT_TOKEN with wiki-push on the target store-backed repos.
+# PUBLIC/CORPORATE BOUNDARY (load-bearing): this is the public air repo. It holds
+# only the reusable workflow CODE — it NEVER enumerates the corporate fleet and
+# never carries a fleet-wide token. A run is ALWAYS scoped to a SINGLE repo:
+#   * called by a PRIVATE fleet repo (workflow_call) → that repo learns its OWN
+#     store + pushes its OWN wiki, using ITS OWN secrets (the same
+#     ANTHROPIC_API_KEY / AIR_BOT_TOKEN it already uses for reviews); or
+#   * dispatched on THIS repo (workflow_dispatch) → scoped to air's own store only.
+# The corporate fleet's scheduled learn lives in each PRIVATE repo's own caller
+# (see managed/air-learn-cron.caller.yml.example), so no corporate credential and
+# no fleet reach ever sits on this public repo.
 #
-# GO-LIVE (separate step, after this trial proves out): set AIR_LEARN_CRON_LIVE=true
-# AND stop reviews from running learn in-job (the review path's _run_learn_sync) so
-# the cron is the sole executor — otherwise both would curate.
+# TRIAL-SAFE: mode 'list' enumerates the (single) repo's due-ness with ZERO model
+# calls; 'dry-run' curates + makes model calls but writes NOTHING; 'live' is the
+# real curation (needs AIR_BOT_TOKEN to push the wiki mirror). The private caller
+# picks the mode (default 'list') and goes live per-repo on its own schedule.
 
 on:
+  workflow_call:
+    inputs:
+      repo:
+        description: 'owner/repo to learn (its OWN store). Empty → the calling repo.'
+        required: false
+        type: string
+        default: ''
+      mode:
+        description: 'list (enumerate only, $0) | dry-run (curate, write nothing) | live (real curation)'
+        required: false
+        type: string
+        default: 'list'
+      air_ref:
+        description: 'air repo ref for the code checkout (default main; override only when benchmarking a branch).'
+        required: false
+        type: string
+        default: 'main'
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      AIR_BOT_TOKEN:
+        description: 'Only needed for mode=live (pushes the wiki mirror). Omit for list/dry-run.'
+        required: false
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: 'Dry-run (enumerate + curate-diff, write nothing)'
-        type: boolean
-        default: true
-      repos:
-        description: 'Comma-separated owner/repo filter (blank = all due)'
-        default: ''
-      limit:
-        description: 'Max repos to learn this run (0 = no cap)'
-        default: '0'
-  schedule:
-    - cron: '23 6 * * *'   # daily 06:23 UTC (offset minute dodges the top-of-hour GHA backlog)
+      mode:
+        description: 'Scoped to THIS repo (air) only — never the fleet.'
+        type: choice
+        options: [list, dry-run, live]
+        default: list
 
-# One learn-cron at a time; a long run never stacks on the next tick.
+# One learn at a time per repo; a long run never stacks on the next tick.
 concurrency:
-  group: air-learn-cron
+  group: air-learn-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -40,39 +61,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      # Always run THIS (air) repo's code, regardless of which repo called us.
       - uses: actions/checkout@v4
+        with:
+          repository: VorobiovD/air
+          ref: ${{ inputs.air_ref || 'main' }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install deps
         run: pip install -r managed/requirements.txt
-      - name: Run scheduled learn
+      - name: Run scoped learn
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
           AIR_LEARN_BATCH: ${{ vars.AIR_LEARN_BATCH }}
           # inputs via env (NOT inline ${{ }} in run:) to avoid shell injection
-          EVENT: ${{ github.event_name }}
-          IN_DRY: ${{ github.event.inputs.dry_run }}
-          IN_REPOS: ${{ github.event.inputs.repos }}
-          IN_LIMIT: ${{ github.event.inputs.limit }}
-          CRON_LIVE: ${{ vars.AIR_LEARN_CRON_LIVE }}
+          IN_REPO: ${{ inputs.repo }}
+          IN_MODE: ${{ inputs.mode }}
+          THIS_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Mode selection (trial-safe):
-          #  - AIR_LEARN_CRON_LIVE=true        → real curation (the go-live switch)
-          #  - manual dispatch, dry_run=false  → real curation (explicit override)
-          #  - manual dispatch, dry_run=true   → --dry-run (curates, makes model calls, writes nothing)
-          #  - scheduled tick, not live        → --list (enumerate ONLY, ZERO model calls / cost)
-          if [ "${CRON_LIVE:-}" = "true" ]; then
-            MODE=""
-          elif [ "$EVENT" = "workflow_dispatch" ]; then
-            if [ "${IN_DRY:-}" = "false" ]; then MODE=""; else MODE="--dry-run"; fi
-          else
-            MODE="--list"
-          fi
-          ARGS="$MODE"
-          if [ -n "${IN_REPOS:-}" ]; then ARGS="$ARGS --repos $IN_REPOS"; fi
-          if [ -n "${IN_LIMIT:-}" ] && [ "${IN_LIMIT}" != "0" ]; then ARGS="$ARGS --limit $IN_LIMIT"; fi
-          echo "running: python managed/learn_cron.py $ARGS"
-          python managed/learn_cron.py $ARGS
+          case "${IN_MODE:-list}" in
+            live)             MODE="" ;;
+            dry-run|dry_run)  MODE="--dry-run" ;;
+            *)                MODE="--list" ;;
+          esac
+          # Resolve the single target repo. NEVER run unscoped (no fleet enumeration).
+          REPO="${IN_REPO:-}"; [ -n "$REPO" ] || REPO="$THIS_REPO"
+          [ -n "$REPO" ] || { echo "::error::air-learn: no repo resolved — refusing to run unscoped"; exit 1; }
+          echo "running: python managed/learn_cron.py $MODE --repos $REPO"
+          python managed/learn_cron.py $MODE --repos "$REPO"
