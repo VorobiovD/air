@@ -18,6 +18,7 @@ see run_agent).
 stdlib + the anthropic SDK (transport only — air owns the loop). Secrets live in
 this orchestrator and are never handed to the Sandbox's git subprocess.
 """
+import os
 import time
 
 from tool_exec import TOOL_SCHEMAS  # type: ignore
@@ -55,6 +56,66 @@ _USAGE_KEYS = ("input_tokens", "output_tokens",
 def _accumulate_usage(acc: dict, usage) -> None:
     for k in _USAGE_KEYS:
         acc[k] = acc.get(k, 0) + (getattr(usage, k, 0) or 0)
+
+
+# Bounded retry for a transient MID-STREAM disconnect. The Anthropic client's
+# max_retries covers request INITIATION only (connect errors, 429/5xx before the
+# stream starts); a RemoteProtocolError / "incomplete chunked read" — the remote
+# peer dropping a streamed body mid-chunk — is raised DURING consumption and the
+# SDK cannot resume a partial stream, so it propagates. Without this a single
+# network blip kills the whole review (observed: clean exit 1, fixed only by a
+# manual `gh run rerun`). The request is UNMUTATED at the point we (re)issue it —
+# the assistant turn + tool_results are appended only after a clean read — so
+# re-streaming the same messages is safe/idempotent. Retries every streaming turn
+# (specialist AND verifier), so a blip now degrades to a short pause, not a lost
+# lens or a dead run.
+STREAM_RETRY_ATTEMPTS = max(1, int(os.environ.get("AIR_STREAM_RETRY_ATTEMPTS", "3")))  # 1 try + 2 retries
+STREAM_RETRY_BACKOFF_S = float(os.environ.get("AIR_STREAM_RETRY_BACKOFF", "2"))         # doubles each retry
+_STREAM_RETRY_CAP_S = 30.0
+_TRANSIENT_STREAM_ERRORS = None  # resolved lazily; this module imports no SDK at load (takes client as a param)
+
+
+def _transient_stream_errors():
+    """Transport error types worth retrying mid-stream, resolved LAZILY so the
+    module stays importable without httpx/anthropic installed (it never imports the
+    SDK at load — the caller supplies the client). An empty tuple (neither present —
+    can't actually run a loop anyway) makes the `except` below match nothing, i.e.
+    byte-identical to the pre-retry behavior."""
+    global _TRANSIENT_STREAM_ERRORS
+    if _TRANSIENT_STREAM_ERRORS is None:
+        errs = []
+        try:
+            import httpx
+            errs.append(httpx.TransportError)  # RemoteProtocolError, timeouts, connect/read/network errors
+        except Exception:
+            pass
+        try:
+            import anthropic
+            errs.append(anthropic.APIConnectionError)  # SDK conn wrapper (APITimeoutError is a subclass)
+        except Exception:
+            pass
+        _TRANSIENT_STREAM_ERRORS = tuple(errs)
+    return _TRANSIENT_STREAM_ERRORS
+
+
+def _final_message_with_retry(client, *, log, label, **stream_kwargs):
+    """One streaming turn with a bounded retry on a transient mid-stream disconnect.
+    Non-transient errors (a 400, content-policy, a real bug) propagate immediately."""
+    transient = _transient_stream_errors()
+    last = None
+    for attempt in range(1, STREAM_RETRY_ATTEMPTS + 1):
+        try:
+            with client.messages.stream(**stream_kwargs) as stream:
+                return stream.get_final_message()
+        except transient as e:  # an empty `transient` tuple matches nothing -> propagates (legacy behavior)
+            last = e
+            if attempt >= STREAM_RETRY_ATTEMPTS:
+                break
+            delay = min(STREAM_RETRY_BACKOFF_S * (2 ** (attempt - 1)), _STREAM_RETRY_CAP_S)
+            log(f"  [warn] {label}: transient stream error ({type(e).__name__}: {e}); "
+                f"retry {attempt}/{STREAM_RETRY_ATTEMPTS - 1} after {delay:.0f}s")
+            time.sleep(delay)
+    raise last
 
 
 def run_agent(client, *, model, persona, pr_context, task, sandbox,
@@ -114,9 +175,10 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
     stop = "max_turns"
     turn_cap = max_turns or MAX_TURNS  # caller scales it by PR size; MAX_TURNS is the floor/default
     for turn in range(1, turn_cap + 1):
-        with client.messages.stream(model=model, system=system, messages=messages,
-                                    tools=TOOL_SCHEMAS, max_tokens=max_tokens, **extra) as stream:
-            msg = stream.get_final_message()
+        msg = _final_message_with_retry(
+            client, log=log, label=label,
+            model=model, system=system, messages=messages,
+            tools=TOOL_SCHEMAS, max_tokens=max_tokens, **extra)
         _accumulate_usage(usage, msg.usage)
         tool_uses = [b for b in msg.content if getattr(b, "type", "") == "tool_use"]
         text_now = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")
