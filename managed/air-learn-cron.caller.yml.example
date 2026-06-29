@@ -1,0 +1,38 @@
+# air learn (scheduled) — PER-CALLER stub. Copy this into a PRIVATE fleet repo as
+# `.github/workflows/air-learn-cron.yml`. It runs the repo's OWN out-of-band learn
+# on a daily schedule, using the repo's OWN secrets — keeping every corporate
+# credential and the fleet reach OFF the public air repo.
+#
+# Setup (per repo):
+#   1. Secrets already present from reviews: ANTHROPIC_API_KEY (+ AIR_BOT_TOKEN for live).
+#   2. Drop this file in as `.github/workflows/air-learn-cron.yml`.
+#   3. Trial: leave it as-is → the daily tick runs `list` ($0, enumerate only).
+#   4. Go-live (per repo, deliberate): set repo VARIABLE AIR_LEARN_CRON_LIVE=true
+#      AND stop the in-job learn (drop review.py's _run_learn_sync for this repo)
+#      so the cron is the SOLE learn executor — otherwise both would curate.
+
+name: air learn (scheduled)
+
+on:
+  schedule:
+    - cron: '23 6 * * *'   # daily 06:23 UTC
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'list (enumerate, $0) | dry-run (curate, no write) | live (real)'
+        type: choice
+        options: [list, dry-run, live]
+        default: dry-run
+
+jobs:
+  learn:
+    uses: VorobiovD/air/.github/workflows/air-learn-cron.yml@main
+    with:
+      repo: ${{ github.repository }}
+      # workflow_dispatch → the chosen mode; scheduled tick → 'live' only when this
+      # repo's AIR_LEARN_CRON_LIVE var is set, else 'list' (trial-safe, $0).
+      mode: >-
+        ${{ github.event_name == 'workflow_dispatch'
+            && inputs.mode
+            || (vars.AIR_LEARN_CRON_LIVE == 'true' && 'live' || 'list') }}
+    secrets: inherit   # passes THIS repo's ANTHROPIC_API_KEY + AIR_BOT_TOKEN
