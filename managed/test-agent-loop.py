@@ -53,12 +53,15 @@ def _ok():
 
 
 def test_recovers_from_transient_midstream_drop():
+    # Drop on every attempt but the last, derived from the configured budget — so a
+    # CI override of AIR_STREAM_RETRY_ATTEMPTS can't strand the success branch.
+    n = agent_loop.STREAM_RETRY_ATTEMPTS
     sentinel = _ok()
-    client, calls = _client([_drop, _drop, lambda: sentinel])  # 2 blips then success
+    client, calls = _client([_drop] * (n - 1) + [lambda: sentinel])
     out = agent_loop._final_message_with_retry(
         client, log=lambda *_a: None, label="t", model="m", system=[], messages=[])
     assert out is sentinel
-    assert calls["n"] == 3  # retried through both blips
+    assert calls["n"] == n  # retried through every blip before succeeding on the last
 
 
 def test_gives_up_after_max_attempts_no_infinite_loop():
@@ -81,8 +84,16 @@ def test_non_transient_error_propagates_immediately():
 
 def test_transient_set_includes_remoteprotocolerror():
     # The observed failure type must be in the retry set (httpx present in this env).
+    errs = agent_loop._transient_stream_errors()  # already a tuple — issubclass takes it directly
+    assert issubclass(httpx.RemoteProtocolError, errs)
+
+
+def test_transient_set_includes_api_connection_error():
+    # Symmetric to the httpx path: the SDK-level connection wrapper (and its
+    # APITimeoutError subclass) must also retry. Skippable if anthropic is absent.
+    anthropic = pytest.importorskip("anthropic")
     errs = agent_loop._transient_stream_errors()
-    assert issubclass(httpx.RemoteProtocolError, tuple(errs))
+    assert issubclass(anthropic.APIConnectionError, errs)
 
 
 if __name__ == "__main__":
