@@ -87,12 +87,12 @@ def _transient_stream_errors():
         try:
             import httpx
             errs.append(httpx.TransportError)  # RemoteProtocolError, timeouts, connect/read/network errors
-        except Exception:
-            pass
+        except ImportError:
+            pass  # only "not installed" is benign — a broken install should surface, not silently disable retries
         try:
             import anthropic
             errs.append(anthropic.APIConnectionError)  # SDK conn wrapper (APITimeoutError is a subclass)
-        except Exception:
+        except ImportError:
             pass
         _TRANSIENT_STREAM_ERRORS = tuple(errs)
     return _TRANSIENT_STREAM_ERRORS
@@ -115,6 +115,8 @@ def _final_message_with_retry(client, *, log, label, **stream_kwargs):
             log(f"  [warn] {label}: transient stream error ({type(e).__name__}: {e}); "
                 f"retry {attempt}/{STREAM_RETRY_ATTEMPTS - 1} after {delay:.0f}s")
             time.sleep(delay)
+    log(f"  [warn] {label}: all {STREAM_RETRY_ATTEMPTS} stream attempt(s) failed "
+        f"({type(last).__name__}); re-raising")
     raise last
 
 
