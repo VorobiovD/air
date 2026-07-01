@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.44.0](https://github.com/VorobiovD/air/compare/v1.43.0...v1.44.0) (2026-07-01)
+
+
+### Features
+
+* **learn:** scheduled out-of-band learn driver (autonomy trial) ([#231](https://github.com/VorobiovD/air/issues/231)) ([1fe1c5c](https://github.com/VorobiovD/air/commit/1fe1c5cbbac187720a7eca751dddc8a8389f9314))
+* **models:** adopt Sonnet 5 for the sonnet tier (fleet flip) ([#237](https://github.com/VorobiovD/air/issues/237)) ([b31ca26](https://github.com/VorobiovD/air/commit/b31ca268a073a0b098cf029e4b19d456799506da))
+
+
+### Bug Fixes
+
+* **headless:** address review nits on the stream-retry ([#235](https://github.com/VorobiovD/air/issues/235)) ([510697f](https://github.com/VorobiovD/air/commit/510697f091f53016a362445a886c2ce3745e33a9))
+* **headless:** retry transient mid-stream disconnects instead of dying ([#234](https://github.com/VorobiovD/air/issues/234)) ([3f3dc96](https://github.com/VorobiovD/air/commit/3f3dc96d35b16d64956520970dd5cae9ca9884e9))
+
 ## [1.43.0](https://github.com/VorobiovD/air/compare/v1.42.0...v1.43.0) (2026-06-28)
 
 
