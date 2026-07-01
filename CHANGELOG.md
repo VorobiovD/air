@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.45.0](https://github.com/VorobiovD/air/compare/v1.44.0...v1.45.0) (2026-07-01)
+
+
+### Features
+
+* **cost:** intro-aware Sonnet 5 pricing in cost telemetry ([#238](https://github.com/VorobiovD/air/issues/238)) ([e17fa14](https://github.com/VorobiovD/air/commit/e17fa147942111f1fc9f4739f2f463984adb8caf))
+
 ## [1.44.0](https://github.com/VorobiovD/air/compare/v1.43.0...v1.44.0) (2026-07-01)
 
 
