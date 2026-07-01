@@ -74,9 +74,9 @@ import agent_loop  # noqa: E402  (plugins/air/lib — usage pricing helpers; _LI
 # can't be imported in some context.
 try:
     from setup import MODEL_ALIASES  # noqa: E402
-    _DEFAULT_MODEL = MODEL_ALIASES.get("sonnet", "claude-sonnet-4-6")
+    _DEFAULT_MODEL = MODEL_ALIASES.get("sonnet", "claude-sonnet-5")
 except Exception:  # pragma: no cover - defensive
-    _DEFAULT_MODEL = "claude-sonnet-4-6"
+    _DEFAULT_MODEL = "claude-sonnet-5"
 MODEL = os.environ.get("AIR_LEARN_MODEL", _DEFAULT_MODEL)
 
 # Concurrency cap for the map stage — mirrors review.py's PRECOMP_PARALLELISM.

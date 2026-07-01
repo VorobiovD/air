@@ -117,7 +117,13 @@ def parse_agent_pins() -> dict[str, int]:
 
 MODEL_ALIASES = {
     "opus": "claude-opus-4-8",
-    "sonnet": "claude-sonnet-4-6",
+    # Sonnet 5 (2026-06-30). Flipped from claude-sonnet-4-6 after a 7-PR A/B: 5 was
+    # ~2x faster, more thorough (found a superset of 4.6's findings every time), and
+    # correct on both gate divergences (caught a real sec blocker 4.6 missed; did NOT
+    # over-gate where 4.6 did). One lever — every `model: sonnet` agent + learn follow
+    # this. Rollback = revert this line. Pricing tier stays "sonnet" ($3/$15; $2/$10
+    # intro through 2026-08-31), so cost telemetry is unchanged.
+    "sonnet": "claude-sonnet-5",
     "haiku": "claude-haiku-4-5",
 }
 
