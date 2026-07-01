@@ -276,6 +276,8 @@ On a **store-backed** repo running headless (`AIR_REVIEW_MODE=messages-api`), a 
 
 **Cost/cache telemetry (output contract).** Like the review path, learn emits, at the end of a run: a per-call `[cost] <file> <tier> in/out/cw/cr $X` breakdown (the `(batch)` rows are 50%-priced), a `[cost] TOTAL … cache-read X% of total prompt tokens` line, and a `[learn] complete in <wall>s  cost≈$<cost>  calls=N batch=0/1` line. `air-stats` parses the latter two into `learn_cost`/`learn_wall_s`/`learn_cache_pct`. **cache-read reads ~0% for learn by design** — each curation's content is unique (no cross-call shared prefix to cache, unlike reviews), and the persona is below the cacheable minimum; learn's cost levers are the cheaper model + the no-session shape + the opt-in Batch-50%.
 
+**Sonnet 5 intro pricing (telemetry accuracy).** The `sonnet` tier price in `agent_loop.price_for_tier` reflects Sonnet 5's **intro $2/$10** (through 2026-08-31) instead of the standard $3/$15 while the intro window is active — the fleet's `sonnet` alias points at Sonnet 5, so without this every post-flip cost the dashboard shows (review *and* learn) would overstate real spend by ~⅓. `air-stats` parses the logged `cost≈$` rather than re-pricing, so the correction happens at emission. Controlled by **`AIR_SONNET_INTRO_PRICING`**: unset / `auto` (default) applies it automatically through the published window then self-expires; `1`/`true`/`yes` forces it on (e.g. if Anthropic extends the window); `0`/`false`/`no` forces the standard $3/$15. Opus/Haiku are unaffected.
+
 ### Diff hygiene & cost caps (managed-only)
 
 Three knobs trim per-review context spend. All of them leave **visible markers** — nothing is dropped silently — and none of them changes gating:

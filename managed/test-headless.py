@@ -617,13 +617,38 @@ def test_advisory_lenses_use_medium_effort(tmp_path, monkeypatch):
     assert eff["verifier"] == "high"
 
 
-def test_usage_cost_write_mult():
+def test_usage_cost_write_mult(monkeypatch):
     al = headless.agent_loop
+    monkeypatch.setenv("AIR_SONNET_INTRO_PRICING", "0")  # pin standard $3/$15 for this mechanics test
     u = {"cache_creation_input_tokens": 1_000_000}  # 1M cache-write tokens, sonnet
     assert abs(al.usage_cost(u, "sonnet", 2.0) - 6.0) < 1e-6    # 1h: 2x * $3/MTok
     assert abs(al.usage_cost(u, "sonnet", 1.25) - 3.75) < 1e-6  # 5m: 1.25x * $3/MTok
     assert al.cache_write_mult("5m") == 1.25 and al.cache_write_mult("1h") == 2.0
     assert al.cache_write_mult("weird") == 2.0                  # unknown → safe default
+
+
+def test_sonnet_intro_pricing(monkeypatch):
+    al = headless.agent_loop
+    import datetime as _dt
+    in_window = _dt.date(2026, 7, 15)
+    after_window = _dt.date(2026, 9, 1)
+
+    # Force ON → sonnet prices at intro $2/$10; opus/haiku unaffected.
+    monkeypatch.setenv("AIR_SONNET_INTRO_PRICING", "1")
+    assert al.price_for_tier("sonnet") == (2.0, 10.0)
+    assert al.price_for_tier("opus") == (5.0, 25.0)
+    assert al.price_for_tier("haiku") == (1.0, 5.0)
+    # 1M input tokens sonnet = $2 at intro vs $3 standard.
+    assert abs(al.usage_cost({"input_tokens": 1_000_000}, "sonnet") - 2.0) < 1e-6
+
+    # Force OFF → standard $3/$15 regardless of date.
+    monkeypatch.setenv("AIR_SONNET_INTRO_PRICING", "0")
+    assert al.price_for_tier("sonnet") == (3.0, 15.0)
+
+    # auto (default): active inside the published window, expires after.
+    monkeypatch.delenv("AIR_SONNET_INTRO_PRICING", raising=False)
+    assert al._sonnet_intro_active(in_window) is True
+    assert al._sonnet_intro_active(after_window) is False
 
 
 def test_analyze_cache_ttl_reprices_and_flags_misses(tmp_path):

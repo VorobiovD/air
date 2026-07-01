@@ -546,13 +546,16 @@ def test_log_learn_cost_format_and_per_row_batch_pricing():
     assert "cache-read 0% of total prompt tokens" in text          # RE_CACHE
     assert "[learn] complete in 514s" in text and "cost\u2248$" in text  # RE_LEARN
     full = L._log_learn_cost([("/authors/x.md", "sonnet", _U, False)], wall_s=514, log=lambda *_: None)
-    assert abs(out["cost"] - full["cost"] / 2) < 1e-6              # batched row = 50%
+    # `_log_learn_cost` returns cost rounded to 4dp, so equality on these dict
+    # values can't be tighter than ~1e-4; a real 50%-vs-full pricing bug differs
+    # by ~$0.16 (orders of magnitude above this floor). Tier-price-independent.
+    assert abs(out["cost"] - full["cost"] / 2) < 1e-3              # batched row = 50%
     # Low #1: a MIXED run prices each row by its OWN flag (batch curation 50% +
     # streamed history/profile full) — not the whole run by one multiplier.
     mixed = L._log_learn_cost([("/authors/x.md", "sonnet", _U, True),
                                ("REVIEW-HISTORY.md", "sonnet", _U, False)],
                               wall_s=1, log=lambda *_: None)
-    assert abs(mixed["cost"] - (full["cost"] * 0.5 + full["cost"])) < 1e-6
+    assert abs(mixed["cost"] - (full["cost"] * 0.5 + full["cost"])) < 1e-3
 
 
 def test_record_usage_tags_batched_per_call():
