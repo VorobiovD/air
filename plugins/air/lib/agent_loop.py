@@ -18,6 +18,7 @@ see run_agent).
 stdlib + the anthropic SDK (transport only — air owns the loop). Secrets live in
 this orchestrator and are never handed to the Sandbox's git subprocess.
 """
+import datetime
 import os
 import time
 
@@ -238,10 +239,36 @@ _PRICES = {
     "opus": (5.0, 25.0), "sonnet": (3.0, 15.0), "haiku": (1.0, 5.0),
 }
 
+# Sonnet 5 launched 2026-06-30 with INTRO pricing $2/$10 through 2026-08-31,
+# reverting to the standard $3/$15 after. The fleet's `sonnet` alias points at
+# Sonnet 5, so during the window the standard _PRICES entry OVERSTATES real spend
+# by ~1/3 (a fresh review logged at ~$4.20 actually costs ~$2.80). air-stats parses
+# the logged cost rather than re-pricing, so the correction has to happen HERE, at
+# emission. AIR_SONNET_INTRO_PRICING controls it:
+#   unset / "auto" (default) -> apply intro pricing automatically through the
+#                               published window, then self-expire (no action needed)
+#   "1" / "true" / "yes"     -> force intro pricing on (e.g. if the window is extended)
+#   "0" / "false" / "no"     -> force it off (price sonnet at standard $3/$15)
+# Opus/Haiku are unaffected — only Sonnet 5 has an intro window.
+_SONNET_INTRO_PRICE = (2.0, 10.0)
+_SONNET_INTRO_END = datetime.date(2026, 8, 31)
+
+
+def _sonnet_intro_active(today: datetime.date = None) -> bool:
+    v = (os.environ.get("AIR_SONNET_INTRO_PRICING") or "auto").strip().lower()
+    if v in ("0", "false", "no"):
+        return False
+    if v in ("1", "true", "yes"):
+        return True
+    return (today or datetime.date.today()) <= _SONNET_INTRO_END
+
 
 def price_for_tier(tier: str) -> tuple:
     """(input, output) $/MTok for a model tier — public so cost tools (analyze_cache_ttl)
-    don't reach into the private _PRICES dict."""
+    don't reach into the private _PRICES dict. The `sonnet` tier reflects Sonnet 5's
+    intro pricing while active (see AIR_SONNET_INTRO_PRICING)."""
+    if tier == "sonnet" and _sonnet_intro_active():
+        return _SONNET_INTRO_PRICE
     return _PRICES.get(tier, _PRICES["sonnet"])
 
 
