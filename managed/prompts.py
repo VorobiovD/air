@@ -55,7 +55,7 @@ LAYOUT (format v2 — professional, scannable, machine-safe):
   downstream agent) expands the proof:
     **1. <concise title>**
 
-    [`<file>#L<line>`](https://github.com/{repo}/blob/{head_sha}/<file>#L<line>) — <1-2 sentence statement>
+    [`<file>#L<line>`](https://github.com/<repo>/blob/<sha>/<file>#L<line>) — <1-2 sentence statement>
 
     <details>
     <summary>Why it matters</summary>
@@ -63,6 +63,8 @@ LAYOUT (format v2 — professional, scannable, machine-safe):
     <the full verification prose / blame / pattern history — plain text or a
     blockquote; NEVER put a `#`/`##`/`###`/`####` heading inside this block>
     </details>
+  (Use the REAL repo + head SHA from the Shape below in every link — the
+  `<repo>`/`<sha>` above are placeholders, never emit them literally.)
 - Fold the low-signal sections into collapsed `<details>` (summary line states
   the count + that they're optional), keeping the exact inner heading:
     <details>
@@ -88,7 +90,10 @@ HARD RULES — these lines are parsed deterministically; emit them byte-exactly:
 - Every blocker entry MUST start the line with `**N.` — NEVER prefix it with an
   emoji, a `>` blockquote marker, or indentation, and NEVER place a blocker
   inside a `<details>` (its evidence folds; the `**N.` line stays visible).
-- Keep `Reviewed at: <full-40-char-sha>` as the LAST line, at line start.
+- End the comment with EXACTLY `Reviewed at: <full-40-char SHA>` as the FINAL
+  line, at line start — copy the real 40-char head SHA verbatim from the Shape
+  below (never a `<sha>`/`{...}` placeholder). The run FAILS if this footer is
+  missing or the SHA differs, so emit it last and unaltered.
 """
 
 # NOTE: the verifier's `[sec:<token>]` exposure-tag rule (the EMISSION half of
