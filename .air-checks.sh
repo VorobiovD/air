@@ -174,7 +174,9 @@ if [ -f managed/prompts.py ]; then
     || fail "managed/prompts.py missing the AIR_REVIEW_FORMAT kill switch (review_format())"
 fi
 for f in managed/prompts.py plugins/air/commands/review.md; do
-  if [ -f "$f" ] && grep -nE '^#{3,4}[[:space:]]+Blockers[[:space:]]+[^[:space:]]' "$f" >/dev/null 2>&1; then
+  # `[[:space:]]*` (not `+`) after Blockers so a GLUED decoration (`### Blockers🔴`,
+  # no separating space) is caught too — a mandatory-space pattern missed it.
+  if [ -f "$f" ] && grep -nE '^#{3,4}[[:space:]]+Blockers[[:space:]]*[^[:space:]]' "$f" >/dev/null 2>&1; then
     fail "$f has a DECORATED Blockers heading — it must stay exactly '### Blockers' / '#### Blockers' (count_blockers anchors on 'Blockers\$')"
   fi
 done
