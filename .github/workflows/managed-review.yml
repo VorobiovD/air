@@ -538,6 +538,13 @@ jobs:
           # headless.py (same subprocess env). Delete the variable to restore
           # normal APPROVE/REQUEST_CHANGES gating.
           AIR_NO_APPROVE: ${{ vars.AIR_NO_APPROVE }}
+          # Cron-sole learn: when the out-of-band learn cron (air-learn-cron.yml)
+          # is the sole learn executor for this repo, the review job only BUMPS the
+          # learn counter (no lock claim, no inline learn) so the cron can fire it
+          # off the PR critical path. Set the SAME repo/org VARIABLE
+          # AIR_LEARN_CRON_LIVE=true on BOTH this review caller and the cron caller.
+          # Off/unset → the review runs learn inline on threshold (default).
+          AIR_LEARN_CRON_LIVE: ${{ vars.AIR_LEARN_CRON_LIVE }}
           # Direct-post: post the verifier's body verbatim instead of the
           # coordinator's relay (bypasses the relay-drop failure mode for any
           # coordinator model). Default ON for MA full; set a caller repo/org

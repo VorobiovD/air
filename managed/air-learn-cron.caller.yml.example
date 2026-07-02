@@ -7,9 +7,13 @@
 #   1. Secrets already present from reviews: ANTHROPIC_API_KEY (+ AIR_BOT_TOKEN for live).
 #   2. Drop this file in as `.github/workflows/air-learn-cron.yml`.
 #   3. Trial: leave it as-is → the daily tick runs `list` ($0, enumerate only).
-#   4. Go-live (per repo, deliberate): set repo VARIABLE AIR_LEARN_CRON_LIVE=true
-#      AND stop the in-job learn (drop review.py's _run_learn_sync for this repo)
-#      so the cron is the SOLE learn executor — otherwise both would curate.
+#   4. Go-live (per repo, deliberate): set the repo/org VARIABLE
+#      AIR_LEARN_CRON_LIVE=true. It does double duty (single-sourced): this cron
+#      runs `live` on schedule, AND the review job automatically switches to
+#      BUMP-ONLY (no inline learn) via review.py:_update_learn_counter — so the
+#      cron is the SOLE learn executor with no double-fire. No code edit needed.
+#      (Store-backed repos only — the cron doesn't service wiki-backed repos, so
+#      the review job keeps learning inline there regardless of the variable.)
 
 name: air learn (scheduled)
 

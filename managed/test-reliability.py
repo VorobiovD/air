@@ -538,6 +538,56 @@ def test_backfill_upgrades_stale_comment_when_no_approve_toggled_off(monkeypatch
     assert submitted == [("APPROVE", HEAD)]
 
 
+# --- AIR_LEARN_CRON_LIVE: cron is the sole learn executor --------------------
+
+def test_cron_sole_learn_bumps_and_skips_inline(monkeypatch):
+    """With AIR_LEARN_CRON_LIVE set, the review job only BUMPS the counter (no
+    lock claim, no inline learn) so the out-of-band cron runs the learn."""
+    monkeypatch.setenv("AIR_LEARN_CRON_LIVE", "1")
+    meta_calls, ran = [], []
+    monkeypatch.setattr(review, "_run_meta",
+                        lambda script, *a: (meta_calls.append(a[0])
+                                            or types.SimpleNamespace(returncode=0, stderr="")))
+    monkeypatch.setattr(review, "_run_learn_sync", lambda *a, **k: ran.append(1))
+    review._update_learn_counter("o/r", 7, "tok", store_id="memstore_x", review_arch="messages-api")
+    assert meta_calls == ["bump"]   # bumped, NOT claimed
+    assert ran == []                # inline learn skipped — cron is sole executor
+
+
+def test_inline_learn_claims_and_runs_when_cron_off(monkeypatch):
+    """Default (cron off): atomic claim; on a winning claim (rc==1) run learn inline."""
+    monkeypatch.delenv("AIR_LEARN_CRON_LIVE", raising=False)
+    meta_calls, ran = [], []
+    monkeypatch.setattr(review, "_run_meta",
+                        lambda script, *a: (meta_calls.append(a[0])
+                                            or types.SimpleNamespace(returncode=1, stderr="")))
+    monkeypatch.setattr(review, "_run_learn_sync", lambda *a, **k: ran.append(1))
+    review._update_learn_counter("o/r", 7, "tok", store_id="memstore_x", review_arch="messages-api")
+    assert meta_calls == ["claim"]  # atomic bump+claim
+    assert ran == [1]               # inline learn ran (claim won the slot)
+
+
+def test_cron_sole_ignored_on_wiki_backed_repo(monkeypatch):
+    """The learn cron services STORE-backed repos only, so a WIKI-backed repo with
+    AIR_LEARN_CRON_LIVE set must STILL claim + run learn inline — bump-only there
+    would strand learn (nothing would ever run it)."""
+    monkeypatch.setenv("AIR_LEARN_CRON_LIVE", "1")
+    fake_wiki_git = types.SimpleNamespace(
+        clone_wiki=lambda url, d: (Path(d).mkdir(parents=True, exist_ok=True) or True),
+        configure_identity=lambda *a, **k: None,
+        commit_meta=lambda *a, **k: None,
+    )
+    monkeypatch.setitem(sys.modules, "wiki_git", fake_wiki_git)
+    meta_calls, ran = [], []
+    monkeypatch.setattr(review, "_run_meta",
+                        lambda script, *a: (meta_calls.append(a[0])
+                                            or types.SimpleNamespace(returncode=1, stderr="")))
+    monkeypatch.setattr(review, "_run_learn_sync", lambda *a, **k: ran.append(1))
+    review._update_learn_counter("o/r", 7, "tok", store_id=None, review_arch="full")
+    assert meta_calls == ["claim"]  # NOT "bump" — wiki path ignores cron_sole
+    assert ran == [1]               # inline learn still ran (cron can't service wiki)
+
+
 def test_backfill_noop_on_closed_pr_or_own_pr_or_dry_run(monkeypatch):
     submitted = []
     monkeypatch.setattr(review, "fetch_pr_reviews", lambda *a, **k: [])
