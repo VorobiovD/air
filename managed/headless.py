@@ -796,6 +796,17 @@ async def run_headless_review(args, bot_token: str) -> dict:
 
     if not extracted:
         print("[headless] verifier produced no usable ## Code Review block — failing the run", file=sys.stderr)
+        # Diagnostic (permanent): show WHY extraction failed — the marker counts +
+        # the tail (footer region). Without this an extraction failure is opaque
+        # (you can't tell a missing footer from a mangled SHA from a wrong header).
+        import re as _re
+        _hdrs = len(_re.findall(r"(?m)^## Code Review", review_body_raw or ""))
+        _foots = _re.findall(r"(?im)Reviewed at:[^\n]*", review_body_raw or "")
+        _tail = (review_body_raw or "")[-1200:]
+        print(f"[headless][diag] raw output {len(review_body_raw or '')} chars; "
+              f"line-start '## Code Review'={_hdrs}; 'Reviewed at:' lines={len(_foots)} "
+              f"({[f[:60] for f in _foots[-3:]]}); head_sha={head_sha}\n"
+              f"----- last 1200 chars -----\n{_tail}\n-----", file=sys.stderr)
         return {"ok": False, "reason": "no review body", "wall": wall, "cost": cost}
 
     # Re-review severity-pin + finding-resurrection (deterministic carry-forward
