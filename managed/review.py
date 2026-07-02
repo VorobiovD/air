@@ -312,6 +312,16 @@ def _category_floor_enabled() -> bool:
     return os.environ.get("AIR_CATEGORY_FLOOR", "1").strip().lower() not in ("0", "false", "no")
 
 
+def _cron_sole_learn() -> bool:
+    """AIR_LEARN_CRON_LIVE: the out-of-band learn cron (air-learn-cron.yml) is the
+    SOLE learn executor for this repo. The review job then only BUMPS the counter —
+    it does NOT claim the learn-slot lock or run learn inline — so the cron's
+    due-detection (meta.should_trigger_learn + a FREE lock) can fire the learn
+    out-of-band, off the PR critical path. Off by default (inline claim+learn).
+    Set the SAME variable on both the review caller (here) and the cron caller."""
+    return os.environ.get("AIR_LEARN_CRON_LIVE", "").strip().lower() in ("1", "true", "yes")
+
+
 def _post_verifier_body_enabled() -> bool:
     # Direct-post: post the VERIFIER's body verbatim instead of the
     # coordinator's relay. The coordinator is a pure relay layer (the verifier
@@ -1670,6 +1680,11 @@ def _backfill_verdict_if_missing(
     - A DISMISSED bot verdict for this SHA counts as "present": a human
       dismissing the bot's verdict is a governance action this best-effort
       repair must not override.
+    - A prior COMMENTED verdict (AIR_NO_APPROVE advisory mode) counts as
+      "present" ONLY while the recomputed event is still COMMENT. If
+      AIR_NO_APPROVE was disabled since (with no new commit), the stale COMMENT
+      is UPGRADED to APPROVE/REQUEST_CHANGES here rather than treated as present
+      — otherwise the PR would stay un-approved forever after the mode toggle.
     """
     if args.dry_run or pr_state != "open" or not bot_login or bot_login == pr_author:
         return
@@ -1691,27 +1706,36 @@ def _backfill_verdict_if_missing(
         # always terminal; only the COMMENTED case is mode-dependent.
         request_changes, reason = should_request_changes(prior_body, floor_exposures=_category_floor_enabled())
         event = resolve_verdict_event(request_changes)  # honors AIR_NO_APPROVE
+        stale_comment_upgrade = False
         for r in fetch_pr_reviews(args.repo, args.pr_number, token):
             if (r.get("user") or {}).get("login") != bot_login or r.get("commit_id") != head_sha:
                 continue
             state = r.get("state")
             if state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
                 return  # verdict already present (or deliberately dismissed)
-            if state == "COMMENTED" and event == "COMMENT":
-                return  # advisory COMMENT is current (still AIR_NO_APPROVE) — don't re-spam
-            # a prior COMMENT but we now want APPROVE/REQUEST_CHANGES (no-approve
-            # toggled off) → fall through and upgrade the stale advisory verdict.
+            if state == "COMMENTED":
+                if event == "COMMENT":
+                    return  # advisory COMMENT is current (still AIR_NO_APPROVE) — don't re-spam
+                # a prior COMMENT but we now want APPROVE/REQUEST_CHANGES (no-approve
+                # toggled off) → fall through and UPGRADE the stale advisory verdict.
+                stale_comment_upgrade = True
+        # Distinguish the two reasons we reach here so the log/comment don't
+        # misreport an intentional mode-toggle upgrade as a failed-post repair.
+        _why = ("upgrading a stale advisory COMMENT (AIR_NO_APPROVE disabled since)"
+                if stale_comment_upgrade else "no verdict found")
+        _note = ("(Verdict upgraded — AIR_NO_APPROVE was disabled after a clean "
+                 "advisory COMMENT at this SHA.)" if stale_comment_upgrade else
+                 "(Verdict backfilled — the original run posted the comment but "
+                 "its verdict step did not complete.)")
         print(
-            f"  [backfill] no verdict found for reviewed SHA {head_sha[:8]} — "
+            f"  [backfill] {_why} for reviewed SHA {head_sha[:8]} — "
             f"submitting {event} recomputed from the posted review comment"
         )
         if request_changes:
             submit_review_verdict(
                 args.repo, args.pr_number, token,
                 event="REQUEST_CHANGES",
-                body=f"Changes requested — {reason}. See review comment above. "
-                     f"(Verdict backfilled — the original run posted the comment "
-                     f"but its verdict step did not complete.)",
+                body=f"Changes requested — {reason}. See review comment above. {_note}",
                 commit_id=head_sha,
             )
         elif event == "COMMENT":  # AIR_NO_APPROVE: never approve
@@ -1725,9 +1749,8 @@ def _backfill_verdict_if_missing(
             submit_review_verdict(
                 args.repo, args.pr_number, token,
                 event="APPROVE",
-                body="Approved — 0 blockers found. See review comment for "
-                     "medium/low/nit findings. (Verdict backfilled — the original "
-                     "run posted the comment but its verdict step did not complete.)",
+                body=f"Approved — 0 blockers found. See review comment for "
+                     f"medium/low/nit findings. {_note}",
                 commit_id=head_sha,
             )
         # Clear any cross-account stale block orphaned by PAT rotation (+ our own
@@ -2855,7 +2878,16 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
     def _meta(*meta_args: str) -> subprocess.CompletedProcess:
         return _run_meta(meta_script, *meta_args)
 
+    cron_sole = _cron_sole_learn()
+
     if store_id:
+        if cron_sole:
+            # Cron is the sole learn executor: only BUMP (no lock claim, no inline
+            # learn) so the out-of-band cron sees the counter cross threshold with a
+            # FREE lock and runs the learn off the PR critical path.
+            bump = _meta("bump", "--store-id", store_id, "--pr-number", str(pr_number))
+            sys.stderr.write(bump.stderr)
+            return
         # Atomic bump + learn-slot claim (replaces the bump+check pair). The
         # single CAS write prevents a busy repo from firing N concurrent learns
         # while the first is still running — exactly one review wins the lock;
@@ -2878,13 +2910,18 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
             return
         wiki_git.configure_identity(wiki_dir, "air-machine", "air-machine@users.noreply.github.com")
 
-        # 1. Atomic bump + learn-slot claim (replaces the bump+check pair).
-        #    Exit 1 == this review claimed the learn slot.
-        claim = _meta("claim", "--wiki-dir", str(wiki_dir),
-                      "--pr-number", str(pr_number))
-        sys.stderr.write(claim.stderr)
-        if claim.returncode == 1:
-            _run_learn_sync(air_root, repo, review_arch=review_arch)
+        # 1. Bump the counter. cron-sole mode BUMPS only (no lock claim, no inline
+        #    learn) — the out-of-band cron runs the learn; otherwise atomic
+        #    bump + learn-slot claim (exit 1 == this review claimed the slot).
+        if cron_sole:
+            bump = _meta("bump", "--wiki-dir", str(wiki_dir), "--pr-number", str(pr_number))
+            sys.stderr.write(bump.stderr)
+        else:
+            claim = _meta("claim", "--wiki-dir", str(wiki_dir),
+                          "--pr-number", str(pr_number))
+            sys.stderr.write(claim.stderr)
+            if claim.returncode == 1:
+                _run_learn_sync(air_root, repo, review_arch=review_arch)
 
         # 2. Push the meta change (the bump + any lock stamp). learn.py's reset
         #    will push a follow-up commit that clears the lock + zeroes the count.
