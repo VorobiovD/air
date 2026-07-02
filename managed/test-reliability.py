@@ -453,6 +453,47 @@ def test_backfill_noop_when_verdict_exists(monkeypatch):
     assert submitted == []
 
 
+def _clean_prior():
+    return {"body": "## Code Review\n\nAll good.\n\nReviewed at: " + HEAD,
+            "created_at": "T0", "updated_at": "T0"}
+
+
+def test_backfill_comment_noop_while_no_approve_on(monkeypatch):
+    # AIR_NO_APPROVE on + a prior COMMENTED at HEAD → the advisory COMMENT is the
+    # current verdict; backfill must NOT re-submit (else every re-trigger spams).
+    monkeypatch.setenv("AIR_NO_APPROVE", "1")
+    submitted = []
+    monkeypatch.setattr(review, "fetch_pr_reviews", lambda *a, **k: [
+        {"user": {"login": "air-machine"}, "state": "COMMENTED", "commit_id": HEAD},
+    ])
+    monkeypatch.setattr(review, "submit_review_verdict", lambda *a, **k: submitted.append(a))
+    review._backfill_verdict_if_missing(
+        _mk_args(), HEAD, _clean_prior(), bot_login="air-machine",
+        pr_state="open", pr_author="dev", token="t",
+    )
+    assert submitted == []
+
+
+def test_backfill_upgrades_stale_comment_when_no_approve_toggled_off(monkeypatch):
+    # The regression: AIR_NO_APPROVE was on (clean COMMENT posted), then unset with
+    # no new commit. The stale COMMENT must be UPGRADED to APPROVE, not treated as
+    # a present verdict — else the PR stays un-approved forever.
+    monkeypatch.delenv("AIR_NO_APPROVE", raising=False)
+    submitted = []
+    monkeypatch.setattr(review, "fetch_pr_reviews", lambda *a, **k: [
+        {"user": {"login": "air-machine"}, "state": "COMMENTED", "commit_id": HEAD},
+    ])
+    monkeypatch.setattr(
+        review, "submit_review_verdict",
+        lambda repo, pr, token, event, body, commit_id: submitted.append((event, commit_id)),
+    )
+    review._backfill_verdict_if_missing(
+        _mk_args(), HEAD, _clean_prior(), bot_login="air-machine",
+        pr_state="open", pr_author="dev", token="t",
+    )
+    assert submitted == [("APPROVE", HEAD)]
+
+
 def test_backfill_noop_on_closed_pr_or_own_pr_or_dry_run(monkeypatch):
     submitted = []
     monkeypatch.setattr(review, "fetch_pr_reviews", lambda *a, **k: [])

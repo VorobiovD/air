@@ -530,6 +530,14 @@ jobs:
           # blocker" floor fleet-lessly. Inert on tag-less review bodies, so
           # disabling is byte-identical to the pre-floor gate.
           AIR_CATEGORY_FLOOR: ${{ vars.AIR_CATEGORY_FLOOR }}
+          # Advisory / no-approve gate mode. Default OFF. Set a caller repo/org
+          # VARIABLE AIR_NO_APPROVE=1 (Settings → Variables) so air still submits
+          # REQUEST_CHANGES on blockers but posts a neutral COMMENT (never APPROVE)
+          # on a clean review — for a repo where a bot approval isn't yet
+          # sanctioned. Read by verdict.resolve_verdict_event in review.py +
+          # headless.py (same subprocess env). Delete the variable to restore
+          # normal APPROVE/REQUEST_CHANGES gating.
+          AIR_NO_APPROVE: ${{ vars.AIR_NO_APPROVE }}
           # Direct-post: post the verifier's body verbatim instead of the
           # coordinator's relay (bypasses the relay-drop failure mode for any
           # coordinator model). Default ON for MA full; set a caller repo/org

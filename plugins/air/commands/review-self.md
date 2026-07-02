@@ -41,7 +41,7 @@ Print summary: "<N> files changed, +<additions>/-<deletions>"
 
 ### Self Step 2: Load Context
 
-Same as regular Step 3 — clone the wiki (into `$AIR_TMP/review-wiki-self`) and copy ALL wiki pages to `$AIR_TMP/` (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md, GLOSSARY.md). Also read CLAUDE.md from the repo root and the current repo's `.claude/agents/` for any repo-specific review rules. Run Step 3.5 (first-run project discovery — see `commands/review.md` Step 3.5) if PROJECT-PROFILE.md doesn't exist.
+Same as regular Step 3 — clone the wiki (into `$AIR_TMP/review-wiki-self`) and copy ALL wiki pages to `$AIR_TMP/` (REVIEW.md, REVIEW-HISTORY.md, PROJECT-PROFILE.md, ACCEPTED-PATTERNS.md, SEVERITY-CALIBRATION.md, GLOSSARY.md). Also read CLAUDE.md (or AGENTS.md if there is no CLAUDE.md) from the repo root and the current repo's `.claude/agents/` for any repo-specific review rules. Run Step 3.5 (first-run project discovery — see `commands/review.md` Step 3.5) if PROJECT-PROFILE.md doesn't exist.
 
 Also generate blame summaries and churn data for the changed files (same as Step 4's "Git history context") so all agents — including git-history-reviewer — have the data they need.
 

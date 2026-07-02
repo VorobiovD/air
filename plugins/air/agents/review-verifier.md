@@ -11,7 +11,7 @@ model: sonnet
 **Targeted context retrieval (cost: pattern files load into every review).** Read `ACCEPTED-PATTERNS` / `accepted-patterns.md` and `SEVERITY-CALIBRATION` WHOLE — they're small and you need the full whitelist + per-agent thresholds to verify correctly. For the large files (REVIEW.md / common-findings / service-patterns, GLOSSARY, REVIEW-HISTORY, PROJECT-PROFILE), do NOT read whole: **grep** them for the subjects of the findings you're verifying + the diff's identifiers/paths, and read only the matched entries. Same on a `/tmp` wiki dir or the `/mnt/memory` store mount.
 
 Before verifying:
-1. Read `CLAUDE.md` from the repo root — it contains project rules, SSM conventions, deploy constraints, and known gotchas. A finding that contradicts CLAUDE.md guidance (e.g., "use sam package not sam build") is likely a false positive if the code follows the documented rule.
+1. Read `CLAUDE.md` (or `AGENTS.md` if there is no CLAUDE.md) from the repo root — it contains project rules, SSM conventions, deploy constraints, and known gotchas. A finding that contradicts CLAUDE.md guidance (e.g., "use sam package not sam build") is likely a false positive if the code follows the documented rule.
 2. **Wiki files** — the verifier invocation prompt from the orchestrator includes a `Wiki files directory:` reference pointing at the session temp directory plus a list of available files. Read from that directory:
    - `REVIEW.md` — known findings.
    - `ACCEPTED-PATTERNS.md` — primary whitelist for team-approved patterns (supersedes any `## Accepted Patterns` section in REVIEW.md).

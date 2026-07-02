@@ -123,3 +123,59 @@ def test_air_bot_logins_tolerates_bad_json(monkeypatch):
     monkeypatch.setenv("AIR_PAT_MAP", "not-json")
     monkeypatch.delenv("AIR_BOT_LOGINS", raising=False)
     assert review._air_bot_logins() == frozenset()
+
+
+# --- AIR_NO_APPROVE: include_own dismisses the current account's OWN block -----
+# In advisory mode a clean re-review posts a COMMENT, which does NOT supersede the
+# same account's prior CHANGES_REQUESTED — so include_own=True must dismiss it too,
+# while still never touching a human's block or the just-posted COMMENT.
+
+def test_include_own_dismisses_current_account_block(monkeypatch):
+    reviews = [
+        _rv(40, "botA", "CHANGES_REQUESTED", f"prior block. {AIR_VERDICT_SENTINEL}"),  # OWN air block → dismiss (include_own)
+        _rv(41, "botB", "CHANGES_REQUESTED", f"other-acct block. {AIR_VERDICT_SENTINEL}"),  # other air acct → dismiss
+        _rv(42, "erin", "CHANGES_REQUESTED", "human: fix the auth check"),               # human → never
+        _rv(43, "botA", "COMMENTED", f"just-posted advisory note. {AIR_VERDICT_SENTINEL}"),  # our COMMENT → not CR → skip
+    ]
+    dismissed = _patch(monkeypatch, reviews)
+    n = dismiss_stale_air_verdicts("o/r", 1, "tok", current_login="botA",
+                                   bot_logins=frozenset(), include_own=True)
+    assert n == 2 and dismissed == [40, 41]  # own + other air blocks; NOT the human, NOT the COMMENT
+
+
+def test_include_own_false_still_skips_current_account(monkeypatch):
+    # Default (normal mode): the current account's own CR is left to GitHub to supersede.
+    reviews = [_rv(50, "botA", "CHANGES_REQUESTED", f"prior. {AIR_VERDICT_SENTINEL}")]
+    dismissed = _patch(monkeypatch, reviews)
+    n = dismiss_stale_air_verdicts("o/r", 1, "tok", current_login="botA",
+                                   bot_logins=frozenset())  # include_own defaults False
+    assert n == 0 and dismissed == []
+
+
+def test_include_own_never_touches_human(monkeypatch):
+    reviews = [_rv(60, "frank", "CHANGES_REQUESTED", "human block, no sentinel")]
+    dismissed = _patch(monkeypatch, reviews)
+    n = dismiss_stale_air_verdicts("o/r", 1, "tok", current_login="botA",
+                                   bot_logins=frozenset(), include_own=True)
+    assert n == 0 and dismissed == []
+
+
+# --- resolve_verdict_event / no_approve_enabled (AIR_NO_APPROVE) --------------
+from verdict import resolve_verdict_event, no_approve_enabled  # noqa: E402
+
+
+def test_resolve_verdict_normal_mode(monkeypatch):
+    monkeypatch.delenv("AIR_NO_APPROVE", raising=False)
+    assert resolve_verdict_event(True) == "REQUEST_CHANGES"
+    assert resolve_verdict_event(False) == "APPROVE"
+    assert no_approve_enabled() is False
+
+
+def test_resolve_verdict_no_approve_mode(monkeypatch):
+    for val in ("1", "true", "yes"):
+        monkeypatch.setenv("AIR_NO_APPROVE", val)
+        assert resolve_verdict_event(True) == "REQUEST_CHANGES"   # still blocks on blockers
+        assert resolve_verdict_event(False) == "COMMENT"          # never approves
+        assert no_approve_enabled() is True
+    monkeypatch.setenv("AIR_NO_APPROVE", "0")
+    assert resolve_verdict_event(False) == "APPROVE"

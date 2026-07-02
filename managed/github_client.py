@@ -309,7 +309,7 @@ def dismiss_review(repo: str, pr_number: int, review_id: int, token: str, messag
 
 def dismiss_stale_air_verdicts(
     repo: str, pr_number: int, token: str, current_login: str | None,
-    bot_logins: frozenset = frozenset(),
+    bot_logins: frozenset = frozenset(), include_own: bool = False,
 ) -> int:
     """Clear the multi-PAT gate-orphan: dismiss prior CHANGES_REQUESTED reviews
     air left under a DIFFERENT bot account than the one just used.
@@ -323,7 +323,16 @@ def dismiss_stale_air_verdicts(
     carrying the verdict sentinel, or authored by an explicitly allowlisted bot
     login. A human's CHANGES_REQUESTED matches neither and is never dismissed.
     The posting account's own prior reviews are auto-superseded by GitHub and
-    left alone. Best-effort; returns the count dismissed."""
+    left alone (UNLESS include_own=True — see below). Best-effort; returns the
+    count dismissed.
+
+    `include_own=True` ALSO dismisses the posting account's own prior
+    CHANGES_REQUESTED. That's required in AIR_NO_APPROVE (advisory) mode: a clean
+    re-review posts a COMMENT, which does NOT supersede the same account's prior
+    CHANGES_REQUESTED (only an APPROVE/REQUEST_CHANGES does), so without this the
+    block would persist after the developer fixed the blockers. Still ownership-
+    gated by the sentinel, so it never touches a human's review — and the just-
+    posted COMMENT isn't CHANGES_REQUESTED, so it's never dismissed."""
     try:
         reviews = fetch_pr_reviews(repo, pr_number, token)
     except Exception as e:  # noqa: BLE001 — cleanup must never break the run
@@ -334,7 +343,7 @@ def dismiss_stale_air_verdicts(
         if r.get("state") != "CHANGES_REQUESTED":
             continue
         login = (r.get("user") or {}).get("login") or ""
-        if current_login and login == current_login:
+        if not include_own and current_login and login == current_login:
             continue  # GitHub auto-supersedes the posting account's own prior state
         if not _is_air_verdict(r, bot_logins):
             continue  # not air's verdict — never touch a human's block

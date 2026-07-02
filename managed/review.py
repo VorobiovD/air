@@ -97,6 +97,8 @@ from verdict import (  # noqa: E402,F401 — split modules; re-exported for test
     extract_prior_statuses,
     format_prior_statuses_block,
     should_request_changes,
+    resolve_verdict_event,
+    NO_APPROVE_VERDICT_BODY,
     has_conflict_markers,
     REVIEWED_AT_RE,
     _BLOCKERS_SECTION_RE,
@@ -1680,18 +1682,28 @@ def _backfill_verdict_if_missing(
         )
         return
     try:
-        for r in fetch_pr_reviews(args.repo, args.pr_number, token):
-            if (
-                (r.get("user") or {}).get("login") == bot_login
-                and r.get("commit_id") == head_sha
-                and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")
-            ):
-                return  # verdict already present (or deliberately dismissed)
+        # Recompute the desired verdict FIRST: a prior COMMENTED only counts as
+        # "already present" while STILL in no-approve mode (event == COMMENT). If
+        # AIR_NO_APPROVE was toggled OFF since (with no new commit pushed), the
+        # stale COMMENT must be UPGRADED to APPROVE — otherwise the "delete the
+        # variable to restore normal gating" promise silently breaks and the PR
+        # stays un-approved forever. APPROVED/CHANGES_REQUESTED/DISMISSED are
+        # always terminal; only the COMMENTED case is mode-dependent.
         request_changes, reason = should_request_changes(prior_body, floor_exposures=_category_floor_enabled())
+        event = resolve_verdict_event(request_changes)  # honors AIR_NO_APPROVE
+        for r in fetch_pr_reviews(args.repo, args.pr_number, token):
+            if (r.get("user") or {}).get("login") != bot_login or r.get("commit_id") != head_sha:
+                continue
+            state = r.get("state")
+            if state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+                return  # verdict already present (or deliberately dismissed)
+            if state == "COMMENTED" and event == "COMMENT":
+                return  # advisory COMMENT is current (still AIR_NO_APPROVE) — don't re-spam
+            # a prior COMMENT but we now want APPROVE/REQUEST_CHANGES (no-approve
+            # toggled off) → fall through and upgrade the stale advisory verdict.
         print(
             f"  [backfill] no verdict found for reviewed SHA {head_sha[:8]} — "
-            f"submitting {'REQUEST_CHANGES' if request_changes else 'APPROVE'} "
-            f"recomputed from the posted review comment"
+            f"submitting {event} recomputed from the posted review comment"
         )
         if request_changes:
             submit_review_verdict(
@@ -1700,6 +1712,13 @@ def _backfill_verdict_if_missing(
                 body=f"Changes requested — {reason}. See review comment above. "
                      f"(Verdict backfilled — the original run posted the comment "
                      f"but its verdict step did not complete.)",
+                commit_id=head_sha,
+            )
+        elif event == "COMMENT":  # AIR_NO_APPROVE: never approve
+            submit_review_verdict(
+                args.repo, args.pr_number, token,
+                event="COMMENT",
+                body=NO_APPROVE_VERDICT_BODY + " (Verdict backfilled.)",
                 commit_id=head_sha,
             )
         else:
@@ -1711,8 +1730,10 @@ def _backfill_verdict_if_missing(
                      "run posted the comment but its verdict step did not complete.)",
                 commit_id=head_sha,
             )
-        # Clear any cross-account stale block orphaned by PAT rotation.
-        dismiss_stale_air_verdicts(args.repo, args.pr_number, token, bot_login, _air_bot_logins())
+        # Clear any cross-account stale block orphaned by PAT rotation (+ our own
+        # prior block on a clean no-approve COMMENT, which can't self-supersede).
+        dismiss_stale_air_verdicts(args.repo, args.pr_number, token, bot_login,
+                                   _air_bot_logins(), include_own=(event == "COMMENT"))
     except Exception as e:
         print(
             f"  [warn] verdict backfill failed ({type(e).__name__}: {e}) — "
@@ -2696,11 +2717,18 @@ async def run_review(args):
             reason = "unresolved merge conflict marker(s) in the diff"
             print("  [gate] conflict markers detected — forcing REQUEST_CHANGES regardless of model verdict", file=sys.stderr)
         try:
+            event = resolve_verdict_event(request_changes)  # honors AIR_NO_APPROVE
             if request_changes:
                 submit_review_verdict(
                     args.repo, args.pr_number, bot_token,
                     event="REQUEST_CHANGES",
                     body=f"Changes requested — {reason}. See review comment above.",
+                    commit_id=head_sha,
+                )
+            elif event == "COMMENT":  # AIR_NO_APPROVE: flag, but never approve
+                submit_review_verdict(
+                    args.repo, args.pr_number, bot_token,
+                    event="COMMENT", body=NO_APPROVE_VERDICT_BODY,
                     commit_id=head_sha,
                 )
             else:
@@ -2713,8 +2741,12 @@ async def run_review(args):
             # Multi-PAT gate-orphan: clear any stale CHANGES_REQUESTED air left
             # under a DIFFERENT bot account (PAT rotation), which GitHub's
             # reviewDecision would otherwise keep gating on despite this verdict.
+            # include_own on a clean COMMENT (no-approve mode): a COMMENT can't
+            # supersede this account's OWN prior CHANGES_REQUESTED, so dismiss it
+            # too — else a fixed PR stays blocked.
             dismiss_stale_air_verdicts(
-                args.repo, args.pr_number, bot_token, bot_login, _air_bot_logins()
+                args.repo, args.pr_number, bot_token, bot_login, _air_bot_logins(),
+                include_own=(event == "COMMENT"),
             )
         except RequestException as e:
             # Comment is posted; the verdict is repairable — the skip-gate
