@@ -2910,18 +2910,23 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
             return
         wiki_git.configure_identity(wiki_dir, "air-machine", "air-machine@users.noreply.github.com")
 
-        # 1. Bump the counter. cron-sole mode BUMPS only (no lock claim, no inline
-        #    learn) — the out-of-band cron runs the learn; otherwise atomic
-        #    bump + learn-slot claim (exit 1 == this review claimed the slot).
+        # 1. Atomic bump + learn-slot claim (exit 1 == this review claimed the
+        #    slot → run learn inline). NOTE: cron_sole does NOT apply on the wiki
+        #    path — the out-of-band learn cron services STORE-backed repos only,
+        #    so bump-only here would strand learn entirely (nothing would ever run
+        #    it). A wiki-backed repo always learns inline; warn if the flag was
+        #    mis-set on one so the operator knows it's a no-op (migrate to a store
+        #    to actually move learn off the critical path).
         if cron_sole:
-            bump = _meta("bump", "--wiki-dir", str(wiki_dir), "--pr-number", str(pr_number))
-            sys.stderr.write(bump.stderr)
-        else:
-            claim = _meta("claim", "--wiki-dir", str(wiki_dir),
-                          "--pr-number", str(pr_number))
-            sys.stderr.write(claim.stderr)
-            if claim.returncode == 1:
-                _run_learn_sync(air_root, repo, review_arch=review_arch)
+            print("  [warn] AIR_LEARN_CRON_LIVE is set on a WIKI-backed repo — the "
+                  "learn cron services store-backed repos only, so learn runs INLINE "
+                  "here regardless (bump-only would strand it). Migrate to a pattern "
+                  "store to use out-of-band cron learn.", file=sys.stderr)
+        claim = _meta("claim", "--wiki-dir", str(wiki_dir),
+                      "--pr-number", str(pr_number))
+        sys.stderr.write(claim.stderr)
+        if claim.returncode == 1:
+            _run_learn_sync(air_root, repo, review_arch=review_arch)
 
         # 2. Push the meta change (the bump + any lock stamp). learn.py's reset
         #    will push a follow-up commit that clears the lock + zeroes the count.
