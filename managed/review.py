@@ -98,6 +98,7 @@ from verdict import (  # noqa: E402,F401 — split modules; re-exported for test
     format_prior_statuses_block,
     should_request_changes,
     resolve_verdict_event,
+    NO_APPROVE_VERDICT_BODY,
     has_conflict_markers,
     REVIEWED_AT_RE,
     _BLOCKERS_SECTION_RE,
@@ -1685,9 +1686,12 @@ def _backfill_verdict_if_missing(
             if (
                 (r.get("user") or {}).get("login") == bot_login
                 and r.get("commit_id") == head_sha
-                and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")
+                and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED", "COMMENTED")
             ):
-                return  # verdict already present (or deliberately dismissed)
+                return  # verdict already present (or deliberately dismissed).
+                # COMMENTED counts: in AIR_NO_APPROVE mode a clean verdict IS a
+                # COMMENT — without this every re-trigger at an unchanged SHA
+                # would re-submit another advisory COMMENT + re-dismiss (spam).
         request_changes, reason = should_request_changes(prior_body, floor_exposures=_category_floor_enabled())
         event = resolve_verdict_event(request_changes)  # honors AIR_NO_APPROVE
         print(
@@ -1707,9 +1711,7 @@ def _backfill_verdict_if_missing(
             submit_review_verdict(
                 args.repo, args.pr_number, token,
                 event="COMMENT",
-                body="No blockers found. Advisory mode (AIR_NO_APPROVE) — air does "
-                     "not approve on this repo. See review comment for medium/low/nit "
-                     "findings. (Verdict backfilled.)",
+                body=NO_APPROVE_VERDICT_BODY + " (Verdict backfilled.)",
                 commit_id=head_sha,
             )
         else:
@@ -2719,10 +2721,7 @@ async def run_review(args):
             elif event == "COMMENT":  # AIR_NO_APPROVE: flag, but never approve
                 submit_review_verdict(
                     args.repo, args.pr_number, bot_token,
-                    event="COMMENT",
-                    body="No blockers found. Advisory mode (AIR_NO_APPROVE) — air "
-                         "reports findings but does not approve on this repo. See "
-                         "review comment for medium/low/nit findings.",
+                    event="COMMENT", body=NO_APPROVE_VERDICT_BODY,
                     commit_id=head_sha,
                 )
             else:

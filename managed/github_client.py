@@ -323,7 +323,8 @@ def dismiss_stale_air_verdicts(
     carrying the verdict sentinel, or authored by an explicitly allowlisted bot
     login. A human's CHANGES_REQUESTED matches neither and is never dismissed.
     The posting account's own prior reviews are auto-superseded by GitHub and
-    left alone. Best-effort; returns the count dismissed.
+    left alone (UNLESS include_own=True — see below). Best-effort; returns the
+    count dismissed.
 
     `include_own=True` ALSO dismisses the posting account's own prior
     CHANGES_REQUESTED. That's required in AIR_NO_APPROVE (advisory) mode: a clean

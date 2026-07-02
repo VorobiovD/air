@@ -207,6 +207,14 @@ def resolve_verdict_event(request_changes: bool) -> str:
     return "COMMENT" if no_approve_enabled() else "APPROVE"
 
 
+# The clean-review COMMENT body in AIR_NO_APPROVE mode — single-sourced so the
+# three submission sites (review.py main + backfill, headless.py) can't drift.
+NO_APPROVE_VERDICT_BODY = (
+    "No blockers found. Advisory mode (AIR_NO_APPROVE) — air reports findings "
+    "but does not approve on this repo. See review comment for medium/low/nit findings."
+)
+
+
 # Open/close conflict markers as ADDED diff lines. We require the 7-char
 # `<<<<<<<` / `>>>>>>>` run (git's marker length) at the start of an added
 # line — these never occur in real source, so precision is ~100%. We do NOT

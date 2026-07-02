@@ -64,7 +64,7 @@ from github_client import (  # noqa: E402
 )
 from prompts import build_pr_context, build_verifier_task  # noqa: E402
 from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py; pure, network-free)
-    should_request_changes, resolve_verdict_event, _extract_review_body, has_conflict_markers,
+    should_request_changes, resolve_verdict_event, NO_APPROVE_VERDICT_BODY, _extract_review_body, has_conflict_markers,
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
 )
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
@@ -857,10 +857,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # head). Both are required args — omitting them crashed the post path
         # (only --dry-run, which returns above, was tested). bot_login was resolved
         # up front (for the pr-conversation bot-self filter); reuse it here.
-        verdict_body = reason or (
-            "No blockers found. Advisory mode (AIR_NO_APPROVE) — air reports "
-            "findings but does not approve on this repo. See review comment."
-            if verdict == "COMMENT" else "")
+        verdict_body = reason or (NO_APPROVE_VERDICT_BODY if verdict == "COMMENT" else "")
         submit_review_verdict(args.repo, args.pr_number, bot_token,
                               event=verdict, body=verdict_body, commit_id=head_sha)
         # Gate-orphan dismissal needs OUR login to skip our own just-posted verdict.
