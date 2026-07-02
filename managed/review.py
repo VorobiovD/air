@@ -1682,18 +1682,25 @@ def _backfill_verdict_if_missing(
         )
         return
     try:
-        for r in fetch_pr_reviews(args.repo, args.pr_number, token):
-            if (
-                (r.get("user") or {}).get("login") == bot_login
-                and r.get("commit_id") == head_sha
-                and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED", "COMMENTED")
-            ):
-                return  # verdict already present (or deliberately dismissed).
-                # COMMENTED counts: in AIR_NO_APPROVE mode a clean verdict IS a
-                # COMMENT — without this every re-trigger at an unchanged SHA
-                # would re-submit another advisory COMMENT + re-dismiss (spam).
+        # Recompute the desired verdict FIRST: a prior COMMENTED only counts as
+        # "already present" while STILL in no-approve mode (event == COMMENT). If
+        # AIR_NO_APPROVE was toggled OFF since (with no new commit pushed), the
+        # stale COMMENT must be UPGRADED to APPROVE — otherwise the "delete the
+        # variable to restore normal gating" promise silently breaks and the PR
+        # stays un-approved forever. APPROVED/CHANGES_REQUESTED/DISMISSED are
+        # always terminal; only the COMMENTED case is mode-dependent.
         request_changes, reason = should_request_changes(prior_body, floor_exposures=_category_floor_enabled())
         event = resolve_verdict_event(request_changes)  # honors AIR_NO_APPROVE
+        for r in fetch_pr_reviews(args.repo, args.pr_number, token):
+            if (r.get("user") or {}).get("login") != bot_login or r.get("commit_id") != head_sha:
+                continue
+            state = r.get("state")
+            if state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+                return  # verdict already present (or deliberately dismissed)
+            if state == "COMMENTED" and event == "COMMENT":
+                return  # advisory COMMENT is current (still AIR_NO_APPROVE) — don't re-spam
+            # a prior COMMENT but we now want APPROVE/REQUEST_CHANGES (no-approve
+            # toggled off) → fall through and upgrade the stale advisory verdict.
         print(
             f"  [backfill] no verdict found for reviewed SHA {head_sha[:8]} — "
             f"submitting {event} recomputed from the posted review comment"
