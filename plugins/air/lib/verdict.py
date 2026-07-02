@@ -186,6 +186,27 @@ def should_request_changes(review_body: str, floor_exposures: bool = True) -> tu
     return False, ""
 
 
+def no_approve_enabled() -> bool:
+    """`AIR_NO_APPROVE` advisory-gate mode (off by default): air may still submit
+    REQUEST_CHANGES on blockers, but NEVER APPROVE — a clean review posts a
+    neutral COMMENT instead. For a repo where a bot APPROVE isn't yet sanctioned
+    (e.g. a broad dev-facing repo). Because a COMMENT does NOT supersede the same
+    account's prior CHANGES_REQUESTED (only an APPROVE/REQUEST_CHANGES does), a
+    clean re-review in this mode dismisses air's OWN prior block explicitly
+    (github_client.dismiss_stale_air_verdicts include_own=True) so it still
+    clears when the developer fixes the blockers."""
+    return os.environ.get("AIR_NO_APPROVE", "").strip().lower() in ("1", "true", "yes")
+
+
+def resolve_verdict_event(request_changes: bool) -> str:
+    """Map the gate decision to the GitHub review `event`, honoring AIR_NO_APPROVE.
+    Blockers → REQUEST_CHANGES in both modes; a clean review APPROVEs normally,
+    but posts a COMMENT (no approval) when no-approve mode is on."""
+    if request_changes:
+        return "REQUEST_CHANGES"
+    return "COMMENT" if no_approve_enabled() else "APPROVE"
+
+
 # Open/close conflict markers as ADDED diff lines. We require the 7-char
 # `<<<<<<<` / `>>>>>>>` run (git's marker length) at the start of an added
 # line — these never occur in real source, so precision is ~100%. We do NOT

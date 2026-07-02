@@ -166,7 +166,7 @@ Compare this value against `REVIEWED_AT_SHA`. If they differ, new commits exist.
 
 Read these for review context:
 
-1. `CLAUDE.md` from the repo root. If cross-repo, fetch via `gh api repos/<owner/name>/contents/CLAUDE.md`.
+1. `CLAUDE.md` from the repo root — **or `AGENTS.md` if there is no `CLAUDE.md`** (some repos maintain project rules there instead; read whichever exists, preferring `CLAUDE.md`). If cross-repo, fetch via `gh api repos/<owner/name>/contents/CLAUDE.md` (fall back to `.../contents/AGENTS.md` on 404).
 
 2. **REVIEW patterns from wiki** (same-repo only):
 
@@ -226,7 +226,7 @@ Deep-scan this repository and generate three outputs. Go beyond listing files �
 1. PROJECT-PROFILE.md — Project characteristics for review agents:
 
    ## Overview
-   - Read CLAUDE.md AND README.md from the repo root
+   - Read CLAUDE.md AND README.md from the repo root (also read AGENTS.md if present — some repos keep their agent/project rules there instead of CLAUDE.md; fold its rules into the profile)
    - Document: languages, frameworks, service layout, deploy mechanism
 
    ## Languages

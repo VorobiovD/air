@@ -64,7 +64,7 @@ from github_client import (  # noqa: E402
 )
 from prompts import build_pr_context, build_verifier_task  # noqa: E402
 from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py; pure, network-free)
-    should_request_changes, _extract_review_body, has_conflict_markers,
+    should_request_changes, resolve_verdict_event, _extract_review_body, has_conflict_markers,
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
 )
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
@@ -834,7 +834,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
         rc, reason = True, (f"diff truncated at {_DIFF_CAP} chars — a blocker beyond the cap "
                             "can't be ruled out; raise AIR_HEADLESS_DIFF_CAP or split the PR")
         print(f"  [gate] {reason} — failing closed", file=sys.stderr)
-    verdict = "REQUEST_CHANGES" if rc else "APPROVE"
+    verdict = resolve_verdict_event(rc)  # REQUEST_CHANGES | APPROVE | COMMENT (AIR_NO_APPROVE)
 
     if getattr(args, "dry_run", False):
         print(f"\n===== DRY RUN — verdict: {verdict} ({reason or 'clean'}) =====\n")
@@ -857,14 +857,21 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # head). Both are required args — omitting them crashed the post path
         # (only --dry-run, which returns above, was tested). bot_login was resolved
         # up front (for the pr-conversation bot-self filter); reuse it here.
+        verdict_body = reason or (
+            "No blockers found. Advisory mode (AIR_NO_APPROVE) — air reports "
+            "findings but does not approve on this repo. See review comment."
+            if verdict == "COMMENT" else "")
         submit_review_verdict(args.repo, args.pr_number, bot_token,
-                              event=verdict, body=reason or "", commit_id=head_sha)
+                              event=verdict, body=verdict_body, commit_id=head_sha)
         # Gate-orphan dismissal needs OUR login to skip our own just-posted verdict.
         # If we can't resolve it, SKIP dismissal — calling with current_login=None
         # makes the skip-self guard falsy and dismisses the verdict we just posted,
         # silently un-gating a REQUEST_CHANGES (the dogfood-caught gate-safety bug).
+        # include_own on a clean no-approve COMMENT: it can't self-supersede our own
+        # prior CHANGES_REQUESTED, so dismiss it too (else a fixed PR stays blocked).
         if bot_login:
-            dismiss_stale_air_verdicts(args.repo, args.pr_number, bot_token, bot_login, _air_bot_logins())
+            dismiss_stale_air_verdicts(args.repo, args.pr_number, bot_token, bot_login,
+                                       _air_bot_logins(), include_own=(verdict == "COMMENT"))
         else:
             print("  [warn] bot login unresolved — skipping stale-verdict dismissal "
                   "(won't risk clearing our own verdict)", file=sys.stderr)
