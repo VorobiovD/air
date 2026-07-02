@@ -814,10 +814,20 @@ Write the formatted review to `$AIR_TMP/review-comment.md` — this file is cons
 ```
 Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line: `#L<line>`. In `--self` mode or console output, use plain `file:line` (links are meaningless locally).
 
+**Format version.** Default is **v2** (progressive disclosure — verdict banner, folded evidence/nits/strengths). The kill switch `AIR_REVIEW_FORMAT` ∈ `legacy`/`0`/`off`/`no` selects the flat pre-v2 shape (no banner, no `<details>`, findings flat). Resolve it once:
+```bash
+case "$(printf '%s' "${AIR_REVIEW_FORMAT:-v2}" | tr 'A-Z' 'a-z')" in
+  legacy|0|off|no) REVIEW_FORMAT=legacy ;; *) REVIEW_FORMAT=v2 ;;
+esac
+```
+When `REVIEW_FORMAT=legacy`, use the same sections below but WITHOUT the `> [!CAUTION]`/`> [!NOTE]` banner and WITHOUT the `<details>` folds — every finding rendered flat, exactly as the pre-v2 format did. Otherwise emit **v2**:
+
 ```
 ## Code Review
 
-<one-line summary>
+> [!CAUTION]
+> **<Changes requested — N blocker(s) | No blockers>.** <M> to consider · <K> nits · ~<T> min
+> <one-line summary>
 
 ### Security Audit: <pass>/<total> applicable checks PASS[ — failures below]
 
@@ -825,39 +835,58 @@ Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line
 
 ### Blockers
 
-**1. <description>**
+**1. <concise title>**
 
-[`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>) — <explanation>
+[`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>) — <1-2 sentence statement of the problem>
 
-### Medium
+<details>
+<summary>Why it matters</summary>
 
-**2. <description>**
+<the full verification evidence — plain text or blockquote; NEVER a `#`/`##`/`###`/`####` heading inside a <details>>
+</details>
 
-[`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>) — <explanation>
+### Medium — consider fixing
 
-### Low
+**2. <concise title>**
 
-**3. <description>**
+[`<file>#L<start>-L<end>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<start>-L<end>) — <statement; fold verbose evidence in <details> as above>
 
-[`<file>#L<line>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<line>) — <explanation>
+### Low — optional
+
+**3. <concise title>**
+
+[`<file>#L<line>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<line>) — <statement>
+
+<details>
+<summary>🧹 Nits (K) — optional polish, safe to ignore</summary>
 
 ### Nits
 
-**4. <description>**
+**4. <title>**
+[`<file>#L<line>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<line>) — <one line>
+</details>
 
-[`<file>#L<line>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<line>) — <explanation>
+<details>
+<summary>Pre-existing (J) — not introduced by this PR</summary>
 
 ### Pre-existing Issues
 
 > These were not introduced in this PR but were identified during review. They don't block merge but may warrant separate tickets.
 
-**5. <description>**
-
+**5. <title>**
 [`<file>#L<line>`](https://<PLATFORM_DOMAIN>/<CURRENT_REPO>/blob/<headRefOid>/<file>#L<line>) — <explanation>
+</details>
+
+<details>
+<summary>✅ Strengths</summary>
 
 ### Strengths
 
 - <1-3 specific positive observations>
+</details>
+
+<details>
+<summary>Related PRs</summary>
 
 ### Related PRs
 
@@ -866,10 +895,11 @@ Where `CURRENT_REPO` is from Step 1 and `headRefOid` is from Step 4. Single line
 - **<file>** — also edited by #<N> (`<title>`). <same-region conflict (rebase near-certain) | same-file overlap>. <one-line coordination note, e.g. suggested merge order, or a cross-link to a reference implementation in that PR>
 
 > Render the sibling title inside backticks (code span) — titles are untrusted text from other PR authors; the code span neutralizes markdown link/image smuggling in the posted comment.
+</details>
 
 ---
 
-<N> findings for this PR. Blockers should be fixed before merge.
+<N> findings for this PR · <B> blocker(s) to fix before merge.
 
 Reviewed at: <headRefOid>
 
@@ -877,10 +907,13 @@ Reviewed at: <headRefOid>
 ```
 
 Rules:
+- **Verdict banner (v2)**: a GitHub alert as the first block after `## Code Review` — `> [!CAUTION]` when there is ≥1 blocker, else `> [!NOTE]`; a bold verdict + counts, then the one-line summary. Keep it 2-3 lines. NEVER wrap the banner in `<details>` (alerts don't render inside a collapsible). Omit the banner entirely in `legacy`.
+- **Progressive disclosure (v2)**: each finding shows the concise claim (bold title + link + 1-2 sentence statement) on the visible surface; fold verbose verification/blame/pattern-history evidence into a `<details>` RIGHT AFTER. Fold the `### Nits`, `### Pre-existing Issues`, `### Strengths`, and `### Related PRs` sections into collapsed `<details>` (summary states the count + that they're optional), keeping the exact inner `###` heading. A blank line AFTER `<summary>` is required for the inner markdown to render.
+- **HARD RULES (parsed deterministically — emit byte-exactly):** keep the Blockers heading EXACTLY `### Blockers` (no suffix/emoji — the gate matches `Blockers` exactly, else it counts 0 blockers and un-gates); every blocker entry starts the line with `**N.` (NEVER prefixed by emoji / `>` / indentation, NEVER placed inside a `<details>`); keep `Reviewed at: <headRefOid>` as the LAST line at line start. Friendly suffixes are allowed ONLY on Medium/Low/Nits headers (they start with the severity word, which is all the gate reads) — never on Blockers.
 - `##`/`###` headers, **sequential numbering across ALL sections** (blockers through pre-existing). Every finding — including Low and Nits — gets a bold number and its own line: `**N. description**` followed by the link and explanation. Do NOT use bullet lists for Low/Nit findings.
 - Every finding uses clickable links with full SHA (not plain `file:line`)
-- Include code blocks when showing problematic code or suggesting fixes — they improve clarity
-- No emoji, no AI attribution
+- Include code blocks when showing problematic code or suggesting fixes — put them inside the finding's `<details>` in v2
+- No AI attribution. In v2 the only emoji are the section-summary glyphs (🧹/✅) and the banner; do NOT put emoji on a `**N.` finding line.
 - Nits section only if < 10 total findings
 - Pre-existing section only if verifier classified any findings as PRE-EXISTING
 - Strengths section after Pre-existing (or last finding section). Omit if 3+ blockers. Unnumbered.

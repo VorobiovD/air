@@ -1499,3 +1499,208 @@ def test_sec_tag_rule_lives_in_verifier_system_prompt():
     import prompts
     fresh = prompts.build_verifier_task("full", "o/r", "a" * 40, None, None)
     assert "[sec:<token>]" not in fresh
+
+
+# ---------------------------------------------------------------------------
+# Review-format v2 (progressive disclosure) — MERGE-BLOCKING gate-safety.
+# The v2 layout adds a verdict alert banner, folds verbose evidence / nits /
+# strengths into <details>, and appends friendly wording to non-blocker section
+# headers. verdict.py is line-anchored regex over the RAW markdown (no AST), so
+# <details> + emoji + friendly suffixes must be invisible to the gate. These
+# tests prove a v2 body gates BYTE-IDENTICALLY to the legacy body with the same
+# findings — the core "don't break anything" guarantee of the redesign.
+# ---------------------------------------------------------------------------
+from verdict import _extract_review_body as _extract_body  # noqa: E402
+
+_V2HEAD = "b" * 40
+_V2BLOB = f"https://github.com/o/r/blob/{_V2HEAD}"
+
+
+def _legacy_fresh(sec_in_medium=False):
+    med_tag = " [sec:pii-exposure]" if sec_in_medium else ""
+    return f"""## Code Review
+
+One-line summary.
+
+### Blockers
+
+**1. SQL injection in query builder [sec:sqli]**
+
+[`app/db.py#L10`]({_V2BLOB}/app/db.py#L10) — user input concatenated into SQL.
+
+### Medium
+
+**2. Leaky log{med_tag}**
+
+[`app/log.py#L40`]({_V2BLOB}/app/log.py#L40) — logs a token.
+
+### Nits
+
+**3. Typo**
+
+[`app/db.py#L5`]({_V2BLOB}/app/db.py#L5) — teh.
+
+### Strengths
+
+- Good tests.
+
+---
+
+3 findings for this PR. Blockers should be fixed before merge.
+
+Reviewed at: {_V2HEAD}
+"""
+
+
+def _v2_fresh(sec_in_medium=False):
+    # SAME findings, v2 shape: banner, folded blocker evidence, friendly section
+    # labels, folded nits + strengths. A [sec:] tag optionally lives on a Medium
+    # finding whose evidence is folded inside <details>.
+    med_tag = " [sec:pii-exposure]" if sec_in_medium else ""
+    return f"""## Code Review
+
+> [!CAUTION]
+> **Changes requested — 1 blocker.** 1 to consider · 1 nit · ~4 min
+> One-line summary.
+
+### Blockers
+
+**1. SQL injection in query builder [sec:sqli]**
+
+[`app/db.py#L10`]({_V2BLOB}/app/db.py#L10) — user input concatenated into SQL.
+
+<details>
+<summary>Why it matters</summary>
+
+Verified: the `q` param flows unescaped into `execute()` — arbitrary row read.
+</details>
+
+### Medium — consider fixing
+
+**2. Leaky log{med_tag}**
+
+[`app/log.py#L40`]({_V2BLOB}/app/log.py#L40) — logs a token.
+
+<details>
+<summary>Evidence</summary>
+
+The token is written at INFO level; verified reachable on the happy path.
+</details>
+
+<details>
+<summary>🧹 Nits (1) — optional polish, safe to ignore</summary>
+
+### Nits
+
+**3. Typo**
+[`app/db.py#L5`]({_V2BLOB}/app/db.py#L5) — teh.
+</details>
+
+<details>
+<summary>✅ Strengths</summary>
+
+### Strengths
+
+- Good tests.
+</details>
+
+---
+
+3 findings for this PR · 1 blocker to fix before merge.
+
+Reviewed at: {_V2HEAD}
+"""
+
+
+def _gate_projection(body):
+    """Every gate-relevant quantity verdict.py derives from a review body."""
+    floored, tags = count_category_floored(body)
+    extracted, ok = _extract_body(body, _V2HEAD)
+    ff = extract_fresh_findings(body)
+    ff_map = tuple(sorted(
+        ((f.num, f.severity) if hasattr(f, "num") else (f[0], f[1])) for f in ff
+    )) if ff else ()
+    return (count_blockers(body), floored, tuple(sorted(tags)),
+            should_request_changes(body)[0], ok, ff_map)
+
+
+def test_v2_fresh_gates_identical_to_legacy():
+    assert _gate_projection(_v2_fresh()) == _gate_projection(_legacy_fresh())
+
+
+def test_v2_blocker_with_folded_details_still_counts():
+    # The <details> evidence block after the **1.** line must not hide the
+    # blocker entry from _BLOCKER_ENTRY_RE.
+    assert count_blockers(_v2_fresh()) == 1
+    assert should_request_changes(_v2_fresh())[0]
+
+
+def test_v2_sec_tag_inside_details_still_floors():
+    # A [sec:pii-exposure] tag on a Medium finding whose evidence is folded in
+    # <details> must STILL floor to a blocker (the exposure floor scans the raw
+    # body) — and identically in both formats.
+    legacy_f, _ = count_category_floored(_legacy_fresh(sec_in_medium=True)), None
+    lf, ltags = count_category_floored(_legacy_fresh(sec_in_medium=True))
+    vf, vtags = count_category_floored(_v2_fresh(sec_in_medium=True))
+    assert lf >= 1 and vf == lf and sorted(vtags) == sorted(ltags)
+    assert should_request_changes(_v2_fresh(sec_in_medium=True))[0]
+
+
+def _legacy_rr(*status_lines):
+    return ("## Code Review (Re-review)\n\n_Re-reviewed._\n\n"
+            "### Previous Findings Status\n\n" + "\n".join(status_lines) +
+            f"\n\nReviewed at: {_V2HEAD}\n")
+
+
+def _v2_rr(*status_lines):
+    # v2 re-review: verdict banner after the header; status lines UNCHANGED
+    # (frozen contract — no emoji/decoration on the STATUS token).
+    return ("## Code Review (Re-review)\n\n"
+            "> [!CAUTION]\n> **Changes requested — 1 unfixed blocker.** "
+            "0 fixed · 1 open · 0 new\n> summary.\n\n"
+            "_Re-reviewed._\n\n"
+            "### Previous Findings Status\n\n" + "\n".join(status_lines) +
+            f"\n\nReviewed at: {_V2HEAD}\n")
+
+
+def test_v2_rereview_gates_identical_to_legacy():
+    lines = ("- **#1** [blocker] — NOT FIXED — auth check still missing",
+             "- **#2** [medium] — FIXED — index added")
+    assert should_request_changes(_v2_rr(*lines))[0] == \
+           should_request_changes(_legacy_rr(*lines))[0]
+    assert extract_prior_statuses(_v2_rr(*lines)) == \
+           extract_prior_statuses(_legacy_rr(*lines))
+
+
+def test_v2_rereview_pin_and_resurrect_parity():
+    # A dropped prior blocker must resurrect + gate identically under v2.
+    ledger = [_ledger_entry(1, "blocker", "NOT FIXED")]
+    nxt_v2 = _v2_rr("- **#2** [low] — FIXED — typo")
+    nxt_lg = _legacy_rr("- **#2** [low] — FIXED — typo")
+    out_v2, _ = pin_and_resurrect(nxt_v2, ledger)
+    out_lg, _ = pin_and_resurrect(nxt_lg, ledger)
+    assert "**#1**" in out_v2 and _gates(out_v2)
+    assert _gates(out_v2) == _gates(out_lg)
+
+
+def test_review_format_kill_switch(monkeypatch):
+    import importlib, prompts
+    for val, want in (("legacy", "legacy"), ("0", "legacy"), ("no", "legacy"),
+                      ("v2", "v2"), ("", "v2")):
+        monkeypatch.setenv("AIR_REVIEW_FORMAT", val)
+        importlib.reload(prompts)
+        assert prompts.review_format() == want
+    monkeypatch.delenv("AIR_REVIEW_FORMAT", raising=False)
+    importlib.reload(prompts)
+    assert prompts.review_format() == "v2"          # default-on
+    # v2 emits the banner + folds; legacy does not.
+    monkeypatch.setenv("AIR_REVIEW_FORMAT", "v2")
+    importlib.reload(prompts)
+    v2 = prompts.build_verifier_task("full", "o/r", "a" * 40, None, None)
+    assert "> [!CAUTION]" in v2 and "<details>" in v2
+    monkeypatch.setenv("AIR_REVIEW_FORMAT", "legacy")
+    importlib.reload(prompts)
+    leg = prompts.build_verifier_task("full", "o/r", "a" * 40, None, None)
+    assert "> [!CAUTION]" not in leg and "<details>" not in leg
+    # legacy fresh skeleton is preserved verbatim (the flat shape).
+    assert "Blockers should be fixed before merge." in leg
