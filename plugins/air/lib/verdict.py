@@ -452,7 +452,8 @@ def extract_reviewed_at_sha(body: str) -> str | None:
 _SHA_PREFIX_LEN = 12
 
 
-def _extract_review_body(raw_text: str, head_sha: str) -> tuple[str, bool]:
+def _extract_review_body(raw_text: str, head_sha: str,
+                         prefer_first_header: bool = False) -> tuple[str, bool]:
     """Extract the SHA-validated `## Code Review` body from a session output.
 
     Returns (review_body, extracted). The runtime interleaves sub-agent
@@ -512,6 +513,34 @@ def _extract_review_body(raw_text: str, head_sha: str) -> tuple[str, bool]:
 
     def _line_start(idx: int) -> bool:
         return idx == 0 or _flattened[idx - 1] == "\n"
+
+    if prefer_first_header:
+        # Headless emits exactly ONE review (no coordinator regenerate-and-echo),
+        # so the FIRST line-start `## Code Review` is the real header and any LATER
+        # line-start one is quoted CONTENT — e.g. a review OF a PR that edits the
+        # review format (#240), whose findings quote the skeleton's own
+        # `## Code Review` / `Reviewed at:` lines. Take the first line-start header
+        # through the LAST head_sha-matching footer; quoted markers in between are
+        # body content (extraction always ends at the matching footer, so an
+        # over-wide span at worst includes same-review content). The default
+        # (bounded, latest-wins) path FRAGMENTS here: the real header's candidate
+        # is bounded by the quoted header and loses its footer, so a skeleton-
+        # quoting review self-un-extracts. Falls through to the default path if the
+        # first line-start header has no matching footer (safety). The raw-body
+        # anti-decoy gate in headless still runs, so a wider span can't hide a
+        # blocker. Managed/CLI keep the default (prefer_first_header=False) — their
+        # coordinator CAN legitimately emit the review twice (echo), where the
+        # LATER copy is the real regeneration.
+        for _hm in _header_re.finditer(_flattened):
+            if not _line_start(_hm.start()):
+                continue
+            _last = None
+            for _m in _footer_re.finditer(_flattened, _hm.end()):
+                if _m.group(1).lower()[:_SHA_PREFIX_LEN] == _expected_prefix:
+                    _last = _m
+            if _last is not None:
+                return _flattened[_hm.start():_last.end()].rstrip(), True
+            break  # first line-start header lacks a matching footer → default path
 
     _candidates = []
     for _hm in _header_re.finditer(_flattened):

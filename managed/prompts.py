@@ -5,11 +5,96 @@ behind `build_verifier_task()` with their interpolations as parameters —
 rendering proven byte-identical to the pre-split inline f-strings.
 """
 import html
+import os
 from verdict import (
     CARRY_FORWARD_THRESHOLD,
     PRIOR_REVIEW_MAX_CHARS,
     format_prior_statuses_block,
 )
+
+
+def review_format() -> str:
+    """Which review-comment layout the verifier emits.
+
+    `v2` (default) = the progressive-disclosure format: a verdict alert banner,
+    concise-first findings with verbose evidence folded into `<details>`, and
+    collapsed nits/strengths/pre-existing. `legacy` = the pre-v2 flat format.
+    Kill switch `AIR_REVIEW_FORMAT` ∈ {legacy,0,off,no} → legacy (instant
+    rollback via caller/org variable, no deploy). The v2 layout only restyles
+    FREE-PROSE zones + folds sections — every machine-parsed anchor (the
+    `## Code Review` header, `**N.` blocker lines at line-start, the
+    `### Blockers` heading, `- **#N** [sev] — STATUS` lines, `[sec:]` tags, and
+    the `Reviewed at:` footer) is byte-identical across both, so verdict.py
+    gates the two formats identically (proven in test-verdict.py). `<details>`
+    is invisible to the line-anchored parsers, and downstream agents read the
+    raw markdown (folded content included), so folding helps humans only."""
+    return "legacy" if os.environ.get(
+        "AIR_REVIEW_FORMAT", "v2"
+    ).strip().lower() in ("legacy", "0", "off", "no") else "v2"
+
+
+# Shared v2 layout guidance (verdict banner + progressive disclosure). Injected
+# into BOTH the fresh and re-review templates so the two never drift. The rules
+# below are the load-bearing "don't break the gate" constraints — they mirror
+# the frozen-anchor contract in review-verifier.md's Output Format section.
+_V2_LAYOUT_RULES = """
+LAYOUT (format v2 — professional, scannable, machine-safe):
+- Open with a GitHub **alert banner** as the verdict at-a-glance (a blockquote
+  whose first line is `> [!CAUTION]` when there is ≥1 blocker, else `> [!NOTE]`),
+  then a bold one-line verdict + counts, then the prose summary. Example:
+    > [!CAUTION]
+    > **Changes requested — 1 blocker.** 2 to consider · 1 nit · ~6 min read
+    > <one-line summary of the change and why it does/doesn't block>
+  (Clean review → `> [!NOTE]` and "**No blockers.** …".) The banner is the only
+  always-visible triage signal — keep it to 2-3 lines. Do NOT wrap the banner in
+  `<details>` (GitHub alerts do not render inside a collapsible).
+- Each finding: put the CONCISE claim on the visible surface (the bold title,
+  the file link, and a 1-2 sentence statement of the problem), then fold the
+  verbose evidence — verification trace, git-blame, pattern-history — into a
+  `<details>` block RIGHT AFTER, so a skimmer sees the point and a skeptic (or a
+  downstream agent) expands the proof:
+    **1. <concise title>**
+
+    [`<file>#L<line>`](https://github.com/<repo>/blob/<sha>/<file>#L<line>) — <1-2 sentence statement>
+
+    <details>
+    <summary>Why it matters</summary>
+
+    <the full verification prose / blame / pattern history — plain text or a
+    blockquote; NEVER put a `#`/`##`/`###`/`####` heading inside this block>
+    </details>
+  (Use the REAL repo + head SHA from the Shape below in every link — the
+  `<repo>`/`<sha>` above are placeholders, never emit them literally.)
+- Fold the low-signal sections into collapsed `<details>` (summary line states
+  the count + that they're optional), keeping the exact inner heading:
+    <details>
+    <summary>🧹 Nits (K) — optional polish, safe to ignore</summary>
+
+    ### Nits
+
+    **N. <title>**
+    [`<file>#L<line>`](…) — <one line>
+    </details>
+  Do the same for `### Pre-existing Issues` ("not introduced by this PR") and
+  `### Strengths`. A blank line AFTER `<summary>` is REQUIRED for the inner
+  markdown to render.
+- Use calm, explicit optionality wording on the non-blocking section headers so
+  the author knows what is safe to skip: `### Medium — consider fixing`,
+  `### Low — optional`, `### Nits — safe to ignore`. (These headers start with
+  the severity word, which is all the gate reads.)
+
+HARD RULES — these lines are parsed deterministically; emit them byte-exactly:
+- Keep the Blockers heading EXACTLY `### Blockers` (fresh) / `#### Blockers`
+  (re-review) — NO suffix, NO emoji (the gate matches `Blockers` exactly and
+  will count 0 blockers otherwise → a real blocker would silently un-gate).
+- Every blocker entry MUST start the line with `**N.` — NEVER prefix it with an
+  emoji, a `>` blockquote marker, or indentation, and NEVER place a blocker
+  inside a `<details>` (its evidence folds; the `**N.` line stays visible).
+- Do NOT move, wrap, decorate, or alter the final footer line from the Shape
+  below — emit it last and verbatim, keeping its real 40-character SHA (never a
+  placeholder). It is the last thing in the comment. (The run fails if that
+  footer is missing or its SHA doesn't match the one in the Shape.)
+"""
 
 # NOTE: the verifier's `[sec:<token>]` exposure-tag rule (the EMISSION half of
 # the deterministic exposure floor) lives in the verifier SYSTEM PROMPT
@@ -341,6 +426,21 @@ def build_verifier_task(
             "use this status for findings originally classified as `blocker`."
         )
 
+        # v2 adds a verdict banner + folding guidance; the `### Previous
+        # Findings Status` lines stay byte-identical (frozen contract — no
+        # emoji/decoration on the STATUS token). Legacy → both blank.
+        if review_format() == "v2":
+            rr_banner = (
+                "\n> [!CAUTION]\n"
+                "> **<Changes requested — N unfixed blocker(s) | all prior "
+                "blockers resolved>.** <X> fixed · <Y> still open · <K> new\n"
+                "> <one-line status summary>\n"
+            )
+            rr_layout = _V2_LAYOUT_RULES + "\n"
+        else:
+            rr_banner = ""
+            rr_layout = ""
+
         verifier_task = f"""You have raw findings from the specialist reviewers
 (embedded in your task message, or read from /workspace/findings/ plus the labeled
 inline blocks in workspace-handoff mode).
@@ -363,12 +463,12 @@ if specialists disagree, prefer the one that cites evidence from the
 inter-diff. Respect developer-comment dispute reasoning surfaced by the
 specialists.
 
-Emit the FINAL REVIEW COMMENT as markdown, exactly in this shape
+Emit the FINAL REVIEW COMMENT as markdown, in this shape
 (start with `## Code Review (Re-review)` on the first line — nothing
 before it). Omit empty sections.
-
+{rr_layout}
 ## Code Review (Re-review)
-
+{rr_banner}
 _Re-reviewed at `{head_sha[:8]}`, previous review at `{(prior_sha or '')[:8]}`._
 
 <one-line summary: N fixed, M still open, K new findings>
@@ -419,6 +519,84 @@ new-findings block (prior findings keep their #N from the last review).
 ---
 
 Reviewed at: {head_sha}
+"""
+    elif review_format() == "v2":
+        verifier_task = f"""You have raw findings from the specialist reviewers
+(embedded in your task message, or read from /workspace/findings/ plus the labeled
+inline blocks in workspace-handoff mode).
+Verify each one per your system prompt (CONFIRMED / DOWNGRADED / IMPROVEMENT /
+PRE-EXISTING / ACCEPTED PATTERN / FALSE POSITIVE with a confidence score). Drop
+FALSE POSITIVE / below-threshold findings.
+
+Then emit the FINAL REVIEW COMMENT as markdown (start with `## Code Review` on the
+first line — nothing before it). Number findings sequentially across ALL sections;
+omit empty sections; Strengths omitted if 3+ blockers; Nits only if < 10 findings.
+{_V2_LAYOUT_RULES}
+Shape:
+
+## Code Review
+
+> [!CAUTION]
+> **<Changes requested — N blocker(s) | No blockers>.** <M> to consider · <K> nits · ~<T> min
+> <one-line summary>
+
+### Blockers
+
+**1. <concise title>**
+
+[`<file>#L<line>`](https://github.com/{repo}/blob/{head_sha}/<file>#L<line>) — <1-2 sentence statement>
+
+<details>
+<summary>Why it matters</summary>
+
+<the full verification evidence — no headings inside>
+</details>
+
+### Medium — consider fixing
+
+**2. <concise title>**
+
+[`<file>#L<line>`](https://github.com/{repo}/blob/{head_sha}/<file>#L<line>) — <statement; fold verbose evidence in <details> as above>
+
+### Low — optional
+
+**3. <concise title>**
+
+[`<file>#L<line>`](https://github.com/{repo}/blob/{head_sha}/<file>#L<line>) — <statement>
+
+<details>
+<summary>🧹 Nits (K) — optional polish, safe to ignore</summary>
+
+### Nits
+
+**4. <title>**
+[`<file>#L<line>`](https://github.com/{repo}/blob/{head_sha}/<file>#L<line>) — <one line>
+</details>
+
+<details>
+<summary>Pre-existing (J) — not introduced by this PR</summary>
+
+### Pre-existing Issues
+
+**5. <title>**
+[`<file>#L<line>`](https://github.com/{repo}/blob/{head_sha}/<file>#L<line>) — <explanation>
+</details>
+
+<details>
+<summary>✅ Strengths</summary>
+
+### Strengths
+
+- <1-3 concrete positive observations>
+</details>
+
+---
+
+<N> findings for this PR · <B> blocker(s) to fix before merge.
+
+Reviewed at: {head_sha}
+
+> After fixing, run `/air:review --respond` to verify and reply.
 """
     else:
         verifier_task = f"""You have raw findings from the specialist reviewers

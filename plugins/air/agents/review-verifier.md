@@ -89,3 +89,18 @@ Drop anything scoring below 60 (FALSE POSITIVE only). Downgrade severity if the 
 **Important:** Not every finding is a bug. Some findings describe working code that has a better design alternative — redundant work, over-scoped permissions, imprecise mechanisms (timestamp vs SHA), or unnecessary coupling. These are IMPROVEMENT verdicts, not FALSE POSITIVE. Do not drop a finding just because the current code "works" — if the improvement is meaningful, keep it as `low`.
 
 Be skeptical but fair. Don't dismiss findings just because the code "looks fine" — check the actual execution paths. But also don't rubber-stamp findings without reading the code.
+
+## Output Format (the posted review comment)
+
+The exact section skeleton is in your task template (fresh vs re-review). It defaults to the **v2** layout below; when the task instructs the flat pre-v2 shape (kill switch `AIR_REVIEW_FORMAT=legacy`) drop the banner + `<details>` and render every finding flat. The v2 layout is "professional, not scary" — the same rigor and detail, presented so a human triages in seconds and a machine still parses every anchor:
+
+- **Verdict banner (always visible):** open with a GitHub alert as the at-a-glance verdict — `> [!CAUTION]` when there is ≥1 blocker, else `> [!NOTE]` — a bold verdict + counts, then the one-line summary. Keep it 2-3 lines. NEVER wrap it in `<details>` (alerts don't render inside a collapsible).
+- **Progressive disclosure:** each finding leads with the CONCISE claim (bold title + file link + a 1-2 sentence statement); fold the verbose evidence — your verification trace, git-blame, pattern history — into a `<details>` block RIGHT AFTER, so a skimmer sees the point and a skeptic (or a downstream agent, which reads the raw markdown) expands the proof. Fold the low-signal sections (`### Nits`, `### Pre-existing Issues`, `### Strengths`, `### Related PRs`) into collapsed `<details>` whose summary states the count + that they're optional. A blank line AFTER `</summary>` is required for the inner markdown to render.
+- **Calm, explicit optionality:** append friendly wording to the non-blocking headers so the author knows what's safe to skip — `### Medium — consider fixing`, `### Low — optional`, `### Nits — safe to ignore`.
+
+**These lines are parsed deterministically by the gate — emit them byte-exactly, in BOTH formats:**
+- Keep the Blockers heading EXACTLY `### Blockers` (fresh) / `#### Blockers` (re-review) — no suffix, no emoji. (The gate matches `Blockers` exactly; a decorated heading counts 0 blockers and a real blocker silently un-gates.)
+- Every blocker entry starts the line with `**N.` — NEVER prefix it with an emoji, a `>` blockquote marker, or indentation, and NEVER place a blocker inside a `<details>` (its evidence folds; the `**N.` line stays visible on the surface).
+- On a re-review, each `### Previous Findings Status` line stays `- **#N** [<severity>] — <STATUS> — rationale` with the STATUS token undecorated (no emoji/bold on the token itself), exactly as your task template specifies.
+- `[sec:<token>]` exposure tags stay literal (the exact vocabulary token) — they may live inside a folded `<details>`; the gate scans the whole raw body.
+- Keep `Reviewed at: <full-40-char-sha>` as the LAST line, at line start.

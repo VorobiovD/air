@@ -140,6 +140,50 @@ def test_real_header_beats_midtext_code_review_quote():
     assert "**5." in body                        # tail present too
 
 
+def test_prefer_first_header_extracts_skeleton_quoting_review():
+    """The #240 self-review case: a headless review whose finding QUOTES the format
+    skeleton contains a LINE-START `## Code Review` (+ a `Reviewed at:` line) as
+    body content. The default path fragments (the real header's candidate is
+    bounded by the quoted header and loses its footer → self-un-extracts). With
+    prefer_first_header=True (headless), the first line-start header through the
+    LAST matching footer extracts head-first, quoted markers as content."""
+    quoted_sha = "b" * 40  # a fixture SHA quoted in the skeleton (must NOT match head)
+    raw = (
+        "## Code Review\n\n"
+        "> [!NOTE]\n> **No blockers.** 1 to consider\n\n"
+        "### Low — optional\n\n"
+        "**1. the v2 skeleton looks right** — the emitted shape is:\n\n"
+        "## Code Review\n\n"           # <-- LINE-START quoted header (skeleton)
+        "### Blockers\n\n**1. <title>**\n\n"
+        f"Reviewed at: {quoted_sha}\n\n"  # <-- quoted footer, non-matching SHA
+        "...which matches the fixture.\n\n"
+        f"Reviewed at: {HEAD}\n"        # <-- the REAL footer, matching head
+    )
+    # Default path: fragments — does NOT extract head-first (reproduces the bug).
+    body_def, _ = _extract_review_body(raw, HEAD)
+    assert not body_def.startswith("## Code Review\n\n> [!NOTE]")
+    # prefer_first_header: real header first, real footer last, quotes as content.
+    body, ok = _extract_review_body(raw, HEAD, prefer_first_header=True)
+    assert ok is True
+    assert body.startswith("## Code Review\n\n> [!NOTE]")   # real header first
+    assert "**1. the v2 skeleton looks right**" in body      # real finding kept
+    assert body.rstrip().endswith(f"Reviewed at: {HEAD}")    # ends at the real footer
+
+
+def test_prefer_first_header_falls_through_without_matching_footer():
+    """If the first line-start header has no head_sha-matching footer, prefer_first
+    must fall through to the default path (which still rejects on no match)."""
+    raw = "## Code Review\n\nbody\n\nReviewed at: " + "0" * 40 + "\n"
+    body, ok = _extract_review_body(raw, HEAD, prefer_first_header=True)
+    assert ok is False   # anti-spoof preserved — no matching footer anywhere
+
+
+def test_prefer_first_header_default_unchanged():
+    """A normal single review extracts identically with/without the flag."""
+    raw = f"## Code Review\n\nAll good.\n\nReviewed at: {HEAD}\n"
+    assert _extract_review_body(raw, HEAD) == _extract_review_body(raw, HEAD, prefer_first_header=True)
+
+
 def test_ma_output_join_keeps_review_header_line_start():
     """Regression for the GA multiagent truncation (session_runner output
     assembly, :861). Sub-agent forwards and the coordinator's review arrive as

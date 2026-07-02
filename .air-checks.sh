@@ -161,6 +161,30 @@ for f in managed/render_store_to_wiki.py plugins/air/commands/review.md plugins/
   fi
 done
 
+# Check I: review-format v2 contract. The v2 layout (verdict banner + folded
+# evidence/nits/strengths) restyles only FREE-PROSE zones — the gate parses
+# line-anchored regex over the raw body, so the frozen anchors must stay
+# byte-exact. Lock: (1) the AIR_REVIEW_FORMAT kill switch exists, (2) the
+# Blockers heading is NEVER decorated in the emitted skeletons (a suffix/emoji
+# makes count_blockers match nothing → a real blocker silently un-gates),
+# (3) review-verifier.md's Output Format states the verdict-banner + no-prefix
+# frozen-anchor rules.
+if [ -f managed/prompts.py ]; then
+  { grep -q 'def review_format' managed/prompts.py && grep -q 'AIR_REVIEW_FORMAT' managed/prompts.py; } \
+    || fail "managed/prompts.py missing the AIR_REVIEW_FORMAT kill switch (review_format())"
+fi
+for f in managed/prompts.py plugins/air/commands/review.md; do
+  # `[[:space:]]*` (not `+`) after Blockers so a GLUED decoration (`### Blockers🔴`,
+  # no separating space) is caught too — a mandatory-space pattern missed it.
+  if [ -f "$f" ] && grep -nE '^#{3,4}[[:space:]]+Blockers[[:space:]]*[^[:space:]]' "$f" >/dev/null 2>&1; then
+    fail "$f has a DECORATED Blockers heading — it must stay exactly '### Blockers' / '#### Blockers' (count_blockers anchors on 'Blockers\$')"
+  fi
+done
+if [ -f "$VERIFIER_MD" ]; then
+  { grep -q '\[!CAUTION\]' "$VERIFIER_MD" && grep -q 'NEVER prefix it with an emoji' "$VERIFIER_MD"; } \
+    || fail "$VERIFIER_MD Output Format section missing the v2 verdict-banner / no-prefix frozen-anchor rules (Check I)"
+fi
+
 if [ "$status" -eq 0 ]; then
   printf 'air drift-check: all checks passed.\n'
 fi
