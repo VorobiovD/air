@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.46.0](https://github.com/VorobiovD/air/compare/v1.45.0...v1.46.0) (2026-07-02)
+
+
+### Features
+
+* **learn:** AIR_LEARN_CRON_LIVE — cron as sole learn executor ([#243](https://github.com/VorobiovD/air/issues/243)) ([d91fa5d](https://github.com/VorobiovD/air/commit/d91fa5d3cd64666e70ee745487d9ed8769042903))
+* **review:** AIR_NO_APPROVE advisory mode + AGENTS.md fallback ([#241](https://github.com/VorobiovD/air/issues/241)) ([a7de588](https://github.com/VorobiovD/air/commit/a7de5880e33e335f992ea0fbbe42c77edbdd6d58))
+* **review:** v2 review format — professional, not scary (default on) ([#240](https://github.com/VorobiovD/air/issues/240)) ([65cfcae](https://github.com/VorobiovD/air/commit/65cfcaeaaf471582d822e283b454a325b58b6748))
+
 ## [1.45.0](https://github.com/VorobiovD/air/compare/v1.44.0...v1.45.0) (2026-07-01)
 
 
