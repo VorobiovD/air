@@ -779,7 +779,12 @@ async def run_headless_review(args, bot_token: str) -> dict:
     wall = time.monotonic() - t0
 
     # ---- DETERMINISTIC TAIL (reused verbatim) ----------------------------
-    review_body, extracted = _extract_review_body(review_body_raw, head_sha)
+    # prefer_first_header: headless emits ONE review, so the FIRST line-start
+    # `## Code Review` is the real header — a review that QUOTES the format
+    # skeleton (e.g. reviewing a PR that edits air's own review format, #240)
+    # must not self-un-extract by having its real header bounded by a quoted one.
+    review_body, extracted = _extract_review_body(review_body_raw, head_sha,
+                                                  prefer_first_header=True)
     cost = (agent_loop.usage_cost(vres["usage"], vtier, write_mult)
             + sum(agent_loop.usage_cost(r["usage"], r["tier"], write_mult)
                   for r in specialist_results.values() if r))
