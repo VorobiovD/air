@@ -90,10 +90,10 @@ HARD RULES — these lines are parsed deterministically; emit them byte-exactly:
 - Every blocker entry MUST start the line with `**N.` — NEVER prefix it with an
   emoji, a `>` blockquote marker, or indentation, and NEVER place a blocker
   inside a `<details>` (its evidence folds; the `**N.` line stays visible).
-- End the comment with EXACTLY `Reviewed at: <full-40-char SHA>` as the FINAL
-  line, at line start — copy the real 40-char head SHA verbatim from the Shape
-  below (never a `<sha>`/`{...}` placeholder). The run FAILS if this footer is
-  missing or the SHA differs, so emit it last and unaltered.
+- Do NOT move, wrap, decorate, or alter the final footer line from the Shape
+  below — emit it last and verbatim, keeping its real 40-character SHA (never a
+  placeholder). It is the last thing in the comment. (The run fails if that
+  footer is missing or its SHA doesn't match the one in the Shape.)
 """
 
 # NOTE: the verifier's `[sec:<token>]` exposure-tag rule (the EMISSION half of
