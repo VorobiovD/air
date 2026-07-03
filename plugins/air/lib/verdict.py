@@ -873,7 +873,9 @@ def extract_finding_files(body: str, base_sha: str) -> dict:
         seg_end = nums[i + 1].start() if i + 1 < len(nums) else len(body)
         files: set = set()
         for am in _BLOB_ANCHOR_RE.finditer(body, nm.end(), seg_end):
-            if not prefix or am.group(1).lower()[:_SHA_PREFIX_LEN] == prefix:
+            # SHA-validate the blob anchor, same as extract_fresh_finding_locations
+            # (no base_sha → recover no blob path; prose tokens below need no SHA).
+            if prefix and am.group(1).lower()[:_SHA_PREFIX_LEN] == prefix:
                 files.add(am.group(2))
         for tm in _FILE_PATH_TOKEN_RE.finditer(body, nm.end(), seg_end):
             tok = tm.group(1)
@@ -1192,7 +1194,8 @@ def _ensure_rereview_shape(body: str, log: list, resurrected: list) -> str:
 _PIN_REWRITE_MARKER = (
     "[air: pinned NOT FIXED — the verifier judged this fixed, but the re-review "
     "inter-diff shows no code change to this finding's file(s); verify manually. "
-    "Clears automatically once the fix appears in-diff, or via a DISPUTED reply.]"
+    "Clears on a later review once the fix lands in the inter-diff, or via a "
+    "DISPUTED reply.]"
 )
 
 
@@ -1277,7 +1280,7 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
             # Trace the trust decision — every other rewrite logs, so the
             # exemption must too (a silent honor is indistinguishable from "no
             # pin needed" in a post-incident audit).
-            log.append(f"[pin] #{num} cross-region FIXED trusted (change=UNCHANGED, file_touched=True; verifier-judged)")
+            log.append(f"[pin] #{num} cross-region/cross-file FIXED trusted (change=UNCHANGED, file_touched=True; verifier-judged)")
         elif status == "DEFERRED":
             if new_sev == "blocker":
                 new_status = "NOT FIXED"

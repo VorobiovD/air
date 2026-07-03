@@ -449,9 +449,12 @@ each prior finding and (b) any NEW findings in the inter-diff.
 
 For each prior finding, choose ONE status:
 - FIXED — the finding is addressed in the current source (read it and judge). The
-  fix may be a cross-region edit elsewhere in the SAME file, not only the exact
-  flagged line — don't require the flagged line in the inter-diff. (A FIXED is
-  not credible when the finding's file is entirely untouched.)
+  fix may be a cross-region edit elsewhere in the SAME file, OR a cross-FILE edit
+  in a DIFFERENT file the finding references (e.g. the finding flags a symptom at a
+  read site but the fix is the wiring in another file) — don't require the flagged
+  line, or even the flagged file, in the inter-diff; judge by reading the current
+  source. (A FIXED is not credible only when NONE of the files the finding is about
+  changed at all.)
 - PARTIALLY FIXED — code changed but doesn't fully address.
 - NOT FIXED — the finding's file is untouched, or its code is present unchanged; finding still applies.
 {deferred_bullet}

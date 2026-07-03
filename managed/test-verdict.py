@@ -670,7 +670,7 @@ def test_cross_region_exemption_emits_pin_log():
     # rewrite logs; a silent honor is unauditable).
     e = _ledger_entry(1, "blocker", "NOT FIXED", change=UNCHANGED, file_touched=True)
     _, log = pin_and_resurrect(_rr_body("- **#1** [blocker] — FIXED — upstream fix"), [e])
-    assert any("cross-region FIXED trusted" in l for l in log)
+    assert any("FIXED trusted" in l for l in log)
 
 
 # --- CROSS-FILE fix: the qai-be #1422 false-block --------------------------
@@ -709,7 +709,7 @@ def test_cross_file_fix_honored_via_referenced_prose_path():
         led)
     assert not _gates(out)                                    # APPROVE — no false block
     assert "- **#1** [blocker] — FIXED" in out                # FIXED honored, not rewritten
-    assert any("cross-region FIXED trusted" in l for l in log)
+    assert any("FIXED trusted" in l for l in log)
 
 
 def test_bare_basename_alone_does_not_credit_a_fix():
@@ -741,6 +741,21 @@ def test_pin_rewrite_appends_self_explaining_marker():
     assert _gates(out)                                        # still gates (real protection intact)
     # gate parses the STATUS token, unaffected by the tail marker
     assert extract_prior_statuses(out) == [(1, "blocker", "NOT FIXED")]
+
+
+def test_referenced_file_touched_suffix_match():
+    # Medium #1 (air review of this fix): _referenced_file_touched matches a
+    # referenced PARTIAL path against a longer real repo path via suffix (prose
+    # names `Grading/SvcGrader.php`; the touched file is `app/Services/Grading/SvcGrader.php`).
+    from verdict import _referenced_file_touched, parse_changed_lines
+    diff = ("diff --git a/app/Services/Grading/SvcGrader.php b/app/Services/Grading/SvcGrader.php\n"
+            "--- a/app/Services/Grading/SvcGrader.php\n+++ b/app/Services/Grading/SvcGrader.php\n"
+            "@@ -10,2 +10,3 @@ class\n x\n+ y\n")
+    idx = parse_changed_lines(diff)
+    assert _referenced_file_touched({"Grading/SvcGrader.php"}, idx) is True     # suffix match
+    assert _referenced_file_touched({"app/Services/Grading/SvcGrader.php"}, idx) is True  # exact
+    assert _referenced_file_touched({"other/SvcGrader.php"}, idx) is False      # different dir, no basename-only match
+    assert _referenced_file_touched(set(), idx) is False                        # no refs
 
 
 def test_extract_finding_files_paths_only():
@@ -800,7 +815,7 @@ def test_origin_anchor_unpoisons_round3_carried_fix():
     assert led_v2[0].origin_sha == _OA_ORIGIN_SHA
     pinned, log = pin_and_resurrect(emitted, led_v2)
     assert not _gates(pinned)                                     # un-poisoned → APPROVE
-    assert any("cross-region FIXED trusted" in l for l in log)
+    assert any("FIXED trusted" in l for l in log)
 
 
 def test_origin_anchor_holds_when_file_untouched_in_origin_window():
@@ -873,7 +888,7 @@ def test_file_origin_resolver_present_diff_unpoisons(tmp_path):
     assert led[0].change == UNCHANGED and led[0].file_touched is True
     pinned, log = pin_and_resurrect(
         _rr_body("- **#1** [blocker] — FIXED — fixed earlier round"), led)
-    assert not _gates(pinned) and any("cross-region FIXED trusted" in l for l in log)
+    assert not _gates(pinned) and any("FIXED trusted" in l for l in log)
 
 
 def test_file_origin_resolver_missing_diff_is_number_identity(tmp_path):
