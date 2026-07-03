@@ -673,6 +673,90 @@ def test_cross_region_exemption_emits_pin_log():
     assert any("cross-region FIXED trusted" in l for l in log)
 
 
+# --- CROSS-FILE fix: the qai-be #1422 false-block --------------------------
+# A blocker anchored at the SYMPTOM/read site (`config/services.php`) whose fix
+# lands in a DIFFERENT file it references in prose (`scripts/after_install.sh`).
+# The anchor file is never touched → the old single-anchor file_touched read
+# False → the verifier's genuine FIXED was rewritten to NOT FIXED and the promote
+# was blocked while the header said "all blockers resolved". Now file_touched
+# considers every file the finding REFERENCES, so the cross-file fix is honored.
+_XFILE_SHA = "47be08d307f8c45faf0fc69b73f46398b23be64d"
+_XFILE_PRIOR = (
+    "## Code Review\n\n### Blockers\n\n"
+    "**1. `SVC_CALLBACK_BASE_URL` never plumbed through `scripts/after_install.sh`**\n\n"
+    f"[`config/services.php#L126-L128`](https://github.com/o/r/blob/{_XFILE_SHA}/config/services.php#L126-L128)"
+    " — the new `env('SVC_CALLBACK_BASE_URL')` read has no entry in "
+    "`scripts/after_install.sh`'s secret block, so it never reaches staging.\n\n"
+    f"Reviewed at: {_XFILE_SHA}\n"
+)
+# Dev fixed it in the WIRING file (+ a sibling), NOT in the anchor file.
+_XFILE_DIFF = (
+    "diff --git a/scripts/after_install.sh b/scripts/after_install.sh\n"
+    "--- a/scripts/after_install.sh\n+++ b/scripts/after_install.sh\n"
+    "@@ -340,3 +340,4 @@ secrets\n ctx\n"
+    "+SVC_CALLBACK_BASE_URL=$(echo \"$S\" | jq -r '.SVC_CALLBACK_BASE_URL // empty')\n more\n"
+)
+
+
+def test_cross_file_fix_honored_via_referenced_prose_path():
+    led = build_carry_forward_ledger(_XFILE_PRIOR, _XFILE_DIFF, _XFILE_SHA)
+    e1 = led[0]
+    # anchor (config/services.php) UNCHANGED, but a REFERENCED file
+    # (scripts/after_install.sh, named in prose) was touched.
+    assert e1.change == UNCHANGED and e1.file_touched is True
+    out, log = pin_and_resurrect(
+        _rr_body("- **#1** [blocker] — FIXED — after_install.sh now extracts it; verified vs source"),
+        led)
+    assert not _gates(out)                                    # APPROVE — no false block
+    assert "- **#1** [blocker] — FIXED" in out                # FIXED honored, not rewritten
+    assert any("cross-region FIXED trusted" in l for l in log)
+
+
+def test_bare_basename_alone_does_not_credit_a_fix():
+    # Scope guard: a finding that references ONLY a bare basename (`SvcGrader.php`,
+    # no path) must NOT be credited by an unrelated touch — too loose to match
+    # safely. Anchor file untouched + only-basename prose → file_touched=False →
+    # the fake FIXED is still rewritten and gates.
+    prior = (
+        "## Code Review\n\n### Blockers\n\n"
+        "**1. bug touched in `SvcGrader.php`**\n\n"
+        f"[`config/services.php#L1`](https://github.com/o/r/blob/{_XFILE_SHA}/config/services.php#L1) — x\n\n"
+        f"Reviewed at: {_XFILE_SHA}\n"
+    )
+    led = build_carry_forward_ledger(prior, _XFILE_DIFF, _XFILE_SHA)  # touches after_install.sh only
+    assert led[0].file_touched is False                       # bare basename not matched
+    out, _ = pin_and_resurrect(_rr_body("- **#1** [blocker] — FIXED — trust me"), led)
+    assert "NOT FIXED" in out and _gates(out)
+
+
+def test_pin_rewrite_appends_self_explaining_marker():
+    # (B) A genuine FIXED→NOT FIXED rewrite must annotate the line so the label
+    # doesn't silently contradict the retained "fixed" rationale (the #1422
+    # confusion). Marker is inert to the gate (STATUS token still parses).
+    from verdict import _PIN_REWRITE_MARKER
+    fake = _ledger_entry(1, "blocker", "NOT FIXED", change=UNCHANGED, file_touched=False)
+    out, _ = pin_and_resurrect(
+        _rr_body("- **#1** [blocker] — FIXED — the narrative says it's resolved"), [fake])
+    assert _PIN_REWRITE_MARKER in out                         # marker appended
+    assert _gates(out)                                        # still gates (real protection intact)
+    # gate parses the STATUS token, unaffected by the tail marker
+    assert extract_prior_statuses(out) == [(1, "blocker", "NOT FIXED")]
+
+
+def test_extract_finding_files_paths_only():
+    from verdict import extract_finding_files
+    body = (
+        "**1. x**\n\n"
+        f"[`src/a.py#L1`](https://github.com/o/r/blob/{_XFILE_SHA}/src/a.py#L1) — refs "
+        "`scripts/deploy.sh` and bare `Helper.php` and a non-path `jq -r`.\n\n"
+    )
+    files = extract_finding_files(body, _XFILE_SHA)[1]
+    assert "src/a.py" in files                                # blob-link anchor
+    assert "scripts/deploy.sh" in files                       # backtick path (has /)
+    assert "Helper.php" not in files                          # bare basename excluded
+    assert not any(" " in f for f in files)                   # no prose fragments
+
+
 # --- #198 origin-anchor: un-poison round-3+ carried fixes (gate-safe) -------
 # A blocker carried in a round-3+ status block, GENUINELY fixed in an EARLIER
 # round, so absent from baseline..head. v1 pins it INDETERMINATE/file_touched=False
