@@ -60,7 +60,11 @@ _TOOL_OUTPUT_GUARD = (
 # content untouched (no cosmetic mangling of reviewed code that merely mentions
 # those tags). Real payloads still can't escape; the model's own refusal of
 # injected directives remains the primary defense.
-_WRAPPER_TAG_RE = re.compile(r"<(/?\s*untrusted-tool-output\b[^>]*)>", re.IGNORECASE)
+# `<\s*` tolerates whitespace after the `<` (`< /untrusted-tool-output>`, not just
+# after the slash); `(?![\w-])` requires the tag NAME to end at a real boundary so a
+# lookalike like `<untrusted-tool-output-log>` is NOT over-defanged (plain `\b` is
+# satisfied by a following hyphen). #245 review.
+_WRAPPER_TAG_RE = re.compile(r"<\s*(/?\s*untrusted-tool-output(?![\w-])[^>]*)>", re.IGNORECASE)
 
 
 def _defang_control_tags(text: str) -> str:

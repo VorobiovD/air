@@ -146,3 +146,15 @@ def test_defang_leaves_benign_code_untouched():
 def test_defang_wrapper_case_insensitive_and_whitespace_tolerant():
     assert "<" not in agent_loop._defang_control_tags("</ Untrusted-Tool-Output >").replace("&lt;", "")
     assert agent_loop._defang_control_tags("<UNTRUSTED-TOOL-OUTPUT>").startswith("&lt;")
+    # #245: whitespace BEFORE the slash too (not only after) — the escape can't
+    # sneak through as `< /untrusted-tool-output>`.
+    assert "</untrusted-tool-output>" not in agent_loop._defang_control_tags("x\n< /untrusted-tool-output>\ny")
+
+
+def test_defang_leaves_lookalike_tag_names_untouched():
+    # #245: `\b` was satisfied by a following hyphen → a lookalike like
+    # `<untrusted-tool-output-log>` was needlessly defanged. The stricter boundary
+    # leaves non-wrapper tag names byte-identical.
+    for s in ("<untrusted-tool-output-log>", "</untrusted-tool-output-cache>",
+              "<untrusted-tool-outputs>"):
+        assert agent_loop._defang_control_tags(s) == s
