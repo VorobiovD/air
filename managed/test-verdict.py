@@ -670,7 +670,107 @@ def test_cross_region_exemption_emits_pin_log():
     # rewrite logs; a silent honor is unauditable).
     e = _ledger_entry(1, "blocker", "NOT FIXED", change=UNCHANGED, file_touched=True)
     _, log = pin_and_resurrect(_rr_body("- **#1** [blocker] — FIXED — upstream fix"), [e])
-    assert any("cross-region FIXED trusted" in l for l in log)
+    assert any("FIXED trusted" in l for l in log)
+
+
+# --- CROSS-FILE fix: the qai-be #1422 false-block --------------------------
+# A blocker anchored at the SYMPTOM/read site (`config/services.php`) whose fix
+# lands in a DIFFERENT file it references in prose (`scripts/after_install.sh`).
+# The anchor file is never touched → the old single-anchor file_touched read
+# False → the verifier's genuine FIXED was rewritten to NOT FIXED and the promote
+# was blocked while the header said "all blockers resolved". Now file_touched
+# considers every file the finding REFERENCES, so the cross-file fix is honored.
+_XFILE_SHA = "47be08d307f8c45faf0fc69b73f46398b23be64d"
+_XFILE_PRIOR = (
+    "## Code Review\n\n### Blockers\n\n"
+    "**1. `SVC_CALLBACK_BASE_URL` never plumbed through `scripts/after_install.sh`**\n\n"
+    f"[`config/services.php#L126-L128`](https://github.com/o/r/blob/{_XFILE_SHA}/config/services.php#L126-L128)"
+    " — the new `env('SVC_CALLBACK_BASE_URL')` read has no entry in "
+    "`scripts/after_install.sh`'s secret block, so it never reaches staging.\n\n"
+    f"Reviewed at: {_XFILE_SHA}\n"
+)
+# Dev fixed it in the WIRING file (+ a sibling), NOT in the anchor file.
+_XFILE_DIFF = (
+    "diff --git a/scripts/after_install.sh b/scripts/after_install.sh\n"
+    "--- a/scripts/after_install.sh\n+++ b/scripts/after_install.sh\n"
+    "@@ -340,3 +340,4 @@ secrets\n ctx\n"
+    "+SVC_CALLBACK_BASE_URL=$(echo \"$S\" | jq -r '.SVC_CALLBACK_BASE_URL // empty')\n more\n"
+)
+
+
+def test_cross_file_fix_honored_via_referenced_prose_path():
+    led = build_carry_forward_ledger(_XFILE_PRIOR, _XFILE_DIFF, _XFILE_SHA)
+    e1 = led[0]
+    # anchor (config/services.php) UNCHANGED, but a REFERENCED file
+    # (scripts/after_install.sh, named in prose) was touched.
+    assert e1.change == UNCHANGED and e1.file_touched is True
+    out, log = pin_and_resurrect(
+        _rr_body("- **#1** [blocker] — FIXED — after_install.sh now extracts it; verified vs source"),
+        led)
+    assert not _gates(out)                                    # APPROVE — no false block
+    assert "- **#1** [blocker] — FIXED" in out                # FIXED honored, not rewritten
+    assert any("FIXED trusted" in l for l in log)
+
+
+def test_bare_basename_alone_does_not_credit_a_fix():
+    # Scope guard: a finding that references ONLY a bare basename (`SvcGrader.php`,
+    # no path) must NOT be credited by an unrelated touch — too loose to match
+    # safely. Anchor file untouched + only-basename prose → file_touched=False →
+    # the fake FIXED is still rewritten and gates.
+    prior = (
+        "## Code Review\n\n### Blockers\n\n"
+        "**1. bug touched in `SvcGrader.php`**\n\n"
+        f"[`config/services.php#L1`](https://github.com/o/r/blob/{_XFILE_SHA}/config/services.php#L1) — x\n\n"
+        f"Reviewed at: {_XFILE_SHA}\n"
+    )
+    led = build_carry_forward_ledger(prior, _XFILE_DIFF, _XFILE_SHA)  # touches after_install.sh only
+    assert led[0].file_touched is False                       # bare basename not matched
+    out, _ = pin_and_resurrect(_rr_body("- **#1** [blocker] — FIXED — trust me"), led)
+    assert "NOT FIXED" in out and _gates(out)
+
+
+def test_pin_rewrite_appends_self_explaining_marker():
+    # (B) A genuine FIXED→NOT FIXED rewrite must annotate the line so the label
+    # doesn't silently contradict the retained "fixed" rationale (the #1422
+    # confusion). Marker is inert to the gate (STATUS token still parses).
+    from verdict import _PIN_REWRITE_MARKER
+    fake = _ledger_entry(1, "blocker", "NOT FIXED", change=UNCHANGED, file_touched=False)
+    out, _ = pin_and_resurrect(
+        _rr_body("- **#1** [blocker] — FIXED — the narrative says it's resolved"), [fake])
+    assert _PIN_REWRITE_MARKER in out                         # marker appended
+    assert _gates(out)                                        # still gates (real protection intact)
+    # gate parses the STATUS token, unaffected by the tail marker
+    assert extract_prior_statuses(out) == [(1, "blocker", "NOT FIXED")]
+
+
+def test_referenced_file_touched_exact_match_only():
+    # Medium #1 (air review of this fix): _referenced_file_touched matches by EXACT
+    # repo path only — a loose suffix would let a same-basename file in a DIFFERENT
+    # directory credit the wrong finding. Both sides are repo-root-relative full
+    # paths, so exact is correct.
+    from verdict import _referenced_file_touched, parse_changed_lines
+    diff = ("diff --git a/app/Services/Grading/SvcGrader.php b/app/Services/Grading/SvcGrader.php\n"
+            "--- a/app/Services/Grading/SvcGrader.php\n+++ b/app/Services/Grading/SvcGrader.php\n"
+            "@@ -10,2 +10,3 @@ class\n x\n+ y\n")
+    idx = parse_changed_lines(diff)
+    assert _referenced_file_touched({"app/Services/Grading/SvcGrader.php"}, idx) is True   # exact
+    assert _referenced_file_touched({"Grading/SvcGrader.php"}, idx) is False   # partial/suffix NOT credited
+    assert _referenced_file_touched({"other/dir/SvcGrader.php"}, idx) is False  # same basename, diff dir
+    assert _referenced_file_touched(set(), idx) is False                        # no refs
+
+
+def test_extract_finding_files_paths_only():
+    from verdict import extract_finding_files
+    body = (
+        "**1. x**\n\n"
+        f"[`src/a.py#L1`](https://github.com/o/r/blob/{_XFILE_SHA}/src/a.py#L1) — refs "
+        "`scripts/deploy.sh` and bare `Helper.php` and a non-path `jq -r`.\n\n"
+    )
+    files = extract_finding_files(body, _XFILE_SHA)[1]
+    assert "src/a.py" in files                                # blob-link anchor
+    assert "scripts/deploy.sh" in files                       # backtick path (has /)
+    assert "Helper.php" not in files                          # bare basename excluded
+    assert not any(" " in f for f in files)                   # no prose fragments
 
 
 # --- #198 origin-anchor: un-poison round-3+ carried fixes (gate-safe) -------
@@ -690,7 +790,7 @@ _OA_ORIGIN_DIFF = ("diff --git a/svc.py b/svc.py\n--- a/svc.py\n+++ b/svc.py\n"
 
 
 def _oa_resolver(num):
-    return (_OA_ORIGIN_SHA, ("svc.py", 5, 5), parse_changed_lines(_OA_ORIGIN_DIFF)) if num == 1 else None
+    return (_OA_ORIGIN_SHA, ("svc.py", 5, 5), parse_changed_lines(_OA_ORIGIN_DIFF), {"svc.py"}) if num == 1 else None
 
 
 def test_origin_anchor_off_is_v1_number_identity():
@@ -716,7 +816,7 @@ def test_origin_anchor_unpoisons_round3_carried_fix():
     assert led_v2[0].origin_sha == _OA_ORIGIN_SHA
     pinned, log = pin_and_resurrect(emitted, led_v2)
     assert not _gates(pinned)                                     # un-poisoned → APPROVE
-    assert any("cross-region FIXED trusted" in l for l in log)
+    assert any("FIXED trusted" in l for l in log)
 
 
 def test_origin_anchor_holds_when_file_untouched_in_origin_window():
@@ -726,7 +826,7 @@ def test_origin_anchor_holds_when_file_untouched_in_origin_window():
     def resolver(num):
         d = ("diff --git a/elsewhere.py b/elsewhere.py\n--- a/elsewhere.py\n"
              "+++ b/elsewhere.py\n@@ -1,1 +1,1 @@\n-x\n+y\n")
-        return (_OA_ORIGIN_SHA, ("svc.py", 5, 5), parse_changed_lines(d)) if num == 1 else None
+        return (_OA_ORIGIN_SHA, ("svc.py", 5, 5), parse_changed_lines(d), {"svc.py"}) if num == 1 else None
     led = build_carry_forward_ledger(_OA_R3_PRIOR, "", "dddd00000000", origin_resolver=resolver)
     assert led[0].change == UNCHANGED and led[0].file_touched is False
     out, plog = pin_and_resurrect(_rr_body("- **#1** [blocker] — FIXED — claims fixed"), led)
@@ -738,7 +838,7 @@ def test_origin_anchor_line_changed_is_honored():
     # FIXED→NOT FIXED rewrite never fires (change==CHANGED) → honored.
     def resolver(num):
         d = "diff --git a/svc.py b/svc.py\n--- a/svc.py\n+++ b/svc.py\n@@ -5,1 +5,1 @@\n-old5\n+new5\n"
-        return (_OA_ORIGIN_SHA, ("svc.py", 5, 5), parse_changed_lines(d)) if num == 1 else None
+        return (_OA_ORIGIN_SHA, ("svc.py", 5, 5), parse_changed_lines(d), {"svc.py"}) if num == 1 else None
     led = build_carry_forward_ledger(_OA_R3_PRIOR, "", "dddd00000000", origin_resolver=resolver)
     assert led[0].change == CHANGED
     assert not _gates(pin_and_resurrect(_rr_body("- **#1** [blocker] — FIXED — fixed at the flagged line"), led)[0])
@@ -758,9 +858,10 @@ def test_find_origin_walks_chain_to_oldest_anchor():
           "Reviewed at: aaaa000000000000000000000000000000000000\n")
     chain = [(r1, "aaaa000000000000000000000000000000000000"),
              (_OA_R3_PRIOR, "dddd000000000000000000000000000000000000")]
-    sha, loc = find_origin(chain, 1)
+    sha, loc, files = find_origin(chain, 1)
     assert sha == "aaaa000000000000000000000000000000000000" and loc[0] == "svc.py"
-    assert find_origin(chain, 99) == (None, None)               # no anchor → fall back
+    assert "svc.py" in files                                    # referenced-files set (anchor incl.)
+    assert find_origin(chain, 99) == (None, None, set())        # no anchor → fall back
 
 
 # --- #198 CLI origin-anchor wiring: file-backed resolver (review.md Step 11.5) --
@@ -789,7 +890,7 @@ def test_file_origin_resolver_present_diff_unpoisons(tmp_path):
     assert led[0].change == UNCHANGED and led[0].file_touched is True
     pinned, log = pin_and_resurrect(
         _rr_body("- **#1** [blocker] — FIXED — fixed earlier round"), led)
-    assert not _gates(pinned) and any("cross-region FIXED trusted" in l for l in log)
+    assert not _gates(pinned) and any("FIXED trusted" in l for l in log)
 
 
 def test_file_origin_resolver_missing_diff_is_number_identity(tmp_path):
@@ -799,6 +900,35 @@ def test_file_origin_resolver_missing_diff_is_number_identity(tmp_path):
     assert resolver(1) is None
     led = build_carry_forward_ledger(_OA_R3_PRIOR, "", "dddd00000000", origin_resolver=resolver)
     assert led[0].change == INDETERMINATE and led[0].file_touched is False
+
+
+def test_round3_origin_cross_file_fix_honored(tmp_path):
+    # #244 round-3+ parity: a carried blocker whose ORIGIN finding is anchored at the
+    # read site (svc.py) but references the WIRING file it was fixed in
+    # (`scripts/wire.sh`). The origin..head diff touches wire.sh, NOT svc.py → the
+    # referenced-file set credits it → cross-FILE FIXED honored, same as round-2.
+    # Before this the round-3+ path used the single-anchor check → would rewrite it
+    # to NOT FIXED while the verifier's narrative said fixed (the #244 medium).
+    origin_body = (
+        "## Code Review\n\n### Blockers\n\n"
+        "**1. env var not plumbed through `scripts/wire.sh`**\n\n"
+        f"[`svc.py#L5`](https://github.com/o/r/blob/{_OA_ORIGIN_SHA}/svc.py#L5) — read site has no wiring\n\n"
+        f"Reviewed at: {_OA_ORIGIN_SHA}\n"
+    )
+    chain = [(origin_body, _OA_ORIGIN_SHA),
+             (_OA_R3_PRIOR, "dddd000000000000000000000000000000000000")]
+    origin_diff = ("diff --git a/scripts/wire.sh b/scripts/wire.sh\n"
+                   "--- a/scripts/wire.sh\n+++ b/scripts/wire.sh\n"
+                   "@@ -10,2 +10,3 @@\n x\n+ ENV=$(secret)\n")
+    (tmp_path / f"{_OA_ORIGIN_SHA[:12]}.diff").write_text(origin_diff)
+    resolver = make_file_origin_resolver(chain, str(tmp_path))
+    res = resolver(1)
+    assert res and res[3] == {"svc.py", "scripts/wire.sh"}          # anchor + prose ref
+    led = build_carry_forward_ledger(_OA_R3_PRIOR, "", "dddd00000000", origin_resolver=resolver)
+    assert led[0].change == UNCHANGED and led[0].file_touched is True   # cross-file honored (was False)
+    pinned, log = pin_and_resurrect(
+        _rr_body("- **#1** [blocker] — FIXED — wired in scripts/wire.sh; verified vs source"), led)
+    assert not _gates(pinned) and any("FIXED trusted" in l for l in log)
 
 
 def _pin_cli(tmp_path, body, *, origin):

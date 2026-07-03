@@ -844,6 +844,62 @@ def extract_fresh_finding_locations(body: str, base_sha: str) -> dict:
     return out
 
 
+# A backtick-wrapped token that looks like a repo file path (`.ext` suffix). We
+# require a `/` at match time (a bare `File.php` basename is too loose to match a
+# touched path safely). Captures prose file references beyond the blob-link anchor.
+_FILE_PATH_TOKEN_RE = re.compile(r"`([A-Za-z0-9_][\w./-]*\.[A-Za-z0-9]+)`")
+
+
+def extract_finding_files(body: str, base_sha: str) -> dict:
+    """`{num: set(referenced repo file paths)}` for a FRESH body's findings — the
+    union of each finding's blob-link anchor paths (SHA-validated) and the
+    backtick-wrapped path-shaped tokens in its prose.
+
+    Widens the round-2 cross-region exemption: a blocker can be legitimately
+    FIXED by editing a file the finding REFERENCES that is NOT its primary
+    blob-link anchor — e.g. a finding anchored at the symptom/read site
+    (`config/services.php`) whose fix lands in the wiring file
+    (`scripts/after_install.sh`). Keying `file_touched` on this SET (not just the
+    single anchor) stops `pin_and_resurrect` from rewriting a genuine cross-FILE
+    FIXED to NOT FIXED (the qai-be #1422 false-block). Only ever called on a
+    FRESH body (round-2 path), same as extract_fresh_finding_locations."""
+    out: dict = {}
+    if not body:
+        return out
+    prefix = (base_sha or "").lower()[:_SHA_PREFIX_LEN]
+    nums = list(_FRESH_FINDING_RE.finditer(body))
+    for i, nm in enumerate(nums):
+        num = int(nm.group(1))
+        seg_end = nums[i + 1].start() if i + 1 < len(nums) else len(body)
+        files: set = set()
+        for am in _BLOB_ANCHOR_RE.finditer(body, nm.end(), seg_end):
+            # SHA-validate the blob anchor, same as extract_fresh_finding_locations
+            # (no base_sha → recover no blob path; prose tokens below need no SHA).
+            if prefix and am.group(1).lower()[:_SHA_PREFIX_LEN] == prefix:
+                files.add(am.group(2))
+        for tm in _FILE_PATH_TOKEN_RE.finditer(body, nm.end(), seg_end):
+            tok = tm.group(1)
+            if "/" in tok:                      # require a path, not a bare basename
+                files.add(tok)
+        out[num] = files
+    return out
+
+
+def _referenced_file_touched(files: set, index: ChangedIndex) -> bool:
+    """True iff ANY referenced repo path has a real content hunk in the inter-diff,
+    by EXACT path match. Both sides are repo-root-relative full paths — a blob-link
+    anchor / backtick'd prose path vs a `diff --git` path — so exact match is
+    correct and avoids a loose suffix crediting a same-basename file in a different
+    directory (#244 review). Keys on non-empty `hunk_old` (a real `@@` hunk), NOT
+    mere `present`, so a metadata-only segment can't qualify. Over-crediting is the
+    SAFE direction (it only honors a verifier's already-source-grounded FIXED, never
+    un-gates a dropped/downgraded finding — those guards are independent)."""
+    if not files:
+        return False
+    touched = {f for f, spanned in index.hunk_old.items() if spanned}
+    return bool(files & touched)
+
+
 class LedgerEntry:
     __slots__ = ("num", "prior_severity", "prior_status", "location", "change",
                  "file_touched", "origin_sha")
@@ -873,12 +929,14 @@ class LedgerEntry:
 
 def find_origin(chain, finding_num: int):
     """Origin-anchor (#198): walk the prior-review CHAIN oldest-first and return
-    `(origin_sha, location)` for the OLDEST round that raised `#N` as a finding with
-    a recoverable `**N.**` anchor (`extract_fresh_finding_locations`). The
-    carry-forward contract preserves a finding's NUMBER across rounds, so a round-3+
-    carried `#N` traces to the same `#N` where it was first a NEW finding. Returns
-    `(None, None)` when no anchor is recoverable → caller falls back to
-    number-identity (conservative).
+    `(origin_sha, location, referenced_files)` for the OLDEST round that raised `#N`
+    as a finding with a recoverable `**N.**` anchor (`extract_fresh_finding_locations`).
+    The carry-forward contract preserves a finding's NUMBER across rounds, so a
+    round-3+ carried `#N` traces to the same `#N` where it was first a NEW finding.
+    Returns `(None, None, set())` when no anchor is recoverable → caller falls back
+    to number-identity (conservative). `referenced_files` = every file that origin
+    finding is about (its anchor + backtick'd prose paths, `extract_finding_files`),
+    so round-3+ honors a cross-FILE fix the same way round-2 does (qai-be #1422/#244).
 
     `chain` is a list of `(review_body, reviewed_sha)` OLDEST-FIRST. Pure — the
     caller (which holds the comments + git/API) builds the chain, runs the
@@ -891,8 +949,9 @@ def find_origin(chain, finding_num: int):
             continue
         locs = extract_fresh_finding_locations(body, sha)
         if finding_num in locs:
-            return sha, locs[finding_num]
-    return None, None
+            files = extract_finding_files(body, sha).get(finding_num, set())
+            return sha, locs[finding_num], files
+    return None, None, set()
 
 
 def make_file_origin_resolver(chain, diffs_dir):
@@ -910,11 +969,12 @@ def make_file_origin_resolver(chain, diffs_dir):
     `chain` is `[(body, reviewed_sha)]` OLDEST-FIRST (the orchestrator builds it
     from the prior bot-review comments, same anti-spoof author filter as the
     baseline selection). Returns a `resolver(num) -> (origin_sha, location,
-    ChangedIndex) | None` matching `build_carry_forward_ledger`'s contract."""
+    ChangedIndex, referenced_files) | None` matching `build_carry_forward_ledger`'s
+    contract."""
     cache: dict = {}
 
     def resolver(num):
-        sha, loc = find_origin(chain, num)
+        sha, loc, files = find_origin(chain, num)
         if not (sha and loc):
             return None
         key = sha[:_SHA_PREFIX_LEN]
@@ -925,7 +985,7 @@ def make_file_origin_resolver(chain, diffs_dir):
             except (OSError, UnicodeDecodeError):
                 cache[key] = None        # diff absent/unreadable ⇒ origin not ancestor-confirmed
         idx = cache[key]
-        return (sha, loc, idx) if idx is not None else None
+        return (sha, loc, idx, files) if idx is not None else None
 
     return resolver
 
@@ -980,11 +1040,15 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
         for num, sev, status in triples:
             loc, change, file_touched, origin_sha = None, INDETERMINATE, False, None
             if origin_resolver is not None:
-                res = origin_resolver(num)   # (origin_sha, location, ChangedIndex) | None
+                res = origin_resolver(num)   # (origin_sha, location, ChangedIndex, referenced_files) | None
                 if res:
-                    origin_sha, loc, oidx = res
+                    origin_sha, loc, oidx, ofiles = res
                     change = finding_changed(loc, oidx) if loc else INDETERMINATE
-                    file_touched = bool(loc) and bool(oidx.hunk_old.get(loc[0]))
+                    # Cross-FILE parity with round-2: honor a fix in ANY file the
+                    # origin finding references (its anchor is in the set), not just
+                    # the single anchor — so a round-3+ cross-file fix isn't rewritten
+                    # to NOT FIXED while the verifier's narrative says fixed (#244).
+                    file_touched = _referenced_file_touched(ofiles, oidx)
             out.append(LedgerEntry(num, sev, status, loc, change, file_touched, origin_sha))
         return out
     # Round 2: fresh prior — line evidence is safe and honors real fixes.
@@ -992,20 +1056,22 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
     if not fresh:
         return []
     locs = extract_fresh_finding_locations(prior_body, base_sha or "")
+    files_by_num = extract_finding_files(prior_body, base_sha or "")
     index = parse_changed_lines(inter_diff or "")
     ledger = []
     for num, sev, status in fresh:
         loc = locs.get(num)
         change = finding_changed(loc, index) if loc else INDETERMINATE
-        # File-level signal: did the dev make a real CODE edit to this finding's
-        # file? A genuine cross-region fix changes a hunk in the file (just not
-        # the flagged line); a bogus FIXED on code the dev never opened leaves
-        # the file absent. We key on `hunk_old` (a real `@@` hunk), NOT mere
-        # `present` membership: a metadata-only segment (mode 100644->100755, a
-        # binary recreation) lands the path in `present` with NO hunk and no
-        # content change, which must NOT qualify for the cross-region exemption
-        # (it would trust a FIXED on byte-identical source).
-        file_touched = bool(loc) and bool(index.hunk_old.get(loc[0]))
+        # File-level signal: did the dev make a real CODE edit to a file this
+        # finding is about? A genuine cross-region (or cross-FILE) fix changes a
+        # hunk in one of the finding's referenced files (just not the flagged
+        # line); a bogus FIXED on code the dev never opened leaves them all
+        # absent. We consider EVERY file the finding references (its anchor +
+        # backtick'd prose paths), not just the single blob-link anchor, so a
+        # blocker flagged at the symptom/read site but fixed in the wiring file
+        # (qai-be #1422) is honored, not rewritten. Keys on a real `@@` hunk (not
+        # mere `present`), so a metadata-only segment can't qualify.
+        file_touched = _referenced_file_touched(files_by_num.get(num, set()), index)
         ledger.append(LedgerEntry(num, sev, status, loc, change, file_touched))
     return ledger
 
@@ -1130,6 +1196,18 @@ def _ensure_rereview_shape(body: str, log: list, resurrected: list) -> str:
     return body.rstrip("\n") + "\n\n### Previous Findings Status\n\n" + block + "\n"
 
 
+# Appended to a status line when the pin rewrites a verifier FIXED→NOT FIXED, so
+# the label is self-explaining rather than contradicting its own "fixed" rationale
+# (the qai-be #1422 report). Inert to the gate — the STATUS token is parsed, the
+# tail is free prose.
+_PIN_REWRITE_MARKER = (
+    "[air: pinned NOT FIXED — the verifier judged this fixed, but the re-review "
+    "inter-diff shows no code change to this finding's file(s); verify manually. "
+    "Clears on a later review once the fix lands in the inter-diff, or via a "
+    "DISPUTED reply.]"
+)
+
+
 def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
     """The hard guard. Given the emitted re-review body + the ledger:
     pin each prior finding's severity to max(prior, emitted) unless its code
@@ -1200,13 +1278,18 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
         if (status == "FIXED" and entry.change != CHANGED and not cross_region_fix
                 and _SEVERITY_RANK.get(new_sev, 3) >= 2):
             new_status = "NOT FIXED"
+            # Annotate the rewrite so the label doesn't silently contradict the
+            # verifier's (retained) "fixed" rationale + the summary header — the
+            # reader sees WHY it reads NOT FIXED (qai-be #1422 confusion). The gate
+            # parses only the STATUS token, so the marker in the tail is inert.
+            tail = f"{tail.rstrip()} {_PIN_REWRITE_MARKER}"
             log.append(f"[pin] #{num} FIXED->NOT FIXED (no cross-region edit; change={entry.change}, file_touched={entry.file_touched})")
         elif (status == "FIXED" and cross_region_fix
                 and _SEVERITY_RANK.get(new_sev, 3) >= 2):
             # Trace the trust decision — every other rewrite logs, so the
             # exemption must too (a silent honor is indistinguishable from "no
             # pin needed" in a post-incident audit).
-            log.append(f"[pin] #{num} cross-region FIXED trusted (change=UNCHANGED, file_touched=True; verifier-judged)")
+            log.append(f"[pin] #{num} cross-region/cross-file FIXED trusted (change=UNCHANGED, file_touched=True; verifier-judged)")
         elif status == "DEFERRED":
             if new_sev == "blocker":
                 new_status = "NOT FIXED"

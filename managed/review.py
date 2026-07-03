@@ -292,11 +292,11 @@ def make_origin_resolver(comments, bot_login, head_sha, repo, token):
         return idx
 
     def resolver(num):
-        origin_sha, loc = find_origin(chain, num)
+        origin_sha, loc, files = find_origin(chain, num)
         if not (origin_sha and loc):
             return None
         idx = _origin_index(origin_sha)
-        return (origin_sha, loc, idx) if idx is not None else None
+        return (origin_sha, loc, idx, files) if idx is not None else None
 
     return resolver
 
