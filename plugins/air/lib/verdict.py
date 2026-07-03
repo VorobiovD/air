@@ -886,17 +886,18 @@ def extract_finding_files(body: str, base_sha: str) -> dict:
 
 
 def _referenced_file_touched(files: set, index: ChangedIndex) -> bool:
-    """True iff ANY referenced repo path has a real content hunk in the inter-diff.
-    Matches on exact path or `touched.endswith('/' + ref)` (a partial/suffix ref of
-    a longer real path). Keys on non-empty `hunk_old` (a real `@@` hunk), NOT mere
-    `present`, matching the single-anchor test it generalizes — a metadata-only
-    segment must not qualify. Over-crediting is the SAFE direction (it can only
-    honor a verifier's already-source-grounded FIXED, never un-gate a dropped or
-    downgraded finding — those guards are independent)."""
+    """True iff ANY referenced repo path has a real content hunk in the inter-diff,
+    by EXACT path match. Both sides are repo-root-relative full paths — a blob-link
+    anchor / backtick'd prose path vs a `diff --git` path — so exact match is
+    correct and avoids a loose suffix crediting a same-basename file in a different
+    directory (#244 review). Keys on non-empty `hunk_old` (a real `@@` hunk), NOT
+    mere `present`, so a metadata-only segment can't qualify. Over-crediting is the
+    SAFE direction (it only honors a verifier's already-source-grounded FIXED, never
+    un-gates a dropped/downgraded finding — those guards are independent)."""
     if not files:
         return False
-    touched = [f for f, spanned in index.hunk_old.items() if spanned]
-    return any(ref == t or t.endswith("/" + ref) for ref in files for t in touched)
+    touched = {f for f, spanned in index.hunk_old.items() if spanned}
+    return bool(files & touched)
 
 
 class LedgerEntry:
@@ -928,12 +929,14 @@ class LedgerEntry:
 
 def find_origin(chain, finding_num: int):
     """Origin-anchor (#198): walk the prior-review CHAIN oldest-first and return
-    `(origin_sha, location)` for the OLDEST round that raised `#N` as a finding with
-    a recoverable `**N.**` anchor (`extract_fresh_finding_locations`). The
-    carry-forward contract preserves a finding's NUMBER across rounds, so a round-3+
-    carried `#N` traces to the same `#N` where it was first a NEW finding. Returns
-    `(None, None)` when no anchor is recoverable → caller falls back to
-    number-identity (conservative).
+    `(origin_sha, location, referenced_files)` for the OLDEST round that raised `#N`
+    as a finding with a recoverable `**N.**` anchor (`extract_fresh_finding_locations`).
+    The carry-forward contract preserves a finding's NUMBER across rounds, so a
+    round-3+ carried `#N` traces to the same `#N` where it was first a NEW finding.
+    Returns `(None, None, set())` when no anchor is recoverable → caller falls back
+    to number-identity (conservative). `referenced_files` = every file that origin
+    finding is about (its anchor + backtick'd prose paths, `extract_finding_files`),
+    so round-3+ honors a cross-FILE fix the same way round-2 does (qai-be #1422/#244).
 
     `chain` is a list of `(review_body, reviewed_sha)` OLDEST-FIRST. Pure — the
     caller (which holds the comments + git/API) builds the chain, runs the
@@ -946,8 +949,9 @@ def find_origin(chain, finding_num: int):
             continue
         locs = extract_fresh_finding_locations(body, sha)
         if finding_num in locs:
-            return sha, locs[finding_num]
-    return None, None
+            files = extract_finding_files(body, sha).get(finding_num, set())
+            return sha, locs[finding_num], files
+    return None, None, set()
 
 
 def make_file_origin_resolver(chain, diffs_dir):
@@ -965,11 +969,12 @@ def make_file_origin_resolver(chain, diffs_dir):
     `chain` is `[(body, reviewed_sha)]` OLDEST-FIRST (the orchestrator builds it
     from the prior bot-review comments, same anti-spoof author filter as the
     baseline selection). Returns a `resolver(num) -> (origin_sha, location,
-    ChangedIndex) | None` matching `build_carry_forward_ledger`'s contract."""
+    ChangedIndex, referenced_files) | None` matching `build_carry_forward_ledger`'s
+    contract."""
     cache: dict = {}
 
     def resolver(num):
-        sha, loc = find_origin(chain, num)
+        sha, loc, files = find_origin(chain, num)
         if not (sha and loc):
             return None
         key = sha[:_SHA_PREFIX_LEN]
@@ -980,7 +985,7 @@ def make_file_origin_resolver(chain, diffs_dir):
             except (OSError, UnicodeDecodeError):
                 cache[key] = None        # diff absent/unreadable ⇒ origin not ancestor-confirmed
         idx = cache[key]
-        return (sha, loc, idx) if idx is not None else None
+        return (sha, loc, idx, files) if idx is not None else None
 
     return resolver
 
@@ -1035,11 +1040,15 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
         for num, sev, status in triples:
             loc, change, file_touched, origin_sha = None, INDETERMINATE, False, None
             if origin_resolver is not None:
-                res = origin_resolver(num)   # (origin_sha, location, ChangedIndex) | None
+                res = origin_resolver(num)   # (origin_sha, location, ChangedIndex, referenced_files) | None
                 if res:
-                    origin_sha, loc, oidx = res
+                    origin_sha, loc, oidx, ofiles = res
                     change = finding_changed(loc, oidx) if loc else INDETERMINATE
-                    file_touched = bool(loc) and bool(oidx.hunk_old.get(loc[0]))
+                    # Cross-FILE parity with round-2: honor a fix in ANY file the
+                    # origin finding references (its anchor is in the set), not just
+                    # the single anchor — so a round-3+ cross-file fix isn't rewritten
+                    # to NOT FIXED while the verifier's narrative says fixed (#244).
+                    file_touched = _referenced_file_touched(ofiles, oidx)
             out.append(LedgerEntry(num, sev, status, loc, change, file_touched, origin_sha))
         return out
     # Round 2: fresh prior — line evidence is safe and honors real fixes.
