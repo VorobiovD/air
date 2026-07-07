@@ -158,6 +158,10 @@ def should_request_changes(review_body: str, floor_exposures: bool = True) -> tu
       A developer can clear a blocker gate by either fixing, explicitly
       disputing (verifier marks DISPUTED), or — for prompt-edge cases —
       escalating to a human reviewer.
+      A body takes the re-review branch when it carries the `(Re-review)`
+      header OR a `### Previous Findings Status` section (`_is_rereview_body`
+      — M7: header-only detection let a suffix-less re-review body fall to the
+      fresh branch and un-gate its NOT FIXED prior blockers).
 
     `floor_exposures=False` (kill switch, wired to AIR_CATEGORY_FLOOR by
     callers) disables the floor. The floor is inert on bodies without
@@ -168,7 +172,7 @@ def should_request_changes(review_body: str, floor_exposures: bool = True) -> tu
     floored, floored_cats = count_category_floored(review_body) if floor_exposures else (0, [])
     floor_note = f"; +{floored} floored exposure(s) [{', '.join(floored_cats)}]" if floored else ""
     exposure_reason = f"{floored} blocker-class exposure(s) [{', '.join(floored_cats)}] floored to blocker"
-    if _REREVIEW_HEADER_RE.search(review_body):
+    if _is_rereview_body(review_body):
         unfixed = _count_gating_unfixed(review_body)
         if blockers > 0 and unfixed > 0:
             return True, f"{blockers} new blocker(s), {unfixed} prior blocker(s) still unfixed{floor_note}"
@@ -411,6 +415,28 @@ _BLOCKER_DEFERRED_STATUS = "DEFERRED"
 
 
 _REREVIEW_HEADER_RE = re.compile(r"^##\s+Code Review\s*\(Re-review\)", re.MULTILINE)
+_PRIOR_STATUS_SECTION_RE = re.compile(r"^###\s+Previous Findings Status\s*$", re.MULTILINE)
+
+
+def _is_rereview_body(body: str) -> bool:
+    """True when the gate must take the RE-REVIEW branch: the body carries the
+    `## Code Review (Re-review)` header OR a `### Previous Findings Status`
+    section.
+
+    The section is the load-bearing second signal (M7): a verifier that emits
+    prior-status lines but forgets the `(Re-review)` header suffix used to fall
+    to the FRESH branch, which never counts `- **#N** [blocker] — NOT FIXED`
+    lines — silently un-gating an unfixed prior blocker. The header repair in
+    pin_and_resurrect (_ensure_rereview_shape) exists, but it runs only when
+    the ledger is enabled AND non-empty, so AIR_LEDGER_PIN=0 (or an
+    unparseable prior body → empty ledger) disabled a repair the gate itself
+    depended on. Detecting the section here fixes branch selection for ALL
+    paths (managed, headless, CLI --decide) at the single gating source.
+
+    Monotone by construction: the re-review branch = the fresh gate
+    (count_blockers + floor) PLUS unfixed-prior counting — widening detection
+    can only ADD gate reasons, never remove one."""
+    return bool(_REREVIEW_HEADER_RE.search(body) or _PRIOR_STATUS_SECTION_RE.search(body))
 
 
 # Cap the prior review body before inlining into specialist prompts. A noisy
@@ -1197,7 +1223,7 @@ def _ensure_rereview_shape(body: str, log: list, resurrected: list) -> str:
     if not resurrected:
         return body
     block = "\n".join(resurrected)
-    sec = re.search(r"^###\s+Previous Findings Status\s*$", body, re.MULTILINE)
+    sec = _PRIOR_STATUS_SECTION_RE.search(body)
     if sec:
         at = _section_end(body, sec.end())
         return body[:at].rstrip("\n") + "\n" + block + "\n\n" + body[at:]
