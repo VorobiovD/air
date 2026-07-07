@@ -447,7 +447,11 @@ cp "$AIR_TMP/REVIEW-ARCHIVE.md" "$WIKI_DIR/REVIEW-ARCHIVE.md" 2>/dev/null
 if [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/wiki_cap.py" ]; then
   python3 "$AIR_PLUGIN_ROOT/lib/wiki_cap.py" --dir "$WIKI_DIR" >&2
 fi
-cd "$WIKI_DIR" && git add REVIEW.md REVIEW-HISTORY.md PROJECT-PROFILE.md ACCEPTED-PATTERNS.md SEVERITY-CALIBRATION.md GLOSSARY.md REVIEW-ARCHIVE.md && { git diff --quiet --cached || git commit -m "review-learn: cleanup + calibration $(date +%Y-%m-%d)"; } && git push
+# Add per-file, tolerating absent ones: `git add` with ANY missing pathspec
+# stages NOTHING (exit 128) and the && chain aborts — the cp lines above
+# explicitly allow most of these files to not exist yet, so a single-call add
+# lost the whole cleanup AND blocked the Step 7 counter reset (learn re-fires).
+cd "$WIKI_DIR" && for f in REVIEW.md REVIEW-HISTORY.md PROJECT-PROFILE.md ACCEPTED-PATTERNS.md SEVERITY-CALIBRATION.md GLOSSARY.md REVIEW-ARCHIVE.md; do git add "$f" 2>/dev/null || true; done && { git diff --quiet --cached || git commit -m "review-learn: cleanup + calibration $(date +%Y-%m-%d)"; } && git push
 ```
 
 ## Step 7: Update meta
