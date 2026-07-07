@@ -1885,3 +1885,81 @@ def test_review_format_kill_switch(monkeypatch):
     assert "> [!CAUTION]" not in leg and "<details>" not in leg
     # legacy fresh skeleton is preserved verbatim (the flat shape).
     assert "Blockers should be fixed before merge." in leg
+
+
+# ---------------------------------------------------------------------------
+# M7 — re-review branch detection must not depend on the (Re-review) header
+# alone. A verifier body carrying a Previous Findings Status section but a
+# plain `## Code Review` header used to fall to the FRESH branch, which never
+# counts `- **#N** [blocker] — NOT FIXED` → silently un-gated an unfixed prior
+# blocker. The pin's header repair didn't cover it: pin_and_resurrect is
+# skipped entirely under AIR_LEDGER_PIN=0 or an empty ledger.
+# ---------------------------------------------------------------------------
+
+def test_m7_suffixless_rereview_body_still_gates_unfixed_blocker():
+    """The headline regression: same body as test_rereview_unfixed_prior_blocker_gates
+    but WITHOUT the (Re-review) suffix — must still gate (was: APPROVE)."""
+    body = (
+        "## Code Review\n\n### Previous Findings Status\n\n"
+        "- **#1** [blocker] — NOT FIXED — still broken\n"
+    )
+    rc, reason = should_request_changes(body)
+    assert rc is True and "prior blocker" in reason
+
+
+def test_m7_gates_independent_of_ledger_pin_killswitch(monkeypatch):
+    """The gate fix must hold with AIR_LEDGER_PIN=0 — the kill switch disables
+    the PIN, and must no longer take the branch-selection repair down with it.
+    (should_request_changes reads no env for branch selection; this locks that.)"""
+    monkeypatch.setenv("AIR_LEDGER_PIN", "0")
+    body = (
+        "## Code Review\n\n### Previous Findings Status\n\n"
+        "- **#1** [blocker] — NOT FIXED — still broken\n"
+    )
+    rc, reason = should_request_changes(body)
+    assert rc is True and "prior blocker" in reason
+
+
+def test_m7_suffixless_clean_rereview_still_approves():
+    """No over-gate: a suffix-less re-review whose priors are all FIXED /
+    non-blocker must still APPROVE — the widened detection only changes WHICH
+    branch runs, and the re-review branch is clean here."""
+    body = (
+        "## Code Review\n\n### Previous Findings Status\n\n"
+        "- **#1** [blocker] — FIXED — addressed\n"
+        "- **#2** [medium] — NOT FIXED — punted, non-gating\n"
+    )
+    rc, reason = should_request_changes(body)
+    assert rc is False and reason == ""
+
+
+def test_m7_fresh_body_without_section_takes_fresh_branch():
+    """A genuinely fresh body (no section, no suffix) is byte-identical to the
+    old gate — blockers gate as 'N blocker(s)', clean approves."""
+    clean = "## Code Review\n\nAll good.\n"
+    assert should_request_changes(clean) == (False, "")
+    with_blocker = "## Code Review\n\n### Blockers\n\n**1. bad** — x\n"
+    rc, reason = should_request_changes(with_blocker)
+    assert rc is True and reason.startswith("1 blocker(s)")  # fresh-branch wording
+
+
+def test_m7_monotone_new_blockers_still_counted_on_suffixless_rereview():
+    """Both signals compose: a suffix-less re-review with a new #### Blockers
+    subsection AND an unfixed prior gates on both."""
+    body = (
+        "## Code Review\n\n### Previous Findings Status\n\n"
+        "- **#1** [blocker] — NOT FIXED — still broken\n\n"
+        "### New Findings\n\n#### Blockers\n\n**2. regression** — x\n"
+    )
+    rc, reason = should_request_changes(body)
+    assert rc is True and "new blocker" in reason and "prior blocker" in reason
+
+
+def test_m7_is_rereview_body_signals():
+    from verdict import _is_rereview_body
+    assert _is_rereview_body("## Code Review (Re-review)\n\nx") is True
+    assert _is_rereview_body("## Code Review\n\n### Previous Findings Status\n\n- **#1** [low] — FIXED — y\n") is True
+    assert _is_rereview_body("## Code Review\n\n### Blockers\n\n**1. b** — z\n") is False
+    # indented / decorated heading is NOT the anchor (line-start h3 exact)
+    assert _is_rereview_body("## Code Review\n\n  ### Previous Findings Status\n") is False
+    assert _is_rereview_body("## Code Review\n\n### Previous Findings Status — extra\n") is False
