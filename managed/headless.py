@@ -874,20 +874,31 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # (only --dry-run, which returns above, was tested). bot_login was resolved
         # up front (for the pr-conversation bot-self filter); reuse it here.
         verdict_body = reason or (NO_APPROVE_VERDICT_BODY if verdict == "COMMENT" else "")
-        submit_review_verdict(args.repo, args.pr_number, bot_token,
-                              event=verdict, body=verdict_body, commit_id=head_sha)
-        # Gate-orphan dismissal needs OUR login to skip our own just-posted verdict.
-        # If we can't resolve it, SKIP dismissal — calling with current_login=None
-        # makes the skip-self guard falsy and dismisses the verdict we just posted,
-        # silently un-gating a REQUEST_CHANGES (the dogfood-caught gate-safety bug).
-        # include_own on a clean no-approve COMMENT: it can't self-supersede our own
-        # prior CHANGES_REQUESTED, so dismiss it too (else a fixed PR stays blocked).
-        if bot_login:
-            dismiss_stale_air_verdicts(args.repo, args.pr_number, bot_token, bot_login,
-                                       _air_bot_logins(), include_own=(verdict == "COMMENT"))
-        else:
-            print("  [warn] bot login unresolved — skipping stale-verdict dismissal "
-                  "(won't risk clearing our own verdict)", file=sys.stderr)
+        # M4: the review comment is already posted, so a transient failure in
+        # the verdict/dismiss POSTs must NOT crash the run — that would skip the
+        # learning write-back below AND show a false-red CI for a live review.
+        # submit_review_verdict uses retry_timeouts=False (a read-timeout RAISES
+        # rather than risk a double-submit), so catch RequestException and let
+        # the next trigger's verdict-backfill re-submit. Parity with review.py.
+        try:
+            submit_review_verdict(args.repo, args.pr_number, bot_token,
+                                  event=verdict, body=verdict_body, commit_id=head_sha)
+            # Gate-orphan dismissal needs OUR login to skip our own just-posted verdict.
+            # If we can't resolve it, SKIP dismissal — calling with current_login=None
+            # makes the skip-self guard falsy and dismisses the verdict we just posted,
+            # silently un-gating a REQUEST_CHANGES (the dogfood-caught gate-safety bug).
+            # include_own on a clean no-approve COMMENT: it can't self-supersede our own
+            # prior CHANGES_REQUESTED, so dismiss it too (else a fixed PR stays blocked).
+            if bot_login:
+                dismiss_stale_air_verdicts(args.repo, args.pr_number, bot_token, bot_login,
+                                           _air_bot_logins(), include_own=(verdict == "COMMENT"))
+            else:
+                print("  [warn] bot login unresolved — skipping stale-verdict dismissal "
+                      "(won't risk clearing our own verdict)", file=sys.stderr)
+        except requests.exceptions.RequestException as e:
+            print(f"  [warn] verdict/dismiss POST failed ({type(e).__name__}: "
+                  f"{str(e)[:120]}) — the review comment is posted; the next "
+                  f"trigger's verdict-backfill will re-submit", file=sys.stderr)
 
     # ---- LEARNING WRITE-BACK (post-review) -------------------------------
     # After the verdict is posted, advance the shared learn cadence — the same tail

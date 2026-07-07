@@ -178,3 +178,15 @@ def test_redact_handles_calledprocess_error_str():
     out = wiki_git._redact(cmd_repr)
     assert "ghp_xyz" not in out
     assert "x-access-token:***@github.com" in out
+
+
+def test_run_timeout_surfaces_as_calledprocesserror():
+    """H3: a hung git command is bounded and re-raised as CalledProcessError
+    (exit 124) so every caller's `except CalledProcessError → return False`
+    path handles it — without this an unbounded wiki push pins the job to the
+    workflow kill."""
+    import subprocess
+    with pytest.raises(subprocess.CalledProcessError) as ei:
+        wiki_git._run(["sleep", "5"], timeout=0.3)
+    assert ei.value.returncode == 124
+    assert "timed out" in (ei.value.stderr or "")

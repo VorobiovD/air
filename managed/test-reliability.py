@@ -23,9 +23,12 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
+import api  # noqa: E402
 import github_client  # noqa: E402
 import session_runner  # noqa: E402
+import setup  # noqa: E402
 import review  # noqa: E402
+import requests as _requests  # noqa: E402
 from verdict import _extract_review_body, should_request_changes  # noqa: E402
 from github_client import PartialPageError, _gh_request, _github_paginate  # noqa: E402
 
@@ -1196,3 +1199,81 @@ def test_usage_limit_string_in_billing_hints():
     # all four billing-classification sites read.
     from session_runner import _BILLING_REASON_HINTS
     assert "specified api usage limits" in _BILLING_REASON_HINTS
+
+
+# ---------------------------------------------------------------------------
+# H2 — api.py timeout / retry / fail-on-partial (Anthropic-platform HTTP)
+# ---------------------------------------------------------------------------
+
+def _patch_api_get(monkeypatch, seq):
+    """Scripted api.requests.get; entries are _Resp or Exception (raised)."""
+    monkeypatch.setattr(api.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(api, "get_headers", lambda **k: {})
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        assert timeout is not None, "api GET must pass an explicit timeout (H2)"
+        item = seq.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(api.requests, "get", fake_get)
+
+
+def test_api_get_retries_5xx_then_raises(monkeypatch):
+    _patch_api_get(monkeypatch, [_Resp(status_code=503, payload={"error": {"message": "svc unavailable"}}) for _ in range(3)])
+    with pytest.raises(RuntimeError, match="failed after 3 attempts"):
+        api._get_with_retry("https://api.anthropic.com/v1/agents", {})
+
+
+def test_api_get_retries_connection_error_then_succeeds(monkeypatch):
+    _patch_api_get(monkeypatch, [
+        _requests.ConnectionError("boom"),
+        _Resp(status_code=200, payload={"data": []}),
+    ])
+    assert api._get_with_retry("u", {}).status_code == 200
+
+
+def test_api_get_returns_4xx_without_retry(monkeypatch):
+    # A 4xx is returned (not retried) — the caller decides its meaning.
+    _patch_api_get(monkeypatch, [_Resp(status_code=404, ok=False)])
+    assert api._get_with_retry("u", {}).status_code == 404
+
+
+def test_api_paginate_raises_on_midwalk_nonok(monkeypatch):
+    """H2: a non-ok response mid-pagination must RAISE, not silently return a
+    partial list (the PartialPageError bug class, for the Anthropic endpoints)."""
+    _patch_api_get(monkeypatch, [
+        _Resp(status_code=200, payload={"data": [{"id": "a"}], "next_page": "p2"}),
+        _Resp(status_code=401, ok=False, payload={"error": {"message": "wrong workspace"}}),  # page 2 auth fail (wrong-workspace key)
+    ])
+    with pytest.raises(RuntimeError, match="partial list"):
+        api._paginate("/agents")
+
+
+def test_api_paginate_full_walk_ok(monkeypatch):
+    _patch_api_get(monkeypatch, [
+        _Resp(status_code=200, payload={"data": [{"id": "a"}], "next_page": "p2"}),
+        _Resp(status_code=200, payload={"data": [{"id": "b"}], "next_page": None}),
+    ])
+    assert [i["id"] for i in api._paginate("/agents")] == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# BUG-2 — setup.find_or_create_environment uses the PAGINATED find (no dup)
+# ---------------------------------------------------------------------------
+
+def test_setup_env_lookup_uses_paginated_find_no_dup(monkeypatch):
+    monkeypatch.setattr(setup, "find_environment", lambda: "env-existing")
+    posted = []
+    monkeypatch.setattr(setup.requests, "post",
+                        lambda *a, **k: posted.append(a) or _Resp(200, {"id": "NEW"}))
+    assert setup.find_or_create_environment() == "env-existing"
+    assert posted == [], "must NOT POST a new environment when one already exists"
+
+
+def test_setup_env_creates_when_absent(monkeypatch):
+    monkeypatch.setattr(setup, "find_environment", lambda: None)
+    monkeypatch.setattr(setup.requests, "post",
+                        lambda *a, **k: _Resp(200, {"id": "env-new"}))
+    assert setup.find_or_create_environment() == "env-new"

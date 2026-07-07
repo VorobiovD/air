@@ -27,9 +27,25 @@ def _redact(s: str) -> str:
     return _TOKEN_URL_RE.sub(r"\1***\2", s or "")
 
 
-def _run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    """Run a git command. Captures stdout+stderr. Raises on non-zero when `check` is True."""
-    return subprocess.run(cmd, cwd=cwd, check=check, capture_output=True, text=True)
+def _run(cmd: list[str], cwd: Path | None = None, check: bool = True,
+         timeout: float = 120) -> subprocess.CompletedProcess:
+    """Run a git command. Captures stdout+stderr. Raises on non-zero when
+    `check` is True.
+
+    Bounded at `timeout` seconds (audit H3): an unbounded wiki clone/pull/push
+    to a black-holed remote used to hang the review tail or a learn run until
+    the 95-min workflow kill. A timeout is surfaced as a CalledProcessError
+    (exit 124) so every caller's existing `except CalledProcessError → return
+    False` path handles it — a hung wiki push after a posted review must fail
+    the counter/mirror step, never the whole job."""
+    try:
+        return subprocess.run(cmd, cwd=cwd, check=check, capture_output=True,
+                              text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        raise subprocess.CalledProcessError(
+            124, cmd, output=(e.output or ""),
+            stderr=f"git timed out after {timeout}s",
+        ) from e
 
 
 def clone_wiki(wiki_url: str, dest: Path, depth: int = 1) -> bool:
