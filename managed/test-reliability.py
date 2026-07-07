@@ -1274,6 +1274,10 @@ def test_setup_env_lookup_uses_paginated_find_no_dup(monkeypatch):
 
 def test_setup_env_creates_when_absent(monkeypatch):
     monkeypatch.setattr(setup, "find_environment", lambda: None)
+    # The create path calls get_headers() BEFORE requests.post — patch it too,
+    # or the test sys.exit(1)s in CI where no ANTHROPIC_API_KEY is set (it
+    # passed locally only via env leakage from the developer shell).
+    monkeypatch.setattr(setup, "get_headers", lambda **k: {})
     monkeypatch.setattr(setup.requests, "post",
                         lambda *a, **k: _Resp(200, {"id": "env-new"}))
     assert setup.find_or_create_environment() == "env-new"
