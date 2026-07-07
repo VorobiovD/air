@@ -1,0 +1,13 @@
+# Pytest configuration. air has no build system or packaging — this file exists
+# ONLY to configure test collection.
+#
+# The managed suites are named `test-<name>.py` (hyphen), which pytest's DEFAULT
+# `python_files` glob (`test_*.py`) does NOT match. managed-tests.yml therefore
+# hand-listed every file — and a new suite dropped off the list ran nowhere
+# (test-gate-orphan.py's 17 gate-orphan tests were invisible to CI for exactly
+# this reason). Collecting both shapes lets CI run `pytest` over a directory and
+# pick up every suite automatically, so a new test file can't be silently
+# dropped again. The lib suite (plugins/air/lib/tests/) uses `test_*.py` and is
+# unaffected (the extra pattern is purely additive).
+[tool.pytest.ini_options]
+python_files = ["test_*.py", "test-*.py"]

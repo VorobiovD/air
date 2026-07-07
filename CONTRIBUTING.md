@@ -2,7 +2,7 @@
 
 ## How It Works
 
-air is a Claude Code plugin — the entire codebase is markdown files and JSON metadata. There is no build system, no dependencies, and no test suite. "Code" means editing markdown prompts that an LLM executes.
+air is a Claude Code plugin — the CLI plugin (`plugins/air/`) is markdown files and JSON metadata with no build system, so "code" there means editing markdown prompts that an LLM executes. The Managed Agent (`managed/`) and the shared helpers (`plugins/air/lib/`) are Python, with an automated `pytest` suite (see Testing below).
 
 ## What You Can Contribute
 
@@ -38,7 +38,21 @@ air is a Claude Code plugin — the entire codebase is markdown files and JSON m
 
 ## Testing
 
-There is no automated test suite. Test manually:
+**Python (managed agent + shared lib).** A network-free `pytest` suite runs in
+CI (`managed-tests.yml` for `managed/test-*.py`, `air-lib-tests.yml` for
+`plugins/air/lib/tests/`). Run it locally before opening a PR:
+
+```bash
+pip install -r managed/requirements.txt pytest
+(cd managed && python -m pytest . --ignore=test-session.py -v)   # test-session.py needs a live API
+(cd plugins/air/lib && python -m pytest tests/ -v)
+```
+
+The gating contract (`plugins/air/lib/verdict.py`) is safety-critical — a change
+there must keep `managed/test-verdict.py` and `test-gate-orphan.py` green.
+
+**Prompt / CLI behavior.** The markdown flows an LLM executes have no unit
+tests; exercise them manually:
 
 ```bash
 /air:review 123 --dry-run     # Review a PR without posting
