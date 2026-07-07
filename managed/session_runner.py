@@ -723,8 +723,8 @@ async def run_session(
             except (AuthenticationError, PermissionDeniedError, NotFoundError) as e:
                 # Permanent failures — never recovers via retry. Use
                 # typed Anthropic SDK exceptions for precision (the
-                # exported hierarchy is stable since SDK v0.20+; matched
-                # against `requirements.txt`'s `anthropic>=0.93.0` pin).
+                # exported hierarchy is stable since SDK v0.20+; well within
+                # `requirements.txt`'s `anthropic>=0.116.0,<0.117.0` pin).
                 msg = str(e)[:200]
                 cls = type(e).__name__
                 print(

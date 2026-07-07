@@ -12,14 +12,25 @@ Behavior:
   (not `git commit-tree`/`git commit-graph`)
 - `--no-verify` on the commit bypasses the check entirely
 - Lookup order for what to run:
-    1. If `.air-checks.sh` at repo root is executable → run only that
-    2. Else if `.air-checks.sh` exists but NOT executable → print nudge,
-       run built-ins (give the user zero-config protection even while their
-       custom script is half-installed)
+    1. If `.air-checks.sh` at repo root is executable AND TRUSTED → run only
+       that (see the security note). Trust = a `<git-dir>/air-checks.trusted`
+       marker or the repo root in `$AIR_TRUSTED_CHECKS`.
+    2. Else if `.air-checks.sh` exists but is not-executable OR not-trusted →
+       print a nudge, run built-ins (zero-config protection meanwhile)
     3. Else → run built-ins
 - Built-ins live at `$AIR_PLUGIN_ROOT/hooks/builtin-checks.sh`. The hook
   exports `AIR_PLUGIN_ROOT` so user scripts can delegate to built-ins via:
       "$AIR_PLUGIN_ROOT/hooks/builtin-checks.sh" || status=1
+
+Security:
+- A repo-provided `.air-checks.sh` is arbitrary code. Because this hook is
+  registered session-global, it fires in EVERY repo the user commits in — so
+  the executable bit alone (which git preserves across clones) must NOT be
+  trust, or a cloned hostile repo could run its script on the first commit.
+  Execution therefore requires an out-of-band trust signal a hostile repo
+  cannot inject (see `_custom_trusted`).
+- Scripts run with a minimal, secret-free environment (`_build_script_env`):
+  never the session's ANTHROPIC_API_KEY / *_PAT / AIR_BOT_TOKEN / etc.
 """
 
 import json
