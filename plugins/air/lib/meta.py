@@ -531,9 +531,12 @@ def cmd_reset(args) -> int:
 def claim_learn_lock(store_id: str) -> bool:
     """Atomically claim the learn lock for an OUT-OF-BAND (cron) learn.
 
-    Sets `learn_claimed_at` iff no live lock exists, via a sha256-CAS write, and
-    returns True iff THIS caller won the claim. Unlike `cmd_claim` it does NOT
-    bump `reviews_since` — a cron run isn't a review. Closes the cron's
+    Sets `learn_claimed_at` iff no live lock exists AND the counter is still due
+    (`should_trigger_learn`), via a sha256-CAS write, and returns True iff THIS
+    caller won the claim. Returns False for a live lock OR a no-longer-due
+    counter (an inline learn reset it since the cron's find-due scan). Unlike
+    `cmd_claim` it does NOT bump `reviews_since` — a cron run isn't a review.
+    Closes the cron's
     find-due → curate gap: `find_due_repos` reads the lock, but that check and
     the minutes-long curation aren't atomic, so an overlapping cron run (or a
     review's inline learn) could double-fire the same repo. run_headless_learn's

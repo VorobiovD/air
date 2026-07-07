@@ -44,7 +44,7 @@ def _clip(raw: str, n: int = 40) -> str:
     definitionally non-secret (timeouts, counts, byte caps, kill switches), but
     cap the echo anyway so a stray long value can't flood the log."""
     r = repr(raw)
-    return r if len(r) <= n else r[:n] + "…'"
+    return r if len(r) <= n else r[:n] + "…"
 
 
 def env_int(name: str, default: int, *, minimum: int | None = None) -> int:

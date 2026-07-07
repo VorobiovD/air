@@ -99,8 +99,12 @@ def run(repos_filter=None, dry_run=False, limit=None, log=print) -> dict:
                 results[repo] = {"error": f"claim failed: {e}"}
                 continue
             if not claimed:
-                log(f"  [cron] {repo}: lost the learn-lock race — another run holds it, skip")
-                results[repo] = {"skipped": "lock lost"}
+                # claim_learn_lock returns False for EITHER a live lock (another
+                # run holds it) OR no-longer-due (an inline learn reset the
+                # counter since find_due_repos scanned) — both mean "someone
+                # else already handled it", so don't assert a specific cause.
+                log(f"  [cron] {repo}: not claimed (lock held or no longer due) — skip")
+                results[repo] = {"skipped": "not claimed (lock held or no longer due)"}
                 continue
         log(f"  [cron] === learn {repo} (dry_run={dry_run}) ===")
         try:
