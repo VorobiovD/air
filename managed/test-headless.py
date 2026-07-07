@@ -834,3 +834,23 @@ def test_origin_resolver_handles_inter_diff_none(monkeypatch):
     monkeypatch.setattr(review, "fetch_inter_diff", lambda *a, **k: None)
     resolver = review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD, "o/r", "tok")
     assert resolver(1) is None                                       # idx None → resolver yields None
+
+
+# --- BUG-1: truncation gate keys on the hygiene marker, not the char cap -----
+
+def test_diff_is_truncated_detects_hygiene_marker_below_cap():
+    """The regression: a hygiene-truncated diff that lands BELOW _DIFF_CAP (the
+    common file-boundary case) must still read as truncated so the fail-closed
+    gate fires. The old char-only check missed this."""
+    small_but_marked = "diff --git a/x b/x\n+line\n" + headless.DIFF_TRUNCATION_MARKER + " at 500000 bytes\n"
+    assert len(small_but_marked) < headless._DIFF_CAP     # well under the char cap
+    assert headless._diff_is_truncated(small_but_marked) is True
+
+
+def test_diff_is_truncated_clean_small_diff_is_false():
+    assert headless._diff_is_truncated("diff --git a/x b/x\n+ok\n") is False
+
+
+def test_diff_is_truncated_over_char_cap_is_true():
+    big = "x" * (headless._DIFF_CAP + 10)
+    assert headless._diff_is_truncated(big) is True

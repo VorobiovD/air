@@ -61,6 +61,7 @@ from github_client import (  # noqa: E402
     fetch_pr_metadata, fetch_pr_diff, fetch_inter_diff, fetch_bot_login,
     fetch_issue_comments, fetch_pr_reviews, fetch_pr_review_comments, fetch_related_prs,
     _post_review_comment_with_retry, submit_review_verdict, dismiss_stale_air_verdicts,
+    DIFF_TRUNCATION_MARKER,  # BUG-1: the authoritative upstream-truncation signal
 )
 from prompts import build_pr_context, build_verifier_task  # noqa: E402
 from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py; pure, network-free)
@@ -252,6 +253,21 @@ def _int_env(name: str, default: int) -> int:
     except ValueError:
         print(f"  [warn] {name}={os.environ.get(name)!r} is not an int — using {default}", file=sys.stderr)
         return default
+
+
+def _diff_is_truncated(diff: str) -> bool:
+    """True if the diff was cut short and a blocker could live in the omitted
+    tail — the signal that drives the fail-closed gate.
+
+    BUG-1: the diff reaching us is ALREADY apply_diff_hygiene'd inside the
+    fetcher, which BYTE-caps at DIFF_MAX_BYTES (== _DIFF_CAP) and appends
+    DIFF_TRUNCATION_MARKER at a file boundary. So the old bare `len(diff) >
+    _DIFF_CAP` char-check was effectively inert — a hygiene-truncated diff that
+    stops below the cap (the common case: greedy first-fit ends at a file
+    boundary) read as NOT truncated, so the gate never fired and a blocker past
+    the cap went unseen. The marker is the authoritative signal; the char-check
+    stays as a secondary for a (rare) diff still over our own cap."""
+    return (DIFF_TRUNCATION_MARKER in diff) or (len(diff) > _DIFF_CAP)
 
 
 def _choose_cache_ttl(n_files: int, diff_bytes: int) -> str:
@@ -491,8 +507,10 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # and a huge PR truncated to fewer `diff --git` markers would undercount files.
     n_files = diff.count("\ndiff --git ") + (1 if diff.startswith("diff --git ") else 0)
     raw_diff_bytes = len(diff.encode("utf-8", "replace"))
-    diff_truncated = len(diff) > _DIFF_CAP
-    if diff_truncated:
+    diff_truncated = _diff_is_truncated(diff)
+    if len(diff) > _DIFF_CAP:
+        # Secondary guard: a diff still over the char cap (rare — the fetcher's
+        # byte-cap is the same size) is re-truncated with a visible marker.
         diff = diff[:_DIFF_CAP] + f"\n[air: diff truncated at {_DIFF_CAP} chars — v1 guard]\n"
 
     # Developer responses since the prior review (same-PR re-review only) — lets the
