@@ -110,15 +110,32 @@ grep -qF '_BLOCKER_CATEGORIES = frozenset(' "$VERDICT_LIB" \
   || fail "lib/verdict.py missing the floor vocabulary frozenset '_BLOCKER_CATEGORIES'"
 grep -qF '[sec:<token>]' "$VERIFIER_MD" \
   || fail "$VERIFIER_MD no longer instructs the verifier to emit the [sec:<token>] gate tag"
-# Lock the markdown token list to the frozenset (markdown can't import Python).
+# Lock the markdown token list to the frozenset BOTH WAYS (markdown can't import
+# Python). Forward: every frozenset token is taught in the prompt. Reverse
+# (audit CHK-F): every token the prompt teaches in the fixed-vocabulary sentence
+# is in the frozenset — a token taught but NOT floored would be emitted as
+# `[sec:<tok>]` and silently NEVER gate (the exact failure the floor prevents).
 python3 - "$VERDICT_LIB" "$VERIFIER_MD" <<'PYF' || status=1
 import re, sys
 lib, md = open(sys.argv[1]).read(), open(sys.argv[2]).read()
 m = re.search(r"_BLOCKER_CATEGORIES = frozenset\(\{(.*?)\}\)", lib, re.DOTALL)
-toks = re.findall(r'"([a-z0-9-]+)"', m.group(1)) if m else []
-missing = [t for t in toks if f"`{t}`" not in md]
+toks = set(re.findall(r'"([a-z0-9-]+)"', m.group(1)) if m else [])
+missing = sorted(t for t in toks if f"`{t}`" not in md)
 if missing:
     print(f"  [FAIL] review-verifier.md missing floor token(s): {missing}", file=sys.stderr)
+    sys.exit(1)
+# Reverse: extract bare backtick tokens from the 'fixed vocabulary:' line (a
+# dotted token like `verdict.py` on that same line is not a bare backtick match).
+vocab_line = next((ln for ln in md.splitlines() if "fixed vocabulary:" in ln), "")
+taught = set(re.findall(r"`([a-z][a-z0-9-]+)`", vocab_line))
+extra = sorted(taught - toks)
+if extra:
+    print(f"  [FAIL] review-verifier.md teaches [sec:] token(s) absent from "
+          f"_BLOCKER_CATEGORIES (would never gate): {extra}", file=sys.stderr)
+    sys.exit(1)
+if not taught:
+    print("  [FAIL] could not locate the [sec:] 'fixed vocabulary:' enumeration "
+          "in review-verifier.md (Check F reverse anchor moved)", file=sys.stderr)
     sys.exit(1)
 PYF
 
@@ -184,6 +201,18 @@ if [ -f "$VERIFIER_MD" ]; then
   { grep -q '\[!CAUTION\]' "$VERIFIER_MD" && grep -q 'NEVER prefix it with an emoji' "$VERIFIER_MD"; } \
     || fail "$VERIFIER_MD Output Format section missing the v2 verdict-banner / no-prefix frozen-anchor rules (Check I)"
 fi
+# CHK-I positive lock: the decoration check above only FORBIDS a bad heading; it
+# does not ensure the heading EXISTS. A rename (### Blockers → ### Blocking
+# Issues) would make count_blockers match nothing → every blocker silently
+# un-gates, yet pass both the decoration check and Check E. Assert the literal
+# heading is present in the emitted skeletons (count_blockers now tolerates a
+# decorated suffix, but a rename/removal must still fail loud).
+grep -qF '### Blockers' managed/prompts.py \
+  || fail "managed/prompts.py no longer emits the literal '### Blockers' heading (count_blockers would match nothing → un-gate)"
+grep -qF '### Blockers' plugins/air/commands/review.md \
+  || fail "plugins/air/commands/review.md no longer emits the literal '### Blockers' heading"
+grep -qF '#### Blockers' managed/prompts.py \
+  || fail "managed/prompts.py no longer emits the re-review '#### Blockers' subsection heading"
 
 if [ "$status" -eq 0 ]; then
   printf 'air drift-check: all checks passed.\n'
