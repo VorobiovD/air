@@ -28,6 +28,15 @@ on:
         options: [list, dry-run, live]
         default: dry-run
 
+# One scheduled learn at a time for this repo — a long live curation must never
+# stack on the next daily tick or a manual dispatch. (The reusable workflow also
+# guards concurrency, and learn_cron itself claims a CAS lock in the store; this
+# is the outermost of the three, stopping a second caller run before it even
+# reaches the reusable workflow.)
+concurrency:
+  group: air-learn-caller-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   learn:
     uses: VorobiovD/air/.github/workflows/air-learn-cron.yml@main

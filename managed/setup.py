@@ -32,6 +32,7 @@ if str(_AIR_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_AIR_LIB_DIR))
 from solo_prompt import SUB_AGENTS, assemble_solo_prompt  # noqa: E402,F401
 from agent_md import read_prompt, split_frontmatter  # noqa: E402,F401
+import env  # noqa: E402  (plugins/air/lib — tolerant env parsing)
 
 # Agent names accepted in AIR_AGENT_VERSIONS pins (the review roster).
 # air-learner is deliberately NOT pinnable — learn is wiki maintenance,
@@ -340,6 +341,8 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     print("Syncing air agents...\n")
+    # Surface a mistyped AIR_* knob NAME early (secret-safe — NAMES only).
+    env.report_env()
 
     pins = parse_agent_pins()
     if pins:
@@ -471,7 +474,7 @@ def main():
     # MODE: WORKSPACE-HANDOFF. Deliberately NOT pinnable (pin the
     # specialists + air-coordinator; the MA agent is rebuilt each sync).
     ma_mode = (
-        os.environ.get("AIR_MULTIAGENT", "") in ("1", "true")
+        env.env_bool("AIR_MULTIAGENT", False)
         and os.environ.get("AIR_REVIEW_MODE", "full") != "solo"
     )
     if not ma_mode:

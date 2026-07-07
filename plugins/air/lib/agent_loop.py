@@ -24,6 +24,7 @@ import re
 import time
 
 from tool_exec import TOOL_SCHEMAS  # type: ignore
+import env  # tolerant env parsing (sibling in plugins/air/lib; same sys.path as tool_exec)
 
 MAX_TURNS = 45          # backstop: a runaway tool loop can't spin forever. Haiku
                         # (no thinking/effort) batches 1 tool/turn, so it needs
@@ -99,8 +100,8 @@ def _accumulate_usage(acc: dict, usage) -> None:
 # re-streaming the same messages is safe/idempotent. Retries every streaming turn
 # (specialist AND verifier), so a blip now degrades to a short pause, not a lost
 # lens or a dead run.
-STREAM_RETRY_ATTEMPTS = max(1, int(os.environ.get("AIR_STREAM_RETRY_ATTEMPTS", "3")))  # 1 try + 2 retries
-STREAM_RETRY_BACKOFF_S = float(os.environ.get("AIR_STREAM_RETRY_BACKOFF", "2"))         # doubles each retry
+STREAM_RETRY_ATTEMPTS = env.env_int("AIR_STREAM_RETRY_ATTEMPTS", 3, minimum=1)  # 1 try + 2 retries
+STREAM_RETRY_BACKOFF_S = env.env_float("AIR_STREAM_RETRY_BACKOFF", 2.0)         # doubles each retry
 _STREAM_RETRY_CAP_S = 30.0
 _TRANSIENT_STREAM_ERRORS = None  # resolved lazily; this module imports no SDK at load (takes client as a param)
 

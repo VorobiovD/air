@@ -210,6 +210,44 @@ def test_store_reset_clears_lock(fake):
     assert data["learn_claimed_at"] == ""
 
 
+# --- M3: out-of-band (cron) lock claim/release -----------------------------
+
+def test_claim_learn_lock_wins_when_free(fake):
+    seed = meta._default_meta()
+    seed["reviews_since"] = 20            # due, no lock
+    fake.content = json.dumps(seed)
+    assert meta.claim_learn_lock("memstore_x") is True
+    data = json.loads(fake.content)
+    assert data["learn_claimed_at"]      # lock acquired
+    assert data["reviews_since"] == 20   # NOT bumped — a cron run isn't a review
+
+
+def test_claim_learn_lock_loses_when_live(fake):
+    seed = meta._default_meta()
+    seed["reviews_since"] = 20
+    seed["learn_claimed_at"] = meta._utc_now_iso()   # a review/other cron holds it
+    fake.content = json.dumps(seed)
+    before = fake.content
+    assert meta.claim_learn_lock("memstore_x") is False
+    assert fake.content == before        # no write on a lost claim
+
+
+def test_claim_learn_lock_none_when_no_counter(fake):
+    fake.content = None                  # store exists but no counter yet
+    assert meta.claim_learn_lock("memstore_x") is False
+
+
+def test_release_learn_lock_clears(fake):
+    seed = meta._default_meta()
+    seed["reviews_since"] = 20
+    seed["learn_claimed_at"] = meta._utc_now_iso()
+    fake.content = json.dumps(seed)
+    meta.release_learn_lock("memstore_x")
+    data = json.loads(fake.content)
+    assert data["learn_claimed_at"] == ""
+    assert data["reviews_since"] == 20   # release touches only the lock
+
+
 # --- read-author: store-backed author-pattern read (CLI Fix 1) -------------
 # The ai-relay 2026-06-27 bug: the store→wiki render emits per-author blocks
 # under a heading the CLI's `### <login>` grep missed, so a dominant author

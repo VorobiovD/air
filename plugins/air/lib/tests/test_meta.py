@@ -385,3 +385,29 @@ def test_claim_then_reset_then_claim_cycle(wiki_dir):
     assert _read(wiki_dir)["reviews_since"] == 0
     assert meta.main(["claim", "--wiki-dir", str(wiki_dir), "--pr-number", "12"]) == 0
     assert _read(wiki_dir)["reviews_since"] == 1
+
+
+def test_learn_lock_ttl_exceeds_learn_runtime():
+    """H1: the anti-storm lock TTL must exceed the learn runtime, or the lock
+    ages out mid-learn and a concurrent review re-fires it (the storm). The old
+    flat 20-min TTL sat below the 25-min AIR_LEARN_TIMEOUT_S. Checked in a fresh
+    process per env so the import-time constant reflects that env."""
+    def ttl(timeout_env):
+        e = dict(os.environ)
+        e.pop("AIR_LEARN_TIMEOUT_S", None)
+        if timeout_env is not None:
+            e["AIR_LEARN_TIMEOUT_S"] = timeout_env
+        out = subprocess.run(
+            [sys.executable, "-c", "import meta; print(meta.LEARN_LOCK_TTL_MIN)"],
+            cwd=str(LIB), env=e, capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        return int(out.stdout.strip())
+
+    # default (1500s / 25min) → floored at 40min; the TTL in seconds exceeds it
+    assert ttl(None) == 40
+    assert ttl(None) * 60 >= 1500
+    # a longer configured timeout scales the TTL above it (+10min margin)
+    assert ttl("3000") == 60                 # 3000//60 + 10
+    assert ttl("3000") * 60 >= 3000
+    # a garbage timeout must NOT crash the import → falls back to 1500 → 40
+    assert ttl("nope") == 40

@@ -67,6 +67,7 @@ if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 import meta  # noqa: E402  (plugins/air/lib — shared counter, stdlib)
 import agent_loop  # noqa: E402  (plugins/air/lib — usage pricing helpers; _LIB on sys.path above)
+import env  # noqa: E402  (plugins/air/lib — tolerant env parsing)
 
 # Model default derives from setup.py's MODEL_ALIASES (single source of truth
 # across the managed stack — learn.py imports it the same way), so a tier bump
@@ -80,16 +81,16 @@ except Exception:  # pragma: no cover - defensive
 MODEL = os.environ.get("AIR_LEARN_MODEL", _DEFAULT_MODEL)
 
 # Concurrency cap for the map stage — mirrors review.py's PRECOMP_PARALLELISM.
-MAP_PARALLELISM = int(os.environ.get("AIR_LEARN_PARALLELISM", "8"))
+MAP_PARALLELISM = env.env_int("AIR_LEARN_PARALLELISM", 8, minimum=1)
 # Output cap per curation. Headroom for a large GLOSSARY (~40-60KB ≈ 12-16K
 # tokens); a curation that still hits this raises (truncation guard) rather
 # than writing a half-formed file.
-MAX_OUTPUT_TOKENS = int(os.environ.get("AIR_LEARN_MAX_TOKENS", "32000"))
+MAX_OUTPUT_TOKENS = env.env_int("AIR_LEARN_MAX_TOKENS", 32_000, minimum=1)
 # Safety floor: refuse to write a curated file that collapses below this
 # fraction of the original byte size — a gross truncation/error must never
 # silently destroy content. The fidelity check below catches finer losses
 # (a single dropped pattern/term that stays above the byte floor).
-MIN_KEEP_FRACTION = float(os.environ.get("AIR_LEARN_MIN_KEEP", "0.5"))
+MIN_KEEP_FRACTION = env.env_float("AIR_LEARN_MIN_KEEP", 0.5)
 
 # Shared, curatable store files (besides per-author files). REVIEW-HISTORY +
 # PROJECT-PROFILE are intentionally absent — see _STAGED.
@@ -199,7 +200,7 @@ def _client_get():
             # Per-call timeout so a single stalled stream can't pin a pool thread
             # for the SDK's 600s default (×MAP_PARALLELISM = wasted runner time;
             # ThreadPoolExecutor can't cancel a running future).
-            _client = Anthropic(timeout=float(os.environ.get("AIR_LEARN_CALL_TIMEOUT", "300")))
+            _client = Anthropic(timeout=env.env_float("AIR_LEARN_CALL_TIMEOUT", 300.0))
         return _client
 
 
@@ -208,8 +209,8 @@ def _client_get():
 # so it lengthens an individual learn's wall-time; worth it for cost on a
 # non-blocking, infrequent learn. Concurrent streaming stays the default.
 _BATCH_ENABLED = os.environ.get("AIR_LEARN_BATCH", "0").lower() in ("1", "true", "yes")
-_BATCH_POLL_S = int(os.environ.get("AIR_LEARN_BATCH_POLL", "20"))
-_BATCH_TIMEOUT_S = int(os.environ.get("AIR_LEARN_BATCH_TIMEOUT", "1800"))  # 30 min
+_BATCH_POLL_S = env.env_int("AIR_LEARN_BATCH_POLL", 20, minimum=1)
+_BATCH_TIMEOUT_S = env.env_int("AIR_LEARN_BATCH_TIMEOUT", 1800, minimum=1)  # 30 min
 
 # Shared curation user-message prefix — single-sourced so the streaming and
 # batch paths send byte-identical prompts (same cache key, same behavior).

@@ -25,13 +25,18 @@ from api import API_BASE, get_headers, list_agents, find_environment, api_error_
 from session_runner import build_session_metadata
 from setup import MODEL_ALIASES, create_or_update_agent
 
+_LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "plugins", "air", "lib")
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+import env  # noqa: E402  (plugins/air/lib — tolerant env parsing, stdlib)
+
 # How long to wait for a learn session to reach idle before giving up. The old
 # split (poll()=~10min, stream()=15min) deadlocked repos with a large wiki: a
 # legitimate curation run that takes >10min was killed mid-flight under --poll,
 # so the bloat-caps never applied, the wiki never shrank, and the learn counter
 # never reset — it just climbed (air hit reviews_since=18 unreset). One shared,
 # env-tunable ceiling, defaulting high enough for a bloated wiki's first curation.
-_LEARN_TIMEOUT_S = int(os.environ.get("AIR_LEARN_TIMEOUT_S", "1500"))  # 25 min
+_LEARN_TIMEOUT_S = env.env_int("AIR_LEARN_TIMEOUT_S", 1500, minimum=1)  # 25 min
 
 
 def sync_learn_agent():

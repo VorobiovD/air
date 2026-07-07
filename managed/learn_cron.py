@@ -79,6 +79,17 @@ def run(repos_filter=None, dry_run=False, limit=None, log=print) -> dict:
         (", ".join(f"{r} ({reason})" for r, _, reason in due) or "none"))
     results = {}
     for repo, store_id, _reason in due:
+        # Claim the anti-storm lock before the (minutes-long) curation so an
+        # overlapping cron run or a review's inline learn can't double-fire this
+        # repo — find_due_repos checked liveness, but that check and the curation
+        # aren't atomic. Skip if we lost the race. Dry-run writes nothing, so it
+        # must not touch the store lock either. run_headless_learn's own counter
+        # reset releases the lock on success; we release explicitly on error or a
+        # degraded (no-reset) run so the next cron re-arms without the TTL wait.
+        if not dry_run and not meta.claim_learn_lock(store_id):
+            log(f"  [cron] {repo}: lost the learn-lock race — another run holds it, skip")
+            results[repo] = {"skipped": "lock lost"}
+            continue
         log(f"  [cron] === learn {repo} (dry_run={dry_run}) ===")
         try:
             results[repo] = learn_headless.run_headless_learn(
@@ -86,6 +97,12 @@ def run(repos_filter=None, dry_run=False, limit=None, log=print) -> dict:
         except Exception as e:
             log(f"  [cron] {repo}: learn errored: {type(e).__name__}: {e}")
             results[repo] = {"error": str(e)}
+            if not dry_run:
+                meta.release_learn_lock(store_id)
+        else:
+            if not dry_run and isinstance(results[repo], dict) and not results[repo].get("reset"):
+                # completed but did NOT reset (degraded → re-arm): free the lock now
+                meta.release_learn_lock(store_id)
     return {"due": [r for r, _, _ in due], "ran": list(results), "dry_run": dry_run}
 
 
