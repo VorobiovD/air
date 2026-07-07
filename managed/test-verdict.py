@@ -62,6 +62,50 @@ def test_count_blockers_no_section_is_zero():
 
 
 # ---------------------------------------------------------------------------
+# H5: a DECORATED Blockers heading must still be counted (a bare-only match
+# silently un-gated a non-security blocker); a look-alike WORD heading must
+# NOT be counted (over-match would flag a re-review summary as new blockers).
+# ---------------------------------------------------------------------------
+
+_H5_BODY = (
+    "## Code Review\n\n{heading}\n\n"
+    "**1. SQL injection** — bad\n\n**2. Auth bypass** — worse\n\n"
+    "### Medium\n\n**3. style** — meh\n"
+)
+
+
+@pytest.mark.parametrize("heading", [
+    "### Blockers",                    # plain (unchanged)
+    "### Blockers — must fix",         # em-dash suffix (v2-style)
+    "### Blockers (2)",                # parenthetical count
+    "### Blockers: fix before merge",  # colon suffix
+    "### Blockers - must fix",         # hyphen suffix
+    "#### Blockers — must fix",        # re-review nested + decorated
+])
+def test_count_blockers_decorated_heading_counts(heading):
+    # Exactly the 2 under Blockers — never bleeds into ### Medium.
+    assert count_blockers(_H5_BODY.format(heading=heading)) == 2
+
+
+@pytest.mark.parametrize("heading", [
+    "### Blockers Resolved",   # space-separated word — a DIFFERENT heading
+    "#### Blockers Fixed",
+    "### Blockersome",         # no word boundary / separator
+])
+def test_count_blockers_lookalike_heading_not_counted(heading):
+    # These are not the Blockers section; their entries must NOT be counted as
+    # blockers (else a re-review "all resolved" summary would false-gate).
+    assert count_blockers(_H5_BODY.format(heading=heading)) == 0
+
+
+def test_decorated_blockers_still_gates_end_to_end():
+    # The un-gate the fix closes: a decorated heading must flip the verdict.
+    body = "## Code Review\n\n### Blockers — must fix\n\n**1. bug** — x\n"
+    rc, reason = should_request_changes(body)
+    assert rc is True and "blocker" in reason
+
+
+# ---------------------------------------------------------------------------
 # should_request_changes — fresh
 # ---------------------------------------------------------------------------
 
