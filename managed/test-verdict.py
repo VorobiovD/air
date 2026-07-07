@@ -63,8 +63,10 @@ def test_count_blockers_no_section_is_zero():
 
 # ---------------------------------------------------------------------------
 # H5: a DECORATED Blockers heading must still be counted (a bare-only match
-# silently un-gated a non-security blocker); a look-alike WORD heading must
-# NOT be counted (over-match would flag a re-review summary as new blockers).
+# silently un-gated a non-security blocker). Tolerance is NARROW — only an
+# unambiguous space-delimited dash suffix or a parenthesized integer count —
+# so a DISTINCT heading (a word, a colon phrase, a glued hyphen, a paren word)
+# is NOT matched and can't miscount a re-review "resolved" summary as blockers.
 # ---------------------------------------------------------------------------
 
 _H5_BODY = (
@@ -76,10 +78,9 @@ _H5_BODY = (
 
 @pytest.mark.parametrize("heading", [
     "### Blockers",                    # plain (unchanged)
-    "### Blockers — must fix",         # em-dash suffix (v2-style)
-    "### Blockers (2)",                # parenthetical count
-    "### Blockers: fix before merge",  # colon suffix
-    "### Blockers - must fix",         # hyphen suffix
+    "### Blockers — must fix",         # em-dash calm suffix (mirrors ### Medium — …)
+    "### Blockers - must fix",         # ascii hyphen, space-delimited
+    "### Blockers (2)",                # parenthesized integer count
     "#### Blockers — must fix",        # re-review nested + decorated
 ])
 def test_count_blockers_decorated_heading_counts(heading):
@@ -88,13 +89,19 @@ def test_count_blockers_decorated_heading_counts(heading):
 
 
 @pytest.mark.parametrize("heading", [
-    "### Blockers Resolved",   # space-separated word — a DIFFERENT heading
+    "### Blockers Resolved",           # space-separated word — a DIFFERENT heading
     "#### Blockers Fixed",
-    "### Blockersome",         # no word boundary / separator
+    "### Blockersome",                 # no separator at all
+    "### Blockers: Resolved",          # colon suffix — ambiguous, not tolerated
+    "### Blockers: fix before merge",  # (colon is NOT a tolerated separator)
+    "### Blockers (Resolved)",         # paren word, not an integer count
+    "### Blockers-Resolved",           # glued hyphen (no surrounding space)
 ])
 def test_count_blockers_lookalike_heading_not_counted(heading):
-    # These are not the Blockers section; their entries must NOT be counted as
-    # blockers (else a re-review "all resolved" summary would false-gate).
+    # None of these is the Blockers section; their entries must NOT be counted
+    # (over-matching would false-gate a re-review "resolved" summary, and could
+    # shift count_category_floored's exclusion window). Bare `### Blockers`
+    # emission is separately enforced by .air-checks.sh Check I.
     assert count_blockers(_H5_BODY.format(heading=heading)) == 0
 
 

@@ -207,10 +207,15 @@ fi
 # un-gates, yet pass both the decoration check and Check E. Assert the literal
 # heading is present in the emitted skeletons (count_blockers now tolerates a
 # decorated suffix, but a rename/removal must still fail loud).
-grep -qF '### Blockers' managed/prompts.py \
-  || fail "managed/prompts.py no longer emits the literal '### Blockers' heading (count_blockers would match nothing → un-gate)"
-grep -qF '### Blockers' plugins/air/commands/review.md \
-  || fail "plugins/air/commands/review.md no longer emits the literal '### Blockers' heading"
+# The 3-hash pattern is anchored to NOT be preceded by a '#' — a plain
+# `grep -F '### Blockers'` also matches `#### Blockers` (it's a substring,
+# offset one hash), so a rename of ONLY the fresh 3-hash heading would still
+# pass while count_blockers matches nothing on a fresh review (the H5 fail-open,
+# one layer down). `(^|[^#])` requires a real 3-hash heading.
+grep -qE '(^|[^#])### Blockers' managed/prompts.py \
+  || fail "managed/prompts.py no longer emits a 3-hash '### Blockers' heading (count_blockers would match nothing on a fresh review → un-gate)"
+grep -qE '(^|[^#])### Blockers' plugins/air/commands/review.md \
+  || fail "plugins/air/commands/review.md no longer emits a 3-hash '### Blockers' heading"
 grep -qF '#### Blockers' managed/prompts.py \
   || fail "managed/prompts.py no longer emits the re-review '#### Blockers' subsection heading"
 
