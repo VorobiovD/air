@@ -19,7 +19,7 @@ from pathlib import Path
 
 import requests
 
-from api import API_BASE, HEADERS, get_headers, api_error_message, list_agents
+from api import API_BASE, HEADERS, get_headers, api_error_message, list_agents, find_environment
 
 AGENTS_DIR = Path(__file__).parent.parent / "plugins" / "air" / "agents"
 PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -32,6 +32,7 @@ if str(_AIR_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_AIR_LIB_DIR))
 from solo_prompt import SUB_AGENTS, assemble_solo_prompt  # noqa: E402,F401
 from agent_md import read_prompt, split_frontmatter  # noqa: E402,F401
+import env  # noqa: E402  (plugins/air/lib — tolerant env parsing)
 
 # Agent names accepted in AIR_AGENT_VERSIONS pins (the review roster).
 # air-learner is deliberately NOT pinnable — learn is wiki maintenance,
@@ -230,6 +231,7 @@ def create_or_update_agent(
             f"{API_BASE}/agents/{existing['id']}",
             headers=headers,
             json=body,
+            timeout=(10, 30),
         )
         if resp.ok:
             data = resp.json()
@@ -248,6 +250,7 @@ def create_or_update_agent(
                 f"{API_BASE}/agents/{existing['id']}",
                 headers=headers,
                 json=retry_body,
+                timeout=(10, 30),
             )
             if retry.ok:
                 data = retry.json()
@@ -273,7 +276,7 @@ def create_or_update_agent(
             body["callable_agents"] = callable_agents
         if multiagent:
             body["multiagent"] = multiagent
-        resp = requests.post(f"{API_BASE}/agents", headers=headers, json=body)
+        resp = requests.post(f"{API_BASE}/agents", headers=headers, json=body, timeout=(10, 30))
         if not resp.ok:
             print(f"  {name}: creation failed — {api_error_message(resp)}", file=sys.stderr)
             sys.exit(1)
@@ -285,15 +288,18 @@ def create_or_update_agent(
 
 def find_or_create_environment() -> str:
     """Find existing environment or create one."""
-    resp = requests.get(f"{API_BASE}/environments", headers=get_headers())
-    if resp.ok:
-        for env in resp.json().get("data", []):
-            if env["name"] == "air-review-env" and not env.get("archived_at"):
-                print(f"  Environment: {env['id']}")
-                return env["id"]
+    # BUG-2: use the PAGINATED find (api.find_environment). The old single-page
+    # GET scanned only the first 20 environments, so on a >20-env workspace it
+    # missed air-review-env and created a DUPLICATE every run. find_environment
+    # walks all pages and fails loud (not silently partial) on a platform error.
+    env_id = find_environment()
+    if env_id:
+        print(f"  Environment: {env_id}")
+        return env_id
 
     resp = requests.post(
         f"{API_BASE}/environments",
+        timeout=(10, 30),
         headers=get_headers(),
         json={
             "name": "air-review-env",
@@ -340,6 +346,8 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(line_buffering=True)
     print("Syncing air agents...\n")
+    # Surface a mistyped AIR_* knob NAME early (secret-safe — NAMES only).
+    env.report_env()
 
     pins = parse_agent_pins()
     if pins:
@@ -471,7 +479,7 @@ def main():
     # MODE: WORKSPACE-HANDOFF. Deliberately NOT pinnable (pin the
     # specialists + air-coordinator; the MA agent is rebuilt each sync).
     ma_mode = (
-        os.environ.get("AIR_MULTIAGENT", "") in ("1", "true")
+        env.env_bool("AIR_MULTIAGENT", False)
         and os.environ.get("AIR_REVIEW_MODE", "full") != "solo"
     )
     if not ma_mode:

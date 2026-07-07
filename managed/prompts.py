@@ -85,8 +85,9 @@ LAYOUT (format v2 — professional, scannable, machine-safe):
 
 HARD RULES — these lines are parsed deterministically; emit them byte-exactly:
 - Keep the Blockers heading EXACTLY `### Blockers` (fresh) / `#### Blockers`
-  (re-review) — NO suffix, NO emoji (the gate matches `Blockers` exactly and
-  will count 0 blockers otherwise → a real blocker would silently un-gate).
+  (re-review) — NO suffix, NO emoji. (The parser tolerates a ` — …`/` (N)`
+  drift suffix as a safety-net, but bare is the contract — keep it undecorated,
+  unlike the Medium/Low/Nits headers.)
 - Every blocker entry MUST start the line with `**N.` — NEVER prefix it with an
   emoji, a `>` blockquote marker, or indentation, and NEVER place a blocker
   inside a `<details>` (its evidence folds; the `**N.` line stays visible).

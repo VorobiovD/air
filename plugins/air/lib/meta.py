@@ -50,6 +50,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from wiki_git import META_FILENAME  # single source for the file name
+import env  # tolerant env parsing (sibling in plugins/air/lib)
 
 # --- memory-store backend -------------------------------------------------
 # When the repo has migrated to a memory store (see managed/memory_store.py
@@ -154,11 +155,17 @@ DAYS_THRESHOLD = 14
 # Anti-storm learn lock. When a review crosses the threshold it sets
 # `learn_claimed_at`; concurrent reviews within this window see the lock and
 # skip (so a busy repo doesn't fire N concurrent learns while the first is
-# still running — the 2026-06-20 learn-storm cluster). Generous vs the ~3-5 min learn
-# runtime so a normal run always clears its own lock first; a learn that dies
-# without resetting leaves a stale lock that ages out here (self-healing — the
-# next review re-claims) rather than blocking learn forever.
-LEARN_LOCK_TTL_MIN = 20
+# still running — the 2026-06-20 learn-storm cluster). The TTL MUST exceed the
+# real learn runtime, or the lock ages out while the first learn is still going
+# and a concurrent review re-fires it — re-opening the very storm the lock
+# closes. A wiki-backed curation runs up to AIR_LEARN_TIMEOUT_S (default 1500s /
+# 25 min); the old flat 20-min TTL sat BELOW that (the comment even claimed a
+# "~3-5 min" runtime, which stopped being true once the timeout was raised to
+# 25 min). Size it off the actual learn ceiling + a 10-min margin, floored at 40
+# min so a shortened timeout can't drop it back under the storm line. A learn
+# that dies without resetting still ages out here (self-healing — the next
+# review re-claims) rather than blocking learn forever.
+LEARN_LOCK_TTL_MIN = max(40, env.env_int("AIR_LEARN_TIMEOUT_S", 1500, minimum=1) // 60 + 10)
 
 
 def _learn_lock_live(meta: dict, now: datetime | None = None) -> bool:
@@ -519,6 +526,61 @@ def cmd_reset(args) -> int:
         write_meta(wiki, meta)
     print(f"  [meta] reset at {now} (last_processed_pr={meta['last_processed_pr']})", file=sys.stderr)
     return 0
+
+
+def claim_learn_lock(store_id: str) -> bool:
+    """Atomically claim the learn lock for an OUT-OF-BAND (cron) learn.
+
+    Sets `learn_claimed_at` iff no live lock exists AND the counter is still due
+    (`should_trigger_learn`), via a sha256-CAS write, and returns True iff THIS
+    caller won the claim. Returns False for a live lock OR a no-longer-due
+    counter (an inline learn reset it since the cron's find-due scan). Unlike
+    `cmd_claim` it does NOT bump `reviews_since` — a cron run isn't a review.
+    Closes the cron's
+    find-due → curate gap: `find_due_repos` reads the lock, but that check and
+    the minutes-long curation aren't atomic, so an overlapping cron run (or a
+    review's inline learn) could double-fire the same repo. run_headless_learn's
+    own counter `reset` releases the lock on success; `release_learn_lock`
+    covers the error / degraded-no-reset paths. Store-backed only."""
+    now = _utc_now_iso()
+    for _ in range(5):
+        found = _store_find_meta(store_id)
+        if found is None:
+            return False  # no counter yet → nothing due, nothing to claim
+        m, sha, mem_id = found
+        if _learn_lock_live(m):
+            return False  # a review/other cron already holds it
+        if not should_trigger_learn(m)[0]:
+            # No longer due — e.g. a review's inline learn reset the counter
+            # between find_due_repos's scan and this claim (prior repos in the
+            # loop can take minutes). Don't claim + re-fire an unnecessary learn.
+            return False
+        m = dict(m)
+        m["learn_claimed_at"] = now
+        try:
+            _store_api(
+                "POST", f"/memory_stores/{store_id}/memories/{mem_id}",
+                {"content": json.dumps(m, indent=2, sort_keys=True),
+                 "precondition": {"type": "content_sha256", "content_sha256": sha}})
+            return True
+        except urllib.error.HTTPError:
+            continue  # raced a concurrent write — re-read + re-check liveness
+    return False
+
+
+def release_learn_lock(store_id: str) -> None:
+    """Best-effort clear of `learn_claimed_at`. The cron calls this when a
+    claimed learn errored or deliberately did NOT reset (a degraded run that
+    re-arms), so the next run retries immediately instead of waiting out
+    LEARN_LOCK_TTL_MIN. A failure here is harmless — the TTL ages the lock out
+    regardless."""
+    def fn(m):
+        m["learn_claimed_at"] = ""
+        return m
+    try:
+        _store_mutate_meta(store_id, fn)
+    except Exception:
+        pass
 
 
 def _mirror_due(meta: dict, now: datetime | None = None) -> tuple[bool, str]:

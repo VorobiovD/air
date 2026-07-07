@@ -836,6 +836,75 @@ def test_origin_resolver_handles_inter_diff_none(monkeypatch):
     assert resolver(1) is None                                       # idx None → resolver yields None
 
 
+# --- M4: verdict/dismiss POST resilience (_submit_verdict_guarded) -----------
+# The review comment is already posted by the time this helper runs, so a
+# transient POST failure must NOT propagate (it would skip the learning
+# write-back and show a false-red CI for a live review). These lock the exact
+# behavior the PR-title M4 change introduced — including the gate-safety guard
+# that a missing bot_login SKIPS dismissal rather than clearing our own verdict.
+
+def test_submit_verdict_guarded_swallows_submit_error(monkeypatch, capsys):
+    """submit_review_verdict raising a transient RequestException must be caught,
+    warned, and NOT propagate — and dismissal must not run after a failed submit."""
+    reached = []
+    def boom(*a, **k):
+        raise requests.exceptions.ConnectionError("blackholed")
+    monkeypatch.setattr(headless, "submit_review_verdict", boom)
+    monkeypatch.setattr(headless, "dismiss_stale_air_verdicts",
+                        lambda *a, **k: reached.append("dismiss"))
+    headless._submit_verdict_guarded(
+        "o/r", 1, "tok", event="APPROVE", body="", commit_id="abc",
+        bot_login="air-machine", bot_logins=frozenset())
+    assert "verdict/dismiss POST failed" in capsys.readouterr().err
+    assert reached == [], "dismiss must not run when submit raised"
+
+
+def test_submit_verdict_guarded_swallows_dismiss_error(monkeypatch, capsys):
+    """The edge case the reviewer flagged: submit succeeds but the subsequent
+    dismiss raises — still swallowed so the run proceeds to learning."""
+    monkeypatch.setattr(headless, "submit_review_verdict", lambda *a, **k: None)
+    def boom(*a, **k):
+        raise requests.exceptions.Timeout("read timed out")
+    monkeypatch.setattr(headless, "dismiss_stale_air_verdicts", boom)
+    headless._submit_verdict_guarded(
+        "o/r", 1, "tok", event="COMMENT", body="b", commit_id="abc",
+        bot_login="air-machine", bot_logins=frozenset({"air-machine"}))
+    assert "verdict/dismiss POST failed" in capsys.readouterr().err
+
+
+def test_submit_verdict_guarded_skips_dismiss_when_login_unresolved(monkeypatch, capsys):
+    """Gate-safety: an unresolved (falsy) bot_login must SKIP dismissal entirely —
+    never call dismiss with a None login, which would clear our own just-posted
+    verdict (the dogfood-caught un-gating bug)."""
+    dismiss_calls = []
+    monkeypatch.setattr(headless, "submit_review_verdict", lambda *a, **k: None)
+    monkeypatch.setattr(headless, "dismiss_stale_air_verdicts",
+                        lambda *a, **k: dismiss_calls.append(k))
+    headless._submit_verdict_guarded(
+        "o/r", 1, "tok", event="REQUEST_CHANGES", body="b", commit_id="abc",
+        bot_login="", bot_logins=frozenset())
+    assert "skipping stale-verdict dismissal" in capsys.readouterr().err
+    assert dismiss_calls == [], "must never dismiss with an unresolved login"
+
+
+def test_submit_verdict_guarded_include_own_reflects_event(monkeypatch):
+    """include_own must be True only for a COMMENT verdict (no-approve clean
+    re-review clears our OWN prior CHANGES_REQUESTED) and False otherwise."""
+    seen = {}
+    monkeypatch.setattr(headless, "submit_review_verdict", lambda *a, **k: None)
+    monkeypatch.setattr(headless, "dismiss_stale_air_verdicts",
+                        lambda *a, **k: seen.update(k))
+    headless._submit_verdict_guarded("o/r", 1, "tok", event="COMMENT", body="b",
+                                     commit_id="abc", bot_login="air-machine",
+                                     bot_logins=frozenset())
+    assert seen.get("include_own") is True
+    seen.clear()
+    headless._submit_verdict_guarded("o/r", 1, "tok", event="APPROVE", body="",
+                                     commit_id="abc", bot_login="air-machine",
+                                     bot_logins=frozenset())
+    assert seen.get("include_own") is False
+
+
 # --- BUG-1: truncation gate keys on the hygiene marker, not the char cap -----
 
 def test_diff_is_truncated_detects_hygiene_marker_below_cap():

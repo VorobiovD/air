@@ -63,6 +63,7 @@ if str(_AIR_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_AIR_LIB_DIR))
 
 import pr_conversation  # noqa: E402  (deferred import; relies on sys.path tweak above)
+import env  # noqa: E402  (plugins/air/lib — tolerant env parsing + startup drift report)
 
 # --- Module split: moved code lives in github_client / verdict / session_runner /
 # --- prompts (same dir). Names re-exported so `from review import X` keeps
@@ -178,7 +179,7 @@ COORDINATOR_MA_AGENT = _ma_coordinator_name(os.environ.get("AIR_MA_COORDINATOR_M
 
 
 def _multiagent_enabled() -> bool:
-    return os.environ.get("AIR_MULTIAGENT", "") in ("1", "true")
+    return env.env_bool("AIR_MULTIAGENT", False)
 
 
 def _air_bot_logins() -> frozenset:
@@ -2050,7 +2051,7 @@ async def run_review(args):
     # sibling's reviewed SHA instead. Only when there's no genuine same-PR
     # prior (a real prior always wins — never overridden by a sibling).
     promote_sibling_pr = None
-    if prior is None and os.environ.get("AIR_PROMOTE_FASTPATH", "") in ("1", "true"):
+    if prior is None and env.env_bool("AIR_PROMOTE_FASTPATH", False):
         fp = _detect_promote_fastpath(
             args.repo, args.pr_number, meta, head_sha, bot_login, bot_token
         )
@@ -3051,6 +3052,10 @@ def main():
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("Error: ANTHROPIC_API_KEY not set.", file=sys.stderr)
         sys.exit(1)
+
+    # Surface a mistyped knob NAME (e.g. AIR_NO_APROVE) — otherwise it silently
+    # no-ops with zero signal. NAMES only (never values → secret-safe).
+    env.report_env()
 
     _install_shutdown_handlers()
     _billing_preflight()

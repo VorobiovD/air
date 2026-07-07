@@ -73,6 +73,7 @@ from agent_md import split_frontmatter  # noqa: E402  (single-source frontmatter
 import memory_store  # noqa: E402  (managed/ — client-side store reads for pattern staging)
 import pr_conversation  # noqa: E402  (plugins/air/lib)
 import agent_loop  # noqa: E402  (plugins/air/lib)
+import env  # noqa: E402  (plugins/air/lib — tolerant env parsing)
 from tool_exec import Sandbox  # noqa: E402
 from wiki_git import _redact  # noqa: E402  (mask token-bearing URLs in clone errors)
 
@@ -80,7 +81,7 @@ AGENTS_DIR = _LIB.parent / "agents"
 SPECIALISTS = ["air-code-reviewer", "air-simplify", "air-security-auditor", "air-git-history-reviewer"]
 UI_SPECIALIST = "air-ui-copy-reviewer"
 VERIFIER = "air-review-verifier"
-_DIFF_CAP = int(os.environ.get("AIR_HEADLESS_DIFF_CAP", "500000"))  # chars — managed parity
+_DIFF_CAP = env.env_int("AIR_HEADLESS_DIFF_CAP", 500_000, minimum=0)  # chars — managed parity
                              # (= managed's AIR_DIFF_MAX_BYTES). The diff is already
                              # apply_diff_hygiene'd (generated/vendored stubbed) before this
                              # cap, so this only bounds real-code diffs. The old 120K "v1
@@ -247,11 +248,7 @@ BLOCKER_LENSES = ("air-security-auditor", "air-code-reviewer")
 
 def _int_env(name: str, default: int) -> int:
     """Tolerant int env read — a misconfigured value logs + falls back, never crashes."""
-    try:
-        return int(os.environ.get(name, "").strip() or default)
-    except ValueError:
-        print(f"  [warn] {name}={os.environ.get(name)!r} is not an int — using {default}", file=sys.stderr)
-        return default
+    return env.env_int(name, default)
 
 
 def _diff_is_truncated(diff: str) -> bool:
@@ -338,6 +335,39 @@ def _log_usage_telemetry(rows, log=print, write_mult=2.0):
     log(f"  [cost] TOTAL in={tot['input_tokens']} out={tot['output_tokens']} "
         f"cw={tot['cache_creation_input_tokens']} cr={tot['cache_read_input_tokens']} "
         f"— cache-read {ratio:.0f}% of total prompt tokens (low ⇒ per-agent context re-write)")
+
+
+def _submit_verdict_guarded(repo, pr_number, bot_token, *, event, body, commit_id,
+                            bot_login, bot_logins):
+    """Submit the formal verdict + dismiss stale gate-orphans (M4-guarded).
+
+    The review comment is already posted by the time we get here, so a transient
+    failure in the verdict/dismiss POSTs must NOT crash the run — that would skip
+    the learning write-back AND show a false-red CI for a live review.
+    submit_review_verdict uses retry_timeouts=False (a read-timeout RAISES rather
+    than risk a double-submit), so catch RequestException and let the next
+    trigger's verdict-backfill re-submit. Parity with review.py.
+
+    Gate-safety: if bot_login is unresolved (falsy), SKIP dismissal entirely —
+    calling dismiss with current_login=None makes the skip-self guard falsy and
+    would dismiss the verdict we just posted, silently un-gating a
+    REQUEST_CHANGES (the dogfood-caught bug). include_own on a clean no-approve
+    COMMENT clears our OWN prior CHANGES_REQUESTED (a COMMENT can't
+    self-supersede it), else a fixed PR stays blocked.
+    """
+    try:
+        submit_review_verdict(repo, pr_number, bot_token,
+                              event=event, body=body, commit_id=commit_id)
+        if bot_login:
+            dismiss_stale_air_verdicts(repo, pr_number, bot_token, bot_login,
+                                       bot_logins, include_own=(event == "COMMENT"))
+        else:
+            print("  [warn] bot login unresolved — skipping stale-verdict dismissal "
+                  "(won't risk clearing our own verdict)", file=sys.stderr)
+    except requests.exceptions.RequestException as e:
+        print(f"  [warn] verdict/dismiss POST failed ({type(e).__name__}: "
+              f"{str(e)[:120]}) — the review comment is posted; the next "
+              f"trigger's verdict-backfill will re-submit", file=sys.stderr)
 
 
 async def run_headless_review(args, bot_token: str) -> dict:
@@ -464,7 +494,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # branch / no merged+reviewed sibling / <80% overlap / any fetch failure → None →
     # full review. An empty inter-diff falls back to full (handled in DIFF SELECTION).
     promote_sibling_pr = None
-    if prior is None and os.environ.get("AIR_PROMOTE_FASTPATH", "") in ("1", "true"):
+    if prior is None and env.env_bool("AIR_PROMOTE_FASTPATH", False):
         fp = _detect_promote_fastpath(
             args.repo, args.pr_number, meta, head_sha, bot_login, bot_token)
         if fp:
@@ -654,8 +684,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # before emitting findings; the verifier then never sees them — observed in
         # A/B testing: two specialists hit a 45-turn cap and produced nothing).
         # n_files + raw_diff_bytes were computed on the RAW diff above (pre-truncation).
-        turn_budget = int(os.environ.get("AIR_HEADLESS_MAX_TURNS")
-                          or min(150, 45 + 3 * max(n_files, 1)))
+        turn_budget = env.env_int("AIR_HEADLESS_MAX_TURNS",
+                                  min(150, 45 + 3 * max(n_files, 1)), minimum=1)
         print(f"[headless] turn budget: {turn_budget} ({n_files} changed files)")
         cache_ttl = _choose_cache_ttl(n_files, raw_diff_bytes)
         write_mult = agent_loop.cache_write_mult(cache_ttl)
@@ -899,20 +929,14 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # (only --dry-run, which returns above, was tested). bot_login was resolved
         # up front (for the pr-conversation bot-self filter); reuse it here.
         verdict_body = reason or (NO_APPROVE_VERDICT_BODY if verdict == "COMMENT" else "")
-        submit_review_verdict(args.repo, args.pr_number, bot_token,
-                              event=verdict, body=verdict_body, commit_id=head_sha)
-        # Gate-orphan dismissal needs OUR login to skip our own just-posted verdict.
-        # If we can't resolve it, SKIP dismissal — calling with current_login=None
-        # makes the skip-self guard falsy and dismisses the verdict we just posted,
-        # silently un-gating a REQUEST_CHANGES (the dogfood-caught gate-safety bug).
-        # include_own on a clean no-approve COMMENT: it can't self-supersede our own
-        # prior CHANGES_REQUESTED, so dismiss it too (else a fixed PR stays blocked).
-        if bot_login:
-            dismiss_stale_air_verdicts(args.repo, args.pr_number, bot_token, bot_login,
-                                       _air_bot_logins(), include_own=(verdict == "COMMENT"))
-        else:
-            print("  [warn] bot login unresolved — skipping stale-verdict dismissal "
-                  "(won't risk clearing our own verdict)", file=sys.stderr)
+        # M4-guarded verdict + gate-orphan dismissal (see _submit_verdict_guarded):
+        # the comment is already posted, so a transient POST failure must not crash
+        # the run or skip the learning write-back below. bot_login was resolved up
+        # front (for the pr-conversation bot-self filter); reuse it here.
+        _submit_verdict_guarded(
+            args.repo, args.pr_number, bot_token,
+            event=verdict, body=verdict_body, commit_id=head_sha,
+            bot_login=bot_login, bot_logins=_air_bot_logins())
 
     # ---- LEARNING WRITE-BACK (post-review) -------------------------------
     # After the verdict is posted, advance the shared learn cadence — the same tail

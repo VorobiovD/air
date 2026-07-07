@@ -255,16 +255,21 @@ REVIEWED_AT_RE = re.compile(r"Reviewed at:\s*([0-9a-f]{40})", re.IGNORECASE)
 # next heading at the same OR shallower depth, so blocker counts don't
 # bleed into adjacent Medium/Low/Nits.
 #
-# The heading may carry a friendly suffix AFTER a separator (`### Blockers —
-# must fix`, `### Blockers (2)`, `### Blockers: …`) — the v2 format decorates
-# the non-blocking headings, and a model can extend the pattern to Blockers.
-# A BARE-match (`Blockers\s*$`) silently counted 0 on a decorated heading →
-# a non-security blocker un-gated (audit H5; the `[sec:]` floor only backstops
-# security categories). The suffix is anchored to a SEPARATOR char so this can
-# NEVER match a distinct heading like `### Blockers Resolved`/`### Blockers
-# Fixed` (space-separated word) and miscount its entries as new blockers.
+# The heading may carry the v2 "calm suffix" a model can mirror from the
+# sibling headings (`### Medium — consider fixing`): `### Blockers — must fix`,
+# `### Blockers - must fix`, or a count `### Blockers (2)`. A BARE-only match
+# (`Blockers\s*$`) silently counted 0 on such a heading → a non-security
+# blocker un-gated (audit H5; the `[sec:]` floor only backstops security
+# categories). The tolerated suffix is NARROW — a SPACE-DELIMITED dash suffix
+# (` — … ` / ` - … `) or a parenthesized integer count (` (N)`) — so it can
+# never be satisfied by a DISTINCT heading (`### Blockers Resolved`,
+# `### Blockers: Resolved`, `### Blockers (Resolved)`, `### Blockers-Resolved`),
+# which would miscount a re-review "resolved" summary's entries as new blockers.
+# Emitted headings stay bare regardless (.air-checks.sh Check I) — this
+# tolerance is only a drift safety-net. Section termination (next heading) is
+# unchanged, so a suffix can't bleed into Medium/Low.
 _BLOCKERS_SECTION_RE = re.compile(
-    r"^#{3,4}\s+Blockers(?:\s*[-—(:][^\n]*)?\s*$\n(.*?)(?=^#{1,4}\s+|\Z)",
+    r"^#{3,4}\s+Blockers(?:\s+[-—]\s+[^\n]*|\s+\(\d+\))?\s*$\n(.*?)(?=^#{1,4}\s+|\Z)",
     re.MULTILINE | re.DOTALL,
 )
 
