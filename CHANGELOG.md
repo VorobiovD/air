@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.46.1](https://github.com/VorobiovD/air/compare/v1.46.0...v1.46.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **cli:** BOT_LOGIN probe matches both BOT_REVIEW_PREFIXES ([#255](https://github.com/VorobiovD/air/issues/255)) ([cef5c7d](https://github.com/VorobiovD/air/commit/cef5c7df3c2d87bb392fb29229aadff60fe3a4d9))
+* **cli:** first-run wiki push no longer aborts; empty-inter-diff carries statuses forward ([#256](https://github.com/VorobiovD/air/issues/256)) ([267c629](https://github.com/VorobiovD/air/commit/267c62980bdd6433b470bc647f6a2c12ee39f13d))
+* **gate-safety:** count blockers under a decorated heading; lock gate anchors both ways ([#248](https://github.com/VorobiovD/air/issues/248)) ([93e5ccf](https://github.com/VorobiovD/air/commit/93e5ccf6dedd60dca88795bc7a26b6fa7c693d14))
+* **gate-safety:** re-review branch detection no longer depends on the header alone ([#254](https://github.com/VorobiovD/air/issues/254)) ([4ac8b23](https://github.com/VorobiovD/air/commit/4ac8b235da11ed7e6423daefc2d19c8a7590a742))
+* **gate-safety:** tighten Blockers-suffix regex + close the CHK-I substring hole ([#249](https://github.com/VorobiovD/air/issues/249)) ([69fcec0](https://github.com/VorobiovD/air/commit/69fcec074f7a65e646f4f0f7b5a138aef964b6ff))
+* **headless,security:** defang the untrusted-tool-output wrapper tag ([#245](https://github.com/VorobiovD/air/issues/245)) ([e0c944b](https://github.com/VorobiovD/air/commit/e0c944b1073a0a598d736150ca9044a326688c65))
+* **headless:** key the truncation gate on the hygiene marker, not the char cap ([#252](https://github.com/VorobiovD/air/issues/252)) ([6172c53](https://github.com/VorobiovD/air/commit/6172c53dab0847294637c23fb88f01a59bf59ba4))
+* **reliability:** platform-HTTP timeouts + fail-on-partial; wiki_git timeout; headless verdict-POST wrap ([#250](https://github.com/VorobiovD/air/issues/250)) ([2aa76d8](https://github.com/VorobiovD/air/commit/2aa76d8d4b32d16cded3e45bba004de4d2a44b51))
+* **reliability:** tolerant AIR_* env parsing, learn-lock TTL, cron lock-claim ([#251](https://github.com/VorobiovD/air/issues/251)) ([8eaa87d](https://github.com/VorobiovD/air/commit/8eaa87d425a61443d4dd04daec54efe4e3e78a8a))
+* **rereview:** honor cross-FILE fixes + annotate FIXED-&gt;NOT FIXED rewrites ([#244](https://github.com/VorobiovD/air/issues/244)) ([608f5ab](https://github.com/VorobiovD/air/commit/608f5ab746c5e84ed0a8eabe3bb9f12191d8ed2e))
+* **security:** trust-gate + de-secret the pre-commit hook; pin CI deps ([#247](https://github.com/VorobiovD/air/issues/247)) ([441b035](https://github.com/VorobiovD/air/commit/441b035716d8d44b3e72dd54176c1ca9cae85b83))
+
 ## [1.46.0](https://github.com/VorobiovD/air/compare/v1.45.0...v1.46.0) (2026-07-02)
 
 

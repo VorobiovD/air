@@ -143,7 +143,7 @@ managed/                          # Managed Agent (CI automation)
 - Conflict markers in PR diff = automatic blocker finding
 - Security auditor uses a 31-item checklist; PROJECT-PROFILE.md controls which items apply per repo
 - Cost telemetry (`agent_loop.price_for_tier`/`usage_cost`) prices the `sonnet` tier at Sonnet 5's **intro $2/$10** while active (through 2026-08-31), since the `sonnet` alias points at Sonnet 5 — kill switch `AIR_SONNET_INTRO_PRICING` (unset/`auto` = date-windowed self-expiring, `1` = force on, `0` = standard $3/$15). air-stats parses the logged cost, so the correction is at emission.
-- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.46.0) <!-- x-release-please-version -->
+- Version is in `plugins/air/.claude-plugin/plugin.json` (currently 1.46.1) <!-- x-release-please-version -->
 - Install via `/plugin marketplace add VorobiovD/air` then `/plugin install air@air`
 
 ## Releases (automated via release-please)
