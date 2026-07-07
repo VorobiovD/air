@@ -577,7 +577,11 @@ Two-dot (`..`) gives the direct range from old SHA to new SHA — exactly what c
 
 **If the inter-diff is empty (0 lines):** the developer made no changes since the last review. Do NOT fall through to a full review. Instead:
 - If `REVIEWED_AT_SHA` == `headRefOid`: print "Already reviewed at <SHA> — no changes since. Use --fresh for full re-review." and STOP.
-- If SHAs differ but diff is still empty (possible with merge commits that don't change PR files): classify all previous findings as NOT FIXED and post a re-review status update without launching agents. Skip to Step 11 (Format and Write) — it flows through Step 11.5 (pin) to Step 12 (Post).
+- If SHAs differ but diff is still empty (possible with merge commits that don't change PR files): post a re-review status update without launching agents, carrying the prior round forward — **do NOT blanket-mark everything NOT FIXED**:
+  - Prior review was a **fresh** review (numbered findings, no `### Previous Findings Status` block): every finding becomes NOT FIXED — correct by definition, since nothing changed to fix them.
+  - Prior review was itself a **re-review**: copy each `- **#N** [severity] — STATUS` line **verbatim** from the prior `### Previous Findings Status` block. An empty inter-diff cannot change any status — a prior FIXED stays FIXED and a prior DISPUTED stays DISPUTED; rewriting them to NOT FIXED would resurrect an already-cleared blocker and false-block a PR where nothing changed.
+
+  Skip to Step 11 (Format and Write) — it flows through Step 11.5 (pin) to Step 12 (Post).
 
 If the command fails (cross-repo, SHA not available locally):
 ```bash
@@ -1226,7 +1230,11 @@ fi
 cp "$AIR_TMP/REVIEW.md" "$WIKI_DIR/REVIEW.md"
 cp "$AIR_TMP/ACCEPTED-PATTERNS.md" "$WIKI_DIR/ACCEPTED-PATTERNS.md" 2>/dev/null
 # .air-meta.json is mutated in-place by meta.py earlier in this step, so no copy needed.
-cd "$WIKI_DIR" && git add REVIEW.md ACCEPTED-PATTERNS.md .air-meta.json && { git diff --quiet --cached || git commit -m "review: learned from PR #<number>"; } && git push
+# Add per-file, skipping absent ones: `git add` with ANY missing pathspec stages
+# NOTHING (exit 128) and the && chain aborts — on a first-run wiki with no
+# ACCEPTED-PATTERNS.md yet, that silently lost the REVIEW.md learning AND the
+# counter push. The `|| true` keeps each iteration (and the loop) exit-0.
+cd "$WIKI_DIR" && for f in REVIEW.md ACCEPTED-PATTERNS.md .air-meta.json; do [ -f "$f" ] && git add "$f" || true; done && { git diff --quiet --cached || git commit -m "review: learned from PR #<number>"; } && git push
 ```
 
 If wiki not found, print guidance. If push fails, warn but don't fail.
