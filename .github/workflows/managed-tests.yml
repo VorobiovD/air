@@ -13,11 +13,16 @@ on:
       # them — trigger on it too.
       - 'plugins/air/lib/**'
       - '.github/workflows/managed-tests.yml'
+      # This job's collection depends on pyproject's python_files, so a
+      # config-only edit must re-run it (else it silently skips — the exact
+      # silent-drop class this config was added to close).
+      - 'pyproject.toml'
   push:
     branches: [main]
     paths:
       - 'managed/**'
       - 'plugins/air/lib/**'
+      - 'pyproject.toml'
 
 permissions:
   contents: read
