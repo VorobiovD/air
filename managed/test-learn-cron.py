@@ -174,3 +174,22 @@ def test_dry_run_never_touches_lock(fleet, monkeypatch):
     monkeypatch.setattr(C.learn_headless, "run_headless_learn",
                         lambda repo, **k: {"dry_run": True})
     C.run(dry_run=True)
+
+
+def test_claim_error_skips_only_that_repo(monkeypatch):
+    # #1 isolation: a store error in claim_learn_lock must skip ONLY that repo,
+    # not abort the rest of the scheduled run (matches find_due_repos isolation).
+    monkeypatch.setattr(C, "find_due_repos",
+                        lambda repos_filter=None, log=print: [("o/a", "sa", "r"), ("o/b", "sb", "r")])
+    def claim(sid):
+        if sid == "sa":
+            raise RuntimeError("store blip")
+        return True
+    learned = []
+    monkeypatch.setattr(C.meta, "claim_learn_lock", claim)
+    monkeypatch.setattr(C.meta, "release_learn_lock", lambda sid: None)
+    monkeypatch.setattr(C.learn_headless, "run_headless_learn",
+                        lambda repo, **k: learned.append(repo) or {"reset": True})
+    out = C.run(dry_run=False)                 # must NOT raise
+    assert learned == ["o/b"]                  # o/a skipped on claim error, o/b still learned
+    assert out["ran"] == ["o/a", "o/b"]        # both recorded (o/a as an error)

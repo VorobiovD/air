@@ -370,3 +370,14 @@ def test_read_author_no_backend_arg_required():
     with contextlib.redirect_stderr(io.StringIO()):
         with pytest.raises(SystemExit):
             meta.main(["read-author", "--repo", "owner/repo"])  # no --login
+
+
+def test_claim_learn_lock_false_when_not_due(fake):
+    # #6: if the counter was reset (below threshold) between find_due and claim,
+    # the cron must NOT claim + re-fire — re-check should_trigger_learn, not just lock.
+    seed = meta._default_meta()
+    seed["reviews_since"] = 2            # below REVIEWS_THRESHOLD, no lock
+    fake.content = json.dumps(seed)
+    before = fake.content
+    assert meta.claim_learn_lock("memstore_x") is False
+    assert fake.content == before        # no write when not due

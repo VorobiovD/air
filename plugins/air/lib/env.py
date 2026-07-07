@@ -39,6 +39,14 @@ def _warn(msg: str) -> None:
     print(f"  [env] {msg}", file=sys.stderr)
 
 
+def _clip(raw: str, n: int = 40) -> str:
+    """repr of a value for a warning, length-capped. The numeric/bool knobs are
+    definitionally non-secret (timeouts, counts, byte caps, kill switches), but
+    cap the echo anyway so a stray long value can't flood the log."""
+    r = repr(raw)
+    return r if len(r) <= n else r[:n] + "…'"
+
+
 def env_int(name: str, default: int, *, minimum: int | None = None) -> int:
     """Parse an integer knob, warning + falling back to `default` on a
     non-integer value (never raises). Empty/unset → default. `minimum` clamps
@@ -50,7 +58,7 @@ def env_int(name: str, default: int, *, minimum: int | None = None) -> int:
         try:
             val = int(raw.strip())
         except ValueError:
-            _warn(f"{name}={raw!r} is not an integer — using default {default}")
+            _warn(f"{name}={_clip(raw)} is not an integer — using default {default}")
             val = default
     if minimum is not None and val < minimum:
         return minimum
@@ -66,7 +74,7 @@ def env_float(name: str, default: float) -> float:
     try:
         return float(raw.strip())
     except ValueError:
-        _warn(f"{name}={raw!r} is not a number — using default {default}")
+        _warn(f"{name}={_clip(raw)} is not a number — using default {default}")
         return default
 
 
@@ -92,7 +100,7 @@ def env_bool(name: str, default: bool) -> bool:
         return True
     if v in _FALSE:
         return False
-    _warn(f"{name}={raw!r} is not a recognized boolean "
+    _warn(f"{name}={_clip(raw)} is not a recognized boolean "
           f"(1/true/yes | 0/false/no) — using default {default}")
     return default
 

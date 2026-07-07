@@ -139,3 +139,14 @@ def test_report_env_never_prints_values(monkeypatch):
     joined = " ".join(logged)
     assert "AIR_MYSTERY_TOKEN" in joined
     assert "s3cr3t-value" not in joined   # NAMES only — never the value
+
+
+def test_env_int_warning_clips_long_value(monkeypatch, capsys):
+    # #7: a stray long value must not flood the log (and the numeric knobs are
+    # non-secret anyway). The warning echoes a length-capped repr.
+    monkeypatch.setenv("AIR_X", "z" * 500)
+    assert env.env_int("AIR_X", 7) == 7
+    line = capsys.readouterr().err
+    assert "AIR_X" in line and "using default 7" in line
+    assert "z" * 500 not in line          # not the full 500-char value
+    assert "…" in line                    # clipped

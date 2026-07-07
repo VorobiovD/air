@@ -547,6 +547,11 @@ def claim_learn_lock(store_id: str) -> bool:
         m, sha, mem_id = found
         if _learn_lock_live(m):
             return False  # a review/other cron already holds it
+        if not should_trigger_learn(m)[0]:
+            # No longer due — e.g. a review's inline learn reset the counter
+            # between find_due_repos's scan and this claim (prior repos in the
+            # loop can take minutes). Don't claim + re-fire an unnecessary learn.
+            return False
         m = dict(m)
         m["learn_claimed_at"] = now
         try:
