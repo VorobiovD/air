@@ -2,10 +2,21 @@
 
 import os
 import sys
+import time
 
 import requests
 
 API_BASE = "https://api.anthropic.com/v1"
+
+# Network resilience (audit H2): requests has NO default timeout, so a
+# black-holed TCP connection to api.anthropic.com used to hang the whole
+# review/setup job until the 95-min workflow kill — the same failure
+# github_client._gh_request fixed for GitHub. Bound every call and retry
+# transient (connection / 5xx) errors; a persistent error RAISES rather than
+# silently returning a partial list (see _paginate).
+_API_TIMEOUT = (10, 30)          # (connect, read) seconds
+_API_RETRY_ATTEMPTS = 3          # 1 try + 2 retries
+_API_RETRY_BACKOFF = 2.0         # seconds, doubles each retry
 # Research-preview header unlocks `callable_agents` (multi-agent), Memory,
 # and Outcomes. Phase 1 only uses callable_agents — the air-coordinator
 # agent dispatches the 4 specialists + verifier as sub-agents in one
@@ -43,8 +54,34 @@ def api_error_message(resp: requests.Response) -> str:
     """Extract error message from API response, handling non-JSON responses."""
     try:
         return resp.json().get("error", {}).get("message", resp.text[:200])
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, AttributeError, TypeError):
+        # ValueError = non-JSON body; Attribute/TypeError = JSON that isn't the
+        # expected {"error": {"message": …}} shape (e.g. a list or a bare
+        # string). The error FORMATTER must never itself raise.
         return resp.text[:200]
+
+
+def _get_with_retry(url: str, params: dict) -> requests.Response:
+    """GET with a bounded timeout + retry on transient (connection / 5xx)
+    errors. Returns the response for any status < 500 (2xx/3xx/4xx — the
+    caller decides what a 4xx means). Raises RuntimeError after exhausting
+    retries on a connection error or persistent 5xx — never hangs, never
+    silently proceeds on a dead endpoint."""
+    last = "unknown error"
+    for attempt in range(_API_RETRY_ATTEMPTS):
+        try:
+            resp = requests.get(
+                url, headers=get_headers(), params=params, timeout=_API_TIMEOUT
+            )
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last = f"{type(e).__name__}: {str(e)[:150]}"
+        else:
+            if resp.status_code < 500:
+                return resp
+            last = f"HTTP {resp.status_code}: {api_error_message(resp)}"
+        if attempt < _API_RETRY_ATTEMPTS - 1:
+            time.sleep(_API_RETRY_BACKOFF * (2 ** attempt))
+    raise RuntimeError(f"api: GET {url} failed after {_API_RETRY_ATTEMPTS} attempts — {last}")
 
 
 def _paginate(path: str) -> list[dict]:
@@ -69,9 +106,17 @@ def _paginate(path: str) -> list[dict]:
         params = {"limit": 100}
         if cursor:
             params["page"] = cursor
-        resp = requests.get(f"{API_BASE}{path}", headers=get_headers(), params=params)
+        resp = _get_with_retry(f"{API_BASE}{path}", params)
         if not resp.ok:
-            break
+            # A persistent 4xx mid-walk (e.g. 401 wrong-workspace key on page 2)
+            # must NOT silently return a partial list — that's the exact bug
+            # class github_client.PartialPageError closed. Fail loud so the
+            # caller (agent sync / env lookup) aborts instead of acting on
+            # partial data (spurious "missing agents", duplicate environments).
+            raise RuntimeError(
+                f"api: {path} returned HTTP {resp.status_code} mid-pagination "
+                f"({api_error_message(resp)}) — refusing to act on a partial list"
+            )
         body = resp.json()
         all_items.extend(body.get("data", []))
         cursor = body.get("next_page")
