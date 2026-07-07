@@ -1,2 +1,9 @@
-anthropic>=0.93.0
-requests>=2.28.0
+# Pinned to the fleet's current, validated SDK line. The managed path uses
+# client.beta.sessions (version-sensitive), so an SDK bump is a deliberate,
+# reviewed step — an UNpinned install pulls the latest release into a CI job
+# that holds the write-PAT + API keys (supply-chain exposure; audit S4). Raise
+# the ceiling only after validating the new release on the fleet.
+# NOTE: the pre-checkout inline install in .github/workflows/managed-review.yml
+# mirrors these bounds — keep the two in sync.
+anthropic>=0.116.0,<0.117.0
+requests>=2.28.0,<3.0.0
