@@ -458,10 +458,10 @@ wait
 
 Now resolve the bot's own login so we can filter out our own prior `## Code Review` comments downstream (re-review delta tracking owns those — `<pr-conversation>` is broader background). Two-step resolution because `gh api user` returns the *current gh-CLI user*, which on a developer's CLI is the developer (not the bot). Prefer the author of any prior `## Code Review` comment on this PR — that's authoritative — and only fall back to `gh api user` if no prior review exists yet.
 
-The probe reads `conv-issues.json` we just fetched (no extra round trip) and applies the same `## Code Review\n` prefix the merger uses (`BOT_REVIEW_PREFIXES` in `pr_conversation.py`). The trailing `\n` is load-bearing — without it, a comment titled `## Code Reviewers Guide` would falsely match and we'd treat its author as the bot:
+The probe reads `conv-issues.json` we just fetched (no extra round trip) and applies BOTH prefixes the merger uses (`BOT_REVIEW_PREFIXES` in `pr_conversation.py` — fresh `## Code Review\n` AND `## Code Review (Re-review)\n`; a promote-fastpath PR's only air comment is a re-review body, so matching just the fresh prefix would miss the bot there and the fallback would resolve to the developer). The trailing `\n` is load-bearing — without it, a comment titled `## Code Reviewers Guide` would falsely match and we'd treat its author as the bot:
 ```bash
 BOT_LOGIN=""
-PRIOR_BOT=$(jq -r '[.[] | select(.body | startswith("## Code Review\n"))] | first | .user.login // empty' "$AIR_TMP/conv-issues.json" 2>/dev/null)
+PRIOR_BOT=$(jq -r '[.[] | select(.body | startswith("## Code Review\n") or startswith("## Code Review (Re-review)\n"))] | first | .user.login // empty' "$AIR_TMP/conv-issues.json" 2>/dev/null)
 if [ -n "$PRIOR_BOT" ] && [ "$PRIOR_BOT" != "null" ]; then
   BOT_LOGIN="$PRIOR_BOT"
 else

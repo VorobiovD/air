@@ -69,10 +69,10 @@ gh api --paginate "repos/<owner>/<repo>/pulls/$PR_NUMBER/comments?per_page=100&s
 wait
 ```
 
-Bot-login resolution: prefer the author of any prior `## Code Review` comment on this PR (authoritative); fall back to `gh api user` (the current CLI user). On a developer's CLI, `gh api user` returns the *developer*, not the bot — without the prior-comment fallback, the bot-self filter is a no-op and the bot's prior numbered findings leak into `<pr-conversation>`. Reads `conv-issues.json` we just fetched; the trailing `\n` on `## Code Review\n` matches `BOT_REVIEW_PREFIXES` in `pr_conversation.py` and rejects `## Code Reviewers Guide`-style lookalikes:
+Bot-login resolution: prefer the author of any prior `## Code Review` comment on this PR (authoritative); fall back to `gh api user` (the current CLI user). On a developer's CLI, `gh api user` returns the *developer*, not the bot — without the prior-comment fallback, the bot-self filter is a no-op and the bot's prior numbered findings leak into `<pr-conversation>`. Reads `conv-issues.json` we just fetched; matches BOTH `BOT_REVIEW_PREFIXES` from `pr_conversation.py` (fresh + `(Re-review)` — a promote-fastpath PR's only air comment is a re-review body), and the trailing `\n` rejects `## Code Reviewers Guide`-style lookalikes:
 ```bash
 BOT_LOGIN=""
-PRIOR_BOT=$(jq -r '[.[] | select(.body | startswith("## Code Review\n"))] | first | .user.login // empty' "$AIR_TMP/conv-issues.json" 2>/dev/null)
+PRIOR_BOT=$(jq -r '[.[] | select(.body | startswith("## Code Review\n") or startswith("## Code Review (Re-review)\n"))] | first | .user.login // empty' "$AIR_TMP/conv-issues.json" 2>/dev/null)
 if [ -n "$PRIOR_BOT" ] && [ "$PRIOR_BOT" != "null" ]; then
   BOT_LOGIN="$PRIOR_BOT"
 else
