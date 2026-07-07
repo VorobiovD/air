@@ -21,7 +21,9 @@ import os
 import re
 import sys
 
-DIFF_MAX_BYTES = int(os.environ.get("AIR_DIFF_MAX_BYTES", "500000"))
+import env  # tolerant env parsing (sibling in plugins/air/lib; on sys.path as a script or via the managed _LIB insert)
+
+DIFF_MAX_BYTES = env.env_int("AIR_DIFF_MAX_BYTES", 500_000, minimum=0)
 # Cap-marker line prefix. review.py keys codex-skip off it: a truncated
 # re-review delta must NOT skip codex (real changes may live in the
 # omitted tail, and codex reads the git tree, not this diff). Detection is

@@ -73,6 +73,7 @@ from agent_md import split_frontmatter  # noqa: E402  (single-source frontmatter
 import memory_store  # noqa: E402  (managed/ — client-side store reads for pattern staging)
 import pr_conversation  # noqa: E402  (plugins/air/lib)
 import agent_loop  # noqa: E402  (plugins/air/lib)
+import env  # noqa: E402  (plugins/air/lib — tolerant env parsing)
 from tool_exec import Sandbox  # noqa: E402
 from wiki_git import _redact  # noqa: E402  (mask token-bearing URLs in clone errors)
 
@@ -80,7 +81,7 @@ AGENTS_DIR = _LIB.parent / "agents"
 SPECIALISTS = ["air-code-reviewer", "air-simplify", "air-security-auditor", "air-git-history-reviewer"]
 UI_SPECIALIST = "air-ui-copy-reviewer"
 VERIFIER = "air-review-verifier"
-_DIFF_CAP = int(os.environ.get("AIR_HEADLESS_DIFF_CAP", "500000"))  # chars — managed parity
+_DIFF_CAP = env.env_int("AIR_HEADLESS_DIFF_CAP", 500_000, minimum=0)  # chars — managed parity
                              # (= managed's AIR_DIFF_MAX_BYTES). The diff is already
                              # apply_diff_hygiene'd (generated/vendored stubbed) before this
                              # cap, so this only bounds real-code diffs. The old 120K "v1
@@ -247,11 +248,7 @@ BLOCKER_LENSES = ("air-security-auditor", "air-code-reviewer")
 
 def _int_env(name: str, default: int) -> int:
     """Tolerant int env read — a misconfigured value logs + falls back, never crashes."""
-    try:
-        return int(os.environ.get(name, "").strip() or default)
-    except ValueError:
-        print(f"  [warn] {name}={os.environ.get(name)!r} is not an int — using {default}", file=sys.stderr)
-        return default
+    return env.env_int(name, default)
 
 
 def _choose_cache_ttl(n_files: int, diff_bytes: int) -> str:
@@ -441,7 +438,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # branch / no merged+reviewed sibling / <80% overlap / any fetch failure → None →
     # full review. An empty inter-diff falls back to full (handled in DIFF SELECTION).
     promote_sibling_pr = None
-    if prior is None and os.environ.get("AIR_PROMOTE_FASTPATH", "") in ("1", "true"):
+    if prior is None and env.env_bool("AIR_PROMOTE_FASTPATH", False):
         fp = _detect_promote_fastpath(
             args.repo, args.pr_number, meta, head_sha, bot_login, bot_token)
         if fp:
@@ -629,8 +626,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # before emitting findings; the verifier then never sees them — observed in
         # A/B testing: two specialists hit a 45-turn cap and produced nothing).
         # n_files + raw_diff_bytes were computed on the RAW diff above (pre-truncation).
-        turn_budget = int(os.environ.get("AIR_HEADLESS_MAX_TURNS")
-                          or min(150, 45 + 3 * max(n_files, 1)))
+        turn_budget = env.env_int("AIR_HEADLESS_MAX_TURNS",
+                                  min(150, 45 + 3 * max(n_files, 1)), minimum=1)
         print(f"[headless] turn budget: {turn_budget} ({n_files} changed files)")
         cache_ttl = _choose_cache_ttl(n_files, raw_diff_bytes)
         write_mult = agent_loop.cache_write_mult(cache_ttl)

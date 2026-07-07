@@ -109,3 +109,87 @@ def test_list_mode_makes_no_model_calls(fleet, monkeypatch):
     rc = C.main(["--list"])
     assert rc == 0
     assert called == []   # zero model calls — the safe scheduled-trial default
+
+
+# --- M3: the cron claims the anti-storm lock before curating -----------------
+
+def test_run_live_claims_lock_then_learns(fleet, monkeypatch):
+    claimed, learned = [], []
+    monkeypatch.setattr(C.meta, "claim_learn_lock", lambda sid: claimed.append(sid) or True)
+    monkeypatch.setattr(C.meta, "release_learn_lock", lambda sid: pytest.fail("must not release on clean reset"))
+    monkeypatch.setattr(C.learn_headless, "run_headless_learn",
+                        lambda repo, **k: learned.append(repo) or {"reset": True})
+    C.run(dry_run=False)
+    assert claimed == ["s1"] and learned == ["thecvlb/qai-be"]
+
+
+def test_run_skips_repo_when_lock_lost(fleet, monkeypatch):
+    learned = []
+    monkeypatch.setattr(C.meta, "claim_learn_lock", lambda sid: False)   # lost the race
+    monkeypatch.setattr(C.learn_headless, "run_headless_learn",
+                        lambda repo, **k: learned.append(repo) or {})
+    out = C.run(dry_run=False)
+    assert learned == []                                  # never curated (lock lost)
+    assert out["due"] == ["thecvlb/qai-be"]               # still detected as due
+
+
+def test_run_releases_lock_on_learn_error(fleet, monkeypatch):
+    released = []
+    monkeypatch.setattr(C.meta, "claim_learn_lock", lambda sid: True)
+    monkeypatch.setattr(C.meta, "release_learn_lock", lambda sid: released.append(sid))
+    def boom(repo, **k):
+        raise RuntimeError("model outage")
+    monkeypatch.setattr(C.learn_headless, "run_headless_learn", boom)
+    C.run(dry_run=False)
+    assert released == ["s1"]                             # errored → lock freed for re-arm
+
+
+def test_run_releases_lock_on_degraded_no_reset(fleet, monkeypatch):
+    released = []
+    monkeypatch.setattr(C.meta, "claim_learn_lock", lambda sid: True)
+    monkeypatch.setattr(C.meta, "release_learn_lock", lambda sid: released.append(sid))
+    # A degraded run returns reset=False (re-arm intent) → the cron frees the lock.
+    monkeypatch.setattr(C.learn_headless, "run_headless_learn",
+                        lambda repo, **k: {"reset": False})
+    C.run(dry_run=False)
+    assert released == ["s1"]
+
+
+def test_run_keeps_lock_on_clean_reset(fleet, monkeypatch):
+    # reset=True means run_headless_learn already cleared the lock → no extra release.
+    monkeypatch.setattr(C.meta, "claim_learn_lock", lambda sid: True)
+    monkeypatch.setattr(C.meta, "release_learn_lock",
+                        lambda sid: pytest.fail("must not double-release after a clean reset"))
+    monkeypatch.setattr(C.learn_headless, "run_headless_learn",
+                        lambda repo, **k: {"reset": True})
+    C.run(dry_run=False)
+
+
+def test_dry_run_never_touches_lock(fleet, monkeypatch):
+    # dry-run writes nothing — it must not claim or release the store lock either.
+    monkeypatch.setattr(C.meta, "claim_learn_lock",
+                        lambda sid: pytest.fail("dry-run must not claim the lock"))
+    monkeypatch.setattr(C.meta, "release_learn_lock",
+                        lambda sid: pytest.fail("dry-run must not release the lock"))
+    monkeypatch.setattr(C.learn_headless, "run_headless_learn",
+                        lambda repo, **k: {"dry_run": True})
+    C.run(dry_run=True)
+
+
+def test_claim_error_skips_only_that_repo(monkeypatch):
+    # #1 isolation: a store error in claim_learn_lock must skip ONLY that repo,
+    # not abort the rest of the scheduled run (matches find_due_repos isolation).
+    monkeypatch.setattr(C, "find_due_repos",
+                        lambda repos_filter=None, log=print: [("o/a", "sa", "r"), ("o/b", "sb", "r")])
+    def claim(sid):
+        if sid == "sa":
+            raise RuntimeError("store blip")
+        return True
+    learned = []
+    monkeypatch.setattr(C.meta, "claim_learn_lock", claim)
+    monkeypatch.setattr(C.meta, "release_learn_lock", lambda sid: None)
+    monkeypatch.setattr(C.learn_headless, "run_headless_learn",
+                        lambda repo, **k: learned.append(repo) or {"reset": True})
+    out = C.run(dry_run=False)                 # must NOT raise
+    assert learned == ["o/b"]                  # o/a skipped on claim error, o/b still learned
+    assert out["ran"] == ["o/a", "o/b"]        # both recorded (o/a as an error)

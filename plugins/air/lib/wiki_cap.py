@@ -40,6 +40,8 @@ import os
 import re
 import sys
 
+import env  # tolerant env parsing (sibling in plugins/air/lib; on sys.path as a script or via the managed _LIB insert)
+
 
 # The wiki files this module caps (also the commit list for the CLI/learn paths).
 CAPPED_FILES = (
@@ -49,10 +51,7 @@ CAPPED_FILES = (
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, "").strip() or default)
-    except ValueError:
-        return default
+    return env.env_int(name, default)
 
 
 # Per-file byte ceilings. Set generously enough that the SAFE trims can plausibly

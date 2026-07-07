@@ -43,6 +43,7 @@ plugins/air/
 │   ├── agent_md.py            # THE agents/*.md frontmatter parser — single source for solo_prompt / setup / headless._persona_model
 │   ├── diff_hygiene.py        # THE diff stub-generated/vendored + size-cap pass — single source: managed github_client fetchers re-export it; CLI review.md pipes its diff saves through it
 │   ├── wiki_cap.py            # THE deterministic wiki bloat-cap (per-file byte ceilings; managed learn/render + CLI learn all call it)
+│   ├── env.py                 # THE tolerant AIR_* env parsing (env_int/float/bool — crash-safe on a typo'd value) + report_env() startup drift report
 │   └── verdict.py             # THE review-gating contract (shared: CLI Step 12 runs it via --decide; managed imports it)
 └── .claude-plugin/
     └── plugin.json      # Plugin metadata (name, version, author)
