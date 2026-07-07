@@ -390,7 +390,11 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python dependencies
-        run: pip install anthropic requests
+        # Pinned (supply-chain, audit S4): an unpinned install would pull the
+        # latest release into this job, which holds AIR_BOT_TOKEN + the API
+        # keys. This install runs before the air checkout below, so it can't
+        # use `-r managed/requirements.txt` — keep these bounds in sync with it.
+        run: pip install 'anthropic>=0.116.0,<0.117.0' 'requests>=2.28.0,<3.0.0'
 
       # `actions/checkout@v4` defaults to the default branch when
       # `repository:` is set to a different repo than the caller's. For

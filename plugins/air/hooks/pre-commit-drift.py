@@ -34,10 +34,37 @@ AIR_PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILTIN_CHECKS = os.path.join(AIR_PLUGIN_ROOT, "hooks", "builtin-checks.sh")
 
 
+# Environment passed to drift-check scripts. DENY-BY-DEFAULT: neither the
+# built-ins nor a repo-provided `.air-checks.sh` may see the session's secrets
+# (ANTHROPIC_API_KEY, *_PAT, AIR_BOT_TOKEN, OPENAI_API_KEY, …). We forward only
+# the infra vars git/python3/grep/sed/find need, plus AIR_PLUGIN_ROOT. This is
+# the security fix for the "a cloned hostile repo exfiltrates secrets on the
+# first commit" class: even if an untrusted script somehow runs, its
+# environment holds nothing worth stealing. Paired with `_custom_trusted`
+# below (which stops an untrusted custom script from running at all), and with
+# the fact that the built-ins are air's own code shipped inside the plugin.
+_ENV_ALLOWLIST = (
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "OLDPWD", "TMPDIR",
+    "TEMP", "TMP", "TERM", "TERMINFO", "TZ", "LANG", "LANGUAGE", "LC_ALL",
+    "LC_CTYPE", "LC_MESSAGES", "SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_EXEC_PATH",
+    "SYSTEMROOT", "PATHEXT",  # Windows: git/python need these
+)
+
+
+def _build_script_env():
+    """A minimal, secret-free environment for drift-check scripts."""
+    env = {k: os.environ[k] for k in _ENV_ALLOWLIST if k in os.environ}
+    # Any other locale var the allowlist didn't name (LC_* / LC_NUMERIC / …).
+    for k, v in os.environ.items():
+        if k.startswith("LC_"):
+            env[k] = v
+    env["AIR_PLUGIN_ROOT"] = AIR_PLUGIN_ROOT
+    return env
+
+
 def run_script(path, cwd):
     """Run a shell script; return (rc, stdout, stderr). Timeout at 25s."""
-    env = os.environ.copy()
-    env["AIR_PLUGIN_ROOT"] = AIR_PLUGIN_ROOT
+    env = _build_script_env()
     try:
         result = subprocess.run(
             ["/bin/bash", path],
@@ -140,6 +167,45 @@ def _has_no_verify(cmd: str) -> bool:
     return False
 
 
+def _absolute_git_dir(repo_root):
+    """Absolute path to this repo's git dir, or None."""
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--absolute-git-dir"],
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        return out or None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def _custom_trusted(repo_root):
+    """Whether a repo-provided `.air-checks.sh` is trusted to execute.
+
+    The executable bit is NOT trust — git preserves it across clones, so a
+    hostile repo can ship `.air-checks.sh` mode 755 and, without this gate,
+    have it run (with the user's environment) on the first Claude-driven
+    commit. Trust therefore requires an OUT-OF-BAND signal the repo's author
+    cannot set:
+      1. a marker file `<git-dir>/air-checks.trusted` — the git dir is not part
+         of the cloned/pulled tree, so a hostile repo cannot inject it; the
+         user creates it once, after reviewing the script; or
+      2. the repo root listed in `$AIR_TRUSTED_CHECKS` (os.pathsep-separated
+         absolute paths) — for non-interactive/allowlist setups.
+    """
+    allow = os.environ.get("AIR_TRUSTED_CHECKS", "")
+    if allow:
+        want = os.path.realpath(repo_root)
+        for p in allow.split(os.pathsep):
+            if p and os.path.realpath(p) == want:
+                return True
+    git_dir = _absolute_git_dir(repo_root)
+    if git_dir and os.path.isfile(os.path.join(git_dir, "air-checks.trusted")):
+        return True
+    return False
+
+
 def main():
     try:
         data = json.loads(sys.stdin.read())
@@ -167,16 +233,28 @@ def main():
     custom = os.path.join(repo_root, ".air-checks.sh")
     custom_exists = os.path.isfile(custom)
     custom_executable = custom_exists and os.access(custom, os.X_OK)
+    # Trust is separate from the executable bit (an attacker's repo can ship a
+    # +x script): a repo-provided script runs only when explicitly trusted.
+    custom_trusted = custom_executable and _custom_trusted(repo_root)
 
     preamble = []  # non-blocking messages to surface alongside any failure
     if custom_exists and not custom_executable:
         preamble.append(
             f"air drift-check: {custom} is present but not executable. "
-            f"`chmod +x .air-checks.sh` to enable it. "
-            f"Running built-in auto-detection in the meantime."
+            f"`chmod +x .air-checks.sh` to enable it (you'll also be prompted "
+            f"to trust it). Running built-in auto-detection in the meantime."
+        )
+    elif custom_executable and not custom_trusted:
+        preamble.append(
+            f"air drift-check: {custom} is executable but NOT trusted for this "
+            f"repo, so it was skipped — a repo-provided script is never run "
+            f"automatically (it could contain anything). Review it, then run "
+            f'`touch "$(git rev-parse --absolute-git-dir)/air-checks.trusted"` '
+            f"to enable it (or set AIR_TRUSTED_CHECKS). Running built-in "
+            f"auto-detection in the meantime."
         )
 
-    if custom_executable:
+    if custom_trusted:
         rc, out, err = run_script(custom, cwd=repo_root)
         source = ".air-checks.sh"
     else:
