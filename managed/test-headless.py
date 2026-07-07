@@ -842,7 +842,7 @@ def test_diff_is_truncated_detects_hygiene_marker_below_cap():
     """The regression: a hygiene-truncated diff that lands BELOW _DIFF_CAP (the
     common file-boundary case) must still read as truncated so the fail-closed
     gate fires. The old char-only check missed this."""
-    small_but_marked = "diff --git a/x b/x\n+line\n" + headless.DIFF_TRUNCATION_MARKER + " at 500000 bytes\n"
+    small_but_marked = "diff --git a/x b/x\n+line\n" + github_client.DIFF_TRUNCATION_MARKER + " at 500000 bytes\n"
     assert len(small_but_marked) < headless._DIFF_CAP     # well under the char cap
     assert headless._diff_is_truncated(small_but_marked) is True
 
@@ -854,3 +854,17 @@ def test_diff_is_truncated_clean_small_diff_is_false():
 def test_diff_is_truncated_over_char_cap_is_true():
     big = "x" * (headless._DIFF_CAP + 10)
     assert headless._diff_is_truncated(big) is True
+
+
+def test_diff_is_truncated_ignores_marker_quoted_in_content():
+    """The reviewer's catch: a diff EDITING a file that contains the marker text
+    embeds it as a +/context line (prefixed by +/-/space), so it must NOT read as
+    truncated — the check is line-start-anchored (reuses review's), not a bare
+    substring. (This PR's own diff quotes the marker; without anchoring it would
+    self-gate.)"""
+    quoted_added = ('diff --git a/h.py b/h.py\n@@ -1 +1 @@\n'
+                    '+msg = "' + github_client.DIFF_TRUNCATION_MARKER + ' at N bytes"\n')
+    assert headless._diff_is_truncated(quoted_added) is False
+    quoted_context = ('diff --git a/h.py b/h.py\n@@ -1,2 +1,2 @@\n'
+                      ' # ' + github_client.DIFF_TRUNCATION_MARKER + ' — a comment\n-old\n+new\n')
+    assert headless._diff_is_truncated(quoted_context) is False

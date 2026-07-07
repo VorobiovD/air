@@ -61,7 +61,6 @@ from github_client import (  # noqa: E402
     fetch_pr_metadata, fetch_pr_diff, fetch_inter_diff, fetch_bot_login,
     fetch_issue_comments, fetch_pr_reviews, fetch_pr_review_comments, fetch_related_prs,
     _post_review_comment_with_retry, submit_review_verdict, dismiss_stale_air_verdicts,
-    DIFF_TRUNCATION_MARKER,  # BUG-1: the authoritative upstream-truncation signal
 )
 from prompts import build_pr_context, build_verifier_task  # noqa: E402
 from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py; pure, network-free)
@@ -265,9 +264,17 @@ def _diff_is_truncated(diff: str) -> bool:
     _DIFF_CAP` char-check was effectively inert — a hygiene-truncated diff that
     stops below the cap (the common case: greedy first-fit ends at a file
     boundary) read as NOT truncated, so the gate never fired and a blocker past
-    the cap went unseen. The marker is the authoritative signal; the char-check
-    stays as a secondary for a (rare) diff still over our own cap."""
-    return (DIFF_TRUNCATION_MARKER in diff) or (len(diff) > _DIFF_CAP)
+    the cap went unseen.
+
+    The marker check MUST be line-start-anchored — a bare `MARKER in diff`
+    substring self-triggers on any diff whose CONTENT merely quotes the marker
+    text (e.g. this file / test-headless.py, which contain the literal). Reuse
+    review.py's already-anchored `_diff_is_truncated` (single source; diff body
+    lines always start with +/-/space, so PR content can't forge a line
+    beginning with the marker). The char-cap stays as a secondary for the rare
+    case of a headless cap set SMALLER than the fetcher's byte cap."""
+    from review import _diff_is_truncated as _marker_truncated  # lazy: avoid the module-top cycle
+    return _marker_truncated(diff) or (len(diff) > _DIFF_CAP)
 
 
 def _choose_cache_ttl(n_files: int, diff_bytes: int) -> str:
