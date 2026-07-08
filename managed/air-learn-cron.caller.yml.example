@@ -5,8 +5,13 @@
 #
 # Setup (per repo):
 #   1. Secrets already present from reviews: ANTHROPIC_API_KEY (+ AIR_BOT_TOKEN for live).
-#   2. Drop this file in as `.github/workflows/air-learn-cron.yml`.
-#   3. Trial: leave it as-is → the daily tick runs `list` ($0, enumerate only).
+#   2. Drop this file in as `.github/workflows/air-learn-cron.yml`, and PICK A
+#      DISTINCT MINUTE for the schedule below — don't keep the stub's default.
+#      Every repo copying this verbatim ticks at the same instant: their learn
+#      runs then race the shared workspace API together (and GitHub delays or
+#      drops schedules at popular minutes). Any minute unique-ish to the repo
+#      works; spreading repos across the hour is enough.
+#   3. Trial: leave the mode as-is → the daily tick runs `list` ($0, enumerate only).
 #   4. Go-live (per repo, deliberate): set the repo/org VARIABLE
 #      AIR_LEARN_CRON_LIVE=true. It does double duty (single-sourced): this cron
 #      runs `live` on schedule, AND the review job automatically switches to
@@ -19,7 +24,7 @@ name: air learn (scheduled)
 
 on:
   schedule:
-    - cron: '23 6 * * *'   # daily 06:23 UTC
+    - cron: '23 6 * * *'   # daily 06:23 UTC — CHANGE the minute per repo (see setup step 2)
   workflow_dispatch:
     inputs:
       mode:
