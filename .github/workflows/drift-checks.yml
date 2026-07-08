@@ -1,0 +1,32 @@
+name: drift checks
+
+# Runs .air-checks.sh (Checks A–I: version mirrors, gate-anchor lockstep,
+# frozen-contract locks) in CI. Locally the same script runs via the
+# pre-commit hook — but only for Claude-driven commits in a trusted clone;
+# a PR authored outside Claude Code, a `git commit --no-verify`, or a
+# GitHub-web edit skips it entirely. This job closes that gap: the checks
+# gate the PR regardless of how the commit was made. Stdlib-only (bash +
+# python3 + grep), no deps, ~seconds.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5   # greps + a few python3 one-liners; a normal run is seconds
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Run .air-checks.sh
+        # AIR_PLUGIN_ROOT points the script at the in-repo plugin (the same
+        # variable the pre-commit hook exports). builtin-checks.sh is invoked
+        # via that path and needs its committed exec bit; .air-checks.sh itself
+        # runs through `bash`, so its own mode doesn't matter here.
+        run: AIR_PLUGIN_ROOT="$GITHUB_WORKSPACE/plugins/air" bash .air-checks.sh

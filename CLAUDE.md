@@ -79,7 +79,8 @@ managed/                          # Managed Agent (CI automation)
 .github/workflows/
 ├── managed-review.yml            # Reusable GitHub Action (teams reference this)
 ├── air-review.yml                # Dogfood caller for this repo (PR + workflow_dispatch)
-└── release-please.yml            # Automated tag + GitHub Release on version bumps
+├── release-please.yml            # Automated tag + GitHub Release on version bumps
+└── drift-checks.yml              # Runs .air-checks.sh on every PR (closes the local-hook-only gap)
 ```
 
 ## Architecture
