@@ -943,14 +943,18 @@ def test_diff_is_truncated_ignores_marker_quoted_in_content():
 # The #240/#256 failure shape: a review-shaped body, clean end_turn, ZERO
 # footer lines -> extraction failed closed and killed the run for the lack of
 # a line whose value is OURS (head_sha). The salvage appends it deterministically
-# — but ONLY behind three gates (clean stop, header present, no footer-like
-# text anywhere), so it can never launder a truncated or ambiguous body.
+# — but ONLY behind four gates (clean stop, exactly one header, no footer-like
+# text anywhere, a substance floor), so it can never launder a truncated,
+# ambiguous, quoted-skeleton, or empty body.
 
 _SALVAGE_SHA = "a" * 40
 
 
 def test_salvage_appends_footer_on_clean_footerless_body():
-    raw = "## Code Review\n\n> [!NOTE]\n> **No blockers.**\n\n### Low\n\n**1. thing** — detail\n"
+    raw = ("## Code Review\n\n> [!NOTE]\n> **No blockers.** 1 to consider\n\n"
+           "### Low — optional\n\n**1. a finding title here** — a realistic explanation "
+           "paragraph long enough to clear the substance floor, describing what the "
+           "issue is, where it lives, and why it matters to the reviewer reading it.\n")
     out, salvaged = headless._salvage_missing_footer(raw, _SALVAGE_SHA, "end_turn")
     assert salvaged is True
     assert out.rstrip().endswith(f"Reviewed at: {_SALVAGE_SHA}")
@@ -958,6 +962,28 @@ def test_salvage_appends_footer_on_clean_footerless_body():
     from verdict import _extract_review_body
     body, ok = _extract_review_body(out, _SALVAGE_SHA, prefer_first_header=True)
     assert ok is True and body.startswith("## Code Review")
+
+
+def test_salvage_refuses_multiple_headers():
+    """The reviewer's catch: with >1 line-start header (a quoted skeleton) the
+    appended footer would make prefer_first_header span the quoted section as
+    body — and a quoted ### Blockers placed before the real one would
+    short-circuit first-match count_blockers (a mis-gate). Multiple headers =
+    ambiguous = refuse."""
+    filler = "x" * 300
+    raw = (f"## Code Review\n\nreal review intro {filler}\n\n"
+           "the emitted skeleton looks like:\n\n"
+           "## Code Review\n\n### Blockers\n\n**1. <quoted example>**\n\nmore prose\n")
+    out, salvaged = headless._salvage_missing_footer(raw, _SALVAGE_SHA, "end_turn")
+    assert salvaged is False and out == raw
+
+
+def test_salvage_refuses_empty_shell_body():
+    """A bare header with no substance is an incomplete analysis, not a
+    forgotten footer — refusing keeps today's fail-closed behavior."""
+    for shell in ("## Code Review\n", "## Code Review\n\nLGTM.\n"):
+        out, salvaged = headless._salvage_missing_footer(shell, _SALVAGE_SHA, "end_turn")
+        assert salvaged is False and out == shell
 
 
 def test_salvage_refuses_truncated_turn():
