@@ -42,6 +42,7 @@ composing with it.) The already-reviewed-at-head skip backfills a missing verdic
 import asyncio
 import html
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -272,6 +273,59 @@ def _diff_is_truncated(diff: str) -> bool:
     case of a headless cap set SMALLER than the fetcher's byte cap."""
     from review import _diff_is_truncated as _marker_truncated  # lazy: avoid the module-top cycle
     return _marker_truncated(diff) or (len(diff) > _DIFF_CAP)
+
+
+_REVIEW_HEADER_LINE_RE = re.compile(r"(?m)^## Code Review")
+_FOOTER_LIKE_RE = re.compile(r"(?i)reviewed at:")
+
+
+def _salvage_missing_footer(raw: str, head_sha: str, stop: "str | None") -> tuple[str, bool]:
+    """Deterministically append the `Reviewed at: <head_sha>` footer when — and
+    ONLY when — the verifier emitted a complete review body and simply omitted
+    it. Returns (body, salvaged).
+
+    The failure shape (observed twice, on #240 and #256 — both SELF-REFERENTIAL
+    PRs whose diffs quote the review format's own anchors): the verifier ends a
+    clean turn with a review-shaped body but no footer, extraction fails
+    closed, and the whole run dies for the lack of a line whose value is OURS.
+    Managed direct-post already synthesizes this exact footer
+    (`_append_review_footer` — "head_sha is ours/deterministic, so it can't be
+    spoofed"); this is the headless analogue, gated four ways so it can never
+    launder a bad body:
+
+      1. `stop == "end_turn"` — a max_turns/max_tokens truncation must NOT be
+         completed into a posted half-review; it still fails the run.
+      2. EXACTLY ONE line-start `## Code Review` header — existence proves a
+         review-shaped body; UNIQUENESS matters because with >1 header (a
+         quoted skeleton) the appended footer would make prefer_first_header
+         span the quoted section as body content, and a quoted `### Blockers`
+         placed before the real one would then short-circuit first-match
+         `count_blockers` — a mis-gate. Multiple headers = ambiguous = keep
+         failing closed (the normal footer-ful multi-header case is what
+         prefer_first_header itself already handles).
+      3. ZERO footer-like lines anywhere in the output (any-position,
+         case-insensitive) — if any `Reviewed at:` text exists (a quoted
+         skeleton, a mangled/stale SHA), the output is AMBIGUOUS and the
+         anti-spoof extraction must keep failing closed rather than have a
+         fresh footer grafted next to competing candidates.
+      4. Substance floor: ≥200 chars beyond the header line — a pathological
+         bare `## Code Review` with no findings is an incomplete analysis,
+         not a forgotten footer; refusing keeps today's fail-closed behavior.
+
+    The salvaged body then goes back through the SAME `_extract_review_body`
+    (prefer_first_header) — the gate runs on the full verifier output, exactly
+    what would have posted had the model remembered the footer."""
+    if stop != "end_turn":
+        return raw, False
+    if len(_REVIEW_HEADER_LINE_RE.findall(raw or "")) != 1:
+        return raw, False
+    if _FOOTER_LIKE_RE.search(raw or ""):
+        return raw, False
+    hdr = _REVIEW_HEADER_LINE_RE.search(raw)
+    after_header = raw[hdr.end():]
+    if len(after_header.strip()) < 200:
+        return raw, False
+    return raw.rstrip("\n") + f"\n\nReviewed at: {head_sha}\n", True
 
 
 def _choose_cache_ttl(n_files: int, diff_bytes: int) -> str:
@@ -840,6 +894,25 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # must not self-un-extract by having its real header bounded by a quoted one.
     review_body, extracted = _extract_review_body(review_body_raw, head_sha,
                                                   prefer_first_header=True)
+    salvage_attempted = False
+    if not extracted:
+        # Footer salvage (narrow, four-gated — see _salvage_missing_footer): a
+        # verifier that ends a CLEAN turn with a review-shaped body but forgot
+        # the footer gets OUR deterministic footer appended and re-extracted,
+        # instead of killing the whole run for the lack of a line whose value
+        # is ours anyway. Any ambiguity (a quoted/mangled footer, a truncated
+        # turn, no/multiple headers) falls through to the fail-closed path below.
+        salvage_raw, salvage_attempted = _salvage_missing_footer(
+            review_body_raw, head_sha, vres.get("stop"))
+        if salvage_attempted:
+            review_body, extracted = _extract_review_body(salvage_raw, head_sha,
+                                                          prefer_first_header=True)
+            if extracted:
+                # [warn]-tagged on stderr like every degraded-condition path in
+                # this file: a RISING salvage rate means something is derailing
+                # the verifier's output format — monitoring must see it.
+                print(f"  [warn][headless] footer salvaged (clean end_turn, "
+                      f"footer omitted) — head_sha={head_sha[:8]}", file=sys.stderr)
     cost = (agent_loop.usage_cost(vres["usage"], vtier, write_mult)
             + sum(agent_loop.usage_cost(r["usage"], r["tier"], write_mult)
                   for r in specialist_results.values() if r))
@@ -860,7 +933,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
         _tail = (review_body_raw or "")[-1200:]
         print(f"[headless][diag] raw output {len(review_body_raw or '')} chars; "
               f"line-start '## Code Review'={_hdrs}; 'Reviewed at:' lines={len(_foots)} "
-              f"({[f[:60] for f in _foots[-3:]]}); head_sha={head_sha}\n"
+              f"({[f[:60] for f in _foots[-3:]]}); head_sha={head_sha}; "
+              f"footer_salvage={'attempted (re-extraction still failed)' if salvage_attempted else 'not applicable (gates refused)'}\n"
               f"----- last 1200 chars -----\n{_tail}\n-----", file=sys.stderr)
         return {"ok": False, "reason": "no review body", "wall": wall, "cost": cost}
 
