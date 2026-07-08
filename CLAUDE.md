@@ -161,3 +161,5 @@ Files tracked for version mirroring are defined in `.release-please-config.json`
 Force a specific version bump regardless of commit types by adding `Release-As: 1.9.0` in a commit footer.
 
 After cutting a release, paste the blessed agent-version set into the GitHub Release notes (capture snippet in `managed/README.md`) — pinned callers reference it via the `agent_versions` workflow input; the air repo itself floats.
+
+Every merge to main deploys fleet-wide immediately — run `docs/post-merge-smoke.md` after any merge touching `managed/`, `plugins/air/lib/`, or the workflows.
