@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.46.2](https://github.com/VorobiovD/air/compare/v1.46.1...v1.46.2) (2026-07-08)
+
+
+### Bug Fixes
+
+* **headless:** salvage a footer-less verifier body on a clean end_turn ([#259](https://github.com/VorobiovD/air/issues/259)) ([3e1a42c](https://github.com/VorobiovD/air/commit/3e1a42c1cf8a2d874888d5ce59a233df2093f031))
+
 ## [1.46.1](https://github.com/VorobiovD/air/compare/v1.46.0...v1.46.1) (2026-07-07)
 
 
