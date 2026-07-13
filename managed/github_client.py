@@ -352,7 +352,8 @@ def dismiss_stale_air_verdicts(
         # self-supersede this account's prior CHANGES_REQUESTED. Cross-account is
         # a stale block from a different air-posting identity — PAT rotation, or a
         # local air CLI verdict posted under a developer's own account.
-        if current_login and login == current_login:
+        same_account = bool(current_login and login == current_login)
+        if same_account:
             reason = "a clean advisory-mode re-review supersedes this account's earlier block"
         else:
             reason = "stale block from a different air-posting account (PAT rotation or a local CLI review)"
@@ -361,9 +362,10 @@ def dismiss_stale_air_verdicts(
             f"Superseded by air's latest verdict — {reason}.",
         ):
             dismissed += 1
+            scope = "same-account advisory" if same_account else "cross-account"
             print(
                 f"  [dismiss] cleared stale air CHANGES_REQUESTED by @{login} "
-                f"(review {r['id']}) — cross-account gate-orphan",
+                f"(review {r['id']}) — {scope} gate-orphan",
                 file=sys.stderr,
             )
     return dismissed
