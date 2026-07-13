@@ -7,6 +7,7 @@ review-verdict POST.
 """
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -378,15 +379,102 @@ def dismiss_stale_air_verdicts(
     return dismissed
 
 
+def local_diff_fallback(base_sha: str, head_sha: str, *, checkout_dir: str | None = None) -> str | None:
+    """Compute a PR/inter diff LOCALLY when GitHub's REST diff endpoint refuses an
+    oversized PR (406: "the diff exceeded the maximum number of files (300)").
+
+    Uses three-dot `git diff base...head`, matching GitHub's PR-diff (merge-base)
+    semantics, from the checkout air already has (`AIR_TARGET_REPO`). Both SHAs
+    are expected to be present already: the CI checkout is fetch-depth 0, whose
+    refspec `+refs/heads/*:refs/remotes/origin/*` fetches every branch (so the
+    base tip) plus the PR head — so `git diff base...head` resolves with NO fetch.
+
+    We deliberately do NOT `git fetch` here: that checkout is created
+    `persist-credentials: false` (the bot PAT is kept out of `.git/config` because
+    Codex + the sandbox read this tree and a persisted PAT is exfiltrable into a
+    public review comment), so an authenticated fetch would fight that boundary
+    and an unauthenticated one fails on a private repo anyway. If a SHA is
+    genuinely absent we return None → the caller keeps its existing failure path
+    (fail-safe, never a wrong diff).
+
+    shell=False argv; the SHAs are GitHub-provided 40-hex, never user text. The
+    caller applies `apply_diff_hygiene` (same as the REST path), so a huge
+    sync/promote PR rides the normal stub + byte-cap instead of hard-failing."""
+    checkout_dir = checkout_dir or os.environ.get("AIR_TARGET_REPO", "")
+    if not (checkout_dir and base_sha and head_sha and os.path.isdir(checkout_dir)):
+        return None
+
+    def _run(args, timeout=180):
+        try:
+            return subprocess.run(
+                ["git", "-C", checkout_dir, *args],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=timeout, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            print(f"  [diff] local fallback git error: {str(e)[:120]}", file=sys.stderr)
+            return None
+
+    # Both SHAs must resolve locally. They normally do (fetch-depth-0 checkout —
+    # see docstring); if not, fail safe. We do NOT fetch (persist-credentials is
+    # off on this checkout by design), so a truly-absent SHA → None → exit(1).
+    for sha in (base_sha, head_sha):
+        r = _run(["rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"], timeout=30)
+        if r is None or r.returncode != 0:
+            print(f"  [diff] local fallback: {sha[:8]} not in checkout — giving up (fail-safe)", file=sys.stderr)
+            return None
+
+    # Pin the diff format so apply_diff_hygiene's `a/`+`b/` path parsing and rename
+    # handling match GitHub's fixed .diff regardless of the runner's git config
+    # (a stray diff.noprefix / diff.renames=false could otherwise skew hygiene
+    # path-matching or inflate the diff into the byte cap earlier).
+    r = _run(["-c", "diff.noprefix=false", "-c", "diff.renames=true",
+              "diff", f"{base_sha}...{head_sha}"], timeout=180)
+    if r is None or r.returncode != 0:
+        if r is not None:
+            print(f"  [diff] local fallback git diff exit {r.returncode}: {r.stderr[:160]}", file=sys.stderr)
+        return None
+    return r.stdout
+
+
+def _pr_base_head(repo: str, pr_number: int, token: str) -> tuple[str, str] | None:
+    """(base_sha, head_sha) for a PR via a JSON GET — used only on the oversized-
+    diff fallback path (fetch_pr_diff has no SHAs of its own). None on ANY error,
+    including a RAISED _gh_request (it re-raises on retry exhaustion rather than
+    returning) — so the 406 path degrades to the original fail-loud exit(1),
+    never an uncaught traceback on this extra GET."""
+    try:
+        r = _gh_request("GET", f"https://api.github.com/repos/{repo}/pulls/{pr_number}", token=token)
+    except req.RequestException:
+        return None
+    if not r.ok:
+        return None
+    try:
+        d = r.json()
+        return (d["base"]["sha"], d["head"]["sha"])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
 def fetch_pr_diff(repo: str, pr_number: int, token: str) -> str:
     resp = _gh_request(
         "GET", f"https://api.github.com/repos/{repo}/pulls/{pr_number}",
         token=token, accept="application/vnd.github.v3.diff",
     )
-    if not resp.ok:
-        print(f"Error fetching PR diff: {_github_error_message(resp)}", file=sys.stderr)
-        sys.exit(1)
-    return apply_diff_hygiene(resp.text)
+    if resp.ok:
+        return apply_diff_hygiene(resp.text)
+    # Oversized PR (>300 files) → GitHub 406s the diff media type. Fall back to a
+    # local `git diff` so a big sync/promote PR gets a (byte-capped) review
+    # instead of a hard exit(1) that leaves the PR ungated. Only on 406 — other
+    # errors (auth/404/5xx) stay fail-loud.
+    if resp.status_code == 406:
+        bh = _pr_base_head(repo, pr_number, token)
+        local = local_diff_fallback(*bh) if bh else None
+        if local is not None:
+            print("  [diff] REST PR diff 406 (>300 files) — using local git diff fallback", file=sys.stderr)
+            return apply_diff_hygiene(local)
+    print(f"Error fetching PR diff: {_github_error_message(resp)}", file=sys.stderr)
+    sys.exit(1)
 
 
 def _github_paginate(url: str, token: str, max_pages: int | None = None) -> list[dict]:
@@ -551,6 +639,14 @@ def fetch_inter_diff(
         token=token, accept="application/vnd.github.v3.diff",
     )
     if not resp.ok:
+        # Oversized inter-diff (>300 files) → 406. We already hold both SHAs, so
+        # fall back to a local `git diff base...head` before degrading to None
+        # (which would send the caller to a full review that 406s the same way).
+        if resp.status_code == 406:
+            local = local_diff_fallback(base_sha, head_sha)
+            if local is not None:
+                print("  [diff] REST compare 406 (>300 files) — using local git diff fallback", file=sys.stderr)
+                return apply_diff_hygiene(local)
         print(f"Error fetching inter-diff: {_github_error_message(resp)}", file=sys.stderr)
         return None
     # Same hygiene as fetch_pr_diff — the promote overlap ratio divides one
