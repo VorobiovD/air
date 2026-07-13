@@ -74,9 +74,10 @@ def test_missing_checkout_returns_none(diverged_repo, monkeypatch):
     assert local_diff_fallback(diverged_repo["base"], diverged_repo["head"]) is None
 
 
-def test_unreachable_sha_no_network(diverged_repo):
-    # a valid-looking SHA absent from the repo: the repo has no 'origin' remote,
-    # so the best-effort fetch fails locally (no network) → None, never a crash.
+def test_absent_sha_fails_safe_no_fetch(diverged_repo):
+    # A valid-looking SHA absent from the checkout: rev-parse fails and we do NOT
+    # fetch (persist-credentials is off on the real checkout by design) → None,
+    # never a crash and never a wrong diff.
     bogus = "0" * 40
     assert local_diff_fallback(bogus, diverged_repo["head"],
                                checkout_dir=diverged_repo["repo"]) is None

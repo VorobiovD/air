@@ -383,16 +383,23 @@ def local_diff_fallback(base_sha: str, head_sha: str, *, checkout_dir: str | Non
     """Compute a PR/inter diff LOCALLY when GitHub's REST diff endpoint refuses an
     oversized PR (406: "the diff exceeded the maximum number of files (300)").
 
-    Uses three-dot `git diff base...head`, which matches GitHub's PR-diff
-    (merge-base) semantics, from the PR-head checkout air already has
-    (`AIR_TARGET_REPO`; present for every CI mode at fetch-depth 0). Best-effort:
-    returns the raw unified diff, or None if there's no checkout / a SHA is
-    unreachable / git fails — the caller then keeps its existing failure path.
+    Uses three-dot `git diff base...head`, matching GitHub's PR-diff (merge-base)
+    semantics, from the checkout air already has (`AIR_TARGET_REPO`). Both SHAs
+    are expected to be present already: the CI checkout is fetch-depth 0, whose
+    refspec `+refs/heads/*:refs/remotes/origin/*` fetches every branch (so the
+    base tip) plus the PR head — so `git diff base...head` resolves with NO fetch.
+
+    We deliberately do NOT `git fetch` here: that checkout is created
+    `persist-credentials: false` (the bot PAT is kept out of `.git/config` because
+    Codex + the sandbox read this tree and a persisted PAT is exfiltrable into a
+    public review comment), so an authenticated fetch would fight that boundary
+    and an unauthenticated one fails on a private repo anyway. If a SHA is
+    genuinely absent we return None → the caller keeps its existing failure path
+    (fail-safe, never a wrong diff).
 
     shell=False argv; the SHAs are GitHub-provided 40-hex, never user text. The
-    caller applies `apply_diff_hygiene` to the result (same as the REST path), so
-    a huge sync/promote PR then rides the normal stub + byte-cap instead of
-    hard-failing the run."""
+    caller applies `apply_diff_hygiene` (same as the REST path), so a huge
+    sync/promote PR rides the normal stub + byte-cap instead of hard-failing."""
     checkout_dir = checkout_dir or os.environ.get("AIR_TARGET_REPO", "")
     if not (checkout_dir and base_sha and head_sha and os.path.isdir(checkout_dir)):
         return None
@@ -408,20 +415,14 @@ def local_diff_fallback(base_sha: str, head_sha: str, *, checkout_dir: str | Non
             print(f"  [diff] local fallback git error: {str(e)[:120]}", file=sys.stderr)
             return None
 
-    # Both endpoints must resolve locally. head is the checkout HEAD (present);
-    # the base may need a best-effort fetch (GitHub allows fetching a reachable
-    # SHA), mirroring the promote-sibling fetch pattern.
+    # Both SHAs must resolve locally. They normally do (fetch-depth-0 checkout —
+    # see docstring); if not, fail safe. We do NOT fetch (persist-credentials is
+    # off on this checkout by design), so a truly-absent SHA → None → exit(1).
     for sha in (base_sha, head_sha):
         r = _run(["rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"], timeout=30)
-        if r is None:
+        if r is None or r.returncode != 0:
+            print(f"  [diff] local fallback: {sha[:8]} not in checkout — giving up (fail-safe)", file=sys.stderr)
             return None
-        if r.returncode != 0:
-            if _run(["fetch", "--no-tags", "origin", sha], timeout=120) is None:
-                return None
-            r2 = _run(["rev-parse", "--verify", "--quiet", f"{sha}^{{commit}}"], timeout=30)
-            if r2 is None or r2.returncode != 0:
-                print(f"  [diff] local fallback: {sha[:8]} unreachable in checkout — giving up", file=sys.stderr)
-                return None
 
     # Pin the diff format so apply_diff_hygiene's `a/`+`b/` path parsing and rename
     # handling match GitHub's fixed .diff regardless of the runner's git config
