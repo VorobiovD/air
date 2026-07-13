@@ -291,7 +291,7 @@ On a **store-backed** repo running headless (`AIR_REVIEW_MODE=messages-api`), a 
 
 ### Diff hygiene & cost caps (managed-only)
 
-Three knobs trim per-review context spend. All of them leave **visible markers** — nothing is dropped silently — and none of them changes gating:
+These knobs trim per-review context spend. All of them leave **visible markers** — nothing is dropped silently — and none of them changes gating:
 
 - **Generated-file stubbing** (`github_client.apply_diff_hygiene`, applied to both the PR diff and re-review inter-diffs): minified bundles (`*.min.js/css`), sourcemaps, snapshots, `dist/`/`vendor/`/`node_modules/`/`__snapshots__/` segments, and **lockfiles whose same-directory manifest also changed** are replaced by a one-line `[air: <path>: N changed lines omitted (generated/vendored)]` marker. A **lockfile-only** change (resolver/integrity swap with no manifest touch — the supply-chain attack shape) is never stubbed; manifests outside vendored dirs always stay whole. (A lockfile-only diff larger than the byte cap below is still size-capped — it then gets a dedicated `[air: LOCKFILE … supply-chain review incomplete]` marker instead of folding into the generic count, so the security checklist can flag the gap.)
 - **Size cap** — `AIR_DIFF_MAX_BYTES` (env, default 500000): greedy first-fit at file boundaries; the marker tail-truncates shown paths and shrinks until the result fits, so the cap holds marker-included for any budget above the ~80-byte path-less-marker floor. Omitted files are named in the marker + stderr. A truncated re-review delta **never** skips codex (it reads the git tree, not the diff).
