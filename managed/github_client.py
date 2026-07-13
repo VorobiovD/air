@@ -234,10 +234,17 @@ AIR_VERDICT_SENTINEL = "<!-- air-review-verdict -->"
 
 def _is_air_verdict(review: dict, bot_logins: frozenset) -> bool:
     """True iff this PR review is one air posted. Identified by the verdict
-    sentinel in the body (account-independent; zero false positives — only air
-    writes it) OR an explicitly caller-allowlisted bot login (catches legacy
-    pre-sentinel verdicts by identity). A human review matches neither."""
-    if AIR_VERDICT_SENTINEL in (review.get("body") or ""):
+    sentinel as the TRAILING marker of the body — air always appends it as the
+    last line (`{body}\n\n{sentinel}`, both the managed and CLI paths), so an
+    end-of-body match stays account-independent (works across rotated PATs and
+    CLI dev accounts, which is the sentinel's whole point) while no longer
+    matching a human review that merely QUOTES a prior air verdict mid-body.
+    Falls back to an explicitly caller-allowlisted bot login (catches legacy
+    pre-sentinel verdicts by identity). A human review matches neither — only
+    air emits the trailing sentinel, so this never dismisses a genuine human
+    block. (Binding to a fixed login list instead was rejected: it would break
+    account-independence for the very rotated/CLI accounts this must recognize.)"""
+    if (review.get("body") or "").rstrip().endswith(AIR_VERDICT_SENTINEL):
         return True
     return ((review.get("user") or {}).get("login") or "") in bot_logins
 

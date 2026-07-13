@@ -219,20 +219,43 @@ grep -qE '(^|[^#])### Blockers' plugins/air/commands/review.md \
 grep -qF '#### Blockers' managed/prompts.py \
   || fail "managed/prompts.py no longer emits the re-review '#### Blockers' subsection heading"
 
-# Check J: CLI verdict sentinel ↔ AIR_VERDICT_SENTINEL. The CLI (review.md
-# Step 12) posts its APPROVE/REQUEST_CHANGES verdict under the developer's OWN
-# account and must stamp the SAME invisible sentinel the managed path uses, so a
-# stale CLI block on a since-fixed blocker is dismissable by CI/headless air's
-# cross-account cleanup (github_client.dismiss_stale_air_verdicts). Without it a
-# CLI verdict looks like a human review and gates forever. The literal is
-# hardcoded in the markdown (can't import the Python constant), so lock it to
-# AIR_VERDICT_SENTINEL and require it on every CLI verdict-submission line.
+# Check J: CLI verdict sentinel ↔ AIR_VERDICT_SENTINEL, and injection-safe body.
+# The CLI (review.md Step 12) posts its verdict under the developer's OWN account
+# and must (a) stamp the SAME invisible sentinel the managed path uses so a stale
+# CLI block on a since-fixed blocker is dismissable by CI/headless air's
+# cross-account cleanup (github_client.dismiss_stale_air_verdicts) — without it a
+# CLI verdict looks like a human review and gates forever — and (b) pass the body
+# via a printf-built file (-F body=@file) so the verdict $REASON is never
+# shell-parsed. The sentinel literal is hardcoded in the markdown (can't import
+# the Python constant), so lock it to AIR_VERDICT_SENTINEL.
+#
+# The three sub-checks below FAIL CLOSED — an earlier single-line-regex form
+# failed OPEN (a multi-line `gh api` continuation or a `-F event=` flag slipped
+# past it, letting an inline `-f body="...$REASON..."` regress green). The
+# load-bearing invariant is (c): $REASON must NEVER appear in a `body=` argument
+# — it must flow only through the printf BODY var into the verdict-body file,
+# which holds regardless of how the gh invocation is line-split or flag-cased.
 if [ -f managed/github_client.py ] && [ -f plugins/air/commands/review.md ]; then
   SENTINEL=$(grep -oE 'AIR_VERDICT_SENTINEL = "[^"]+"' managed/github_client.py | sed -E 's/.*"([^"]+)".*/\1/')
+  RMD=plugins/air/commands/review.md
   if [ -z "$SENTINEL" ]; then
     fail "Check J: could not extract AIR_VERDICT_SENTINEL from managed/github_client.py"
-  elif grep -nE 'reviews .*-f event=(APPROVE|REQUEST_CHANGES)' plugins/air/commands/review.md | grep -vqF "$SENTINEL"; then
-    fail "review.md has a CLI verdict-submission line missing the air sentinel '$SENTINEL' (Check J: CLI verdicts must carry AIR_VERDICT_SENTINEL so CI air can clear stale CLI blocks)"
+  else
+    # (a) Anchor to the OPERATIVE assignment, not a prose mention that could drift
+    #     apart from it — the CLI emits whatever SENTINEL= holds.
+    grep -qF "SENTINEL='$SENTINEL'" "$RMD" \
+      || fail "review.md SENTINEL= assignment missing or != AIR_VERDICT_SENTINEL '$SENTINEL' — CLI verdicts must carry the exact sentinel so CI air can clear stale CLI blocks (Check J-a)"
+    # (b) The safe mechanism must be present: body passed from a file.
+    grep -qF 'body=@' "$RMD" \
+      || fail "review.md verdict submission must pass the body via -F body=@file (Check J-b)"
+    # (c) FAIL-CLOSED core: inside fenced code blocks, $REASON must never be
+    #     interpolated into a body= arg (inline -f/-F body="...$REASON..."),
+    #     regardless of flag case or multi-line splitting — it must flow through
+    #     printf into the body file. Scoped to ``` code blocks (via awk) so the
+    #     instructional prose that shows the anti-pattern doesn't trip it.
+    if awk '/^```/{inb=!inb; next} inb' "$RMD" | grep -E 'body=' | grep -q 'REASON'; then
+      fail "review.md interpolates \$REASON into a body= argument in a code block — route it through printf into the verdict-body file, never an inline body= (Check J-c: injection-safe)"
+    fi
   fi
 fi
 

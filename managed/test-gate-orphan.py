@@ -40,6 +40,20 @@ def test_human_review_never_matches():
                                frozenset({"botA"}))
 
 
+def test_sentinel_must_be_trailing_not_midbody():
+    # A human review that QUOTES a prior air verdict mid-body is NOT air-owned —
+    # the sentinel only counts as air's marker at end-of-body.
+    assert not _is_air_verdict(
+        _rv(1, "erin", "CHANGES_REQUESTED",
+            f"Quoting the bot: {AIR_VERDICT_SENTINEL} — but I still want a test added."),
+        frozenset())
+    # air's real verdict ends with the sentinel (trailing, tolerating a newline).
+    assert _is_air_verdict(
+        _rv(2, "some-rotated-bot", "CHANGES_REQUESTED",
+            f"Changes requested — 1 blocker(s). See review comment above.\n\n{AIR_VERDICT_SENTINEL}\n"),
+        frozenset())
+
+
 # --- dismissal behavior ------------------------------------------------------
 
 def _patch(monkeypatch, reviews):
