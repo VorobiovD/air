@@ -213,9 +213,12 @@ def resolve_verdict_event(request_changes: bool) -> str:
 
 # The clean-review COMMENT body in AIR_NO_APPROVE mode — single-sourced so the
 # three submission sites (review.py main + backfill, headless.py) can't drift.
+# Deliberately mode-NEUTRAL: it must NOT name AIR_NO_APPROVE or announce that an
+# approval was withheld. In this mode air simply doesn't approve (it posts a
+# COMMENT rather than an APPROVE); the gate mode is never advertised on the PR,
+# so the comment reads like any other clean-review summary.
 NO_APPROVE_VERDICT_BODY = (
-    "No blockers found. Advisory mode (AIR_NO_APPROVE) — air reports findings "
-    "but does not approve on this repo. See review comment for medium/low/nit findings."
+    "No blockers found. See review comment for medium/low/nit findings."
 )
 
 
