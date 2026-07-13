@@ -234,10 +234,17 @@ AIR_VERDICT_SENTINEL = "<!-- air-review-verdict -->"
 
 def _is_air_verdict(review: dict, bot_logins: frozenset) -> bool:
     """True iff this PR review is one air posted. Identified by the verdict
-    sentinel in the body (account-independent; zero false positives — only air
-    writes it) OR an explicitly caller-allowlisted bot login (catches legacy
-    pre-sentinel verdicts by identity). A human review matches neither."""
-    if AIR_VERDICT_SENTINEL in (review.get("body") or ""):
+    sentinel as the TRAILING marker of the body — air always appends it as the
+    last line (`{body}\n\n{sentinel}`, both the managed and CLI paths), so an
+    end-of-body match stays account-independent (works across rotated PATs and
+    CLI dev accounts, which is the sentinel's whole point) while no longer
+    matching a human review that merely QUOTES a prior air verdict mid-body.
+    Falls back to an explicitly caller-allowlisted bot login (catches legacy
+    pre-sentinel verdicts by identity). A human review matches neither — only
+    air emits the trailing sentinel, so this never dismisses a genuine human
+    block. (Binding to a fixed login list instead was rejected: it would break
+    account-independence for the very rotated/CLI accounts this must recognize.)"""
+    if (review.get("body") or "").rstrip().endswith(AIR_VERDICT_SENTINEL):
         return True
     return ((review.get("user") or {}).get("login") or "") in bot_logins
 
@@ -347,15 +354,25 @@ def dismiss_stale_air_verdicts(
             continue  # GitHub auto-supersedes the posting account's own prior state
         if not _is_air_verdict(r, bot_logins):
             continue  # not air's verdict — never touch a human's block
+        # Reason-aware message: same-account is only reachable via include_own
+        # (AIR_NO_APPROVE advisory mode), where a clean COMMENT re-review can't
+        # self-supersede this account's prior CHANGES_REQUESTED. Cross-account is
+        # a stale block from a different air-posting identity — PAT rotation, or a
+        # local air CLI verdict posted under a developer's own account.
+        same_account = bool(current_login and login == current_login)
+        if same_account:
+            reason = "a clean advisory-mode re-review supersedes this account's earlier block"
+        else:
+            reason = "stale block from a different air-posting account (PAT rotation or a local CLI review)"
         if dismiss_review(
             repo, pr_number, r["id"], token,
-            "Superseded by air's latest verdict — stale block orphaned by "
-            "multi-account (PAT-rotation) posting.",
+            f"Superseded by air's latest verdict — {reason}.",
         ):
             dismissed += 1
+            scope = "same-account advisory" if same_account else "cross-account"
             print(
                 f"  [dismiss] cleared stale air CHANGES_REQUESTED by @{login} "
-                f"(review {r['id']}) — cross-account gate-orphan",
+                f"(review {r['id']}) — {scope} gate-orphan",
                 file=sys.stderr,
             )
     return dismissed
