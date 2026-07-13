@@ -483,6 +483,13 @@ jobs:
           # Non-fatal runtime/config/auth diagnostic — surfaces sandbox + auth
           # health in the job log if Codex still misbehaves.
           codex doctor || true
+          # Model observability: air passes no --model and the config above pins
+          # none, so `codex review` uses the CLI/account default (the catalog's
+          # top-priority model). Record it so every run's log shows which model
+          # actually ran. Zero-inference (catalog fetch only); non-fatal — an
+          # older CLI without `debug models` just prints a bump hint.
+          echo "[codex-model] config pin: $(grep -E '^[[:space:]]*model[[:space:]]*=' ~/.codex/config.toml 2>/dev/null || echo 'none (CLI/account default)')"
+          codex debug models 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); ms=sorted(d.get('models',[]),key=lambda m:m.get('priority',999)); print('[codex-model] default (top-priority):', ms[0]['slug'], '.', ms[0].get('display_name')) if ms else print('[codex-model] catalog empty'); print('[codex-model] catalog:', ', '.join(m.get('slug','?') for m in ms[:6]))" || echo "[codex-model] 'codex debug models' unavailable on this codex CLI — bump the pin to observe the model"
 
       - name: Run review
         env:
