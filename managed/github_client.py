@@ -347,10 +347,18 @@ def dismiss_stale_air_verdicts(
             continue  # GitHub auto-supersedes the posting account's own prior state
         if not _is_air_verdict(r, bot_logins):
             continue  # not air's verdict — never touch a human's block
+        # Reason-aware message: same-account is only reachable via include_own
+        # (AIR_NO_APPROVE advisory mode), where a clean COMMENT re-review can't
+        # self-supersede this account's prior CHANGES_REQUESTED. Cross-account is
+        # a stale block from a different air-posting identity — PAT rotation, or a
+        # local air CLI verdict posted under a developer's own account.
+        if current_login and login == current_login:
+            reason = "a clean advisory-mode re-review supersedes this account's earlier block"
+        else:
+            reason = "stale block from a different air-posting account (PAT rotation or a local CLI review)"
         if dismiss_review(
             repo, pr_number, r["id"], token,
-            "Superseded by air's latest verdict — stale block orphaned by "
-            "multi-account (PAT-rotation) posting.",
+            f"Superseded by air's latest verdict — {reason}.",
         ):
             dismissed += 1
             print(

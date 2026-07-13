@@ -160,6 +160,35 @@ def test_include_own_never_touches_human(monkeypatch):
     assert n == 0 and dismissed == []
 
 
+# --- reason-aware dismissal message ------------------------------------------
+
+def _patch_msgs(monkeypatch, reviews):
+    """Like _patch but captures (rid, message) so the wording can be asserted."""
+    calls = []
+    monkeypatch.setattr(gc, "fetch_pr_reviews", lambda r, p, t: reviews)
+    monkeypatch.setattr(gc, "dismiss_review", lambda r, p, rid, t, m: calls.append((rid, m)) or True)
+    return calls
+
+
+def test_dismissal_message_is_reason_aware(monkeypatch):
+    # Cross-account (PAT rotation OR a CLI verdict posted under a dev's own
+    # account) and same-account (advisory include_own) get distinct wording —
+    # a same-account dismissal must NOT falsely claim PAT rotation.
+    reviews = [
+        _rv(70, "botB", "CHANGES_REQUESTED", f"cross-account block. {AIR_VERDICT_SENTINEL}"),
+        _rv(71, "botA", "CHANGES_REQUESTED", f"own advisory block. {AIR_VERDICT_SENTINEL}"),
+    ]
+    calls = _patch_msgs(monkeypatch, reviews)
+    n = dismiss_stale_air_verdicts("o/r", 1, "tok", current_login="botA",
+                                   bot_logins=frozenset(), include_own=True)
+    assert n == 2
+    msgs = dict(calls)
+    assert "different air-posting account" in msgs[70]
+    assert "PAT rotation or a local CLI review" in msgs[70]
+    assert "advisory-mode re-review" in msgs[71]
+    assert "PAT rotation" not in msgs[71]  # same-account must not claim rotation
+
+
 # --- resolve_verdict_event / no_approve_enabled (AIR_NO_APPROVE) --------------
 from verdict import resolve_verdict_event, no_approve_enabled  # noqa: E402
 

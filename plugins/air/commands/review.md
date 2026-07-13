@@ -1120,14 +1120,16 @@ fi
 
 3. Submit the verdict PINNED to the reviewed SHA — `commit_id` ties the approval to `headRefOid` so a push that lands mid-review dismisses it instead of riding a stale approval:
 
+Append the verdict sentinel `<!-- air-review-verdict -->` to the body (invisible in the GitHub UI). This marks the verdict as air-owned so that the managed/headless cross-account cleanup (`github_client.dismiss_stale_air_verdicts`) can later clear a stale CLI block once the PR is fixed — a CLI verdict posts under the developer's own account, and without the sentinel CI air can't tell it apart from a human review and would leave it gating forever. The literal MUST match `AIR_VERDICT_SENTINEL` in `managed/github_client.py` (locked by `.air-checks.sh` Check J).
+
 If `VERDICT` = `approve`:
 ```bash
-gh api repos/<owner>/<repo>/pulls/<number>/reviews -f commit_id="$headRefOid" -f event=APPROVE -f body="Approved — 0 gating findings."
+gh api repos/<owner>/<repo>/pulls/<number>/reviews -f commit_id="$headRefOid" -f event=APPROVE -f body="Approved — 0 gating findings."$'\n\n<!-- air-review-verdict -->'
 ```
 
 If `VERDICT` = `request-changes`:
 ```bash
-gh api repos/<owner>/<repo>/pulls/<number>/reviews -f commit_id="$headRefOid" -f event=REQUEST_CHANGES -f body="Changes requested — $REASON. See review comment above."
+gh api repos/<owner>/<repo>/pulls/<number>/reviews -f commit_id="$headRefOid" -f event=REQUEST_CHANGES -f body="Changes requested — $REASON. See review comment above."$'\n\n<!-- air-review-verdict -->'
 ```
 
 The issue comment contains the full review body (searchable by Step 2 for re-review detection). The review verdict is a short summary that sets the GitHub approval state for branch protection rules — computed by the same `should_request_changes()` both modes share, so the CLI and CI can never gate the same body differently.

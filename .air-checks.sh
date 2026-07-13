@@ -219,6 +219,23 @@ grep -qE '(^|[^#])### Blockers' plugins/air/commands/review.md \
 grep -qF '#### Blockers' managed/prompts.py \
   || fail "managed/prompts.py no longer emits the re-review '#### Blockers' subsection heading"
 
+# Check J: CLI verdict sentinel ↔ AIR_VERDICT_SENTINEL. The CLI (review.md
+# Step 12) posts its APPROVE/REQUEST_CHANGES verdict under the developer's OWN
+# account and must stamp the SAME invisible sentinel the managed path uses, so a
+# stale CLI block on a since-fixed blocker is dismissable by CI/headless air's
+# cross-account cleanup (github_client.dismiss_stale_air_verdicts). Without it a
+# CLI verdict looks like a human review and gates forever. The literal is
+# hardcoded in the markdown (can't import the Python constant), so lock it to
+# AIR_VERDICT_SENTINEL and require it on every CLI verdict-submission line.
+if [ -f managed/github_client.py ] && [ -f plugins/air/commands/review.md ]; then
+  SENTINEL=$(grep -oE 'AIR_VERDICT_SENTINEL = "[^"]+"' managed/github_client.py | sed -E 's/.*"([^"]+)".*/\1/')
+  if [ -z "$SENTINEL" ]; then
+    fail "Check J: could not extract AIR_VERDICT_SENTINEL from managed/github_client.py"
+  elif grep -nE 'reviews .*-f event=(APPROVE|REQUEST_CHANGES)' plugins/air/commands/review.md | grep -vqF "$SENTINEL"; then
+    fail "review.md has a CLI verdict-submission line missing the air sentinel '$SENTINEL' (Check J: CLI verdicts must carry AIR_VERDICT_SENTINEL so CI air can clear stale CLI blocks)"
+  fi
+fi
+
 if [ "$status" -eq 0 ]; then
   printf 'air drift-check: all checks passed.\n'
 fi
