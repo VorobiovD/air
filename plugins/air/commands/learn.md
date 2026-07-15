@@ -73,7 +73,7 @@ fi
 
 If the clone failed (no `.git` directory): print "Wiki not found — create at https://$PLATFORM_DOMAIN/$CURRENT_REPO/wiki" and STOP.
 
-**Store-backed repo guard (key-independent).** If the cloned wiki is a READ-ONLY mirror of an Anthropic memory store, this CLI learn must NOT push to it — the canonical learn is the managed/headless `air-learner`, and a deterministic render overwrites whatever the CLI pushes here (the ai-relay 2026-06-27 incident: `find-store` was blank because the local `ANTHROPIC_API_KEY` saw the wrong workspace, so the repo was misread as legacy and the CLI learn nearly clobbered the mirror). Detect it via the render's banner (no API key needed):
+**Store-backed repo guard (key-independent).** If the cloned wiki is a READ-ONLY mirror of an Anthropic memory store, this CLI learn must NOT push to it — the canonical learn is the managed/headless `air-learner`, and a deterministic render overwrites whatever the CLI pushes here (the repo-C 2026-06-27 incident: `find-store` was blank because the local `ANTHROPIC_API_KEY` saw the wrong workspace, so the repo was misread as legacy and the CLI learn nearly clobbered the mirror). Detect it via the render's banner (no API key needed):
 ```bash
 # Keep the banner substring in sync with managed/render_store_to_wiki.py:MIRROR_BANNER
 IS_STORE_MIRROR=0

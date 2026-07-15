@@ -249,7 +249,7 @@ def test_release_learn_lock_clears(fake):
 
 
 # --- read-author: store-backed author-pattern read (CLI Fix 1) -------------
-# The ai-relay 2026-06-27 bug: the store→wiki render emits per-author blocks
+# The repo-C 2026-06-27 bug: the store→wiki render emits per-author blocks
 # under a heading the CLI's `### <login>` grep missed, so a dominant author
 # read as "new author". The CLI now reads /authors/<login>.md from the store.
 # Exit codes are the contract the CLI branches on: 0=found, 3=new, 2=unknown.
@@ -352,7 +352,7 @@ def test_read_author_rejects_injection_login(monkeypatch):
 
 
 def test_read_author_store_unreachable_is_unknown(monkeypatch):
-    # The ai-relay failure mode: the local ANTHROPIC_API_KEY can't reach the
+    # The repo-C failure mode: the local ANTHROPIC_API_KEY can't reach the
     # store (wrong workspace / revoked) → transport error → UNKNOWN (exit 2).
     def boom(*a, **k):
         raise RuntimeError("401 invalid x-api-key")
