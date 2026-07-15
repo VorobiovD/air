@@ -15,7 +15,7 @@
 * **gate-orphan:** make the PR-visible dismissal reason generic (no tool name / gate mechanics) ([#267](https://github.com/VorobiovD/air/issues/267)) ([7ae6b77](https://github.com/VorobiovD/air/commit/7ae6b77883d783cc742db678c7f29685a5869b44))
 * **gate-orphan:** stamp the sentinel on CLI verdicts + reason-aware dismissal message ([#264](https://github.com/VorobiovD/air/issues/264)) ([d05893e](https://github.com/VorobiovD/air/commit/d05893e08e15252fa3e3a3b489f7f87583142165))
 * **no-approve:** don't announce the gate mode in the clean-review comment ([#263](https://github.com/VorobiovD/air/issues/263)) ([47a3c5e](https://github.com/VorobiovD/air/commit/47a3c5e333dcdcacef8fce1430080da7cb3a2430))
-* **review:** surface untracked working-tree files in CLI PR Context (hermes[#31](https://github.com/VorobiovD/air/issues/31) FP) — CLI-scoped, personas untouched ([#269](https://github.com/VorobiovD/air/issues/269)) ([e83708b](https://github.com/VorobiovD/air/commit/e83708b7df8fbe621f38d491682ded8a94628222))
+* **review:** surface untracked working-tree files in CLI PR Context (untracked-file FP) — CLI-scoped, personas untouched ([#269](https://github.com/VorobiovD/air/issues/269)) ([e83708b](https://github.com/VorobiovD/air/commit/e83708b7df8fbe621f38d491682ded8a94628222))
 
 ## [1.46.2](https://github.com/VorobiovD/air/compare/v1.46.1...v1.46.2) (2026-07-08)
 

@@ -7,7 +7,7 @@ assembled prompt (`lib/solo_prompt.py`) and the same verdict-gating contract
 ~3–7 min of agent time and $0 of Claude API spend. The **Codex cross-check runs
 alongside it** (an independent-vendor pass on the OpenAI API — a small cost)
 unless `--no-codex`: it catches what a single same-vendor agent can miss
-(hermes#31: Codex caught a false positive the Claude passes confirmed).
+(a real incident: Codex caught a false positive the Claude passes confirmed).
 
 **Advisory by default; gate by opt-in.** `--solo` posts the review comment
 WITHOUT an APPROVE/REQUEST_CHANGES verdict. `--solo --gate` opts into the
