@@ -69,7 +69,7 @@ from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
 )
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
-from agent_md import split_frontmatter  # noqa: E402  (single-source frontmatter parser)
+from agent_md import split_frontmatter, resolve_model_alias  # noqa: E402  (single-source frontmatter parser + AIR_MODEL_* override)
 
 import memory_store  # noqa: E402  (managed/ — client-side store reads for pattern staging)
 import pr_conversation  # noqa: E402  (plugins/air/lib)
@@ -212,7 +212,10 @@ def _persona_model(agent: str) -> tuple[str, str, str]:
     """(persona_body, model_id, tier) from plugins/air/agents/<short>.md frontmatter."""
     short = agent.replace("air-", "")
     fields, body = split_frontmatter(AGENTS_DIR / f"{short}.md")
-    alias = fields.get("model", "") or "sonnet"
+    # AIR_MODEL_* override layer (env > frontmatter); no-env → the frontmatter value.
+    alias = resolve_model_alias(short, fields.get("model", "")) or "sonnet"
+    if alias == "inherit":
+        alias = "sonnet"  # no session server-side (fable is org-restricted too → sonnet below)
     return body, MODEL_ALIASES.get(alias, MODEL_ALIASES["sonnet"]), (alias if alias in _TIERS else "sonnet")
 
 

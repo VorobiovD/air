@@ -17,8 +17,19 @@ stdlib-only, network-free. Importable from `managed/` (setup.py / headless.py
 put `plugins/air/lib` on sys.path) and runnable in-place from the lib dir.
 """
 import functools
+import os
 import sys
 from pathlib import Path
+
+# Model aliases the per-session/client override layer ACCEPTS. This layer only
+# decides WHICH alias wins (env vs frontmatter); the alias→API-ID mapping stays
+# in managed/setup.py's MODEL_ALIASES (this module can't import it — managed
+# imports the lib, not vice versa). Kept a superset of MODEL_ALIASES' keys plus
+# `fable` (CLI/subscription only — the managed API path is org-restricted, where
+# it degrades to sonnet) and `inherit` (session model on the CLI; no session
+# server-side → sonnet). An UNRECOGNIZED env value is ignored so a typo can
+# never silently select a phantom/absent model.
+_OVERRIDE_ALIASES = ("opus", "sonnet", "haiku", "fable", "inherit")
 
 
 @functools.lru_cache(maxsize=None)
@@ -56,3 +67,64 @@ def read_prompt(path: Path) -> str:
     """Read a markdown prompt file, stripping YAML frontmatter."""
     _, body = split_frontmatter(path)
     return body
+
+
+def _env_key(short_name: str) -> str:
+    """`review-verifier` → `AIR_MODEL_REVIEW_VERIFIER` (the `air-` prefix, if any,
+    is dropped first so the key matches the agent's short name)."""
+    return "AIR_MODEL_" + short_name.replace("air-", "").replace("-", "_").upper()
+
+
+def model_override(short_name: str) -> str:
+    """Per-session/client model override from the environment, or "" if none.
+
+    Precedence (highest first): AIR_MODEL_<AGENT> then AIR_MODEL_DEFAULT. Returns
+    a recognized alias (see _OVERRIDE_ALIASES) or "". An UNRECOGNIZED value is
+    ignored (with a one-line stderr warning) and the next level applies, so a
+    typo can't select a phantom model. This is the ONLY place the env layer is
+    read — so with no AIR_MODEL* set it returns "" and every caller behaves
+    exactly as before the override layer existed (the fleet is unaffected)."""
+    for var in (_env_key(short_name), "AIR_MODEL_DEFAULT"):
+        val = os.environ.get(var, "").strip().lower()
+        if not val:
+            continue
+        if val in _OVERRIDE_ALIASES:
+            return val
+        print(f"  Warning: {var}={val!r} is not a recognized model alias "
+              f"({', '.join(_OVERRIDE_ALIASES)}) — ignoring", file=sys.stderr)
+    return ""
+
+
+def resolve_model_alias(short_name: str, frontmatter_model: str = "") -> str:
+    """The model ALIAS an agent should run at: the env override if set, else the
+    committed frontmatter value. Returns an alias string (or "" if neither is
+    set — the caller then applies its own default).
+
+    WITH NO AIR_MODEL* ENV SET this returns exactly `frontmatter_model`, so
+    managed/headless resolution is byte-identical to pre-override behavior. The
+    alias→API-ID mapping stays in the caller (managed MODEL_ALIASES); the CLI
+    passes the alias straight to Claude Code's Task `model:` (which takes
+    aliases). `inherit` means "session model" — honored natively by the CLI;
+    server-side (managed/headless) there is no session, so the caller maps it to
+    its default."""
+    return model_override(short_name) or frontmatter_model
+
+
+if __name__ == "__main__":  # CLI shim for review.md (the plugin can only call lib/)
+    import argparse
+    ap = argparse.ArgumentParser(description="air agent-md helper")
+    ap.add_argument("--resolve-model", metavar="SHORT",
+                    help="print the ENV model override for <SHORT> (empty if none set) — "
+                         "the CLI passes it to the Task spawn only when non-empty")
+    ap.add_argument("--agents-dir",
+                    default=str(Path(__file__).resolve().parents[1] / "agents"))
+    args = ap.parse_args()
+    if args.resolve_model:
+        # Only the ENV override is printed (not the frontmatter fallback): the CLI
+        # omits `model:` when this is empty, so no-env spawns stay byte-identical.
+        # `inherit` (session model) is dropped to empty — Claude Code's Task
+        # `model:` takes a concrete tier, not `inherit`; to override the CLI tier
+        # use a concrete alias (fable/opus/…). `inherit` stays meaningful only in
+        # frontmatter (CLI-native) and server-side (managed/headless → sonnet).
+        ov = model_override(args.resolve_model)
+        print("" if ov == "inherit" else ov)

@@ -58,5 +58,54 @@ def test_persona_model_consistent_with_shared_parser():
         assert tier in headless._TIERS
 
 
+# ---- AIR_MODEL_* override layer wired into managed + headless ---------------
+def _clear_model_env(mp):
+    for v in ("AIR_MODEL_DEFAULT", "AIR_MODEL_CODE_REVIEWER", "AIR_MODEL_X"):
+        mp.delenv(v, raising=False)
+
+
+def test_parse_agent_model_no_env_byte_identical(monkeypatch, tmp_path):
+    pytest.importorskip("requests")
+    import setup  # noqa: E402
+    _clear_model_env(monkeypatch)
+    p = tmp_path / "code-reviewer.md"
+    p.write_text("---\nmodel: sonnet\n---\nb\n")
+    assert setup.parse_agent_model(p) == setup.MODEL_ALIASES["sonnet"]  # frontmatter, unchanged
+
+
+def test_parse_agent_model_inherit_maps_to_sonnet_not_literal(monkeypatch, tmp_path):
+    # The managed bug fix: `inherit` (and any unmapped value) resolves to the
+    # Sonnet default, NOT the literal string that 400'd at agent creation.
+    pytest.importorskip("requests")
+    import setup  # noqa: E402
+    _clear_model_env(monkeypatch)
+    p = tmp_path / "x.md"
+    p.write_text("---\nmodel: inherit\n---\nb\n")
+    assert setup.parse_agent_model(p) == setup.MODEL_ALIASES["sonnet"]
+
+
+def test_parse_agent_model_env_override(monkeypatch, tmp_path):
+    pytest.importorskip("requests")
+    import setup  # noqa: E402
+    p = tmp_path / "code-reviewer.md"
+    p.write_text("---\nmodel: sonnet\n---\nb\n")
+    monkeypatch.setenv("AIR_MODEL_DEFAULT", "opus")
+    assert setup.parse_agent_model(p) == setup.MODEL_ALIASES["opus"]     # env beats frontmatter
+    monkeypatch.setenv("AIR_MODEL_DEFAULT", "fable")                     # org-restricted server-side
+    assert setup.parse_agent_model(p) == setup.MODEL_ALIASES["sonnet"]  # → sonnet, not broken
+
+
+def test_persona_model_env_override(monkeypatch):
+    pytest.importorskip("anthropic")
+    import headless  # noqa: E402
+    from setup import MODEL_ALIASES  # noqa: E402
+    monkeypatch.setenv("AIR_MODEL_DEFAULT", "opus")
+    _, model_id, tier = headless._persona_model("air-code-reviewer")
+    assert model_id == MODEL_ALIASES["opus"] and tier == "opus"
+    monkeypatch.setenv("AIR_MODEL_DEFAULT", "fable")                     # → sonnet (org-restricted)
+    _, model_id, tier = headless._persona_model("air-code-reviewer")
+    assert model_id == MODEL_ALIASES["sonnet"] and tier == "sonnet"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
