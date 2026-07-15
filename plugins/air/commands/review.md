@@ -736,14 +736,19 @@ WIKI DRIFT: <what you noticed> — suggest running /review-learn --refresh-profi
 Do NOT update the wiki yourself during the review — the PR isn't merged yet and the code may change during the review-fix cycle. The orchestrator will collect drift notes and decide whether to trigger a profile refresh after the PR merges.
 
 **Agent types:** Launch each agent using its registered `subagent_type` so it picks up the `.claude/agents/<name>.md` definition and shows the correct name in the UI:
-- Agent 1 → `subagent_type: "air:code-reviewer"` (Opus — judgment-heavy bug/design review)
-- Agent 2 → `subagent_type: "air:simplify"` (Sonnet — pattern matching against codebase + heuristics)
-- Agent 3 → `subagent_type: "air:security-auditor"` (Opus — judgment-heavy threat modeling)
-- Agent 4 → `subagent_type: "air:git-history-reviewer"` (Haiku — mostly mechanical blame/churn analysis)
-- Agent 5 → `subagent_type: "air:ui-copy-reviewer"` (Sonnet — user-facing copy + static UX/a11y; **launch ONLY when the diff touches user-facing files**: `.tsx/.jsx/.vue/.svelte/.html`, templates, i18n catalogs (`locales/`, `en.json`, `.po`/`.arb`), user-facing help/content docs (`help/`/`content/`/`faq` — NOT internal eng docs/specs), OR files matching a `## User-Facing Copy Paths` glob in PROJECT-PROFILE.md (CLI/TUI copy modules, e.g. Python message modules) — skip entirely on backend-only diffs)
-- Verifier (Step 8) → `subagent_type: "air:review-verifier"` (Sonnet — final quality gate, must be precise)
+- Agent 1 → `subagent_type: "air:code-reviewer"` (judgment-heavy bug/design review)
+- Agent 2 → `subagent_type: "air:simplify"` (pattern matching against codebase + heuristics)
+- Agent 3 → `subagent_type: "air:security-auditor"` (judgment-heavy threat modeling)
+- Agent 4 → `subagent_type: "air:git-history-reviewer"` (mostly mechanical blame/churn analysis)
+- Agent 5 → `subagent_type: "air:ui-copy-reviewer"` (user-facing copy + static UX/a11y; **launch ONLY when the diff touches user-facing files**: `.tsx/.jsx/.vue/.svelte/.html`, templates, i18n catalogs (`locales/`, `en.json`, `.po`/`.arb`), user-facing help/content docs (`help/`/`content/`/`faq` — NOT internal eng docs/specs), OR files matching a `## User-Facing Copy Paths` glob in PROJECT-PROFILE.md (CLI/TUI copy modules, e.g. Python message modules) — skip entirely on backend-only diffs)
+- Verifier (Step 8) → `subagent_type: "air:review-verifier"` (final quality gate, must be precise)
 
-**Model tiering rationale:** Each agent's model is declared in its own frontmatter (`plugins/air/agents/<name>.md`). Judgment-heavy reviewers (code-reviewer, security-auditor) run on Opus. The verifier, simplify, and ui-copy-reviewer run on Sonnet; git-history-reviewer runs on Haiku — cheaper models matched to lighter task shapes. Do not override models when launching agents — the frontmatter is the source of truth.
+**Model selection (frontmatter default + optional per-session override):** Each agent's model comes from its frontmatter (`plugins/air/agents/<name>.md`) — the source of truth and the default. A per-session/client override layer lets you run any agent on a different tier WITHOUT editing the shared frontmatter (e.g. Fable locally on your Claude Code subscription, leaving CI untouched). For EACH agent you launch, first resolve its override (only when `$AIR_PLUGIN_ROOT` resolved in Step 0 — else skip and use frontmatter as today):
+```bash
+# <short-name> ∈ code-reviewer | security-auditor | review-verifier | simplify | ui-copy-reviewer | git-history-reviewer
+MODEL_OVERRIDE=$(python3 "$AIR_PLUGIN_ROOT/lib/agent_md.py" --resolve-model <short-name> 2>/dev/null)
+```
+This reads `AIR_MODEL_<AGENT>` then `AIR_MODEL_DEFAULT` from the environment (accepted values: `opus`/`sonnet`/`haiku`/`fable`). If `$MODEL_OVERRIDE` is **non-empty**, pass it as that agent's `model` when launching (e.g. `model: "fable"`). If **empty** — the default, no `AIR_MODEL*` set — launch with **NO** `model` override so the frontmatter tier applies unchanged (byte-identical to before this layer existed). This is a **local/in-process knob**: it's read from the process environment (your shell, for a local CLI run), so it applies wherever `AIR_MODEL_*` is exported. In **CI it's inert by default** — GitHub repo *variables* aren't auto-exported to the job process, so enabling it there would require the caller's workflow to map `AIR_MODEL_*` into the job `env:` (not wired by default). So the fleet is unaffected unless a caller explicitly does that.
 
 **Fallback:** If a `subagent_type: "air:<name>"` fails (plugin not installed or agent file not found), fall back to `subagent_type: "general-purpose"` and include the full agent instructions from `plugins/air/agents/<name>.md` in the prompt. The review quality is the same — only the UI label changes.
 

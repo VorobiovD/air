@@ -31,7 +31,7 @@ _AIR_LIB_DIR = Path(__file__).resolve().parent.parent / "plugins" / "air" / "lib
 if str(_AIR_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_AIR_LIB_DIR))
 from solo_prompt import SUB_AGENTS, assemble_solo_prompt  # noqa: E402,F401
-from agent_md import read_prompt, split_frontmatter  # noqa: E402,F401
+from agent_md import read_prompt, split_frontmatter, resolve_model_alias  # noqa: E402,F401
 import env  # noqa: E402  (plugins/air/lib — tolerant env parsing)
 
 # Agent names accepted in AIR_AGENT_VERSIONS pins (the review roster).
@@ -140,12 +140,31 @@ def parse_agent_tools(path: Path) -> list[str]:
 
 
 def parse_agent_model(path: Path, default: str = DEFAULT_OPUS) -> str:
-    """Read `model:` from agent frontmatter, resolving aliases to API IDs."""
+    """Read `model:` from agent frontmatter — honoring the AIR_MODEL_* override
+    layer (env > frontmatter) — and resolve the alias to an API model ID.
+
+    Unknown / `inherit` / `fable` map to the Sonnet default (matching headless):
+    there is no session server-side, and the Fable API is org-restricted. This
+    also fixes the prior bug where an unmapped value (e.g. `inherit`) was returned
+    verbatim as an invalid model ID that 400'd at agent creation. With no
+    AIR_MODEL* env set, the result is byte-identical to reading the frontmatter."""
     fields, _ = split_frontmatter(path)
-    value = fields.get("model", "")
-    if not value:
+    alias = resolve_model_alias(path.stem, fields.get("model", ""))
+    if not alias:
         return default
-    return MODEL_ALIASES.get(value, value)
+    if alias in ("inherit", "fable"):
+        # Expected degrades: `inherit` has no session server-side; `fable`'s API
+        # is org-restricted. Both → the Sonnet default, no warning.
+        return MODEL_ALIASES["sonnet"]
+    resolved = MODEL_ALIASES.get(alias)
+    if resolved is None:
+        # A genuinely-unknown value (a typo or a raw API id in frontmatter) — warn
+        # rather than silently downgrade, so a mistake in a committed agent file
+        # is visible. (The env-override path validates + warns separately.)
+        print(f"  Warning: {path.name} model {alias!r} is not a known alias "
+              f"({', '.join(MODEL_ALIASES)}) — using sonnet", file=sys.stderr)
+        return MODEL_ALIASES["sonnet"]
+    return resolved
 
 
 def parse_agent_speed(path: Path) -> str | None:

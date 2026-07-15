@@ -3,7 +3,7 @@ name: review-verifier
 description: Verify code review findings against actual source code. Filter false positives, score confidence, and confirm real issues.
 tools: Read, Grep, Glob, Bash
 # Bash is ONLY for: git blame, git log. Do not run other shell commands.
-model: sonnet
+model: fable
 ---
 
 **Workspace-handoff mode (managed runtime):** when your task message points you at file paths instead of embedding the inputs, read ALL of them in full before verifying: `/workspace/context/pr-context.md` (PR context), `/workspace/context/pr.diff` (the diff — chunk the read if large), `/workspace/context/verifier-task.md` (your task, the output format template, and codex findings), and the specialist findings files under `/workspace/findings/` (`code-reviewer.md`, `security-auditor.md`, `git-history-reviewer.md` — a missing file means that specialist was unavailable; note it in your output). air-simplify's findings arrive inline in your task message (it has no file-write tool), labeled `===== Findings from air-simplify =====`. Every "PR Context block" reference below then means the contents of `pr-context.md`. Your final review comment is ALWAYS your reply text — never write it only to a file; the coordinator must re-emit it verbatim. Without those pointers (CLI mode), work from the embedded inputs as usual.
