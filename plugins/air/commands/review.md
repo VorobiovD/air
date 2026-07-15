@@ -704,7 +704,7 @@ Run with `run_in_background: true`. Graceful skip if not configured.
 - High-attention files: <file> (<reason>), ...
 - Diff-check blockers: <warnings, if any>
 - Untracked files in checkout (reviewer-side artifacts — NOT in the repo or PR; do NOT flag, reference, or tell the author to change them): <UNTRACKED_FILES, one per line, or "none">
-- Review scope: raise findings ONLY about files in this PR's change set (the File statuses above / the diff). A file being READABLE in the checkout does NOT mean it is part of the repo or PR — never flag an untracked file (listed above) or a file outside the change set. For a repo-wide claim about an existing file, confirm it is tracked first.
+- Review scope: findings may reference any **tracked** file in the repo — cross-file findings (a changed file breaking or misusing an *unchanged* tracked caller/dependency/dependent) are core value; keep the review broad, do NOT narrow to only the changed files. The ONLY exclusion is the `Untracked files in checkout` above: reviewer-side artifacts that live only in the local working tree, not the repo — never flag or reference them. A file being readable in the checkout does not make it tracked; confirm a repo-wide claim with `git ls-files --error-unmatch`.
 - <commit-history>
 <commit list from Step 4, one line per commit>
 </commit-history>
