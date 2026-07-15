@@ -1,7 +1,7 @@
 {
   "name": "air",
   "description": "Automated PR code review for GitHub — 6 specialized agents + Codex, wiki-based pattern learning, self-review/respond/re-review modes, model tiering, session-scoped /tmp, pre-commit drift-check hook, and Managed Agent CI option.",
-  "version": "1.46.2",
+  "version": "1.47.0",
   "author": {
     "name": "Dmytro Vorobiov",
     "email": "vorobef@gmail.com"

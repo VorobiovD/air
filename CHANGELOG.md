@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.47.0](https://github.com/VorobiovD/air/compare/v1.46.2...v1.47.0) (2026-07-15)
+
+
+### Features
+
+* **models:** per-session/client model override (AIR_MODEL_*) + fix managed inherit bug ([#268](https://github.com/VorobiovD/air/issues/268)) ([61d9fe7](https://github.com/VorobiovD/air/commit/61d9fe7ac0f0a24de662f682f860826373f457de))
+
+
+### Bug Fixes
+
+* **diff:** local git-diff fallback for oversized PRs (&gt;300 files) ([#266](https://github.com/VorobiovD/air/issues/266)) ([ae21f9e](https://github.com/VorobiovD/air/commit/ae21f9ec5b54b8c1dcd35e7e4289880c9ffe3bf3))
+* **env:** recognize the AIR_NEW_API_KEY_&lt;REPO&gt; key-handle family in report_env ([#261](https://github.com/VorobiovD/air/issues/261)) ([478dc1a](https://github.com/VorobiovD/air/commit/478dc1ae4f3c006a8b7aed52a959cd0c85235e6c))
+* **gate-orphan:** make the PR-visible dismissal reason generic (no tool name / gate mechanics) ([#267](https://github.com/VorobiovD/air/issues/267)) ([7ae6b77](https://github.com/VorobiovD/air/commit/7ae6b77883d783cc742db678c7f29685a5869b44))
+* **gate-orphan:** stamp the sentinel on CLI verdicts + reason-aware dismissal message ([#264](https://github.com/VorobiovD/air/issues/264)) ([d05893e](https://github.com/VorobiovD/air/commit/d05893e08e15252fa3e3a3b489f7f87583142165))
+* **no-approve:** don't announce the gate mode in the clean-review comment ([#263](https://github.com/VorobiovD/air/issues/263)) ([47a3c5e](https://github.com/VorobiovD/air/commit/47a3c5e333dcdcacef8fce1430080da7cb3a2430))
+* **review:** surface untracked working-tree files in CLI PR Context (hermes[#31](https://github.com/VorobiovD/air/issues/31) FP) — CLI-scoped, personas untouched ([#269](https://github.com/VorobiovD/air/issues/269)) ([e83708b](https://github.com/VorobiovD/air/commit/e83708b7df8fbe621f38d491682ded8a94628222))
+
 ## [1.46.2](https://github.com/VorobiovD/air/compare/v1.46.1...v1.46.2) (2026-07-08)
 
 
