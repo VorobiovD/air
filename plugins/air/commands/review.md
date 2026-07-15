@@ -73,7 +73,7 @@ Extract from `$ARGUMENTS`:
 - **--dry-run**: print to console, don't post. Works with all modes including `--respond`.
 - **--gate**: (only with `--solo`) post the APPROVE/REQUEST_CHANGES verdict in addition to the comment. Without it, `--solo` is advisory-only.
 
-If `--solo` is present, **reject if combined with `--self`, `--full`, `--respond`, `--rewrite`, or `--re-review`** — solo v1 is a fresh-review flow. Print "--solo supports fresh PR reviews only (combine with --fresh/--closed/--dry-run)." and STOP. `--solo` implies `--no-codex`. Continue through Steps 2–5 as normal; the flow diverts at Step 6.
+If `--solo` is present, **reject if combined with `--self`, `--full`, `--respond`, `--rewrite`, or `--re-review`** — solo v1 is a fresh-review flow. Print "--solo supports fresh PR reviews only (combine with --fresh/--closed/--dry-run)." and STOP. `--solo` **runs the Codex cross-check too** by default — the independent-vendor pass catches what a single Claude agent (and a same-vendor verifier) can miss (a real review incident: Codex caught a false positive both Claude passes confirmed); pass `--no-codex` to skip it. Continue through Steps 2–5 as normal; the flow diverts at Step 6.
 
 If `--closed` is present, **reject if combined with `--self`, `--full`, or `--respond`** — those modes divert away from the PR-review flow (Step 5 / Step 12) where `--closed` is honored, so combining them is a silent no-op. Print "--closed only applies to PR review mode. Drop --self / --full / --respond, or drop --closed." and STOP. This check must run BEFORE the `--full` and `--self` flow-diverters below, otherwise those branches short-circuit past the guard.
 
@@ -382,12 +382,12 @@ git diff --check origin/<baseRefName>...HEAD 2>/dev/null
 # Untracked working-tree files — NOT part of the repo or PR. A local review runs
 # against the operator's working tree, which may contain reviewer-side session
 # artifacts (e.g. a CLAUDE.md / .air-checks.sh the operator created this session).
-# Agents can Read these but must NEVER flag them (the hermes#31 false-positive:
+# Agents can Read these but must NEVER flag them (a real false-positive incident:
 # an untracked reviewer-side CLAUDE.md was flagged + "confirmed" — retracted).
-git status --porcelain --untracked-files=all 2>/dev/null | sed -n 's/^?? //p'
+git status --porcelain --untracked-files=all 2>/dev/null | sed -n 's/^?? //p' | head -50
 ```
 
-Save file statuses as `FILE_STATUS_LIST`. Save diff-check output as `DIFF_CHECK_WARNINGS` (empty = clean). Save the untracked-file list as `UNTRACKED_FILES` (empty = none) — surface it in the PR Context block (below) so agents can exclude reviewer-side artifacts from findings.
+Save file statuses as `FILE_STATUS_LIST`. Save diff-check output as `DIFF_CHECK_WARNINGS` (empty = clean). Save the untracked-file list as `UNTRACKED_FILES` (empty = none; capped at 50 to bound PR-Context size — a working tree with more untracked files than that is unusual) — surface it in the PR Context block (below) so agents can exclude reviewer-side artifacts from findings.
 
 If either command fails (detached HEAD, missing remote): skip gracefully — agents proceed without that data.
 
@@ -704,7 +704,7 @@ Run with `run_in_background: true`. Graceful skip if not configured.
 - High-attention files: <file> (<reason>), ...
 - Diff-check blockers: <warnings, if any>
 - Untracked files in checkout (reviewer-side artifacts — NOT in the repo or PR; do NOT flag, reference, or tell the author to change them): <UNTRACKED_FILES, one per line, or "none">
-- Review scope: findings may reference any **tracked** file in the repo — cross-file findings (a changed file breaking or misusing an *unchanged* tracked caller/dependency/dependent) are core value; keep the review broad, do NOT narrow to only the changed files. The ONLY exclusion is the `Untracked files in checkout` above: reviewer-side artifacts that live only in the local working tree, not the repo — never flag or reference them. A file being readable in the checkout does not make it tracked; confirm a repo-wide claim with `git ls-files --error-unmatch`.
+- Review scope: findings may reference any **tracked** file in the repo — cross-file findings (a changed file breaking or misusing an *unchanged* tracked caller/dependency/dependent) are core value; keep the review broad, do NOT narrow to only the changed files. The ONLY exclusion is the `Untracked files in checkout` above: reviewer-side artifacts that live only in the local working tree, not the repo — never flag or reference them. A file being readable in the checkout does not make it tracked; agents with Bash can confirm a repo-wide claim with `git ls-files --error-unmatch`.
 - <commit-history>
 <commit list from Step 4, one line per commit>
 </commit-history>
