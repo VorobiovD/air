@@ -22,6 +22,10 @@
 
 name: air learn (scheduled)
 
+# The reusable workflow authenticates via the forwarded PATs, not GITHUB_TOKEN,
+# so this caller job needs no default token grants. Mirrors air-review.yml.
+permissions: {}
+
 on:
   schedule:
     - cron: '23 6 * * *'   # daily 06:23 UTC — CHANGE the minute per repo (see setup step 2)
@@ -44,6 +48,9 @@ concurrency:
 
 jobs:
   learn:
+    # For stricter supply-chain isolation, pin @main to an immutable air commit
+    # SHA — a push to the public air repo then can't silently change the code
+    # your secrets flow into (bump deliberately). @main is the low-friction default.
     uses: VorobiovD/air/.github/workflows/air-learn-cron.yml@main
     with:
       repo: ${{ github.repository }}
@@ -53,4 +60,10 @@ jobs:
         ${{ github.event_name == 'workflow_dispatch'
             && inputs.mode
             || (vars.AIR_LEARN_CRON_LIVE == 'true' && 'live' || 'list') }}
-    secrets: inherit   # passes THIS repo's ANTHROPIC_API_KEY + AIR_BOT_TOKEN
+    # Explicit forwarding ONLY — mirror air-review.yml's contract ("the other
+    # secrets never leave the repo; no `secrets: inherit`"). `secrets: inherit`
+    # would hand EVERY repo secret (DB creds, reviewer PATs, API keys) to the
+    # external reusable workflow; forward exactly the two it declares instead.
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AIR_BOT_TOKEN:     ${{ secrets.AIR_BOT_TOKEN }}
