@@ -89,7 +89,7 @@ _DIFF_CAP = env.env_int("AIR_HEADLESS_DIFF_CAP", 500_000, minimum=0)  # chars �
                              # guard" systematically truncated real staging→main promotes
                              # (2000+ lines) → spurious fail-closed REQUEST_CHANGES; raising
                              # to managed's 500K fixes the gate at ~no cost change (validated
-                             # 2026-06-24: qai-be #1243 2455L flipped RC→APPROVE, $7.56→$7.05).
+                             # 2026-06-24: repo-A #1243 2455L flipped RC→APPROVE, $7.56→$7.05).
                              # Truncation + fail-close stays as the backstop for >500K diffs.
 _TIERS = frozenset(MODEL_ALIASES)   # known model-alias tiers; unknown → "sonnet"
 
@@ -338,7 +338,7 @@ def _choose_cache_ttl(n_files: int, diff_bytes: int) -> str:
     loop: per-turn gaps are bounded by max_tokens generation (~2-4min), NOT file count
     (back-to-back client-side, no managed stall), so 5m never expires and even a heavy PR
     isn't miss-prone — confirmed across every captured run (3 files → 76 files, 0 gaps >5min;
-    ai-relay #268 at 76 files measured $11.82@1h vs $9.33@5m, 0/57 misses). So the old
+    repo-C #268 at 76 files measured $11.82@1h vs $9.33@5m, 0/57 misses). So the old
     heavy->1h auto-bump is now OPT-IN (default off): set AIR_HEADLESS_TTL_FILES / _BYTES to
     re-enable a bump, or force the whole run with AIR_HEADLESS_CACHE_TTL ∈ {5m,1h}. All knobs
     read at CALL time (bad-input-safe, monkeypatch-able). `diff_bytes` is the RAW size."""

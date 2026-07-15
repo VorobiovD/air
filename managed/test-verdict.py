@@ -724,7 +724,7 @@ def test_cross_region_exemption_emits_pin_log():
     assert any("FIXED trusted" in l for l in log)
 
 
-# --- CROSS-FILE fix: the qai-be #1422 false-block --------------------------
+# --- CROSS-FILE fix: the repo-A #1422 false-block --------------------------
 # A blocker anchored at the SYMPTOM/read site (`config/services.php`) whose fix
 # lands in a DIFFERENT file it references in prose (`scripts/after_install.sh`).
 # The anchor file is never touched → the old single-anchor file_touched read
@@ -827,7 +827,7 @@ def test_extract_finding_files_paths_only():
 # --- #198 origin-anchor: un-poison round-3+ carried fixes (gate-safe) -------
 # A blocker carried in a round-3+ status block, GENUINELY fixed in an EARLIER
 # round, so absent from baseline..head. v1 pins it INDETERMINATE/file_touched=False
-# → rewrites the verifier FIXED to NOT FIXED FOREVER (the qai-be #1290 poison).
+# → rewrites the verifier FIXED to NOT FIXED FOREVER (the repo-A #1290 poison).
 # Origin-anchor recovers #N's first-raise anchor + tests it against origin..head.
 _OA_R3_PRIOR = (
     "## Code Review (Re-review)\n\n### Previous Findings Status\n\n"

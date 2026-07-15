@@ -904,7 +904,7 @@ def extract_finding_files(body: str, base_sha: str) -> dict:
     (`config/services.php`) whose fix lands in the wiring file
     (`scripts/after_install.sh`). Keying `file_touched` on this SET (not just the
     single anchor) stops `pin_and_resurrect` from rewriting a genuine cross-FILE
-    FIXED to NOT FIXED (the qai-be #1422 false-block). Only ever called on a
+    FIXED to NOT FIXED (the repo-A #1422 false-block). Only ever called on a
     FRESH body (round-2 path), same as extract_fresh_finding_locations."""
     out: dict = {}
     if not body:
@@ -979,7 +979,7 @@ def find_origin(chain, finding_num: int):
     Returns `(None, None, set())` when no anchor is recoverable → caller falls back
     to number-identity (conservative). `referenced_files` = every file that origin
     finding is about (its anchor + backtick'd prose paths, `extract_finding_files`),
-    so round-3+ honors a cross-FILE fix the same way round-2 does (qai-be #1422/#244).
+    so round-3+ honors a cross-FILE fix the same way round-2 does (repo-A #1422/#244).
 
     `chain` is a list of `(review_body, reviewed_sha)` OLDEST-FIRST. Pure — the
     caller (which holds the comments + git/API) builds the chain, runs the
@@ -1070,7 +1070,7 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
         # Round 3+: carried #N has NO anchor in this body. ORIGIN-ANCHOR (#198):
         # when origin_resolver is supplied, recover #N's first-raise anchor + test
         # it against the WIDER origin..head window, so a fix that landed BEFORE the
-        # current baseline un-poisons (the qai-be #1290 class: file absent from
+        # current baseline un-poisons (the repo-A #1290 class: file absent from
         # baseline..head -> file_touched=False -> FIXED rewritten to NOT FIXED
         # forever). Same change/file_touched semantics as round-2, just over the
         # origin window. No resolver / unresolved origin -> v1 number-identity
@@ -1112,7 +1112,7 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
         # absent. We consider EVERY file the finding references (its anchor +
         # backtick'd prose paths), not just the single blob-link anchor, so a
         # blocker flagged at the symptom/read site but fixed in the wiring file
-        # (qai-be #1422) is honored, not rewritten. Keys on a real `@@` hunk (not
+        # (repo-A #1422) is honored, not rewritten. Keys on a real `@@` hunk (not
         # mere `present`), so a metadata-only segment can't qualify.
         file_touched = _referenced_file_touched(files_by_num.get(num, set()), index)
         ledger.append(LedgerEntry(num, sev, status, loc, change, file_touched))
@@ -1241,7 +1241,7 @@ def _ensure_rereview_shape(body: str, log: list, resurrected: list) -> str:
 
 # Appended to a status line when the pin rewrites a verifier FIXED→NOT FIXED, so
 # the label is self-explaining rather than contradicting its own "fixed" rationale
-# (the qai-be #1422 report). Inert to the gate — the STATUS token is parsed, the
+# (the repo-A #1422 report). Inert to the gate — the STATUS token is parsed, the
 # tail is free prose.
 _PIN_REWRITE_MARKER = (
     "[air: pinned NOT FIXED — the verifier judged this fixed, but the re-review "
@@ -1323,7 +1323,7 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
             new_status = "NOT FIXED"
             # Annotate the rewrite so the label doesn't silently contradict the
             # verifier's (retained) "fixed" rationale + the summary header — the
-            # reader sees WHY it reads NOT FIXED (qai-be #1422 confusion). The gate
+            # reader sees WHY it reads NOT FIXED (repo-A #1422 confusion). The gate
             # parses only the STATUS token, so the marker in the tail is inert.
             tail = f"{tail.rstrip()} {_PIN_REWRITE_MARKER}"
             log.append(f"[pin] #{num} FIXED->NOT FIXED (no cross-region edit; change={entry.change}, file_touched={entry.file_touched})")

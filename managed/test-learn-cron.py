@@ -33,12 +33,12 @@ def _meta(reviews_since, locked=False):
 
 @pytest.fixture
 def fleet(monkeypatch):
-    # qai-be due(20), qai-fe not-due(3), other due but locked, old archived, non-air store
+    # repo-A due(20), repo-B not-due(3), other due but locked, old archived, non-air store
     stores = [
-        {"name": "air-patterns thecvlb/qai-be", "id": "s1"},
-        {"name": "air-patterns thecvlb/qai-fe", "id": "s2"},
-        {"name": "air-patterns thecvlb/ai-relay", "id": "s3"},      # due but LOCKED
-        {"name": "air-patterns thecvlb/retired", "id": "s4", "archived_at": "2026-01-01"},
+        {"name": "air-patterns owner/repo-A", "id": "s1"},
+        {"name": "air-patterns owner/repo-B", "id": "s2"},
+        {"name": "air-patterns owner/repo-C", "id": "s3"},      # due but LOCKED
+        {"name": "air-patterns owner/retired", "id": "s4", "archived_at": "2026-01-01"},
         {"name": "some-other-store", "id": "s5"},                    # not air-patterns
     ]
     metas = {"s1": _meta(20), "s2": _meta(3), "s3": _meta(20, locked=True), "s4": _meta(99)}
@@ -52,13 +52,13 @@ def fleet(monkeypatch):
 def test_find_due_filters_archived_nonair_locked_and_notdue(fleet):
     due = C.find_due_repos()
     repos = [r for r, _, _ in due]
-    assert repos == ["thecvlb/qai-be"]          # only due + non-archived + air-patterns + unlocked
-    # qai-fe not due, ai-relay locked, retired archived, other not-air → all excluded
+    assert repos == ["owner/repo-A"]          # only due + non-archived + air-patterns + unlocked
+    # repo-B not due, repo-C locked, retired archived, other not-air → all excluded
 
 
 def test_repos_filter_narrows_scan(fleet):
-    due = C.find_due_repos(repos_filter={"thecvlb/qai-fe"})
-    assert due == []                            # qai-fe is in-filter but NOT due
+    due = C.find_due_repos(repos_filter={"owner/repo-B"})
+    assert due == []                            # repo-B is in-filter but NOT due
 
 
 def test_store_with_no_counter_is_skipped(monkeypatch):
@@ -76,8 +76,8 @@ def test_run_invokes_headless_learn_per_due_with_dry_run(fleet, monkeypatch):
         return {"store_id": store_id, "written": [], "dry_run": dry_run}
     monkeypatch.setattr(C.learn_headless, "run_headless_learn", fake_learn)
     out = C.run(dry_run=True)
-    assert out["due"] == ["thecvlb/qai-be"] and out["ran"] == ["thecvlb/qai-be"]
-    assert calls == [("thecvlb/qai-be", "s1", True)]   # store_id threaded, dry_run passed
+    assert out["due"] == ["owner/repo-A"] and out["ran"] == ["owner/repo-A"]
+    assert calls == [("owner/repo-A", "s1", True)]   # store_id threaded, dry_run passed
 
 
 def test_run_limit_caps_repos(monkeypatch):
@@ -120,7 +120,7 @@ def test_run_live_claims_lock_then_learns(fleet, monkeypatch):
     monkeypatch.setattr(C.learn_headless, "run_headless_learn",
                         lambda repo, **k: learned.append(repo) or {"reset": True})
     C.run(dry_run=False)
-    assert claimed == ["s1"] and learned == ["thecvlb/qai-be"]
+    assert claimed == ["s1"] and learned == ["owner/repo-A"]
 
 
 def test_run_skips_repo_when_lock_lost(fleet, monkeypatch):
@@ -130,7 +130,7 @@ def test_run_skips_repo_when_lock_lost(fleet, monkeypatch):
                         lambda repo, **k: learned.append(repo) or {})
     out = C.run(dry_run=False)
     assert learned == []                                  # never curated (lock lost)
-    assert out["due"] == ["thecvlb/qai-be"]               # still detected as due
+    assert out["due"] == ["owner/repo-A"]               # still detected as due
 
 
 def test_run_releases_lock_on_learn_error(fleet, monkeypatch):

@@ -295,7 +295,7 @@ def cmd_find_store(args) -> int:
 
 
 # Exit codes for read-author (the CLI branches on these so it never misreports
-# a known author as new — the ai-relay 2026-06-27 bug, where the store→wiki
+# a known author as new — the repo-C 2026-06-27 bug, where the store→wiki
 # render emits per-author blocks under a heading the CLI's `### <login>` grep
 # missed, so a dominant author read as "new author"):
 #   0 → stdout carries the author's pattern file (found)
