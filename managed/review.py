@@ -742,6 +742,12 @@ def sync_agents(review_arch: str = "full"):
         # air-coordinator-ma-<alias> agent this run will route to.
         "AIR_MA_COORDINATOR_MODEL": os.environ.get("AIR_MA_COORDINATOR_MODEL", ""),
     }
+    # Per-session/client model override (AIR_MODEL_DEFAULT / AIR_MODEL_<AGENT>):
+    # forward so setup.parse_agent_model honors it on the managed-full path too,
+    # matching headless (which reads it in-process). Values are allowlisted model
+    # aliases (see agent_md._OVERRIDE_ALIASES) — no secret exposure. Absent by
+    # default → agents created on their frontmatter tier, unchanged.
+    narrow_env.update({k: v for k, v in os.environ.items() if k.startswith("AIR_MODEL")})
     result = subprocess.run(
         [sys.executable, str(Path(__file__).parent / "setup.py")],
         env=narrow_env,

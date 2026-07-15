@@ -126,3 +126,11 @@ def test_cli_shim_end_to_end(monkeypatch):
     assert run({"AIR_MODEL_DEFAULT": "inherit"}) == ""     # inherit not a Task value → dropped
     assert run({"AIR_MODEL_CODE_REVIEWER": "opus",
                 "AIR_MODEL_DEFAULT": "sonnet"}) == "opus"  # per-agent wins
+
+
+def test_per_agent_typo_falls_to_valid_global(monkeypatch, capsys):
+    _clear_model_env(monkeypatch)
+    monkeypatch.setenv("AIR_MODEL_CODE_REVIEWER", "opuss")  # typo (per-agent)
+    monkeypatch.setenv("AIR_MODEL_DEFAULT", "haiku")        # valid global
+    assert agent_md.model_override("code-reviewer") == "haiku"  # typo ignored → global
+    assert "not a recognized model alias" in capsys.readouterr().err
