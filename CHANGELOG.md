@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.48.0](https://github.com/VorobiovD/air/compare/v1.47.0...v1.48.0) (2026-07-15)
+
+
+### Features
+
+* **review:** Codex in --solo + Mongoose index-readiness check + [#269](https://github.com/VorobiovD/air/issues/269) nits ([#270](https://github.com/VorobiovD/air/issues/270)) ([2605d61](https://github.com/VorobiovD/air/commit/2605d61246810ef30101f99094bc554bddfaa1fc))
+
 ## [1.47.0](https://github.com/VorobiovD/air/compare/v1.46.2...v1.47.0) (2026-07-15)
 
 
