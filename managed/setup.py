@@ -152,9 +152,19 @@ def parse_agent_model(path: Path, default: str = DEFAULT_OPUS) -> str:
     alias = resolve_model_alias(path.stem, fields.get("model", ""))
     if not alias:
         return default
-    if alias == "inherit":
+    if alias in ("inherit", "fable"):
+        # Expected degrades: `inherit` has no session server-side; `fable`'s API
+        # is org-restricted. Both → the Sonnet default, no warning.
         return MODEL_ALIASES["sonnet"]
-    return MODEL_ALIASES.get(alias, MODEL_ALIASES["sonnet"])
+    resolved = MODEL_ALIASES.get(alias)
+    if resolved is None:
+        # A genuinely-unknown value (a typo or a raw API id in frontmatter) — warn
+        # rather than silently downgrade, so a mistake in a committed agent file
+        # is visible. (The env-override path validates + warns separately.)
+        print(f"  Warning: {path.name} model {alias!r} is not a known alias "
+              f"({', '.join(MODEL_ALIASES)}) — using sonnet", file=sys.stderr)
+        return MODEL_ALIASES["sonnet"]
+    return resolved
 
 
 def parse_agent_speed(path: Path) -> str | None:

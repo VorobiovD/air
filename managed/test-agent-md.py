@@ -6,10 +6,21 @@ headless._persona_model stays consistent with the shared parser after the
 refactor. These import setup/headless (managed deps), so they live here; the
 pure parse-behavior tests are in plugins/air/lib/tests/test_agent_md.py.
 """
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_model_env(monkeypatch):
+    """Clear AIR_MODEL_* before every test so a value exported in the dev/CI shell
+    can't perturb the frontmatter-based assertions (the model-override tests set
+    their own values on top). Prevents a spurious failure of the pre-existing
+    consistency test when AIR_MODEL_DEFAULT is present in the environment."""
+    for k in [k for k in os.environ if k.startswith("AIR_MODEL")]:
+        monkeypatch.delenv(k, raising=False)
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))

@@ -209,7 +209,9 @@ def stage_patterns(repo: str, author: str, checkout: str, token: str,
 
 
 def _persona_model(agent: str) -> tuple[str, str, str]:
-    """(persona_body, model_id, tier) from plugins/air/agents/<short>.md frontmatter."""
+    """(persona_body, model_id, tier) from plugins/air/agents/<short>.md frontmatter,
+    honoring the AIR_MODEL_* per-session override (env > frontmatter; inherit/fable/
+    unknown → sonnet). With no AIR_MODEL* set → the frontmatter tier, unchanged."""
     short = agent.replace("air-", "")
     fields, body = split_frontmatter(AGENTS_DIR / f"{short}.md")
     # AIR_MODEL_* override layer (env > frontmatter); no-env → the frontmatter value.

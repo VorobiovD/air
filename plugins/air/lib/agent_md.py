@@ -116,8 +116,6 @@ if __name__ == "__main__":  # CLI shim for review.md (the plugin can only call l
     ap.add_argument("--resolve-model", metavar="SHORT",
                     help="print the ENV model override for <SHORT> (empty if none set) — "
                          "the CLI passes it to the Task spawn only when non-empty")
-    ap.add_argument("--agents-dir",
-                    default=str(Path(__file__).resolve().parents[1] / "agents"))
     args = ap.parse_args()
     if args.resolve_model:
         # Only the ENV override is printed (not the frontmatter fallback): the CLI
