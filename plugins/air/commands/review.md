@@ -378,9 +378,16 @@ git diff --name-status origin/<baseRefName>...HEAD 2>/dev/null
 
 # Conflict markers and whitespace errors
 git diff --check origin/<baseRefName>...HEAD 2>/dev/null
+
+# Untracked working-tree files — NOT part of the repo or PR. A local review runs
+# against the operator's working tree, which may contain reviewer-side session
+# artifacts (e.g. a CLAUDE.md / .air-checks.sh the operator created this session).
+# Agents can Read these but must NEVER flag them (the hermes#31 false-positive:
+# an untracked reviewer-side CLAUDE.md was flagged + "confirmed" — retracted).
+git status --porcelain --untracked-files=all 2>/dev/null | sed -n 's/^?? //p'
 ```
 
-Save file statuses as `FILE_STATUS_LIST`. Save diff-check output as `DIFF_CHECK_WARNINGS` (empty = clean).
+Save file statuses as `FILE_STATUS_LIST`. Save diff-check output as `DIFF_CHECK_WARNINGS` (empty = clean). Save the untracked-file list as `UNTRACKED_FILES` (empty = none) — surface it in the PR Context block (below) so agents can exclude reviewer-side artifacts from findings.
 
 If either command fails (detached HEAD, missing remote): skip gracefully — agents proceed without that data.
 
@@ -696,6 +703,8 @@ Run with `run_in_background: true`. Graceful skip if not configured.
 - File statuses: Added: [<A files>], Modified: [<M files>], Deleted: [<D files>], Renamed: [<R files>]
 - High-attention files: <file> (<reason>), ...
 - Diff-check blockers: <warnings, if any>
+- Untracked files in checkout (reviewer-side artifacts — NOT in the repo or PR; do NOT flag, reference, or tell the author to change them): <UNTRACKED_FILES, one per line, or "none">
+- Review scope: findings may reference any **tracked** file in the repo — cross-file findings (a changed file breaking or misusing an *unchanged* tracked caller/dependency/dependent) are core value; keep the review broad, do NOT narrow to only the changed files. The ONLY exclusion is the `Untracked files in checkout` above: reviewer-side artifacts that live only in the local working tree, not the repo — never flag or reference them. A file being readable in the checkout does not make it tracked; confirm a repo-wide claim with `git ls-files --error-unmatch`.
 - <commit-history>
 <commit list from Step 4, one line per commit>
 </commit-history>
