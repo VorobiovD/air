@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.49.0](https://github.com/VorobiovD/air/compare/v1.48.0...v1.49.0) (2026-07-22)
+
+
+### Features
+
+* **review:** port/refactor behavioral-diff lens ([#276](https://github.com/VorobiovD/air/issues/276)) ([#280](https://github.com/VorobiovD/air/issues/280)) ([e1af8ff](https://github.com/VorobiovD/air/commit/e1af8ff3d601fde7a9cf8e996870fc9522770ad2))
+
+
+### Bug Fixes
+
+* **headless:** self-heal an empty (thinking-only) completion instead of fail-closing ([#281](https://github.com/VorobiovD/air/issues/281)) ([b3e2c93](https://github.com/VorobiovD/air/commit/b3e2c930adb5b81569b5b89125576ecaa32791f8))
+* **review:** align the v2 verdict banner with the deterministic gate ([#277](https://github.com/VorobiovD/air/issues/277)) ([242f1f3](https://github.com/VorobiovD/air/commit/242f1f35d38b8e87cd468e6e66f206c9e031ca2f))
+* **review:** scope the re-review inter-diff to the PR's own changed files ([#278](https://github.com/VorobiovD/air/issues/278)) ([63ea9b6](https://github.com/VorobiovD/air/commit/63ea9b6617201dc8f43386761b07640b8eade738))
+* **review:** stop the verifier abandoning self-referential PRs ([#273](https://github.com/VorobiovD/air/issues/273)) ([#279](https://github.com/VorobiovD/air/issues/279)) ([0dd4b47](https://github.com/VorobiovD/air/commit/0dd4b47388152b66428c54f09e8c98d420277b6d))
+
 ## [1.48.0](https://github.com/VorobiovD/air/compare/v1.47.0...v1.48.0) (2026-07-15)
 
 
