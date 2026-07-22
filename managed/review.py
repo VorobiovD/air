@@ -86,6 +86,7 @@ from github_client import (  # noqa: E402,F401 — split modules; re-exported fo
     fetch_pr_reviews,
     fetch_pr_review_comments,
     fetch_inter_diff,
+    fetch_pr_changed_files,
     fetch_compare_status,
     fetch_related_prs,
     count_diff_changed_lines,
@@ -2068,11 +2069,22 @@ async def run_review(args):
     print(f"  mode: {mode}")
 
     if mode == "re-review":
+        # Re-review inter-diff scope (default ON, kill switch AIR_REREVIEW_FILE_SCOPE
+        # ∈ 0/false/no): restrict `prior_sha...head` to THIS PR's own changed files
+        # so a base-branch merge landed after the prior review can't balloon the
+        # inter-diff past the byte cap and force a spurious "diff truncated"
+        # fail-closed (repo-A #17061). Fail-open: a None file set (API error /
+        # oversized / disabled) → unfiltered, byte-identical to before.
+        only_files = None
+        if os.environ.get("AIR_REREVIEW_FILE_SCOPE", "1").strip().lower() not in ("0", "false", "no"):
+            only_files = fetch_pr_changed_files(args.repo, args.pr_number, bot_token)
+            if only_files is not None:
+                print(f"  [diff] re-review scoped to {len(only_files)} PR file(s)")
         # fetch_inter_diff returns None on non-OK, but _gh_request raises
         # RequestException on retry exhaustion — coerce that to None so the
         # block below falls back to full review instead of crashing.
         try:
-            inter_diff = fetch_inter_diff(args.repo, prior_sha, head_sha, bot_token)
+            inter_diff = fetch_inter_diff(args.repo, prior_sha, head_sha, bot_token, only_files=only_files)
         except RequestException as e:
             print(f"Inter-diff fetch errored ({e}) — falling back to full review.", file=sys.stderr)
             inter_diff = None

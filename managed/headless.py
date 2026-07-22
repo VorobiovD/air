@@ -59,7 +59,7 @@ import anthropic  # noqa: E402
 import requests  # noqa: E402  (RequestException wrap for fetch_inter_diff — it RAISES on retry exhaustion)
 
 from github_client import (  # noqa: E402
-    fetch_pr_metadata, fetch_pr_diff, fetch_inter_diff, fetch_bot_login,
+    fetch_pr_metadata, fetch_pr_diff, fetch_inter_diff, fetch_pr_changed_files, fetch_bot_login,
     fetch_issue_comments, fetch_pr_reviews, fetch_pr_review_comments, fetch_related_prs,
     _post_review_comment_with_retry, submit_review_verdict, dismiss_stale_air_verdicts,
 )
@@ -569,8 +569,18 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # commits) → skip. The None/"" distinction is load-bearing. fetch_inter_diff
     # RAISES on retry exhaustion, so wrap it.
     if mode == "re-review":
+        # Re-review inter-diff scope (parity with review.py; kill switch
+        # AIR_REREVIEW_FILE_SCOPE): restrict `prior_sha...head` to THIS PR's own
+        # changed files so a base-branch merge after the prior review can't balloon
+        # the inter-diff past the cap and force a spurious "diff truncated"
+        # fail-closed (repo-A #17061). Fail-open: None file set → unfiltered.
+        only_files = None
+        if os.environ.get("AIR_REREVIEW_FILE_SCOPE", "1").strip().lower() not in ("0", "false", "no"):
+            only_files = fetch_pr_changed_files(args.repo, args.pr_number, bot_token)
+            if only_files is not None:
+                print(f"  [diff] re-review scoped to {len(only_files)} PR file(s)", file=sys.stderr)
         try:
-            inter = fetch_inter_diff(args.repo, prior_sha, head_sha, bot_token)
+            inter = fetch_inter_diff(args.repo, prior_sha, head_sha, bot_token, only_files=only_files)
         except requests.exceptions.RequestException as e:
             print(f"  [warn] inter-diff fetch failed: {e!r} — falling back to full review", file=sys.stderr)
             inter = None
