@@ -69,6 +69,32 @@ def _segment_path(segment: str) -> str:
     return header.rsplit(" b/", 1)[-1] if " b/" in header else ""
 
 
+def filter_diff_to_files(diff: str, keep: set) -> str:
+    """Keep only the per-file segments whose b/-side path is in `keep`.
+
+    Used by the re-review inter-diff scope fix: `prior_sha...head` includes any
+    base-branch commits MERGED into the branch after the prior review — on a
+    small PR that absorbed a big base merge, that noise (docs/mockups/unrelated
+    files) balloons the inter-diff past the byte cap and forces a spurious
+    "diff truncated" fail-closed. Filtering to the PR's OWN changed-file set
+    (`GET /pulls/{n}/files`) drops the merged-in noise while keeping every file
+    the author actually touched. Rename-safe (b/-side = new path; the caller
+    seeds `keep` with both `filename` and `previous_filename`).
+
+    A path segment whose b/-side path is NOT in `keep` is dropped whole. Any
+    leading non-`diff --git` preamble (normally empty in a GitHub compare diff)
+    is preserved. `keep` empty → everything is dropped (caller must guard: an
+    empty/None file set means "don't filter", handled at the call site).
+    """
+    out = []
+    for seg in re.split(r"(?m)^(?=diff --git )", diff):
+        if not seg.startswith("diff --git "):
+            out.append(seg)            # leading preamble (usually "")
+        elif _segment_path(seg) in keep:
+            out.append(seg)
+    return "".join(out)
+
+
 def count_diff_changed_lines(diff: str) -> int:
     """Count added/removed lines in a unified diff (excl. +++/--- headers).
 

@@ -164,3 +164,55 @@ def test_fetch_pr_diff_406_base_head_none_exits(monkeypatch):
     with pytest.raises(SystemExit) as ei:
         fetch_pr_diff("o/r", 1, "tok")
     assert ei.value.code == 1
+
+
+# --- re-review inter-diff scope (only_files) + fetch_pr_changed_files --------
+
+# A 2-file compare diff: the PR's own file + a base-branch-merged noise file.
+_SCOPED_DIFF = (
+    "diff --git a/src/pr.py b/src/pr.py\n--- a/src/pr.py\n+++ b/src/pr.py\n@@ -1 +1 @@\n-x\n+y\n"
+    "diff --git a/docs/merged.md b/docs/merged.md\n--- a/docs/merged.md\n+++ b/docs/merged.md\n@@ -0,0 +1 @@\n+noise\n"
+)
+
+
+def test_inter_diff_only_files_filters_before_hygiene(monkeypatch):
+    monkeypatch.setattr(gc, "_gh_request", lambda *a, **k: _Resp(True, 200, _SCOPED_DIFF))
+    out = fetch_inter_diff("o/r", "base40", "head40", "tok", only_files={"src/pr.py"})
+    assert "src/pr.py" in out
+    assert "docs/merged.md" not in out          # merged-in noise dropped
+
+
+def test_inter_diff_only_files_none_is_unfiltered(monkeypatch):
+    # Default (promote/origin callers) → byte-identical to no-filter behavior.
+    monkeypatch.setattr(gc, "_gh_request", lambda *a, **k: _Resp(True, 200, _SCOPED_DIFF))
+    out = fetch_inter_diff("o/r", "base40", "head40", "tok")
+    assert out == gc.apply_diff_hygiene(_SCOPED_DIFF)
+    assert "docs/merged.md" in out
+
+
+def test_inter_diff_only_files_applies_on_406_local_fallback(monkeypatch):
+    monkeypatch.setattr(gc, "_gh_request", lambda *a, **k: _Resp(False, 406, "too many files"))
+    monkeypatch.setattr(gc, "local_diff_fallback", lambda b, h, **k: _SCOPED_DIFF)
+    out = fetch_inter_diff("o/r", "b", "h", "tok", only_files={"src/pr.py"})
+    assert "src/pr.py" in out and "docs/merged.md" not in out
+
+
+def test_fetch_pr_changed_files_collects_paths_and_renames(monkeypatch):
+    files = [{"filename": "src/a.py"},
+             {"filename": "src/new.py", "previous_filename": "src/old.py"}]
+    monkeypatch.setattr(gc, "_github_paginate", lambda *a, **k: files)
+    got = gc.fetch_pr_changed_files("o/r", 1, "tok")
+    assert got == {"src/a.py", "src/new.py", "src/old.py"}
+
+
+def test_fetch_pr_changed_files_error_returns_none(monkeypatch):
+    def _boom(*a, **k):
+        raise gc.PartialPageError("mid-walk fail")
+    monkeypatch.setattr(gc, "_github_paginate", _boom)
+    assert gc.fetch_pr_changed_files("o/r", 1, "tok") is None   # fail-open
+
+
+def test_fetch_pr_changed_files_oversized_returns_none(monkeypatch):
+    huge = [{"filename": f"f{i}.py"} for i in range(gc._PR_FILES_MAX_PAGES * 100)]
+    monkeypatch.setattr(gc, "_github_paginate", lambda *a, **k: huge)
+    assert gc.fetch_pr_changed_files("o/r", 1, "tok") is None   # oversized → don't filter

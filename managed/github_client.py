@@ -21,8 +21,9 @@ import requests as req
 _LIB = Path(__file__).resolve().parent.parent / "plugins" / "air" / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
-from diff_hygiene import (  # noqa: E402,F401  (re-export — these four are imported from github_client by review.py / the test suites)
+from diff_hygiene import (  # noqa: E402,F401  (re-export — imported from github_client by review.py / the test suites)
     DIFF_TRUNCATION_MARKER, apply_diff_hygiene, count_diff_changed_lines, _is_generated_path,
+    filter_diff_to_files,
 )
 from pr_conversation import BOT_REVIEW_PREFIXES  # noqa: E402  (canonical ## Code Review prefixes incl. re-review)
 
@@ -623,8 +624,37 @@ def fetch_pr_review_comments(repo: str, pr_number: int, token: str) -> list[dict
     return _github_paginate(url, token)
 
 
+_PR_FILES_MAX_PAGES = 30   # 3000 files — a PR bigger than this is the oversized
+                           # (406/local-fallback) regime; don't scope-filter it.
+
+
+def fetch_pr_changed_files(repo: str, pr_number: int, token: str) -> set | None:
+    """The set of paths THIS PR changes (relative to its base), for re-review
+    inter-diff scoping. Returns both `filename` (new path) and `previous_filename`
+    (rename old path) so `filter_diff_to_files` matches renamed files either way.
+
+    Returns None (→ caller must NOT filter, fail-open) on ANY API error OR when
+    the file list is truncated at the page cap — an incomplete set would wrongly
+    DROP real PR files (and a >3000-file PR is the oversized regime the byte-cap /
+    local-fallback already covers). A genuinely 0-file PR returns an empty set."""
+    try:
+        files = _github_paginate(
+            f"https://api.github.com/repos/{repo}/pulls/{pr_number}/files?per_page=100",
+            token, max_pages=_PR_FILES_MAX_PAGES,
+        )
+    except (PartialPageError, req.RequestException) as e:
+        print(f"  [diff] PR-files fetch failed ({e}); re-review scope-filter skipped", file=sys.stderr)
+        return None
+    if len(files) >= _PR_FILES_MAX_PAGES * 100:
+        print("  [diff] PR touches >3000 files — re-review scope-filter skipped (oversized regime)", file=sys.stderr)
+        return None
+    paths = {f["filename"] for f in files if f.get("filename")}
+    paths |= {f["previous_filename"] for f in files if f.get("previous_filename")}
+    return paths
+
+
 def fetch_inter_diff(
-    repo: str, base_sha: str, head_sha: str, token: str
+    repo: str, base_sha: str, head_sha: str, token: str, only_files: set | None = None
 ) -> str | None:
     """Fetch the diff between two SHAs via GitHub's compare endpoint.
 
@@ -636,7 +666,14 @@ def fetch_inter_diff(
     - Success (200, possibly empty body) → return str (may be "")
     - API error (404 / 5xx / rate-limit) → return None so the caller can
       fall back to a full review instead of silently skipping.
-    """
+
+    `only_files` (re-review scope fix): when a non-None set is passed, the diff
+    is filtered to those paths BEFORE hygiene/byte-cap — so base-branch commits
+    MERGED into the branch after the prior review (which are on `base...head` but
+    NOT part of this PR's own change set) can't balloon the inter-diff past the
+    cap and force a spurious "diff truncated" fail-closed (repo-A #17061 class).
+    None (default) → unfiltered, byte-identical to before: the promote/origin
+    callers pass nothing, only the same-PR re-review call opts in."""
     resp = _gh_request(
         "GET", f"https://api.github.com/repos/{repo}/compare/{base_sha}...{head_sha}",
         token=token, accept="application/vnd.github.v3.diff",
@@ -649,13 +686,19 @@ def fetch_inter_diff(
             local = local_diff_fallback(base_sha, head_sha)
             if local is not None:
                 print("  [diff] REST compare 406 (>300 files) — using local git diff fallback", file=sys.stderr)
+                if only_files is not None:
+                    local = filter_diff_to_files(local, only_files)
                 return apply_diff_hygiene(local)
         print(f"Error fetching inter-diff: {_github_error_message(resp)}", file=sys.stderr)
         return None
     # Same hygiene as fetch_pr_diff — the promote overlap ratio divides one
     # changed-line count by the other, so both sides must see the same
-    # stubbing or generated churn would skew the gate.
-    return apply_diff_hygiene(resp.text)
+    # stubbing or generated churn would skew the gate. Scope-filter (if opted in)
+    # runs FIRST so the byte cap sees only the PR's own files.
+    text = resp.text
+    if only_files is not None:
+        text = filter_diff_to_files(text, only_files)
+    return apply_diff_hygiene(text)
 
 
 def fetch_compare_status(repo: str, base_sha: str, head_sha: str, token: str) -> str | None:
