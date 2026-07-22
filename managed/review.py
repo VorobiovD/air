@@ -99,6 +99,7 @@ from verdict import (  # noqa: E402,F401 — split modules; re-exported for test
     format_prior_statuses_block,
     should_request_changes,
     resolve_verdict_event,
+    normalize_verdict_banner,
     NO_APPROVE_VERDICT_BODY,
     has_conflict_markers,
     REVIEWED_AT_RE,
@@ -2653,6 +2654,21 @@ async def run_review(args):
                 f"1500-2400s) AND output unusable — likely stale-cache signal",
                 file=sys.stderr,
             )
+
+    # Banner ↔ gate consistency (v2 format): the verifier writes the top alert
+    # banner as prose and can over-escalate — e.g. a re-review carrying unfixed
+    # mediums emitting [!CAUTION]/"Changes requested" with 0 blockers and a
+    # non-gating verdict. Recompute the deterministic gate and rewrite ONLY the
+    # banner to match, so the human-facing banner never contradicts the machine
+    # verdict. Gate-safe: normalize_verdict_banner touches only the banner, never
+    # a parsed anchor, so the verdict computed below is byte-identical. Applied to
+    # a real extracted review only (never the run-failed diagnostic), and before
+    # the dry-run print so --dry-run shows the same body that would post.
+    if review_extracted:
+        _banner_rc, _ = should_request_changes(review_body, floor_exposures=_category_floor_enabled())
+        if not _banner_rc and has_conflict_markers(diff, diff_check_warnings):
+            _banner_rc = True
+        review_body = normalize_verdict_banner(review_body, request_changes=_banner_rc)
 
     if args.dry_run:
         print("\n" + "=" * 60)

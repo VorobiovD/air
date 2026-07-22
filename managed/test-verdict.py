@@ -26,6 +26,7 @@ from verdict import (  # noqa: E402
     _count_gating_unfixed,
     extract_reviewed_at_sha,
     has_conflict_markers,
+    normalize_verdict_banner,
 )
 
 HEAD = "fc3b2e03546153449edba2a224dbbbfff58a14b6"
@@ -269,6 +270,131 @@ def test_conflict_marker_empty_inputs():
 
 
 # ---------------------------------------------------------------------------
+# normalize_verdict_banner — the v2 banner must match the deterministic gate.
+# The motivating live bug: a re-review carrying unfixed *medium* findings
+# emitted `[!CAUTION]` + "Changes requested" with 0 blockers / non-gating verdict.
+# ---------------------------------------------------------------------------
+
+# A 0-blocker re-review whose banner over-escalates (the observed shape).
+_OVERESCALATED = (
+    "## Code Review (Re-review)\n\n"
+    "> [!CAUTION]\n"
+    "> **Changes requested — 2 unfixed medium blockers-to-consider, no true blockers.** "
+    "3 fixed · 5 still open · 0 new\n"
+    "> Solid re-review; the two silent-failure paths remain untouched.\n\n"
+    "_Re-reviewed at `b6db2d48`, previous review at `ec862ee8`._\n\n"
+    "### Previous Findings Status\n\n"
+    "- **#1** [medium] — NOT FIXED — still `logger.error(...); return`\n"
+    "- **#2** [medium] — NOT FIXED — untouched\n\n"
+    "Reviewed at: " + HEAD + "\n"
+)
+
+# A genuinely-gating fresh review whose banner UNDER-states (NOTE despite a blocker).
+_UNDERSTATED = (
+    "## Code Review\n\n"
+    "> [!NOTE]\n"
+    "> **Looks mostly fine.** 1 to consider\n"
+    "> minor stuff\n\n"
+    "### Blockers\n\n"
+    "**1. SQL injection** — attacker-controlled input reaches a raw query\n\n"
+    "Reviewed at: " + HEAD + "\n"
+)
+
+
+def test_banner_overescalation_downgraded_to_note():
+    # 0 blockers → gate is non-gating → banner must become [!NOTE] + "No blockers."
+    assert count_blockers(_OVERESCALATED) == 0
+    rc, _ = should_request_changes(_OVERESCALATED)
+    assert rc is False
+    out = normalize_verdict_banner(_OVERESCALATED, request_changes=rc)
+    assert "> [!NOTE]" in out and "[!CAUTION]" not in out
+    assert "Changes requested" not in out
+    assert "> **No blockers.**" in out
+    # informative trailing counts survive the lead rewrite
+    assert "3 fixed · 5 still open · 0 new" in out
+
+
+def test_banner_understatement_bumped_to_caution():
+    rc, _ = should_request_changes(_UNDERSTATED)
+    assert rc is True
+    out = normalize_verdict_banner(_UNDERSTATED, request_changes=rc)
+    assert "> [!CAUTION]" in out and "[!NOTE]" not in out
+
+
+def test_banner_gating_body_stays_caution_untouched():
+    body = _UNDERSTATED.replace("> [!NOTE]", "> [!CAUTION]")
+    out = normalize_verdict_banner(body, request_changes=True)
+    assert out == body  # already correct → exact no-op
+
+
+def test_banner_legacy_flat_body_is_noop():
+    flat = "## Code Review\n\n### Blockers\n\n**1. bug** — x\n\nReviewed at: " + HEAD + "\n"
+    assert normalize_verdict_banner(flat, request_changes=True) == flat
+    assert normalize_verdict_banner(flat, request_changes=False) == flat
+
+
+def test_banner_normalize_idempotent():
+    once = normalize_verdict_banner(_OVERESCALATED, request_changes=False)
+    twice = normalize_verdict_banner(once, request_changes=False)
+    assert once == twice
+
+
+def test_banner_normalize_is_gate_safe():
+    # THE invariant: normalizing the banner must NOT change any gate-parsed value.
+    for body in (_OVERESCALATED, _UNDERSTATED):
+        for rc in (True, False):
+            out = normalize_verdict_banner(body, request_changes=rc)
+            assert count_blockers(out) == count_blockers(body)
+            assert should_request_changes(out) == should_request_changes(body)
+            assert _count_gating_unfixed(out) == _count_gating_unfixed(body)
+            # frozen anchors intact
+            assert ("Reviewed at: " + HEAD) in out
+            assert out.count("- **#1**") == body.count("- **#1**")
+
+
+def test_banner_only_top_banner_touched_not_quoted_alert():
+    # A finding that QUOTES a GitHub alert must not be mistaken for the banner.
+    body = (
+        "## Code Review\n\n> [!NOTE]\n> **Clean.** 0 findings\n\n"
+        "### Medium — consider fixing\n\n"
+        "**1. doc drift** — the README shows:\n> [!WARNING]\n> old note\n\n"
+        "Reviewed at: " + HEAD + "\n"
+    )
+    out = normalize_verdict_banner(body, request_changes=True)
+    # top banner NOTE→CAUTION; the quoted [!WARNING] inside finding #1 untouched
+    assert out.split("### Medium")[0].count("[!CAUTION]") == 1
+    assert "[!WARNING]" in out
+
+
+def test_banner_no_top_banner_legacy_with_quoted_alert_is_noop():
+    # Legacy/flat body (no top banner) that happens to quote an alert in a finding:
+    # the alert is AFTER the first findings marker, so normalize is a no-op.
+    body = (
+        "## Code Review\n\n### Blockers\n\n"
+        "**1. bug** — repro:\n> [!CAUTION]\n> boom\n\n"
+        "Reviewed at: " + HEAD + "\n"
+    )
+    assert normalize_verdict_banner(body, request_changes=False) == body
+
+
+def test_banner_sec_tag_folded_still_gates_after_normalize():
+    # A [sec:] exposure tag makes the gate request changes even with a NOTE banner;
+    # normalize must bump to CAUTION AND leave the tag (and thus the gate) intact.
+    body = (
+        "## Code Review\n\n> [!NOTE]\n> **Clean-ish.** 1 to consider\n\n"
+        "### Medium — consider fixing\n\n"
+        "**1. PII leak** — unauth read of patient records [sec:pii-exposure]\n\n"
+        "Reviewed at: " + HEAD + "\n"
+    )
+    rc_before, _ = should_request_changes(body)
+    assert rc_before is True  # floored by the [sec:] tag
+    out = normalize_verdict_banner(body, request_changes=rc_before)
+    assert "> [!CAUTION]" in out
+    assert "[sec:pii-exposure]" in out
+    assert should_request_changes(out) == should_request_changes(body)
+
+
+# ---------------------------------------------------------------------------
 # Shared-contract CLI surface (lib/verdict.py --decide) — the exact entry
 # point review.md Step 12 invokes, exercised as a real subprocess so the
 # CLI and managed modes provably share one decision implementation.
@@ -296,6 +422,18 @@ def test_cli_decide_fresh_blocker_requests_changes():
 
 def test_cli_decide_clean_body_approves():
     assert _decide("## Code Review\n\nAll good.\n") == "approve"
+
+
+def test_cli_normalize_banner_downgrades_overescalated():
+    out = subprocess.run(
+        [sys.executable, _LIB, "--normalize-banner"], input=_OVERESCALATED,
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert "> [!NOTE]" in out and "[!CAUTION]" not in out
+    assert "Changes requested" not in out
+    # gate-safe through the CLI too
+    assert count_blockers(out) == 0
+    assert ("Reviewed at: " + HEAD) in out
 
 
 # --- --head-sha anti-decoy SHA validation (CLI Step 12) ---------------------

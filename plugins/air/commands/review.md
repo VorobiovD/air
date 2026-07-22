@@ -1086,6 +1086,17 @@ The pinned body is now what Step 12 posts AND what Step 12's `--decide` gates on
 
 ## Step 12: Post
 
+**Banner ↔ gate consistency (run FIRST, rewrites `review-comment.md` in place):** the v2 verdict banner (`> [!CAUTION]`/`> [!NOTE]` + lead) is model-written prose and can contradict the deterministic gate — e.g. a re-review carrying unfixed *mediums* emitting `[!CAUTION]`/"Changes requested" with 0 blockers. Pipe the body through `verdict.py --normalize-banner` so the banner matches the same gate Step 12 decides on, BEFORE any print (dry-run), PATCH (`--rewrite`), or comment post. Gate-safe (touches only the banner, never a parsed anchor) and a no-op on a flat/legacy body; same `$AIR_PLUGIN_ROOT` guard as the pin (an empty variable must take the skip branch). Runs for every mode (fresh + re-review + rewrite):
+
+```bash
+if [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/verdict.py" ]; then
+  if python3 "$AIR_PLUGIN_ROOT/lib/verdict.py" --normalize-banner --head-sha "$headRefOid" \
+       < "$AIR_TMP/review-comment.md" > "$AIR_TMP/review-comment.banner.md"; then
+    mv "$AIR_TMP/review-comment.banner.md" "$AIR_TMP/review-comment.md"
+  fi   # non-zero exit: leave the original body untouched (banner is cosmetic, never block the post)
+fi
+```
+
 **Own-PR guard (check FIRST, before any posting path):** Determine if the PR author matches the current user:
 ```bash
 gh api user --jq '.login'
