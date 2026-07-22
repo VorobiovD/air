@@ -65,7 +65,7 @@ from github_client import (  # noqa: E402
 )
 from prompts import build_pr_context, build_verifier_task  # noqa: E402
 from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py; pure, network-free)
-    should_request_changes, resolve_verdict_event, NO_APPROVE_VERDICT_BODY, _extract_review_body, has_conflict_markers,
+    should_request_changes, resolve_verdict_event, normalize_verdict_banner, NO_APPROVE_VERDICT_BODY, _extract_review_body, has_conflict_markers,
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
 )
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
@@ -995,6 +995,12 @@ async def run_headless_review(args, bot_token: str) -> dict:
                             "can't be ruled out; raise AIR_HEADLESS_DIFF_CAP or split the PR")
         print(f"  [gate] {reason} — failing closed", file=sys.stderr)
     verdict = resolve_verdict_event(rc)  # REQUEST_CHANGES | APPROVE | COMMENT (AIR_NO_APPROVE)
+    # Banner ↔ gate consistency (parity with review.py): rewrite ONLY the v2 verdict
+    # banner to match the FINAL gate `rc` (incl. conflict / truncation / missing-lens
+    # fail-closed forcing above), so the human-facing banner never contradicts the
+    # verdict. Gate-safe — touches only the banner, never a parsed anchor; both the
+    # dry-run print and the posted comment below use the normalized body.
+    review_body = normalize_verdict_banner(review_body, request_changes=rc)
 
     if getattr(args, "dry_run", False):
         print(f"\n===== DRY RUN — verdict: {verdict} ({reason or 'clean'}) =====\n")

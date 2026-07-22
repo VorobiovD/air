@@ -211,6 +211,58 @@ def resolve_verdict_event(request_changes: bool) -> str:
     return "COMMENT" if no_approve_enabled() else "APPROVE"
 
 
+# The v2 verdict banner is a GitHub alert (`> [!CAUTION]` / `> [!NOTE]`) whose
+# severity is model-written PROSE. `normalize_verdict_banner` forces that banner
+# to agree with the deterministic gate. Match the alert line and the bold lead
+# phrase that opens the banner's verdict line.
+_BANNER_ALERT_RE = re.compile(r"(?m)^>[ \t]*\[!(?:CAUTION|WARNING|NOTE|TIP|IMPORTANT)\][ \t]*$")
+# `> **Changes requested — …blockers-to-consider…**` — the over-escalation lead.
+# Non-greedy to the first closing `**`, so trailing counts (`** 3 fixed · …`) survive.
+_BANNER_CHANGES_REQUESTED_RE = re.compile(
+    r"(?mi)^(>[ \t]*\*\*)[ \t]*changes requested\b[^\n]*?(\*\*)")
+# The first "findings" marker — a section heading, a `**N.` blocker entry, or a
+# `- **#N**` re-review status line. The verdict banner always precedes all of
+# these; an alert AFTER the first marker is quoted inside a finding, not the banner.
+_FINDINGS_MARKER_RE = re.compile(r"(?m)^(?:#{3,4}[ \t]|\*\*\d+\.|- \*\*#\d)")
+
+
+def normalize_verdict_banner(body: str, *, request_changes: bool) -> str:
+    """Force the top v2 verdict banner to match the deterministic gate.
+
+    The verifier writes the `> [!CAUTION]`/`> [!NOTE]` banner + its bold verdict
+    line as free prose and can DIVERGE from the gate — most often over-escalation:
+    a re-review carrying unfixed *medium* findings emitting `[!CAUTION]` +
+    "Changes requested" despite 0 blockers and a non-gating (COMMENT/APPROVE)
+    verdict (observed live). This rewrites ONLY:
+      1. the alert type → `[!CAUTION]` when `request_changes` else `[!NOTE]`
+         (both directions, so the banner is never softer OR harsher than the gate);
+      2. on a non-gating verdict, a `**Changes requested …**` lead → `**No blockers.**`
+         (trailing counts preserved).
+
+    GATE-SAFE by construction: every verdict parser (`count_blockers`,
+    `should_request_changes`, `count_category_floored`, `_extract_review_body`,
+    the `- **#N**` re-review status lines, `[sec:]` tags) anchors on the
+    `### Blockers` section / status lines / tags — NEVER the banner. So this
+    changes only what a human reads, never the verdict; the body re-parses to
+    the identical gate. Idempotent. No-op on a legacy/flat body (no alert line).
+    """
+    m = _BANNER_ALERT_RE.search(body)
+    if not m:
+        return body  # legacy/flat format or a body with no verdict banner
+    # Only the TOP banner is the verdict banner. If the first alert line falls
+    # AFTER the first findings marker (a heading / `**N.` / `- **#N**` line), it's
+    # an alert quoted inside a finding, not the banner — leave it alone. The real
+    # banner always sits in the preamble, right under the `## Code Review` header.
+    fm = _FINDINGS_MARKER_RE.search(body)
+    if fm and fm.start() < m.start():
+        return body
+    want = "CAUTION" if request_changes else "NOTE"
+    body = body[:m.start()] + f"> [!{want}]" + body[m.end():]
+    if not request_changes:
+        body = _BANNER_CHANGES_REQUESTED_RE.sub(r"\1No blockers.\2", body, count=1)
+    return body
+
+
 # The clean-review COMMENT body in AIR_NO_APPROVE mode — single-sourced so the
 # three submission sites (review.py main + backfill, headless.py) can't drift.
 # Deliberately mode-NEUTRAL: it must NOT name AIR_NO_APPROVE or announce that an
@@ -1388,6 +1440,12 @@ def _main(argv: list[str]) -> int:
         help="Read a review body on stdin; print the blocker count.",
     )
     parser.add_argument(
+        "--normalize-banner", action="store_true",
+        help="Read a review body on stdin; rewrite ONLY the v2 verdict banner to "
+             "match the deterministic gate (alert type + 'Changes requested' lead) "
+             "and print the full corrected body. Gate-safe; no-op on a flat/legacy body.",
+    )
+    parser.add_argument(
         "--pin", action="store_true",
         help="Read a re-review body on stdin; apply the deterministic severity-"
              "pin + ledger resurrection (needs --prior-body/--inter-diff/--base-"
@@ -1401,7 +1459,7 @@ def _main(argv: list[str]) -> int:
     parser.add_argument("--origin-diffs", help="Directory of ancestor-confirmed origin..head diffs named <sha12>.diff (#198 origin-anchor; pairs with --origin-chain).")
     parser.add_argument("--head-sha", default="", help="Reviewed HEAD SHA; when set, --decide gates on the SHA-validated `## Code Review` block (anti-decoy), falling back to the raw body if none matches.")
     args = parser.parse_args(argv)
-    if not (args.decide or args.count_blockers or args.pin):
+    if not (args.decide or args.count_blockers or args.pin or args.normalize_banner):
         parser.print_usage(sys.stderr)
         return 2
     body = sys.stdin.read()
@@ -1444,6 +1502,19 @@ def _main(argv: list[str]) -> int:
         return 0
     if args.count_blockers:
         print(count_blockers(body))
+        return 0
+    if args.normalize_banner:
+        # Decide on the same gate the verdict uses (floor honored; the body piped
+        # here is already pinned by Step 11.5, so we do NOT re-pin), then rewrite
+        # only the banner to match. head_sha anti-decoy extraction mirrors --decide.
+        floor = os.environ.get("AIR_CATEGORY_FLOOR", "1").strip().lower() not in ("0", "false", "no")
+        decide_on = body
+        if args.head_sha:
+            extracted, ok = _extract_review_body(body, args.head_sha)
+            if ok:
+                decide_on = extracted
+        rc, _ = should_request_changes(decide_on, floor_exposures=floor)
+        sys.stdout.write(normalize_verdict_banner(body, request_changes=rc))
         return 0
     # AIR_CATEGORY_FLOOR=0/false/no is the fresh-gate floor kill switch (same
     # grammar as AIR_LEDGER_PIN). The CLI's Step 12 `--decide` inherits it from
