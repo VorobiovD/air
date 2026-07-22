@@ -216,10 +216,24 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
     empty_retries = 0   # empty-completion self-heal (thinking-only end_turn, no text)
     turn_cap = max_turns or MAX_TURNS  # caller scales it by PR size; MAX_TURNS is the floor/default
     for turn in range(1, turn_cap + 1):
-        msg = _final_message_with_retry(
-            client, log=log, label=label,
-            model=model, system=system, messages=messages,
-            tools=TOOL_SCHEMAS, max_tokens=max_tokens, **extra)
+        try:
+            msg = _final_message_with_retry(
+                client, log=log, label=label,
+                model=model, system=system, messages=messages,
+                tools=TOOL_SCHEMAS, max_tokens=max_tokens, **extra)
+        except Exception as exc:  # noqa: BLE001
+            # Only AFTER an empty-completion nudge do we swallow a re-issue error:
+            # the self-heal must not become a NEW crash surface (a non-transient
+            # API error on the nudged re-issue). Degrade to the SAME fail-closed
+            # give-up as an un-nudged empty completion — the blocker-lens gate then
+            # fires exactly as it did before this feature. On turn 1 / any non-
+            # nudged turn, re-raise: a genuine error must still fail loud.
+            if empty_retries > 0:
+                log(f"  [{label}] nudge-retry re-issue failed ({exc!r}) — "
+                    f"giving up with empty result (fail-closed, as before)")
+                stop = "empty_completion_error"
+                break
+            raise
         _accumulate_usage(usage, msg.usage)
         tool_uses = [b for b in msg.content if getattr(b, "type", "") == "tool_use"]
         text_now = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")

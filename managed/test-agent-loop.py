@@ -164,6 +164,33 @@ def test_nonempty_completion_never_retries(monkeypatch):
     assert out["text"] == "Findings: one nit." and calls["n"] == 1
 
 
+def _boom():
+    raise ValueError("400 invalid_request: message sequence rejected")
+
+
+def test_nudge_retry_reissue_error_degrades_not_crashes(monkeypatch):
+    # After an empty-completion nudge, if the re-issue raises a NON-transient error,
+    # the self-heal must NOT introduce a new crash — degrade to the fail-closed
+    # empty give-up (same as an un-nudged empty completion), never propagate.
+    monkeypatch.setattr(agent_loop, "EMPTY_COMPLETION_RETRIES", 2)
+    client, _ = _client([
+        lambda: _msg("", "end_turn"),   # empty → triggers a nudge
+        _boom,                          # the nudged re-issue raises
+    ])
+    out = _run(client)                  # must NOT raise
+    assert out["text"] == ""            # fail-closed downstream, exactly as before
+    assert out["stop"] == "empty_completion_error"
+
+
+def test_turn1_error_still_fails_loud(monkeypatch):
+    # A genuine error BEFORE any nudge must still propagate (fail loud) — the
+    # swallow is scoped strictly to the post-nudge re-issue.
+    monkeypatch.setattr(agent_loop, "EMPTY_COMPLETION_RETRIES", 2)
+    client, _ = _client([_boom])
+    with pytest.raises(ValueError):
+        _run(client)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
 
