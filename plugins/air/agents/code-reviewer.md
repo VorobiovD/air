@@ -70,6 +70,15 @@ Review the provided code diff. Check for:
    - Check `REVIEW.md` and `ACCEPTED-PATTERNS.md` for `paired-allowlist` or `paired-sentinel` patterns — if the project has a recurring paired-doc pattern (5+ prior flags), cite the count in the finding so the author sees it's systemic.
    - The same principle applies to header comments inside the changed file: if you add a 3rd caller, the file's top-of-block comment should list all three.
 
+7. **Refactor / port / extraction — verify the behavioral diff (do NOT trust "no behavior change"):**
+   When a PR moves, ports, re-exports, extracts, or rewrites a function — or the description says "no behavior change" / "pure move" / "just a refactor" / "no-op" — a clean-looking `+`-only "add" hunk hides the ORIGINAL it replaces, so a dropped guard is invisible in the diff alone. Locate the origin (the deleted `-` counterpart, the file/symbol named in the docstring or PR body, or `git log`/`git blame` the old path) and compare **new-vs-origin**, not just the PR hunk. Flag any behavior change the claim contradicts:
+   - **Dropped throws / error branches:** the original threw (e.g. `if (!doc) throw new NotFoundError(...)`) and the port silently returns / no-ops. On a write or transaction path this turns a fail-and-rollback into a silent success — a data-integrity blocker, not a nit.
+   - **Swallowed-input coercions:** the original threw on malformed input (`value.data.map(...)` when `data` is missing) and the rewrite coerces it away (`asArray(x) → []`, `?? {}`, `?? []`), silently persisting empty/partial data instead of failing loudly — especially dangerous when the function is re-exported to callers that don't pre-validate.
+   - **Newly-swallowed upstream failures:** `response?.results ?? []` with no log turns a degraded/empty API response into "no data", indistinguishable from a genuine empty result on a path that feeds downstream decisions — and a new test that "tolerates a partial response" codifies the silent behavior as contract.
+   - **Weakened assertions on the rewired path:** the old test pinned the full payload/behavior; the new one only asserts "called once", dropping exactly the assertion that would catch a regression in what the refactor rewired.
+   - **Inaccurate coverage claims:** a "covered by suite X" claim where X exercises a *different* code path, or where a mock the moved file relied on is now bypassed because it imports the dependency directly.
+   Treat a "no behavior change" claim as a **verification target**, not a reason to relax — it is the exact claim that ships a silent regression when wrong.
+
 Report findings by severity: blocker > medium > low > nit.
 Include file paths and line numbers for each finding.
 
