@@ -103,6 +103,13 @@ def _accumulate_usage(acc: dict, usage) -> None:
 STREAM_RETRY_ATTEMPTS = env.env_int("AIR_STREAM_RETRY_ATTEMPTS", 3, minimum=1)  # 1 try + 2 retries
 STREAM_RETRY_BACKOFF_S = env.env_float("AIR_STREAM_RETRY_BACKOFF", 2.0)         # doubles each retry
 _STREAM_RETRY_CAP_S = 30.0
+# Empty-completion self-heal: a model that ends a turn `end_turn` with a thinking
+# block but NO text and NO tool calls has "thought" without answering. Left as-is
+# that returns text="" — which fail-closes a blocker-class lens gate despite a
+# clean overall review (repo-A #1707: code-reviewer flaked to a thinking-only turn),
+# and is the same shape as the verifier returning 0 chars on a self-referential PR.
+# Nudge it to emit, bounded, before giving up. 0 disables (byte-identical to before).
+EMPTY_COMPLETION_RETRIES = env.env_int("AIR_EMPTY_COMPLETION_RETRIES", 2, minimum=0)
 _TRANSIENT_STREAM_ERRORS = None  # resolved lazily; this module imports no SDK at load (takes client as a param)
 
 
@@ -206,6 +213,7 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
                  # 5m-TTL miss analysis (flags more potential misses than reality, never fewer)
     final_text = ""
     stop = "max_turns"
+    empty_retries = 0   # empty-completion self-heal (thinking-only end_turn, no text)
     turn_cap = max_turns or MAX_TURNS  # caller scales it by PR size; MAX_TURNS is the floor/default
     for turn in range(1, turn_cap + 1):
         msg = _final_message_with_retry(
@@ -232,6 +240,26 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
         t_prev = _now
         if msg.stop_reason != "tool_use":
             stop = msg.stop_reason
+            # Empty-completion self-heal: the model ended cleanly (`end_turn`) but
+            # produced NO answer text across all turns — a thinking-only turn (it
+            # "thought" and stopped). Returning that empty result fail-closes a
+            # blocker-class lens gate (repo-A #1707) and is the verifier's 0-char
+            # self-referential failure shape. Nudge it to emit and retry, bounded.
+            # Scoped to `end_turn`: a `max_tokens`/other stop is a real truncation
+            # that a retry would just repeat — leave those to fail closed. The
+            # assistant turn is round-tripped verbatim (thinking blocks + signatures)
+            # exactly as the tool-use path does, so re-issuing is well-formed.
+            if (msg.stop_reason == "end_turn" and not final_text
+                    and empty_retries < EMPTY_COMPLETION_RETRIES):
+                empty_retries += 1
+                log(f"  [{label}] empty completion (end_turn, no text/tools) — "
+                    f"nudge + retry {empty_retries}/{EMPTY_COMPLETION_RETRIES}")
+                messages.append({"role": "assistant", "content": msg.content})
+                messages.append({"role": "user", "content": [{"type": "text", "text":
+                    "You ended your turn without emitting any findings — do not stop on a "
+                    "thinking block. Output your COMPLETE findings now as visible text, in "
+                    "the exact format your instructions specify."}]})
+                continue
             break
         # Round-trip the assistant turn VERBATIM (incl. thinking blocks + signatures).
         messages.append({"role": "assistant", "content": msg.content})

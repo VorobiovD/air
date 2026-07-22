@@ -96,6 +96,74 @@ def test_transient_set_includes_api_connection_error():
     assert issubclass(anthropic.APIConnectionError, errs)
 
 
+# ---- empty-completion self-heal (thinking-only end_turn → nudge + retry) ------
+# repo-A #1707: a blocker-class lens ended turn 1 `end_turn` with a thinking block
+# and NO text (0 tool calls) → text="" → the gate fail-closed despite a clean
+# overall review. run_agent must nudge + retry a clean-but-empty completion.
+
+class _Sandbox:
+    def dispatch(self, *a, **k):  # never called in these no-tool tests
+        raise AssertionError("sandbox.dispatch should not run for a no-tool turn")
+
+
+def _msg(text="", stop="end_turn"):
+    """A fake final message: a text block when `text` is set, else a thinking-only
+    turn (no text block) — the empty-completion shape."""
+    if text:
+        content = [types.SimpleNamespace(type="text", text=text)]
+    else:
+        content = [types.SimpleNamespace(type="thinking", thinking="...reasoning, no answer...")]
+    return types.SimpleNamespace(usage=None, content=content, stop_reason=stop)
+
+
+def _run(client):
+    return agent_loop.run_agent(
+        client, model="sonnet", persona="p", pr_context="ctx", task="t",
+        sandbox=_Sandbox(), log=lambda *_a, **_k: None)
+
+
+def test_empty_completion_nudges_then_returns_text(monkeypatch):
+    monkeypatch.setattr(agent_loop, "EMPTY_COMPLETION_RETRIES", 2)
+    client, calls = _client([
+        lambda: _msg("", "end_turn"),                    # thinking-only, empty
+        lambda: _msg("Findings: no blockers.", "end_turn"),  # after nudge: real text
+    ])
+    out = _run(client)
+    assert out["text"] == "Findings: no blockers."
+    assert out["stop"] == "end_turn"
+    assert calls["n"] == 2                                # retried exactly once
+
+
+def test_empty_completion_bounded_no_infinite_loop(monkeypatch):
+    monkeypatch.setattr(agent_loop, "EMPTY_COMPLETION_RETRIES", 2)
+    client, calls = _client([lambda: _msg("", "end_turn")])  # always empty
+    out = _run(client)
+    assert out["text"] == ""                              # gives up → empty (fail-closed downstream)
+    assert calls["n"] == 3                                # 1 initial + 2 retries, then break
+
+
+def test_empty_completion_disabled_is_byte_identical(monkeypatch):
+    monkeypatch.setattr(agent_loop, "EMPTY_COMPLETION_RETRIES", 0)
+    client, calls = _client([lambda: _msg("", "end_turn")])
+    out = _run(client)
+    assert out["text"] == "" and calls["n"] == 1          # no retry at all
+
+
+def test_max_tokens_truncation_is_not_retried(monkeypatch):
+    # A `max_tokens` stop is a real truncation — a retry would just truncate again.
+    monkeypatch.setattr(agent_loop, "EMPTY_COMPLETION_RETRIES", 2)
+    client, calls = _client([lambda: _msg("", "max_tokens")])
+    out = _run(client)
+    assert out["stop"] == "max_tokens" and calls["n"] == 1
+
+
+def test_nonempty_completion_never_retries(monkeypatch):
+    monkeypatch.setattr(agent_loop, "EMPTY_COMPLETION_RETRIES", 2)
+    client, calls = _client([lambda: _msg("Findings: one nit.", "end_turn")])
+    out = _run(client)
+    assert out["text"] == "Findings: one nit." and calls["n"] == 1
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
 
