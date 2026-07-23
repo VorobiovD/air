@@ -101,8 +101,11 @@ def test_rate_limit_429_is_retryable():
     assert agent_loop._is_retryable_turn_error(_status_error(429)) is True
 
 
-@pytest.mark.parametrize("code", [529, 500, 502, 503, 429])
+@pytest.mark.parametrize("code", [408, 409, 429, 500, 502, 503, 504, 529])
 def test_retryable_statuses(code):
+    # Transient set = the Anthropic SDK's own default retry statuses, incl. the
+    # transient 4xx (408 request-timeout, 409 conflict). Locks the contract so a
+    # future edit can't silently narrow it (PR #284 review finding).
     assert agent_loop._is_retryable_turn_error(_status_error(code)) is True
 
 

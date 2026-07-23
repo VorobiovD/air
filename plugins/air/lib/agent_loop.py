@@ -136,8 +136,10 @@ def _transient_stream_errors():
     return _TRANSIENT_STREAM_ERRORS
 
 
-# HTTP statuses worth retrying: rate-limit (429) + transient server/overload (5xx,
-# incl. 529 `overloaded_error`). NOT 4xx auth/bad-request (real errors → fail loud).
+# HTTP statuses worth retrying: the same transient set the Anthropic SDK retries
+# by default — request-timeout (408), conflict (409), rate-limit (429), and
+# transient server/overload 5xx (incl. 529 `overloaded_error`). NOT the
+# auth/bad-request 4xx (400/401/403/404/422) — those are real errors → fail loud.
 _RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
 
 
@@ -146,7 +148,8 @@ def _is_retryable_turn_error(e) -> bool:
     drop (existing) OR an Anthropic OVERLOAD/rate/5xx status error (429/5xx/529).
     A 529 `overloaded_error` on the verifier used to crash the whole run with no
     verdict/comment (repo-A #1710 silent flameout); retrying rides out the common
-    brief spike. A 4xx (auth/bad-request/content-policy) is NOT retryable → propagates."""
+    brief spike. An auth/bad-request 4xx (400/401/403/404/422/content-policy) is
+    NOT retryable → propagates (408/409 are the transient 4xx the SDK itself retries)."""
     if isinstance(e, _transient_stream_errors()):
         return True
     try:
