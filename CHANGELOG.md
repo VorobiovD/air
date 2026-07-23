@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.49.1](https://github.com/VorobiovD/air/compare/v1.49.0...v1.49.1) (2026-07-23)
+
+
+### Bug Fixes
+
+* **headless:** verifier overload resilience — retry any 5xx/429 + visible-failure comment ([#284](https://github.com/VorobiovD/air/issues/284)) ([9a5fbcb](https://github.com/VorobiovD/air/commit/9a5fbcb73cbba2461c8683424ff1f0092c8148e1))
+* **store:** repair Memories API calls broken by the SDK/API change ([#283](https://github.com/VorobiovD/air/issues/283)) ([d2a41e0](https://github.com/VorobiovD/air/commit/d2a41e054fb49385b375af75059446286f81e048))
+
 ## [1.49.0](https://github.com/VorobiovD/air/compare/v1.48.0...v1.49.0) (2026-07-22)
 
 
