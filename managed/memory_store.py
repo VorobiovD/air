@@ -118,8 +118,16 @@ def list_memories(store_id: str, path_prefix: str = "/") -> dict[str, dict]:
     """Flat {path: {"id", "content_sha256"}} map for the given prefix."""
     out: dict[str, dict] = {}
     def _list(**kw):
+        # No `order_by` / `depth`: the Managed-Agents Memories API dropped
+        # `order_by` (SDK raises TypeError) and now bounds `depth` to 0–1 (a
+        # `depth=20` 400s: "must be … less than or equal to 1"). A bare
+        # `path_prefix` already returns the full RECURSIVE, prefix-filtered
+        # listing this needs — verified live 2026-07-23 ("/" returns nested
+        # /authors/*, /meta/*, /archive/* + root files). Passing the stale
+        # kwargs made EVERY store read TypeError → reviews ran pattern-blind and
+        # headless learn crashed. `**kw` still carries pagination (`page`).
         return client().beta.memory_stores.memories.list(
-            store_id, path_prefix=path_prefix, order_by="path", depth=20, **kw
+            store_id, path_prefix=path_prefix, **kw
         )
     for item in _paginate(_list):
         # Live API uses type "memory_metadata" in list responses (docs
@@ -132,9 +140,21 @@ def list_memories(store_id: str, path_prefix: str = "/") -> dict[str, dict]:
     return out
 
 
+def _dir_prefix(path: str) -> str:
+    """The directory-shaped `path_prefix` for a memory path (ends in `/`).
+
+    The Memories API now regex-validates path_prefix as `^(/([^/\\x00]+/)*)?$`
+    (a directory, trailing slash), so a FULL file path like `/authors/foo.md`
+    must be listed via its dir `/authors/` and matched exactly from the result.
+    `/glossary.md` → `/`; `/authors/foo.md` → `/authors/`. Verified live 2026-07-23.
+    """
+    head = path.rsplit("/", 1)[0]
+    return (head + "/") if head else "/"
+
+
 def read_memory(store_id: str, path: str) -> tuple[str, str, str] | None:
     """Return (content, content_sha256, memory_id) or None if absent."""
-    entry = list_memories(store_id, path_prefix=path).get(path)
+    entry = list_memories(store_id, path_prefix=_dir_prefix(path)).get(path)
     if not entry:
         return None
     mem = client().beta.memory_stores.memories.retrieve(
@@ -147,7 +167,7 @@ def write_memory(store_id: str, path: str, content: str) -> None:
     """Create-or-overwrite without read-modify-write semantics. NOT safe
     for concurrent writers (no precondition) — migration/seeding only.
     For counter-style or concurrent mutations use update_with()."""
-    existing = list_memories(store_id, path_prefix=path).get(path)
+    existing = list_memories(store_id, path_prefix=_dir_prefix(path)).get(path)
     if existing:
         client().beta.memory_stores.memories.update(
             existing["id"], memory_store_id=store_id, content=content
