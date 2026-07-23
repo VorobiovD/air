@@ -101,15 +101,17 @@ def test_rate_limit_429_is_retryable():
     assert agent_loop._is_retryable_turn_error(_status_error(429)) is True
 
 
-@pytest.mark.parametrize("code", [408, 409, 429, 500, 502, 503, 504, 529])
+# Retryable = the transient 4xx {408,409,429} + ANY 5xx (a `>= 500` catch-all
+# matching the SDK's own policy, so CDN/proxy overload codes like 520/522/524
+# aren't silently omitted the way a finite enum would omit them — PR #284 finding).
+@pytest.mark.parametrize("code", [408, 409, 429, 500, 502, 503, 504, 505, 520, 522, 524, 529, 599])
 def test_retryable_statuses(code):
-    # Transient set = the Anthropic SDK's own default retry statuses, incl. the
-    # transient 4xx (408 request-timeout, 409 conflict). Locks the contract so a
-    # future edit can't silently narrow it (PR #284 review finding).
     assert agent_loop._is_retryable_turn_error(_status_error(code)) is True
 
 
-@pytest.mark.parametrize("code", [400, 401, 403, 404, 422])
+# 4xx that are NOT the transient trio must fail loud (auth/bad-request/content-policy,
+# plus any other non-{408,409,429} 4xx such as 418).
+@pytest.mark.parametrize("code", [400, 401, 403, 404, 418, 422, 451])
 def test_non_retryable_statuses_propagate(code):
     # A 4xx (auth/bad-request/content-policy) must NOT retry — fail loud.
     assert agent_loop._is_retryable_turn_error(_status_error(code)) is False

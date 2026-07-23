@@ -137,26 +137,34 @@ def _transient_stream_errors():
 
 
 # HTTP statuses worth retrying: the same transient set the Anthropic SDK retries
-# by default — request-timeout (408), conflict (409), rate-limit (429), and
-# transient server/overload 5xx (incl. 529 `overloaded_error`). NOT the
-# auth/bad-request 4xx (400/401/403/404/422) — those are real errors → fail loud.
-_RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504, 529})
+# The transient 4xx the Anthropic SDK retries by default: request-timeout (408),
+# conflict (409), rate-limit (429). ALL other 4xx (400/401/403/404/422 —
+# auth/bad-request/content-policy) are real errors → fail loud. 5xx are handled by
+# a `>= 500` catch-all below (matches the SDK's own policy — incl. 529
+# `overloaded_error` and CDN/proxy overload codes like 520/522/524), so it can't
+# silently omit a real transient 5xx the way a finite enum would.
+_RETRYABLE_4XX = frozenset({408, 409, 429})
 
 
 def _is_retryable_turn_error(e) -> bool:
     """A transient error worth re-issuing the turn for: a mid-stream transport
-    drop (existing) OR an Anthropic OVERLOAD/rate/5xx status error (429/5xx/529).
-    A 529 `overloaded_error` on the verifier used to crash the whole run with no
-    verdict/comment (repo-A #1710 silent flameout); retrying rides out the common
-    brief spike. An auth/bad-request 4xx (400/401/403/404/422/content-policy) is
-    NOT retryable → propagates (408/409 are the transient 4xx the SDK itself retries)."""
+    drop (existing) OR an Anthropic OVERLOAD/rate/5xx status error (any 5xx incl.
+    529, plus the transient 4xx 408/409/429). A 529 `overloaded_error` on the
+    verifier used to crash the whole run with no verdict/comment (repo-A #1710
+    silent flameout); retrying rides out the common brief spike. An
+    auth/bad-request 4xx (400/401/403/404/422/content-policy) is NOT retryable →
+    propagates. Mirrors the SDK's own retry taxonomy so no real transient 5xx is
+    silently omitted (a finite enum would miss 520/522/524)."""
     if isinstance(e, _transient_stream_errors()):
         return True
     try:
         import anthropic
     except ImportError:
         return False
-    return isinstance(e, anthropic.APIStatusError) and getattr(e, "status_code", None) in _RETRYABLE_STATUS
+    if not isinstance(e, anthropic.APIStatusError):
+        return False
+    code = getattr(e, "status_code", None)
+    return isinstance(code, int) and (code >= 500 or code in _RETRYABLE_4XX)
 
 
 def _final_message_with_retry(client, *, log, label, **stream_kwargs):
