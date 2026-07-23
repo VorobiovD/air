@@ -136,24 +136,57 @@ def _transient_stream_errors():
     return _TRANSIENT_STREAM_ERRORS
 
 
+# HTTP statuses worth retrying: the same transient set the Anthropic SDK retries
+# The transient 4xx the Anthropic SDK retries by default: request-timeout (408),
+# conflict (409), rate-limit (429). ALL other 4xx (400/401/403/404/422 —
+# auth/bad-request/content-policy) are real errors → fail loud. 5xx are handled by
+# a `>= 500` catch-all below (matches the SDK's own policy — incl. 529
+# `overloaded_error` and CDN/proxy overload codes like 520/522/524), so it can't
+# silently omit a real transient 5xx the way a finite enum would.
+_RETRYABLE_4XX = frozenset({408, 409, 429})
+
+
+def _is_retryable_turn_error(e) -> bool:
+    """A transient error worth re-issuing the turn for: a mid-stream transport
+    drop (existing) OR an Anthropic OVERLOAD/rate/5xx status error (any 5xx incl.
+    529, plus the transient 4xx 408/409/429). A 529 `overloaded_error` on the
+    verifier used to crash the whole run with no verdict/comment (repo-A #1710
+    silent flameout); retrying rides out the common brief spike. An
+    auth/bad-request 4xx (400/401/403/404/422/content-policy) is NOT retryable →
+    propagates. Mirrors the SDK's own retry taxonomy so no real transient 5xx is
+    silently omitted (a finite enum would miss 520/522/524)."""
+    if isinstance(e, _transient_stream_errors()):
+        return True
+    try:
+        import anthropic
+    except ImportError:
+        return False
+    if not isinstance(e, anthropic.APIStatusError):
+        return False
+    code = getattr(e, "status_code", None)
+    return isinstance(code, int) and (code >= 500 or code in _RETRYABLE_4XX)
+
+
 def _final_message_with_retry(client, *, log, label, **stream_kwargs):
-    """One streaming turn with a bounded retry on a transient mid-stream disconnect.
-    Non-transient errors (a 400, content-policy, a real bug) propagate immediately."""
-    transient = _transient_stream_errors()
+    """One streaming turn with a bounded retry on a transient mid-stream disconnect
+    OR a transient overload/rate/5xx status error (429/5xx/529). A non-retryable
+    error (4xx auth/bad-request, content-policy, a real bug) propagates immediately."""
     last = None
     for attempt in range(1, STREAM_RETRY_ATTEMPTS + 1):
         try:
             with client.messages.stream(**stream_kwargs) as stream:
                 return stream.get_final_message()
-        except transient as e:  # an empty `transient` tuple matches nothing -> propagates (legacy behavior)
+        except Exception as e:
+            if not _is_retryable_turn_error(e):
+                raise  # 4xx / content-policy / real bug — fail loud, unchanged
             last = e
             if attempt >= STREAM_RETRY_ATTEMPTS:
                 break
             delay = min(STREAM_RETRY_BACKOFF_S * (2 ** (attempt - 1)), _STREAM_RETRY_CAP_S)
-            log(f"  [warn] {label}: transient stream error ({type(e).__name__}: {e}); "
+            log(f"  [warn] {label}: transient error ({type(e).__name__}: {str(e)[:80]}); "
                 f"retry {attempt}/{STREAM_RETRY_ATTEMPTS - 1} after {delay:.0f}s")
             time.sleep(delay)
-    log(f"  [warn] {label}: all {STREAM_RETRY_ATTEMPTS} stream attempt(s) failed "
+    log(f"  [warn] {label}: all {STREAM_RETRY_ATTEMPTS} attempt(s) failed "
         f"({type(last).__name__}); re-raising")
     raise last
 

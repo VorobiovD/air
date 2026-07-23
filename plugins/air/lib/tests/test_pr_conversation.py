@@ -61,6 +61,28 @@ def test_filter_bot_code_review():
     assert "## Code Review" not in out
 
 
+def test_filter_bot_run_incomplete_diagnostic():
+    """The headless 'could not complete' diagnostic (a bot-authored status note,
+    not a review) is dropped from the conversation so a future re-review doesn't
+    feed a stale note back into specialist context (PR #284 finding)."""
+    issues = [
+        _issue("bot", pc.RUN_INCOMPLETE_HEADER + "\n\nRe-request the reviewer.", "2026-01-01T01:00:00Z"),
+        _issue("alice", "looks good", "2026-01-01T02:00:00Z"),
+    ]
+    out = pc.build_pr_conversation(issues, [], [], "bot")
+    assert "alice" in out
+    assert "could not complete" not in out
+
+
+def test_run_incomplete_header_is_not_a_review_prefix():
+    """Load-bearing: the diagnostic prefix must live ONLY in BOT_NONREVIEW_PREFIXES,
+    never in BOT_REVIEW_PREFIXES — else prior-review/verdict detection would mistake
+    it for a real review and wreck the re-review baseline."""
+    diag = pc.RUN_INCOMPLETE_HEADER + "\n"
+    assert diag in pc.BOT_NONREVIEW_PREFIXES
+    assert not (pc.RUN_INCOMPLETE_HEADER + "\n\nx").startswith(pc.BOT_REVIEW_PREFIXES)
+
+
 def test_keeps_bot_response_comments():
     """Only ## Code Review prefix is filtered. The bot's --respond mode
     posts ## Review Response — agents benefit from seeing those."""

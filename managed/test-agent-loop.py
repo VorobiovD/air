@@ -82,6 +82,46 @@ def test_non_transient_error_propagates_immediately():
     assert calls["n"] == 1  # NOT retried — only transient transport errors are
 
 
+def _status_error(code):
+    anthropic = pytest.importorskip("anthropic")
+    resp = httpx.Response(code, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    return anthropic.APIStatusError("Overloaded" if code == 529 else "err", response=resp, body={"type": "error"})
+
+
+def test_overload_529_is_retryable_then_recovers():
+    # A 529 overloaded_error (the #1710 verifier crash) must retry, not propagate.
+    ok = types.SimpleNamespace(usage=None, content=[types.SimpleNamespace(type="text", text="hi")], stop_reason="end_turn")
+    def raise529(): raise _status_error(529)
+    client, calls = _client([raise529, lambda: ok])
+    out = agent_loop._final_message_with_retry(client, log=lambda *_a: None, label="verifier", model="m", messages=[], system=[])
+    assert out is ok and calls["n"] == 2  # retried the 529, then succeeded
+
+
+def test_rate_limit_429_is_retryable():
+    assert agent_loop._is_retryable_turn_error(_status_error(429)) is True
+
+
+# Retryable = the transient 4xx {408,409,429} + ANY 5xx (a `>= 500` catch-all
+# matching the SDK's own policy, so CDN/proxy overload codes like 520/522/524
+# aren't silently omitted the way a finite enum would omit them — PR #284 finding).
+@pytest.mark.parametrize("code", [408, 409, 429, 500, 502, 503, 504, 505, 520, 522, 524, 529, 599])
+def test_retryable_statuses(code):
+    assert agent_loop._is_retryable_turn_error(_status_error(code)) is True
+
+
+# 4xx that are NOT the transient trio must fail loud (auth/bad-request/content-policy,
+# plus any other non-{408,409,429} 4xx such as 418).
+@pytest.mark.parametrize("code", [400, 401, 403, 404, 418, 422, 451])
+def test_non_retryable_statuses_propagate(code):
+    # A 4xx (auth/bad-request/content-policy) must NOT retry — fail loud.
+    assert agent_loop._is_retryable_turn_error(_status_error(code)) is False
+    def raise4xx(): raise _status_error(code)
+    client, _ = _client([raise4xx])
+    anthropic = pytest.importorskip("anthropic")
+    with pytest.raises(anthropic.APIStatusError):
+        agent_loop._final_message_with_retry(client, log=lambda *_a: None, label="x", model="m", messages=[], system=[])
+
+
 def test_transient_set_includes_remoteprotocolerror():
     # The observed failure type must be in the retry set (httpx present in this env).
     errs = agent_loop._transient_stream_errors()  # already a tuple — issubclass takes it directly
