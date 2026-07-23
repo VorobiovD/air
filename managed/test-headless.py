@@ -1045,3 +1045,28 @@ def test_post_incomplete_comment_never_masks_original_error():
     class _E(Exception):
         status_code = 503
     headless._post_incomplete_comment("o/r", 1, "tok", _E("x"), post_fn=boom_post)  # must not raise
+
+
+def test_post_incomplete_comment_flags_rejected_post(capsys):
+    # _post_review_comment_with_retry returns a Response on most non-2xx rather
+    # than raising, so a rejected POST must be detected via resp.ok — not logged
+    # as a false "posted" (PR #284 finding).
+    class _Resp:
+        ok = False
+        status_code = 403
+    def rejected_post(*a, **k): return _Resp()
+    class _E(Exception):
+        status_code = 529
+    headless._post_incomplete_comment("o/r", 7, "tok", _E("x"), post_fn=rejected_post)  # no raise
+    err = capsys.readouterr().err
+    assert "rejected" in err and "403" in err
+    assert "re-runnable" not in err          # must NOT claim success
+
+
+def test_post_incomplete_comment_ok_response_logs_posted(capsys):
+    class _Resp:
+        ok = True
+        status_code = 201
+    headless._post_incomplete_comment("o/r", 8, "tok", RuntimeError("x"), post_fn=lambda *a, **k: _Resp())
+    err = capsys.readouterr().err
+    assert "re-runnable" in err and "rejected" not in err

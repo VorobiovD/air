@@ -115,7 +115,7 @@ def test_retryable_statuses(code):
 def test_non_retryable_statuses_propagate(code):
     # A 4xx (auth/bad-request/content-policy) must NOT retry — fail loud.
     assert agent_loop._is_retryable_turn_error(_status_error(code)) is False
-    def raise4xx(): raise _status_error(400)
+    def raise4xx(): raise _status_error(code)
     client, _ = _client([raise4xx])
     anthropic = pytest.importorskip("anthropic")
     with pytest.raises(anthropic.APIStatusError):

@@ -406,15 +406,24 @@ def _post_incomplete_comment(repo, pr_number, bot_token, exc, *, post_fn=None):
     is logged and the caller re-raises the real exception."""
     status = getattr(exc, "status_code", None)
     body = (
-        "## air review — could not complete\n\n"
+        pr_conversation.RUN_INCOMPLETE_HEADER + "\n\n"
         f"air couldn't finish this review due to a transient infrastructure error "
         f"(`{type(exc).__name__}`" + (f", HTTP {status}" if status else "") + "). "
         "No verdict was posted — this is almost always a brief provider overload. "
         "**Re-request the reviewer (or re-run the workflow) to retry.**"
     )
     try:
-        (post_fn or _post_review_comment_with_retry)(repo, pr_number, body, bot_token)
-        print("  [headless] posted run-incomplete diagnostic (transient infra) — re-runnable", file=sys.stderr)
+        resp = (post_fn or _post_review_comment_with_retry)(repo, pr_number, body, bot_token)
+        # _post_review_comment_with_retry returns a Response on most non-2xx rather
+        # than raising (only conn/timeout raise), so a rejected POST (403/404/422,
+        # e.g. token lacking issues:write) would otherwise log a false "posted" with
+        # no comment on the PR — undercutting the whole point of this diagnostic.
+        # Mirror the formal-comment site's `resp.ok` check (headless.py ~1050).
+        if getattr(resp, "ok", True):
+            print("  [headless] posted run-incomplete diagnostic (transient infra) — re-runnable", file=sys.stderr)
+        else:
+            print(f"  [headless][warn] run-incomplete diagnostic POST rejected: HTTP "
+                  f"{getattr(resp, 'status_code', '?')} — no comment on the PR", file=sys.stderr)
     except Exception as post_err:  # noqa: BLE001
         print(f"  [headless][warn] could not post run-incomplete diagnostic ({post_err!r})", file=sys.stderr)
 

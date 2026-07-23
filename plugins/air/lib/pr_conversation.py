@@ -38,6 +38,25 @@ BOT_REVIEW_PREFIXES: tuple[str, ...] = (
     "## Code Review (Re-review)\n",
 )
 
+# Header of the headless "run couldn't complete" diagnostic comment
+# (managed/headless.py:_post_incomplete_comment builds its body from this, so the
+# two can't drift). This is NOT a review — it must never be treated as a prior
+# review by re-review/verdict detection (those key off BOT_REVIEW_PREFIXES ONLY),
+# but it SHOULD be filtered from the conversation block fed to specialists (it's a
+# stale status note with zero review value). Hence a separate tuple that only
+# `_is_bot_self` unions in — see BOT_NONREVIEW_PREFIXES below.
+RUN_INCOMPLETE_HEADER = "## air review — could not complete"
+
+# Bot-authored comments that are NOT reviews but should still be dropped from the
+# conversation context. Kept SEPARATE from BOT_REVIEW_PREFIXES on purpose: adding
+# these there would make prior-review detection (managed/review.py, verdict.py,
+# github_client.py) mistake a diagnostic note for a real review and wreck the
+# re-review baseline. `## Review Response` (--respond) is deliberately absent —
+# agents benefit from seeing it (see _is_bot_self).
+BOT_NONREVIEW_PREFIXES: tuple[str, ...] = (
+    RUN_INCOMPLETE_HEADER + "\n",
+)
+
 
 def _load_json_array(path: Path | None) -> list[dict]:
     """Load a JSON array from path. Returns [] on missing/empty/malformed —
@@ -115,7 +134,7 @@ def _is_bot_self(record: dict, bot_login: str | None) -> bool:
         return False
     if record["author"] != bot_login:
         return False
-    return record["body"].startswith(BOT_REVIEW_PREFIXES)
+    return record["body"].startswith(BOT_REVIEW_PREFIXES + BOT_NONREVIEW_PREFIXES)
 
 
 def _truncate(body: str, max_chars: int) -> str:
