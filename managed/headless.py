@@ -396,6 +396,29 @@ def _log_usage_telemetry(rows, log=print, write_mult=2.0):
         f"— cache-read {ratio:.0f}% of total prompt tokens (low ⇒ per-agent context re-write)")
 
 
+def _post_incomplete_comment(repo, pr_number, bot_token, exc, *, post_fn=None):
+    """Best-effort VISIBLE diagnostic when the review can't complete due to a
+    sustained transient infra error (overload/5xx/transport) that outlasted
+    agent_loop's retries. Turns a silent flameout — a run that crashes with no
+    comment and no verdict (repo-A #1710: nobody noticed till morning) — into a
+    re-runnable signal ON the PR. Deliberately NOT a `## Code Review` header so
+    re-review detection ignores it. NEVER masks the original error: a failed post
+    is logged and the caller re-raises the real exception."""
+    status = getattr(exc, "status_code", None)
+    body = (
+        "## air review — could not complete\n\n"
+        f"air couldn't finish this review due to a transient infrastructure error "
+        f"(`{type(exc).__name__}`" + (f", HTTP {status}" if status else "") + "). "
+        "No verdict was posted — this is almost always a brief provider overload. "
+        "**Re-request the reviewer (or re-run the workflow) to retry.**"
+    )
+    try:
+        (post_fn or _post_review_comment_with_retry)(repo, pr_number, body, bot_token)
+        print("  [headless] posted run-incomplete diagnostic (transient infra) — re-runnable", file=sys.stderr)
+    except Exception as post_err:  # noqa: BLE001
+        print(f"  [headless][warn] could not post run-incomplete diagnostic ({post_err!r})", file=sys.stderr)
+
+
 def _submit_verdict_guarded(repo, pr_number, bot_token, *, event, body, commit_id,
                             bot_login, bot_logins):
     """Submit the formal verdict + dismiss stale gate-orphans (M4-guarded).
@@ -887,11 +910,22 @@ async def run_headless_review(args, bot_token: str) -> dict:
             + "\n\n".join(findings_block) + "\n\n" + verifier_task + _BATCH_DIRECTIVE)
         vpersona, vmodel, vtier = _persona_model(VERIFIER)
         print("[headless] running verifier (self-hosted loop)…")
-        vres = await asyncio.to_thread(
-            agent_loop.run_agent, client, **{
-                "model": vmodel, "persona": vpersona, "pr_context": pr_context,
-                "task": verifier_input, "sandbox": sandbox, "effort": "high", "label": "verifier",
-                "max_turns": turn_budget, "cache_ttl": cache_ttl})
+        try:
+            vres = await asyncio.to_thread(
+                agent_loop.run_agent, client, **{
+                    "model": vmodel, "persona": vpersona, "pr_context": pr_context,
+                    "task": verifier_input, "sandbox": sandbox, "effort": "high", "label": "verifier",
+                    "max_turns": turn_budget, "cache_ttl": cache_ttl})
+        except Exception as exc:
+            # A terminal verifier failure (a transient overload/5xx/transport error
+            # that outlasted agent_loop's retries — the #1710 sustained-overload case)
+            # would otherwise crash the run with NO comment: a silent flameout. Post a
+            # VISIBLE, re-runnable diagnostic, then re-raise so CI still fails (the run
+            # IS incomplete). Only for transient-infra errors — a real bug / 4xx crashes
+            # loud with no misleading "transient" note. Skipped on --dry-run (no posting).
+            if agent_loop._is_retryable_turn_error(exc) and not getattr(args, "dry_run", False):
+                _post_incomplete_comment(args.repo, args.pr_number, bot_token, exc)
+            raise
     finally:
         # Patterns were read during the specialist + verifier loops and aren't needed
         # past this point — remove the staged dir UNCONDITIONALLY (any exception in the

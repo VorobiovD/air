@@ -1021,3 +1021,27 @@ def test_salvage_256_failure_shape_recovers():
     from verdict import _extract_review_body
     body, ok = _extract_review_body(out, _SALVAGE_SHA, prefer_first_header=True)
     assert ok is True and "finding 5" in body   # full body, nothing dropped
+
+
+# ---- run-incomplete diagnostic (F(b): silent-flameout → visible re-runnable) ----
+
+def test_post_incomplete_comment_body_and_besteffort():
+    posted = {}
+    def fake_post(repo, pr, body, token):
+        posted.update(repo=repo, pr=pr, body=body, token=token)
+    class _E(Exception):
+        status_code = 529
+    headless._post_incomplete_comment("o/r", 42, "tok", _E("Overloaded"), post_fn=fake_post)
+    assert posted["repo"] == "o/r" and posted["pr"] == 42 and posted["token"] == "tok"
+    assert posted["body"].startswith("## air review — could not complete")
+    assert "## Code Review" not in posted["body"]          # re-review detection must ignore it
+    assert "Re-request the reviewer" in posted["body"]
+    assert "HTTP 529" in posted["body"]
+
+
+def test_post_incomplete_comment_never_masks_original_error():
+    # A failing diagnostic post must NOT raise (caller re-raises the REAL error).
+    def boom_post(*a, **k): raise RuntimeError("post failed too")
+    class _E(Exception):
+        status_code = 503
+    headless._post_incomplete_comment("o/r", 1, "tok", _E("x"), post_fn=boom_post)  # must not raise
