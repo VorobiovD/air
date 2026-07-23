@@ -49,8 +49,10 @@ def _memories(client, store_id: str) -> dict[str, dict]:
     """{path: {id, content_sha256}} for the whole store."""
     out = {}
     for item in _paginate(
+        # No order_by/depth — see memory_store.list_memories (the API dropped
+        # order_by and caps depth at 0-1; bare path_prefix lists recursively).
         client.beta.memory_stores.memories.list,
-        memory_store_id=store_id, path_prefix="/", order_by="path", depth=20,
+        memory_store_id=store_id, path_prefix="/",
     ):
         if item.get("type") in ("memory", "memory_metadata"):
             out[item["path"]] = {"id": item["id"], "content_sha256": item.get("content_sha256")}
