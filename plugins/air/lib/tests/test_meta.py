@@ -96,6 +96,61 @@ def test_trigger_count_threshold(now):
     assert "reviews_since=15" in reason
 
 
+def test_reviews_threshold_default_is_15():
+    """Unset AIR_LEARN_REVIEWS_THRESHOLD → 15, i.e. byte-identical to pre-knob
+    behavior for every caller that doesn't opt in."""
+    assert meta.REVIEWS_THRESHOLD == 15
+
+
+@pytest.mark.parametrize("raw,expected", [("10", 10), ("25", 25), ("1", 1)])
+def test_reviews_threshold_env_override(monkeypatch, raw, expected):
+    """AIR_LEARN_REVIEWS_THRESHOLD retunes the cadence without a code change."""
+    import importlib
+    monkeypatch.setenv("AIR_LEARN_REVIEWS_THRESHOLD", raw)
+    reloaded = importlib.reload(meta)
+    try:
+        assert reloaded.REVIEWS_THRESHOLD == expected
+        m = {"last_cleanup": _iso(datetime(2026, 4, 24, 11, tzinfo=timezone.utc)),
+             "last_check": _iso(datetime(2026, 4, 24, 12, tzinfo=timezone.utc)),
+             "reviews_since": expected, "last_processed_pr": 30}
+        trigger, reason = reloaded.should_trigger_learn(
+            m, now=datetime(2026, 4, 24, 12, tzinfo=timezone.utc))
+        assert trigger is True
+        assert f">= {expected}" in reason
+    finally:
+        monkeypatch.delenv("AIR_LEARN_REVIEWS_THRESHOLD", raising=False)
+        importlib.reload(meta)   # restore the default for sibling tests
+
+
+def test_reviews_threshold_env_typo_falls_back_to_default(monkeypatch):
+    """A typo'd value must NOT crash the counter step (env.env_int is tolerant)
+    and must NOT silently resolve to something surprising — fall back to 15."""
+    import importlib
+    monkeypatch.setenv("AIR_LEARN_REVIEWS_THRESHOLD", "ten")
+    reloaded = importlib.reload(meta)
+    try:
+        assert reloaded.REVIEWS_THRESHOLD == 15
+    finally:
+        monkeypatch.delenv("AIR_LEARN_REVIEWS_THRESHOLD", raising=False)
+        importlib.reload(meta)
+
+
+def test_below_a_lowered_threshold_still_skips(monkeypatch):
+    """Lowering the threshold must not make everything due — 9 < 10 still skips."""
+    import importlib
+    monkeypatch.setenv("AIR_LEARN_REVIEWS_THRESHOLD", "10")
+    reloaded = importlib.reload(meta)
+    try:
+        n = datetime(2026, 4, 24, 12, tzinfo=timezone.utc)
+        m = {"last_cleanup": _iso(n - timedelta(days=1)), "last_check": _iso(n),
+             "reviews_since": 9, "last_processed_pr": 30}
+        trigger, _ = reloaded.should_trigger_learn(m, now=n)
+        assert trigger is False
+    finally:
+        monkeypatch.delenv("AIR_LEARN_REVIEWS_THRESHOLD", raising=False)
+        importlib.reload(meta)
+
+
 def test_trigger_count_threshold_exceeded(now):
     m = {"last_cleanup": _iso(now), "last_check": _iso(now), "reviews_since": 22, "last_processed_pr": 30}
     trigger, _ = meta.should_trigger_learn(m, now=now)

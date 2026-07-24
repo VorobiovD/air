@@ -108,7 +108,7 @@ Posts a structured response the reviewer's re-review can parse directly, then pu
 10. **Consolidate** — deduplicate, assign severity, generate Strengths section
 11. **Format** — clickable links with full SHA, sequential numbering across all sections, trailing unnumbered Related PRs section when concurrent open PRs overlap
 12. **Post** — new comment, or PATCH existing (--rewrite), or console-only (--dry-run)
-13. **Learn** — author pattern lifecycle (create/strengthen/decline/archive), wiki push with graduated resistance, auto-trigger full cleanup every 15 reviews
+13. **Learn** — author pattern lifecycle (create/strengthen/decline/archive), wiki push with graduated resistance, auto-trigger full cleanup every 15 reviews (tunable via `AIR_LEARN_REVIEWS_THRESHOLD`)
 
 **Pre-commit drift check (v1.6.0+):** A `PreToolUse` hook fires before every Claude-driven `git commit` and runs either a repo's opt-in `.air-checks.sh` or the plugin's built-in auto-detection (manifest-version mirror greps). Step 3.5 and `/air:learn` bootstrap the tailored script from `PROJECT-PROFILE.md`. See [`plugins/air/README.md`](plugins/air/README.md#pre-commit-drift-check-v160) for the three-level progression.
 
@@ -239,7 +239,7 @@ Lifecycle: **create** (1x, new) → **strengthen** (Nx, counter resets on match)
 
 ### Auto-trigger Cleanup
 
-A wiki-backed counter (`.air-meta.json` at the wiki root) tracks reviews since last cleanup, shared across CLI and managed runs. Every 15 reviews or 14 days (with ≥1 new PR) — whichever comes first — the next `/air:review` or managed run automatically triggers:
+A wiki-backed counter (`.air-meta.json` at the wiki root) tracks reviews since last cleanup, shared across CLI and managed runs. Every 15 reviews (the default — retune per repo with `AIR_LEARN_REVIEWS_THRESHOLD`) or 14 days (with ≥1 new PR) — whichever comes first — the next `/air:review` or managed run automatically triggers:
 - Full REVIEW.md deduplication and reorganization
 - REVIEW-HISTORY.md regeneration from PR comment history
 - Counter resets — distributed across the team

@@ -1214,7 +1214,7 @@ If `$META_RC == 0` (threshold not met):
 - Fall through to sub-steps 2, 2.5, 3, 4, 5 below (existing per-review pattern extraction + author lifecycle + push).
 
 **Threshold rules** (enforced in `meta.py::should_trigger_learn`):
-- `reviews_since >= 15` → trigger
+- `reviews_since >= 15` (default; per-repo override via `AIR_LEARN_REVIEWS_THRESHOLD`) → trigger
 - `days_since_cleanup >= 14` AND `reviews_since > 0` → trigger
 - `days_since_cleanup >= 14` AND `reviews_since == 0` → skip
 - else → skip

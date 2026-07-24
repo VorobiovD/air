@@ -8,7 +8,8 @@ caller is responsible for invoking `/air:learn` (CLI) or
 `managed/learn.py` (managed) — this module only decides and mutates state.
 
 Threshold:
-    reviews_since >= 15
+    reviews_since >= REVIEWS_THRESHOLD (default 15,
+        per-repo override via AIR_LEARN_REVIEWS_THRESHOLD)
         → trigger
     days_since_cleanup >= 14 AND reviews_since > 0
         → trigger
@@ -149,7 +150,15 @@ def _store_mutate_meta(store_id: str, fn) -> dict:
 # 2-day rule fired a full Opus learn session on nearly every review in
 # repos reviewed less often than every 2 days — it fired on 4 of the 5
 # runs preceding the 2026-05-22 credit exhaustion.
-REVIEWS_THRESHOLD = 15
+#
+# The reviews count is per-repo tunable via AIR_LEARN_REVIEWS_THRESHOLD so a repo
+# can curate more often WITHOUT a code change or a fleet-wide default shift (the
+# out-of-band learn cron makes a tighter cadence cheap — it runs off the PR
+# critical path, and with AIR_LEARN_BATCH it prices at 50%). Unset → 15, i.e.
+# byte-identical to pre-knob behavior for every caller that doesn't opt in.
+# Read at import: the module is either a short-lived `meta.py` subprocess or
+# imported by learn_cron.py in a process whose env the workflow already set.
+REVIEWS_THRESHOLD = env.env_int("AIR_LEARN_REVIEWS_THRESHOLD", 15, minimum=1)
 DAYS_THRESHOLD = 14
 
 # Anti-storm learn lock. When a review crosses the threshold it sets
