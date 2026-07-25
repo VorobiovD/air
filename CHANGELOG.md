@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.50.0](https://github.com/VorobiovD/air/compare/v1.49.1...v1.50.0) (2026-07-25)
+
+
+### Features
+
+* **learn:** per-repo learn cadence via AIR_LEARN_REVIEWS_THRESHOLD ([#287](https://github.com/VorobiovD/air/issues/287)) ([de1ac66](https://github.com/VorobiovD/air/commit/de1ac66e7cda700f201fa4def9159c90d8030333))
+
+
+### Bug Fixes
+
+* **verifier:** a project doc permitting an exposure is not a compensating control ([#288](https://github.com/VorobiovD/air/issues/288)) ([881a194](https://github.com/VorobiovD/air/commit/881a19428b0b3fdd171ef87a8c4e498c84eabc2a))
+
 ## [1.49.1](https://github.com/VorobiovD/air/compare/v1.49.0...v1.49.1) (2026-07-23)
 
 
