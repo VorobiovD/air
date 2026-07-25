@@ -197,7 +197,15 @@ def _declared_air_vars() -> dict[str, list[str]]:
 def test_every_env_helper_var_is_registered():
     declared = _declared_air_vars()
     assert declared, "regex found no env_* calls — the pattern drifted, fix the test"
-    missing = {n: f for n, f in declared.items() if n not in env.KNOWN_AIR_VARS}
+    # A var is registered either explicitly OR via a documented dynamic family
+    # (env._KNOWN_PREFIXES — e.g. the per-file AIR_WIKI_CAP_<FILE> ceilings).
+    # report_env() honors both, so the test must too, or it demands redundant
+    # entries that contradict the prefix design.
+    missing = {
+        n: f for n, f in declared.items()
+        if n not in env.KNOWN_AIR_VARS
+        and not any(n.startswith(p) for p in env._KNOWN_PREFIXES)
+    }
     assert not missing, (
         "AIR_* variables read via env.py helpers but absent from KNOWN_AIR_VARS "
         f"(report_env would warn on air's own vars): {missing}"
