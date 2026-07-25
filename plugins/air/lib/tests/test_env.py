@@ -7,6 +7,7 @@ otherwise a refactor could silently flip a gate. We assert that against a
 faithful reimplementation of both old grammars across a value matrix.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -165,3 +166,44 @@ def test_report_env_ignores_per_repo_key_handles(monkeypatch):
     logged = []
     unknown = env.report_env(log=logged.append)
     assert unknown == ["AIR_NEW_API_KEYX"]
+
+
+# --- registry completeness -------------------------------------------------
+# Generic guard for the class of bug air caught on PR #287: a new knob is added
+# via env.env_int/env_float/env_bool but never registered in KNOWN_AIR_VARS, so
+# report_env() flags the project's OWN variable as an unrecognized typo on every
+# review and cron run — and pollutes the [env]-clean signal the post-merge smoke
+# runbook checks. Asserting the whole surface (not just one name) means the next
+# knob can't reintroduce it.
+
+_ENV_CALL_RE = re.compile(r"""env(?:\.env_|_)(?:int|float|bool)\(\s*["'](AIR_[A-Z0-9_]+)["']""")
+
+
+def _declared_air_vars() -> dict[str, list[str]]:
+    """Every AIR_* name read through an env.py helper, mapped to the files."""
+    roots = [LIB, LIB.parents[2] / "managed"]
+    found: dict[str, list[str]] = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.py"):
+            if "tests" in path.parts or "experiments" in path.parts:
+                continue
+            for name in _ENV_CALL_RE.findall(path.read_text(errors="ignore")):
+                found.setdefault(name, []).append(path.name)
+    return found
+
+
+def test_every_env_helper_var_is_registered():
+    declared = _declared_air_vars()
+    assert declared, "regex found no env_* calls — the pattern drifted, fix the test"
+    missing = {n: f for n, f in declared.items() if n not in env.KNOWN_AIR_VARS}
+    assert not missing, (
+        "AIR_* variables read via env.py helpers but absent from KNOWN_AIR_VARS "
+        f"(report_env would warn on air's own vars): {missing}"
+    )
+
+
+def test_reviews_threshold_is_registered():
+    """Explicit anchor for the #287 regression."""
+    assert "AIR_LEARN_REVIEWS_THRESHOLD" in env.KNOWN_AIR_VARS
