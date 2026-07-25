@@ -556,6 +556,12 @@ jobs:
           # AIR_LEARN_CRON_LIVE=true on BOTH this review caller and the cron caller.
           # Off/unset → the review runs learn inline on threshold (default).
           AIR_LEARN_CRON_LIVE: ${{ vars.AIR_LEARN_CRON_LIVE }}
+          # Per-repo learn cadence (reviews between curations). Unset → 15 (the
+          # default, byte-identical to pre-knob). Set the SAME value on the cron
+          # caller: the review path decides due-ness when learn runs inline, the
+          # cron path decides it when AIR_LEARN_CRON_LIVE=true, and a mismatch
+          # makes the two disagree about when a repo is due.
+          AIR_LEARN_REVIEWS_THRESHOLD: ${{ vars.AIR_LEARN_REVIEWS_THRESHOLD }}
           # Direct-post: post the verifier's body verbatim instead of the
           # coordinator's relay (bypasses the relay-drop failure mode for any
           # coordinator model). Default ON for MA full; set a caller repo/org

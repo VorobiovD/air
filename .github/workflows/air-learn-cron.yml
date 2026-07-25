@@ -76,6 +76,10 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
           AIR_LEARN_BATCH: ${{ vars.AIR_LEARN_BATCH }}
+          # Per-repo learn cadence. Unset → 15 (the default). A repo curating
+          # out-of-band can afford a tighter count; MUST match the value on the
+          # review caller, or the two paths disagree on when a repo is due.
+          AIR_LEARN_REVIEWS_THRESHOLD: ${{ vars.AIR_LEARN_REVIEWS_THRESHOLD }}
           # inputs via env (NOT inline ${{ }} in run:) to avoid shell injection
           IN_REPO: ${{ inputs.repo }}
           IN_MODE: ${{ inputs.mode }}

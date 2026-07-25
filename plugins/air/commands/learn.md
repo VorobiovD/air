@@ -5,7 +5,7 @@ argument-hint: [--dry-run] [--history-only] [--refresh-profile]
 
 Fetch REVIEW.md from the wiki, clean it up using AI, generate REVIEW-HISTORY.md from PR comment history, and push both back.
 
-Note: `/air:review` auto-triggers this command every 15 reviews or every 14 days (whichever comes first). You can also run it manually for immediate cleanup.
+Note: `/air:review` auto-triggers this command every 15 reviews (default; a repo can retune the count with `AIR_LEARN_REVIEWS_THRESHOLD`) or every 14 days — whichever comes first. You can also run it manually for immediate cleanup.
 
 > **Store-backed repos (managed/headless fleet):** when a repo's patterns live in an Anthropic memory store (the source of truth), the canonical learn is the cloud/client `air-learner` (managed `learn.py`, or the MA-independent `managed/learn_headless.py`), which curates the store; a deterministic Python step (`managed/render_store_to_wiki.py`) then exports the git-wiki mirror. **This CLI command never reads or renders the store** — it operates on the git wiki directly, so on a store-backed repo its writes would be overwritten by the next render. Step 1 now DETECTS a store mirror (via the render's banner — no API key needed) and STOPS, instead of relying on `find-store` (which is blank when the local `ANTHROPIC_API_KEY` can't see the repo's store). Reserve this CLI flow for legacy wiki-only repos.
 
