@@ -293,3 +293,89 @@ def test_defang_leaves_lookalike_tag_names_untouched():
     for s in ("<untrusted-tool-output-log>", "</untrusted-tool-output-cache>",
               "<untrusted-tool-outputs>"):
         assert agent_loop._defang_control_tags(s) == s
+
+
+# ---- tool_use blocks on a non-`tool_use` stop_reason (repo-A #1751) ---------
+# A code-reviewer turn carried 6 tool_use blocks but reported stop_reason
+# `end_turn`. Keying the terminal branch off stop_reason sent it to the
+# empty-completion nudge, which appended a bare user message after 6 UNANSWERED
+# tool_use blocks; the re-issue 400'd ("tool_use ids were found without
+# tool_result blocks"), the lens died `empty_completion_error`, and the
+# blocker-class gate fail-closed to CHANGES_REQUESTED on a body saying "No
+# blockers". The loop now keys off whether the turn HAS tool calls.
+
+class _RecordingSandbox:
+    def __init__(self): self.dispatched = []
+    def dispatch(self, name, args):
+        self.dispatched.append(name)
+        return ("file contents", False)
+
+
+def _tool_msg(ids, stop):
+    content = [types.SimpleNamespace(type="thinking", thinking="...")]
+    content += [types.SimpleNamespace(type="tool_use", id=i, name="Read", input={"path": "a.py"})
+                for i in ids]
+    return types.SimpleNamespace(usage=None, content=content, stop_reason=stop)
+
+
+def test_tool_use_blocks_are_answered_even_when_stop_reason_is_end_turn(monkeypatch):
+    """The live #1751 shape: tool_use blocks + `end_turn`. They must be dispatched
+    and answered (protocol requires a tool_result for every tool_use), NOT sent to
+    the nudge path — which would build a malformed request and kill the lens."""
+    monkeypatch.setattr(agent_loop, "EMPTY_COMPLETION_RETRIES", 2)
+    sandbox = _RecordingSandbox()
+    client, calls = _client([
+        lambda: _tool_msg(["toolu_a", "toolu_b"], "end_turn"),   # tools + end_turn
+        lambda: _msg("Findings: 1 medium.", "end_turn"),         # completes normally
+    ])
+    out = agent_loop.run_agent(client, model="sonnet", persona="p", pr_context="ctx",
+                               task="t", sandbox=sandbox, log=lambda *_a, **_k: None)
+    assert sandbox.dispatched == ["Read", "Read"]     # both answered, not skipped
+    assert out["text"] == "Findings: 1 medium."       # lens completed → no fail-close
+    assert out["stop"] == "end_turn"
+    assert out["tool_calls"] == 2
+
+
+def test_no_bare_user_message_after_unanswered_tool_use(monkeypatch):
+    """Guards the exact 400: every tool_use must be followed by a message whose
+    content carries a matching tool_result — never a plain text nudge."""
+    monkeypatch.setattr(agent_loop, "EMPTY_COMPLETION_RETRIES", 2)
+    sent = []
+
+    def _capture(**kw):
+        sent.append(kw.get("messages") or [])
+        return _tool_msg(["toolu_x"], "end_turn") if len(sent) == 1 else _msg("done", "end_turn")
+
+    class _Msgs:
+        def stream(self, **kw):
+            msg = _capture(**kw)
+            class _S:
+                def __enter__(_s): return _s
+                def __exit__(*_a): return False
+                def get_final_message(_s): return msg
+            return _S()
+    client = types.SimpleNamespace(messages=_Msgs())
+    agent_loop.run_agent(client, model="sonnet", persona="p", pr_context="ctx", task="t",
+                         sandbox=_RecordingSandbox(), log=lambda *_a, **_k: None)
+    # Inspect the SECOND request: the turn after the tool_use one.
+    convo = sent[-1]
+    for i, m in enumerate(convo[:-1]):
+        blocks = m.get("content")
+        if not isinstance(blocks, list):
+            continue
+        ids = [getattr(b, "id", None) for b in blocks if getattr(b, "type", "") == "tool_use"]
+        if ids:
+            nxt = convo[i + 1].get("content")
+            answered = [b.get("tool_use_id") for b in nxt
+                        if isinstance(b, dict) and b.get("type") == "tool_result"]
+            assert set(ids) <= set(answered), f"unanswered tool_use {ids} — this is the #1751 400"
+
+
+def test_tool_use_stop_with_zero_blocks_terminates_cleanly(monkeypatch):
+    """Inverse edge case: stop_reason=tool_use but no tool_use blocks. Previously
+    appended an assistant turn with an empty results list (also malformed)."""
+    monkeypatch.setattr(agent_loop, "EMPTY_COMPLETION_RETRIES", 0)
+    client, calls = _client([lambda: _msg("partial text", "tool_use")])
+    out = agent_loop.run_agent(client, model="sonnet", persona="p", pr_context="ctx",
+                               task="t", sandbox=_Sandbox(), log=lambda *_a, **_k: None)
+    assert out["stop"] == "tool_use" and calls["n"] == 1

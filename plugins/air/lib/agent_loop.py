@@ -285,7 +285,21 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
             f"cw={getattr(_u, 'cache_creation_input_tokens', 0) or 0} "
             f"cr={getattr(_u, 'cache_read_input_tokens', 0) or 0}")
         t_prev = _now
-        if msg.stop_reason != "tool_use":
+        # Answer tool_use blocks whenever the turn HAS them, regardless of the
+        # reported stop_reason. The API requires a tool_result for every tool_use
+        # in the IMMEDIATELY following message, so this is a protocol obligation,
+        # not a stop_reason question. Keying off stop_reason instead (the original
+        # form) broke live on repo-A #1751: a code-reviewer turn carried 6 tool_use
+        # blocks but reported `end_turn`, fell into the terminal branch, and the
+        # empty-completion nudge below appended a bare user message after those 6
+        # unanswered calls — the re-issue 400'd ("tool_use ids were found without
+        # tool_result blocks"), the lens died `empty_completion_error`, and the
+        # blocker-class gate fail-closed into CHANGES_REQUESTED on a review whose
+        # own body said "No blockers". Keying off tool_uses also makes the nudge's
+        # "no text/tools" claim true (it only ever checked text) and terminates
+        # cleanly on the inverse edge case (stop_reason=tool_use, zero blocks),
+        # which previously appended an assistant turn with an empty results list.
+        if not tool_uses:
             stop = msg.stop_reason
             # Empty-completion self-heal: the model ended cleanly (`end_turn`) but
             # produced NO answer text across all turns — a thinking-only turn (it
