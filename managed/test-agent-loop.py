@@ -379,3 +379,17 @@ def test_tool_use_stop_with_zero_blocks_terminates_cleanly(monkeypatch):
     out = agent_loop.run_agent(client, model="sonnet", persona="p", pr_context="ctx",
                                task="t", sandbox=_Sandbox(), log=lambda *_a, **_k: None)
     assert out["stop"] == "tool_use" and calls["n"] == 1
+
+
+def test_truncated_turn_with_tool_uses_fails_closed(monkeypatch):
+    """`max_tokens` + tool_use blocks: the turn was CUT OFF, so its tool calls may
+    be half-formed. Must fail closed (break, appending nothing) rather than
+    execute them and continue — the regression air caught on PR #290."""
+    monkeypatch.setattr(agent_loop, "EMPTY_COMPLETION_RETRIES", 2)
+    sandbox = _RecordingSandbox()
+    client, calls = _client([lambda: _tool_msg(["toolu_trunc"], "max_tokens")])
+    out = agent_loop.run_agent(client, model="sonnet", persona="p", pr_context="ctx",
+                               task="t", sandbox=sandbox, log=lambda *_a, **_k: None)
+    assert out["stop"] == "max_tokens"
+    assert sandbox.dispatched == []    # never executed a truncated call
+    assert calls["n"] == 1             # no continue, no nudge

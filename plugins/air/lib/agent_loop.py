@@ -3,7 +3,7 @@
 air owns the tool-use loop CLIENT-SIDE instead of the managed runtime hosting it.
 `run_agent()` runs ONE agent (a specialist or the verifier) to completion:
 
-    stream messages.create -> while stop_reason == 'tool_use':
+    stream messages.create -> while the turn carries tool_use blocks:
         execute each tool_use block via the read-only Sandbox (tool_exec.py)
         append the assistant turn + all tool_results (one user message) -> repeat
     -> end_turn
@@ -285,21 +285,19 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
             f"cw={getattr(_u, 'cache_creation_input_tokens', 0) or 0} "
             f"cr={getattr(_u, 'cache_read_input_tokens', 0) or 0}")
         t_prev = _now
-        # Answer tool_use blocks whenever the turn HAS them, regardless of the
-        # reported stop_reason. The API requires a tool_result for every tool_use
-        # in the IMMEDIATELY following message, so this is a protocol obligation,
-        # not a stop_reason question. Keying off stop_reason instead (the original
-        # form) broke live on repo-A #1751: a code-reviewer turn carried 6 tool_use
-        # blocks but reported `end_turn`, fell into the terminal branch, and the
-        # empty-completion nudge below appended a bare user message after those 6
-        # unanswered calls — the re-issue 400'd ("tool_use ids were found without
-        # tool_result blocks"), the lens died `empty_completion_error`, and the
-        # blocker-class gate fail-closed into CHANGES_REQUESTED on a review whose
-        # own body said "No blockers". Keying off tool_uses also makes the nudge's
-        # "no text/tools" claim true (it only ever checked text) and terminates
-        # cleanly on the inverse edge case (stop_reason=tool_use, zero blocks),
-        # which previously appended an assistant turn with an empty results list.
-        if not tool_uses:
+        # Terminal-vs-continue is decided by whether the turn CARRIES tool calls,
+        # not by its stop_reason. The API requires a tool_result for every tool_use
+        # in the immediately-following message, so once a turn with tool_use blocks
+        # is round-tripped into the history, the next message must answer them.
+        #
+        # Keying off stop_reason instead let a turn that carried tool_use blocks but
+        # reported `end_turn` reach the empty-completion nudge below, which appended
+        # a bare text message after those unanswered calls -> 400 "tool_use ids were
+        # found without tool_result blocks" (observed on a live blocker-class lens,
+        # which then fail-closed the gate on a clean review). The inverse shape --
+        # stop_reason `tool_use` with zero blocks -- fell through to the dispatch
+        # path and raised IndexError on `results[-1]` of an empty list.
+        if not tool_uses or msg.stop_reason == "max_tokens":
             stop = msg.stop_reason
             # Empty-completion self-heal: the model ended cleanly (`end_turn`) but
             # produced NO answer text across all turns — a thinking-only turn (it
@@ -310,7 +308,7 @@ def run_agent(client, *, model, persona, pr_context, task, sandbox,
             # that a retry would just repeat — leave those to fail closed. The
             # assistant turn is round-tripped verbatim (thinking blocks + signatures)
             # exactly as the tool-use path does, so re-issuing is well-formed.
-            if (msg.stop_reason == "end_turn" and not final_text
+            if (msg.stop_reason == "end_turn" and not final_text and not tool_uses
                     and empty_retries < EMPTY_COMPLETION_RETRIES):
                 empty_retries += 1
                 log(f"  [{label}] empty completion (end_turn, no text/tools) — "
