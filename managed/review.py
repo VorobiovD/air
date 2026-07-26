@@ -101,6 +101,7 @@ from verdict import (  # noqa: E402,F401 — split modules; re-exported for test
     should_request_changes,
     resolve_verdict_event,
     normalize_verdict_banner,
+    append_gate_note,
     NO_APPROVE_VERDICT_BODY,
     has_conflict_markers,
     REVIEWED_AT_RE,
@@ -2681,6 +2682,8 @@ async def run_review(args):
         if not _banner_rc and has_conflict_markers(diff, diff_check_warnings):
             _banner_rc = True
         review_body = normalize_verdict_banner(review_body, request_changes=_banner_rc)
+        review_body = append_gate_note(review_body, request_changes=_banner_rc,
+                                       head_sha=head_sha)
 
     if args.dry_run:
         print("\n" + "=" * 60)
