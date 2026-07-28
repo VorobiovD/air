@@ -65,7 +65,14 @@ def _ceilings() -> dict:
         # byte-slice a rule). HISTORY/ARCHIVE rarely bind.
         "GLOSSARY.md": _env_int("AIR_WIKI_CAP_GLOSSARY", 45_000),
         "PROJECT-PROFILE.md": _env_int("AIR_WIKI_CAP_PROFILE", 50_000),
-        "REVIEW.md": _env_int("AIR_WIKI_CAP_REVIEW", 44_000),
+        # REVIEW.md on a store-backed repo is an AGGREGATE render of several store
+        # files (common-findings + service-patterns + every per-author file), so
+        # its size is the sum of its parts — svc: 27K+74K+34K = 135K rendered to
+        # 140K. A 44K ceiling there implied the ENTIRE pattern store fit in 44K,
+        # which no active repo does; it fired an unactionable `[cap][warn]` on all
+        # four store repos forever, training people to ignore cap warnings. Sized
+        # to the aggregate it actually is, so the warn means something again.
+        "REVIEW.md": _env_int("AIR_WIKI_CAP_REVIEW", 150_000),
         "REVIEW-HISTORY.md": _env_int("AIR_WIKI_CAP_HISTORY", 35_000),
         "REVIEW-ARCHIVE.md": _env_int("AIR_WIKI_CAP_ARCHIVE", 90_000),
     }

@@ -85,7 +85,19 @@ MAP_PARALLELISM = env.env_int("AIR_LEARN_PARALLELISM", 8, minimum=1)
 # Output cap per curation. Headroom for a large GLOSSARY (~40-60KB ≈ 12-16K
 # tokens); a curation that still hits this raises (truncation guard) rather
 # than writing a half-formed file.
-MAX_OUTPUT_TOKENS = env.env_int("AIR_LEARN_MAX_TOKENS", 32_000, minimum=1)
+# Curation must RE-EMIT the whole file, so this cap is a hard ceiling on the size
+# of a file that can ever be curated — and therefore on the only mechanism that
+# shrinks one. Measured on real stores: this content re-emits at ~3 chars/token,
+# so the old 32K cap walled off any file past ~92KB. Two fleet glossaries (96KB,
+# 93KB) had crossed it and were permanently frozen: every curation truncated, the
+# guard skipped the write, and per-review appends kept growing them — a ratchet
+# with no way back. 64K moves the wall to ~190KB with room to spare (largest file
+# today needs ~33K) while staying well inside the model's real 128K output limit
+# (probed) so a runaway generation is still bounded. Raising the cap costs nothing
+# on small files: output is billed as emitted, and curation output is bounded by
+# the file itself. This BUYS TIME — it does not stop the ratchet; capping growth
+# at the source is the durable fix.
+MAX_OUTPUT_TOKENS = env.env_int("AIR_LEARN_MAX_TOKENS", 64_000, minimum=1)
 # Safety floor: refuse to write a curated file that collapses below this
 # fraction of the original byte size — a gross truncation/error must never
 # silently destroy content. The fidelity check below catches finer losses
