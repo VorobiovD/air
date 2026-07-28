@@ -2122,7 +2122,7 @@ def test_gate_note_explains_a_process_failclose():
                                    head_sha=_GN_SHA)
     assert "Gated for a process reason, not a finding" in out
     assert "air-code-reviewer" in out
-    assert "Pushing a fix does not re-trigger" in out
+    assert "If no new review appears after you push a fix" in out
 
 
 def test_gate_note_omits_process_line_for_a_real_blocker():
@@ -2130,7 +2130,7 @@ def test_gate_note_omits_process_line_for_a_real_blocker():
     out = append_gate_note(_gn_body(), request_changes=True,
                                    reason="1 unfixed blocker", head_sha=_GN_SHA)
     assert "Gated for a process reason" not in out
-    assert "Pushing a fix does not re-trigger" in out
+    assert "If no new review appears after you push a fix" in out
 
 
 def test_gate_note_noop_when_not_gating():
@@ -2169,3 +2169,33 @@ def test_gate_note_skips_a_quoted_alert_inside_a_finding():
     b = (f"## Code Review\n\n### Blockers\n\n**1. quotes a banner**\n\n> [!CAUTION]\n> not the verdict\n\n"
          f"Reviewed at: {_GN_SHA}")
     assert append_gate_note(b, request_changes=True, reason="x", head_sha=_GN_SHA) == b
+
+
+def test_gate_note_never_claims_pushes_do_not_retrigger():
+    """The claim must stay CONDITIONAL: an unconditional 'pushing will not
+    re-trigger' is FALSE on a push-driven caller (types: [.., synchronize, ..]),
+    and shipping a confidently wrong instruction is worse than saying nothing."""
+    out = append_gate_note(_gn_body(), request_changes=True, reason="1 unfixed blocker",
+                           head_sha=_GN_SHA)
+    assert "does not re-trigger" not in out
+    assert "If no new review appears" in out
+
+
+def test_gate_note_omits_rerun_advice_for_a_truncated_diff():
+    """A truncated diff truncates again identically — its reason already carries the
+    real remedy, so 'Re-run the review' would loop the reader."""
+    trunc = append_gate_note(_gn_body(), request_changes=True, head_sha=_GN_SHA,
+                             reason="diff truncated at 500000 chars — raise AIR_HEADLESS_DIFF_CAP or split the PR")
+    assert "Re-run the review to clear it" not in trunc
+    assert "raise AIR_HEADLESS_DIFF_CAP" in trunc
+    lens = append_gate_note(_gn_body(), request_changes=True, head_sha=_GN_SHA,
+                            reason="blocker-class lens did not complete: air-code-reviewer")
+    assert "Re-run the review to clear it" in lens   # transient → re-run IS the remedy
+
+
+def test_gate_note_not_suppressed_by_a_quoted_marker_in_the_body():
+    """Idempotency is keyed to the banner region — a body that merely QUOTES the
+    marker (a review of this feature does) must still get its real note."""
+    b = _gn_body() + "\n\nSomeone pasted <!-- air-gate-note --> into a finding.\n"
+    out = append_gate_note(b, request_changes=True, reason="1 unfixed blocker", head_sha=_GN_SHA)
+    assert "If no new review appears" in out

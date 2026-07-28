@@ -259,7 +259,7 @@ def append_gate_note(body: str, *, request_changes: bool,
     finding and never displaces the trailing `Reviewed at:` footer. Idempotent.
     No-op on a non-gating verdict or a legacy/flat body with no banner.
     """
-    if not request_changes or _GATE_NOTE_MARK in body:
+    if not request_changes:
         return body
     m = _BANNER_ALERT_RE.search(body)
     if not m:
@@ -268,23 +268,43 @@ def append_gate_note(body: str, *, request_changes: bool,
     if fm and fm.start() < m.start():
         return body  # an alert quoted inside a finding, not the verdict banner
 
-    notes = []
-    if reason and any(k in reason for k in _PROCESS_GATE_MARKERS):
-        notes.append(f"**Gated for a process reason, not a finding:** {reason}. "
-                     "Re-run the review to clear it.")
-    pin = f"pinned to `{head_sha[:8]}`" if head_sha else "pinned to the reviewed commit"
-    notes.append(f"This verdict is {pin}. **Pushing a fix does not re-trigger a review** "
-                 "on this repo — re-request the reviewer (or run `/air:review --respond`, "
-                 "which re-requests for you) after you push.")
-
-    # Extend the banner's own blockquote: walk to the end of the consecutive `>` run.
+    # Locate the banner's own blockquote: the consecutive `>` run from the alert.
     lines = body.split("\n")
     start = body[:m.start()].count("\n")
-    i = start
-    while i + 1 < len(lines) and lines[i + 1].lstrip().startswith(">"):
-        i += 1
+    end = start
+    while end + 1 < len(lines) and lines[end + 1].lstrip().startswith(">"):
+        end += 1
+
+    # Idempotency keyed to THOSE LINES ONLY, not a body-wide (or windowed) scan:
+    # the rest of the body is model-written text that can legitimately quote the
+    # marker — a review OF this feature does exactly that — and a broader check
+    # would then silently suppress the real note.
+    if any(_GATE_NOTE_MARK in ln for ln in lines[start:end + 1]):
+        return body
+    notes = []
+    if reason and any(k in reason for k in _PROCESS_GATE_MARKERS):
+        # Only a TRANSIENT process failure clears on a re-run. A truncated diff will
+        # truncate again identically, and its reason string already carries the real
+        # remedy (raise the cap / split the PR) — appending "re-run it" there would
+        # send the reader in a loop.
+        remedy = "" if "diff truncated" in reason else " Re-run the review to clear it."
+        notes.append(f"**Gated for a process reason, not a finding:** {reason}.{remedy}")
+    # Phrased as a CONDITIONAL on purpose. Callers come in two shapes: push-driven
+    # (`types: [opened, synchronize, reopened]` + cooldown_minutes) where a push DOES
+    # re-review, and request-driven (`types: [review_requested]`) where it does not.
+    # The gate cannot see the caller's trigger config, so an unconditional "pushing
+    # will not re-trigger" would be a confidently FALSE instruction on every
+    # push-driven repo. This wording is true either way: on a push-driven repo the
+    # re-review just arrives and the reader never needs the escape hatch.
+    pin = f"pinned to `{head_sha[:8]}`" if head_sha else "pinned to the reviewed commit"
+    notes.append(f"This verdict is {pin}, not to the branch. **If no new review appears "
+                 "after you push a fix**, this repo reviews on request only — re-request "
+                 "the reviewer (or run `/air:review --respond`, which re-requests for you) "
+                 "to get a verdict on the new commit.")
+
+    # Extend the banner's own blockquote (range computed above).
     block = ["> "] + [f"> {n}" for n in notes] + [f"> {_GATE_NOTE_MARK}"]
-    return "\n".join(lines[:i + 1] + block + lines[i + 1:])
+    return "\n".join(lines[:end + 1] + block + lines[end + 1:])
 
 def normalize_verdict_banner(body: str, *, request_changes: bool) -> str:
     """Force the top v2 verdict banner to match the deterministic gate.
