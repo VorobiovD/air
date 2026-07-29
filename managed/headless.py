@@ -733,7 +733,9 @@ async def run_headless_review(args, bot_token: str) -> dict:
             # anchor against origin..head (un-poisons a fix predating baseline). None
             # on the promote sibling path (different PR tree → number-identity only).
             origin_resolver = (None if promote_sibling_pr is not None
-                               else make_origin_resolver(ic, bot_login, head_sha, args.repo, bot_token))
+                               else make_origin_resolver(ic, bot_login, head_sha, args.repo,
+                                                        bot_token,
+                                                        base_sha=(meta.get("base") or {}).get("sha")))
             ledger = build_carry_forward_ledger(prior.get("body", ""), diff, prior_sha,
                                                 sibling=(promote_sibling_pr is not None),
                                                 origin_resolver=origin_resolver)

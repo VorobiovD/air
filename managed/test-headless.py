@@ -1070,3 +1070,80 @@ def test_post_incomplete_comment_ok_response_logs_posted(capsys):
     headless._post_incomplete_comment("o/r", 8, "tok", RuntimeError("x"), post_fn=lambda *a, **k: _Resp())
     err = capsys.readouterr().err
     assert "re-runnable" in err and "rejected" not in err
+
+
+# --- rebased-branch un-poison: base..head fallback (repo-C #17065) ------------
+# 5 force-pushes made every origin SHA a non-ancestor of head, so the #198
+# ancestor gate rejected them all and v1 number-identity pinned six carried
+# blockers NOT FIXED forever — while every one of their files WAS present in the
+# PR's own base..head diff. The verifier even recorded that specialists had
+# re-verified the fixes on direct source read. It had to be dismissed by hand.
+
+_BASE_SHA = "e" * 40
+
+
+def _diverged_env(monkeypatch, base_diff):
+    """Origin gate always rejects (rebased); base..head still resolves."""
+    monkeypatch.setattr(review, "_air_bot_logins", lambda: frozenset({"air-machine"}))
+    monkeypatch.setattr(review, "fetch_compare_status", lambda *a, **k: "diverged")
+    seen = {}
+
+    def _inter(repo, a, b, token, **kw):
+        seen["from"] = a
+        return base_diff if a == _BASE_SHA else None
+    monkeypatch.setattr(review, "fetch_inter_diff", _inter)
+    return seen
+
+
+def test_rebased_origin_falls_back_to_base_window_not_number_identity(monkeypatch):
+    seen = _diverged_env(monkeypatch, _OA_TOUCH_DIFF)
+    resolver = review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD,
+                                           "o/r", "tok", base_sha=_BASE_SHA)
+    res = resolver(1)
+    assert res, "rebased origin must NOT collapse to v1 number-identity"
+    assert res[2] is not None, "expected the base..head index"
+    assert seen["from"] == _BASE_SHA, "must compare from the PR base"
+
+
+def test_rebased_branch_honors_a_fix_present_only_in_the_pr_diff(monkeypatch):
+    """The #17065 outcome: file touched in the PR (an earlier round), absent from
+    this round's inter-diff. v1 pinned NOT FIXED; the base window honors it."""
+    from verdict import build_carry_forward_ledger, pin_and_resurrect
+    _diverged_env(monkeypatch, _OA_TOUCH_DIFF)
+    prior = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+             "- **#1** [blocker] — NOT FIXED — carried\n\nReviewed at: " + "d" * 40 + "\n")
+    now = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+           "- **#1** [blocker] — FIXED — verified on direct source read\n\n"
+           "Reviewed at: " + _OA_HEAD + "\n")
+    empty_inter = ""      # this round touched none of the fixed files
+
+    v1 = build_carry_forward_ledger(prior, empty_inter, "d" * 40, origin_resolver=None)
+    v1_body, _ = pin_and_resurrect(now, v1)
+    assert "NOT FIXED" in v1_body, "v1 must still poison (regression guard)"
+
+    r = review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD, "o/r", "tok",
+                                    base_sha=_BASE_SHA)
+    v2 = build_carry_forward_ledger(prior, empty_inter, "d" * 40, origin_resolver=r)
+    v2_body, _ = pin_and_resurrect(now, v2)
+    assert "FIXED" in v2_body and "NOT FIXED" not in v2_body, \
+        "base window must honor the verifier's source-grounded FIXED"
+
+
+def test_base_window_is_monotone_never_narrows(monkeypatch):
+    """GATE SAFETY: base..head ⊇ origin..head, so file_touched can only flip
+    False→True. A base window that touches nothing must NOT un-poison."""
+    from verdict import build_carry_forward_ledger
+    _diverged_env(monkeypatch, "diff --git a/other.py b/other.py\n--- a/other.py\n"
+                               "+++ b/other.py\n@@ -1,2 +1,3 @@\n ctx\n+x\n")
+    r = review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD, "o/r", "tok",
+                                    base_sha=_BASE_SHA)
+    led = build_carry_forward_ledger(_OA_R2_BODY, "", "d" * 40, origin_resolver=r)
+    assert led and led[0].file_touched is False, "unrelated base diff must not grant file_touched"
+
+
+def test_no_base_sha_still_falls_back_to_v1(monkeypatch):
+    """Without a base SHA (or an unavailable compare) behavior is byte-identical
+    to before: conservative v1 number-identity, never un-gates."""
+    _diverged_env(monkeypatch, _OA_TOUCH_DIFF)
+    r = review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD, "o/r", "tok")
+    assert r(1) is None, "no base_sha → v1 fallback preserved"
