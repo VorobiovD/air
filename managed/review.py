@@ -310,6 +310,8 @@ def make_origin_resolver(comments, bot_login, head_sha, repo, token, base_sha=No
         return idx
 
     def _origin_index(origin_sha):
+        """-> (ChangedIndex | None, from_base). `from_base` marks a BASE-space
+        index, whose coordinates do NOT match an origin-space anchor."""
         if origin_sha in index_cache:
             return index_cache[origin_sha]
         idx = None
@@ -328,20 +330,35 @@ def make_origin_resolver(comments, bot_login, head_sha, repo, token, base_sha=No
         except Exception as e:
             print(f"  [origin][warn] {origin_sha[:8]}..{(head_sha or '')[:8]} "
                   f"failed ({type(e).__name__}: {e}) — baseline fallback", file=sys.stderr)
+        from_base = False
         if idx is None:
             idx = _base_index()
             if idx is not None:
+                from_base = True
                 print(f"  [origin] {origin_sha[:8]} unusable — falling back to the PR's "
-                      f"own base..head window (wider, rebase-proof)", file=sys.stderr)
-        index_cache[origin_sha] = idx
-        return idx
+                      f"own base..head window (file-level only; rebase-proof)", file=sys.stderr)
+        index_cache[origin_sha] = (idx, from_base)
+        return idx, from_base
 
     def resolver(num):
         origin_sha, loc, files = find_origin(chain, num)
         if not (origin_sha and loc):
             return None
-        idx = _origin_index(origin_sha)
-        return (origin_sha, loc, idx, files) if idx is not None else None
+        idx, from_base = _origin_index(origin_sha)
+        if idx is None:
+            return None
+        # COORDINATE SPACES MUST MATCH. `loc` is a line number in the ORIGIN
+        # commit's space (recovered from that review's blob link), and an
+        # `origin..head` diff's old side is the same space — so the line-level
+        # test is real evidence there. A `base..head` diff's old side is BASE
+        # space, so testing an origin-space line against it would match only by
+        # COINCIDENCE, and `change=CHANGED` carries more weight in the pin than
+        # `file_touched` does. Drop `loc` on the base path: the ledger then
+        # records INDETERMINATE and uses only `_referenced_file_touched`, which
+        # is path-level and coordinate-free. That makes the widening exactly what
+        # the safety argument claims — file_touched into the already-validated
+        # cross_region trust class, and nothing else.
+        return (origin_sha, None if from_base else loc, idx, files)
 
     return resolver
 

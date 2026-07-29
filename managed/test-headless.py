@@ -1147,3 +1147,42 @@ def test_no_base_sha_still_falls_back_to_v1(monkeypatch):
     _diverged_env(monkeypatch, _OA_TOUCH_DIFF)
     r = review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD, "o/r", "tok")
     assert r(1) is None, "no base_sha → v1 fallback preserved"
+
+
+def test_base_window_never_grants_line_level_change(monkeypatch):
+    """COORDINATE SAFETY (#294 review blocker): `loc` is an ORIGIN-space line, a
+    base..head diff's old side is BASE-space. Matching them is coincidence, not
+    evidence, and `change=CHANGED` weighs more in the pin than `file_touched`.
+    The base path must therefore surface file-level evidence ONLY."""
+    from verdict import build_carry_forward_ledger, INDETERMINATE
+    # A base diff whose edited hunk COVERS the origin anchor line (svc.py#L5) —
+    # exactly the collision that must not be read as a line-level fix.
+    colliding = ("diff --git a/svc.py b/svc.py\n--- a/svc.py\n+++ b/svc.py\n"
+                 "@@ -1,10 +1,11 @@\n ctx\n+collides with L5\n ctx\n")
+    _diverged_env(monkeypatch, colliding)
+    r = review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD, "o/r", "tok",
+                                    base_sha=_BASE_SHA)
+    res = r(1)
+    assert res is not None
+    assert res[1] is None, "base path must drop the origin-space anchor"
+    led = build_carry_forward_ledger(_OA_R2_BODY, "", "d" * 40, origin_resolver=r)
+    from verdict import UNCHANGED
+    assert led[0].change is UNCHANGED, ("a mismatched space yields NO line verdict; "
+                                        "UNCHANGED == 'no line-level evidence', which pairs "
+                                        "with file_touched for cross_region trust")
+    assert led[0].file_touched is True, "file-level evidence still honored"
+
+
+def test_origin_window_keeps_line_level_evidence(monkeypatch):
+    """Contrast: when the origin IS an ancestor, coordinates match and the
+    line-level signal must still be used (no regression from the fix above)."""
+    from verdict import build_carry_forward_ledger, INDETERMINATE
+    monkeypatch.setattr(review, "_air_bot_logins", lambda: frozenset({"air-machine"}))
+    monkeypatch.setattr(review, "fetch_compare_status", lambda *a, **k: "ahead")
+    monkeypatch.setattr(review, "fetch_inter_diff", lambda *a, **k: _OA_TOUCH_DIFF)
+    r = review.make_origin_resolver(_OA_COMMENTS, "air-machine", _OA_HEAD, "o/r", "tok",
+                                    base_sha=_BASE_SHA)
+    res = r(1)
+    assert res[1] is not None and res[1][0] == "svc.py", "origin anchor must be kept"
+    led = build_carry_forward_ledger(_OA_R2_BODY, "", "d" * 40, origin_resolver=r)
+    assert led[0].change is not INDETERMINATE, "origin-space line evidence still applies"
