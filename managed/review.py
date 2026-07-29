@@ -258,22 +258,61 @@ def _build_review_chain(comments: list, bot_login) -> list:
     return chain
 
 
-def make_origin_resolver(comments, bot_login, head_sha, repo, token):
+def make_origin_resolver(comments, bot_login, head_sha, repo, token, base_sha=None):
     """Build the per-finding origin_resolver for build_carry_forward_ledger (#198),
     or None when disabled / no head_sha / no chain. For each carried #N,
     find_origin recovers its first-raise (origin_sha, anchor); per distinct origin
     SHA the ANCESTOR GATE runs (fetch_compare_status must be ahead/identical — the
     monotone superset guard) then the hygiene'd origin..head diff is parsed. A
-    non-ancestor / API-fail origin → None for that finding → v1 number-identity
-    fallback (conservative, never un-gates). Index cached per origin SHA."""
+    non-ancestor / API-fail origin falls back to the PR's OWN `base..head` window
+    (see `_base_index`) rather than straight to v1 number-identity. Index cached
+    per origin SHA."""
     if not (_origin_anchor_enabled() and head_sha):
         return None
     chain = _build_review_chain(comments, bot_login)
     if not chain:
         return None
     index_cache: dict = {}
+    base_index_cache: list = []   # [] = not computed yet, [None] = unavailable
+
+    def _base_index():
+        """The PR's own `base..head` window, as the fallback when an origin SHA
+        can't be used. This is what un-poisons a REBASED branch: the origin-anchor
+        ancestor gate rejects a force-pushed origin (`not an ancestor of head`),
+        and falling straight back to v1 number-identity pins every carried finding
+        NOT FIXED forever — even when the fix is plainly present in the PR. Seen
+        live on repo-C #17065: 5 force-pushes, both origins rejected, and all six
+        carried blockers pinned NOT FIXED while every one of their files WAS in
+        `base..head`; the verifier even wrote that specialists had re-verified the
+        fixes on direct source read. The PR had to be dismissed by hand to merge.
+
+        Valid where the origin gate is not: `fetch_inter_diff` compares THREE-DOT,
+        so `base..head` is the merge-base diff — the PR's own changes — which no
+        rebase can invalidate. No ancestor probe is needed or meaningful here.
+
+        GATE-SAFE by the same monotone argument as #198: base..head ⊇ origin..head
+        ⊇ baseline..head, so this can only flip `change` toward CHANGED and
+        `file_touched` False→True, and it feeds ONLY pin_and_resurrect's already-
+        validated cross_region trust class — never a new one. The verifier still
+        reads current source, so a fake FIXED cannot pass, and the independent
+        downgrade/silent-drop guards are untouched."""
+        if base_index_cache:
+            return base_index_cache[0]
+        idx = None
+        if base_sha:
+            try:
+                diff = fetch_inter_diff(repo, base_sha, head_sha, token)
+                if diff is not None:
+                    idx = parse_changed_lines(diff)
+            except Exception as e:
+                print(f"  [origin][warn] base window {base_sha[:8]}..{head_sha[:8]} "
+                      f"failed ({type(e).__name__}: {e})", file=sys.stderr)
+        base_index_cache.append(idx)
+        return idx
 
     def _origin_index(origin_sha):
+        """-> (ChangedIndex | None, from_base). `from_base` marks a BASE-space
+        index, whose coordinates do NOT match an origin-space anchor."""
         if origin_sha in index_cache:
             return index_cache[origin_sha]
         idx = None
@@ -292,15 +331,35 @@ def make_origin_resolver(comments, bot_login, head_sha, repo, token):
         except Exception as e:
             print(f"  [origin][warn] {origin_sha[:8]}..{(head_sha or '')[:8]} "
                   f"failed ({type(e).__name__}: {e}) — baseline fallback", file=sys.stderr)
-        index_cache[origin_sha] = idx
-        return idx
+        from_base = False
+        if idx is None:
+            idx = _base_index()
+            if idx is not None:
+                from_base = True
+                print(f"  [origin] {origin_sha[:8]} unusable — falling back to the PR's "
+                      f"own base..head window (file-level only; rebase-proof)", file=sys.stderr)
+        index_cache[origin_sha] = (idx, from_base)
+        return idx, from_base
 
     def resolver(num):
         origin_sha, loc, files = find_origin(chain, num)
         if not (origin_sha and loc):
             return None
-        idx = _origin_index(origin_sha)
-        return (origin_sha, loc, idx, files) if idx is not None else None
+        idx, from_base = _origin_index(origin_sha)
+        if idx is None:
+            return None
+        # COORDINATE SPACES MUST MATCH. `loc` is a line number in the ORIGIN
+        # commit's space (recovered from that review's blob link), and an
+        # `origin..head` diff's old side is the same space — so the line-level
+        # test is real evidence there. A `base..head` diff's old side is BASE
+        # space, so testing an origin-space line against it would match only by
+        # COINCIDENCE, and `change=CHANGED` carries more weight in the pin than
+        # `file_touched` does. Drop `loc` on the base path: the ledger then
+        # records INDETERMINATE and uses only `_referenced_file_touched`, which
+        # is path-level and coordinate-free. That makes the widening exactly what
+        # the safety argument claims — file_touched into the already-validated
+        # cross_region trust class, and nothing else.
+        return (origin_sha, None if from_base else loc, idx, files)
 
     return resolver
 
@@ -2165,7 +2224,8 @@ async def run_review(args):
         # anyway, but skipping the chain-walk + compare API calls is cleaner).
         origin_resolver = (None if promote_sibling_pr is not None
                            else make_origin_resolver(all_comments, bot_login, head_sha,
-                                                      args.repo, bot_token))
+                                                      args.repo, bot_token,
+                                                      base_sha=(meta.get("base") or {}).get("sha")))
         carry_forward_ledger = build_carry_forward_ledger(
             (prior or {}).get("body", ""), diff, prior_sha or "",
             sibling=(promote_sibling_pr is not None),

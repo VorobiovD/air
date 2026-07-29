@@ -1218,7 +1218,21 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
                 res = origin_resolver(num)   # (origin_sha, location, ChangedIndex, referenced_files) | None
                 if res:
                     origin_sha, loc, oidx, ofiles = res
-                    change = finding_changed(loc, oidx) if loc else INDETERMINATE
+                    # `loc=None` WITH an index is the caller signalling a
+                    # FILE-LEVEL-ONLY window: it has evidence about which files
+                    # changed, but in coordinates that don't match this finding's
+                    # anchor (the base..head fallback for a rebased branch, where
+                    # the anchor is origin-space and the diff is base-space). A
+                    # line-level match there would be coincidence, so there is no
+                    # line verdict — and "no line-level evidence" is exactly what
+                    # UNCHANGED means. Pairing it with the coordinate-free
+                    # file_touched below routes the finding into pin_and_resurrect's
+                    # already-validated cross_region trust (verifier read current
+                    # source + the file was edited) instead of the INDETERMINATE
+                    # dead end that pins a fixed finding NOT FIXED forever.
+                    # Unreachable for any other caller: find_origin and the CLI
+                    # resolver both return None unless they have a real anchor.
+                    change = finding_changed(loc, oidx) if loc else UNCHANGED
                     # Cross-FILE parity with round-2: honor a fix in ANY file the
                     # origin finding references (its anchor is in the set), not just
                     # the single anchor — so a round-3+ cross-file fix isn't rewritten
