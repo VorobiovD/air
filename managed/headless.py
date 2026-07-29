@@ -65,7 +65,7 @@ from github_client import (  # noqa: E402
 )
 from prompts import build_pr_context, build_verifier_task  # noqa: E402
 from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py; pure, network-free)
-    should_request_changes, resolve_verdict_event, normalize_verdict_banner, NO_APPROVE_VERDICT_BODY, _extract_review_body, has_conflict_markers,
+    should_request_changes, resolve_verdict_event, normalize_verdict_banner, append_gate_note, NO_APPROVE_VERDICT_BODY, _extract_review_body, has_conflict_markers,
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
 )
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
@@ -1044,6 +1044,13 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # verdict. Gate-safe — touches only the banner, never a parsed anchor; both the
     # dry-run print and the posted comment below use the normalized body.
     review_body = normalize_verdict_banner(review_body, request_changes=rc)
+    # Explain the gate in the body (parity with review.py). Two things a reader
+    # can't otherwise infer: WHY it gated with no blockers (a fail-closed run
+    # pairs [!CAUTION] with "No blockers" and reads as a self-contradiction), and
+    # that pushing a fix won't re-trigger anything on a review_requested-only
+    # caller — the verdict just goes stale against an old SHA. Body-only.
+    review_body = append_gate_note(review_body, request_changes=rc,
+                                   reason=reason, head_sha=head_sha)
 
     if getattr(args, "dry_run", False):
         print(f"\n===== DRY RUN — verdict: {verdict} ({reason or 'clean'}) =====\n")

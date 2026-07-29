@@ -27,6 +27,9 @@ from verdict import (  # noqa: E402
     extract_reviewed_at_sha,
     has_conflict_markers,
     normalize_verdict_banner,
+    append_gate_note,
+    count_category_floored,
+    extract_prior_statuses,
 )
 
 HEAD = "fc3b2e03546153449edba2a224dbbbfff58a14b6"
@@ -2101,3 +2104,98 @@ def test_m7_is_rereview_body_signals():
     # indented / decorated heading is NOT the anchor (line-start h3 exact)
     assert _is_rereview_body("## Code Review\n\n  ### Previous Findings Status\n") is False
     assert _is_rereview_body("## Code Review\n\n### Previous Findings Status — extra\n") is False
+
+
+# ---- append_gate_note: explain a gating verdict, change nothing parsed -------
+
+_GN_SHA = "b" * 40
+
+
+def _gn_body(banner="[!CAUTION]", lead="**No blockers.** 1 to consider"):
+    return (f"## Code Review\n\n> {banner}\n> {lead}\n\n### Medium — consider fixing\n\n"
+            f"**1. a thing**\n\nReviewed at: {_GN_SHA}")
+
+
+def test_gate_note_explains_a_process_failclose():
+    out = append_gate_note(_gn_body(), request_changes=True,
+                                   reason="blocker-class lens did not complete: air-code-reviewer",
+                                   head_sha=_GN_SHA)
+    assert "Gated for a process reason, not a finding" in out
+    assert "air-code-reviewer" in out
+    assert "If no new review appears after you push a fix" in out
+
+
+def test_gate_note_omits_process_line_for_a_real_blocker():
+    """A genuine blocker gate is self-explanatory — only the stale-SHA note applies."""
+    out = append_gate_note(_gn_body(), request_changes=True,
+                                   reason="1 unfixed blocker", head_sha=_GN_SHA)
+    assert "Gated for a process reason" not in out
+    assert "If no new review appears after you push a fix" in out
+
+
+def test_gate_note_noop_when_not_gating():
+    b = _gn_body(banner="[!NOTE]")
+    assert append_gate_note(b, request_changes=False, head_sha=_GN_SHA) == b
+
+
+def test_gate_note_is_idempotent():
+    a = append_gate_note(_gn_body(), request_changes=True, reason="x", head_sha=_GN_SHA)
+    assert append_gate_note(a, request_changes=True, reason="x", head_sha=_GN_SHA) == a
+
+
+def test_gate_note_never_changes_what_the_gate_parses():
+    """The load-bearing property: annotated body must gate byte-identically."""
+    bodies = [
+        _gn_body(),
+        "## Code Review\n\n> [!CAUTION]\n> **1 blocker.**\n\n### Blockers\n\n**1. real**\n\n"
+        f"Reviewed at: {_GN_SHA}",
+        "## Code Review\n\n> [!CAUTION]\n> **No blockers.**\n\n### Medium\n\n"
+        f"**1. leak [sec:pii-exposure]**\n\nReviewed at: {_GN_SHA}",
+        "## Code Review (Re-review)\n\n> [!CAUTION]\n> **1 unfixed.**\n\n"
+        f"### Previous Findings Status\n\n- **#1** [blocker] — NOT FIXED\n\nReviewed at: {_GN_SHA}",
+    ]
+    for b in bodies:
+        a = append_gate_note(b, request_changes=True,
+                                     reason="blocker-class lens did not complete: x",
+                                     head_sha=_GN_SHA)
+        assert count_blockers(a) == count_blockers(b)
+        assert count_category_floored(a) == count_category_floored(b)
+        assert should_request_changes(a)[0] == should_request_changes(b)[0]
+        assert extract_prior_statuses(a) == extract_prior_statuses(b)
+        assert a.rstrip().endswith(_GN_SHA), "trailing Reviewed at: footer displaced"
+
+
+def test_gate_note_skips_a_quoted_alert_inside_a_finding():
+    b = (f"## Code Review\n\n### Blockers\n\n**1. quotes a banner**\n\n> [!CAUTION]\n> not the verdict\n\n"
+         f"Reviewed at: {_GN_SHA}")
+    assert append_gate_note(b, request_changes=True, reason="x", head_sha=_GN_SHA) == b
+
+
+def test_gate_note_never_claims_pushes_do_not_retrigger():
+    """The claim must stay CONDITIONAL: an unconditional 'pushing will not
+    re-trigger' is FALSE on a push-driven caller (types: [.., synchronize, ..]),
+    and shipping a confidently wrong instruction is worse than saying nothing."""
+    out = append_gate_note(_gn_body(), request_changes=True, reason="1 unfixed blocker",
+                           head_sha=_GN_SHA)
+    assert "does not re-trigger" not in out
+    assert "If no new review appears" in out
+
+
+def test_gate_note_omits_rerun_advice_for_a_truncated_diff():
+    """A truncated diff truncates again identically — its reason already carries the
+    real remedy, so 'Re-run the review' would loop the reader."""
+    trunc = append_gate_note(_gn_body(), request_changes=True, head_sha=_GN_SHA,
+                             reason="diff truncated at 500000 chars — raise AIR_HEADLESS_DIFF_CAP or split the PR")
+    assert "Re-run the review to clear it" not in trunc
+    assert "raise AIR_HEADLESS_DIFF_CAP" in trunc
+    lens = append_gate_note(_gn_body(), request_changes=True, head_sha=_GN_SHA,
+                            reason="blocker-class lens did not complete: air-code-reviewer")
+    assert "Re-run the review to clear it" in lens   # transient → re-run IS the remedy
+
+
+def test_gate_note_not_suppressed_by_a_quoted_marker_in_the_body():
+    """Idempotency is keyed to the banner region — a body that merely QUOTES the
+    marker (a review of this feature does) must still get its real note."""
+    b = _gn_body() + "\n\nSomeone pasted <!-- air-gate-note --> into a finding.\n"
+    out = append_gate_note(b, request_changes=True, reason="1 unfixed blocker", head_sha=_GN_SHA)
+    assert "If no new review appears" in out
