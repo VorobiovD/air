@@ -488,7 +488,14 @@ async def run_session(
     # Stop reasons we treat as a clean end-of-turn. Anything else (explicit
     # error, cancelled, unknown future types) is surfaced via
     # SpecialistSessionError so the caller can decide how to fail.
-    TERMINAL_SUCCESS = {"end_turn", "stop_sequence", "max_tokens"}
+    # `max_tokens` is deliberately NOT here: it means the model was CUT OFF
+    # mid-answer. Accepting a truncated turn as a clean end lets a half-written
+    # review reach the gate as if complete — the worst variant of the truncation
+    # class that hit the headless verifier (16K) and learn curation (32K). Surface
+    # it as SpecialistSessionError so the caller decides, exactly like any other
+    # non-clean stop. (Managed path only; the fleet runs headless, but public
+    # Managed-Agents users are on this code.)
+    TERMINAL_SUCCESS = {"end_turn", "stop_sequence"}
 
     # Multi-agent sessions emit `session.status_idle stop=end_turn` BETWEEN
     # the coordinator's turns while sub-agents are still running — the
@@ -509,6 +516,14 @@ async def run_session(
     # 2026-06-20 Haiku 11→9 drop). Empty/unused on the default path.
     received_reviews: list[str] = []
     terminated_reason: str | None = None
+    # A `max_tokens` stop means the model was CUT OFF mid-answer, so whatever
+    # landed in `parts` is definitionally INCOMPLETE. Tracked separately from
+    # `terminated_reason` because the raise below is gated on `not output`:
+    # every other non-clean stop keeps that pre-existing fail-open-with-output
+    # behavior (a complete review followed by a late terminate/error event
+    # still posts), while a truncated turn must raise even WITH partial text —
+    # a half-written review reaching the gate is the whole failure mode.
+    truncated = False
     # SSE / REST events backend can lag in EITHER direction relative to the
     # other:
     #
@@ -553,8 +568,9 @@ async def run_session(
           - `seen_event_ids`     — added via `.add()`, no nonlocal needed
           - `threads` (tracker)  — mutated via `.on_event()`, no nonlocal needed
           - `terminated_reason`  — rebound, requires nonlocal
+          - `truncated`          — rebound, requires nonlocal
         """
-        nonlocal terminated_reason
+        nonlocal terminated_reason, truncated
         eid = getattr(event, "id", None)
         if eid:
             if eid in seen_event_ids:
@@ -600,6 +616,8 @@ async def run_session(
                     return None
                 return "break"
             terminated_reason = f"idle with stop_reason={stop_type!r}"
+            if stop_type == "max_tokens":
+                truncated = True
             return "break-error"
         if t == "session.status_terminated":
             terminated_reason = "session terminated"
@@ -900,7 +918,7 @@ async def run_session(
     # leading header is line-start; an extra blank line between blocks is inert
     # for every downstream consumer.
     output = "\n".join(parts).strip()
-    if terminated_reason and not output:
+    if terminated_reason and (truncated or not output):
         raise SpecialistSessionError(label, terminated_reason)
     if require_dispatch and not threads.ever_dispatched:
         # The session "succeeded" — output and all — but no sub-agent

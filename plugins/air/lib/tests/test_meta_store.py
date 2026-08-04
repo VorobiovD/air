@@ -392,19 +392,23 @@ def test_claim_learn_lock_false_when_not_due(fake):
 # every store-backed repo, with no error anywhere because each caller shrugs off a
 # failed lookup. These tests lock the two implementations to one contract.
 
-def _memory_store_module():
-    """managed/memory_store.py, loaded without needing it on sys.path."""
-    import importlib.util
-    p = LIB.parents[2] / "managed" / "memory_store.py"
-    if not p.is_file():
-        pytest.skip("managed/memory_store.py not present")
-    spec = importlib.util.spec_from_file_location("_ms_parity", p)
-    mod = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(mod)
-    except Exception as e:                     # needs the anthropic SDK
-        pytest.skip(f"memory_store import unavailable: {e}")
-    return mod
+def _memory_store_dir_prefix():
+    """`memory_store._dir_prefix`, extracted WITHOUT importing the module.
+
+    Importing memory_store.py needs the anthropic SDK, which the air-lib-tests
+    workflow does not install — so an import-and-skip made this parity check
+    vanish silently in exactly the CI that should enforce it. Compile just the one
+    function from source instead: no SDK, no skip, runs everywhere."""
+    import ast
+    src_path = LIB.parents[2] / "managed" / "memory_store.py"
+    assert src_path.is_file(), "managed/memory_store.py missing — parity unverifiable"
+    tree = ast.parse(src_path.read_text())
+    fn = next((n for n in tree.body
+               if isinstance(n, ast.FunctionDef) and n.name == "_dir_prefix"), None)
+    assert fn is not None, "memory_store._dir_prefix not found — did it get renamed?"
+    ns: dict = {}
+    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(src_path), "exec"), ns)
+    return ns["_dir_prefix"]
 
 
 @pytest.mark.parametrize("path,expected", [
@@ -417,8 +421,7 @@ def test_dir_prefix_matches_memory_store(path, expected):
     """Both modules must derive the same directory prefix — a divergence here is
     what a future API tweak would exploit to break one and not the other."""
     assert meta._dir_prefix(path) == expected
-    ms = _memory_store_module()
-    assert ms._dir_prefix(path) == expected
+    assert _memory_store_dir_prefix()(path) == expected
 
 
 _DIR_SHAPED = re.compile(r"^(/([^/\x00]+/)*)?$")
@@ -432,23 +435,34 @@ def test_dir_prefix_is_always_api_legal(path):
         f"{meta._dir_prefix(path)!r} is not a legal path_prefix"
 
 
-def test_no_file_path_is_ever_sent_as_path_prefix():
-    """Source-level guard: neither store query may interpolate a FILE path into
-    path_prefix. Catches a regression even if nobody runs it against the API."""
+def test_all_store_listings_go_through_the_paginating_helper():
+    """Architecture guard: `_store_list_all` is the ONE place that lists memories,
+    so a caller cannot reintroduce either failure mode — a FILE path_prefix (HTTP
+    400) or a page-1-only read (a known author reported NEW)."""
     src = (LIB / "meta.py").read_text()
-    sites = re.findall(r"path_prefix=\{([^}]*)\}", src)
-    assert sites, "no path_prefix query found — did the store API access move?"
-    for expr in sites:
-        if "_dir_prefix" in expr:
-            continue
-        # A bare identifier is allowed only if it is itself assigned from
-        # _dir_prefix (e.g. `q = quote(_dir_prefix(path))` used as `{q}`).
-        ident = expr.strip()
-        assert re.fullmatch(r"[A-Za-z_]\w*", ident), (
-            f"path_prefix={{{expr}}} is neither a _dir_prefix() call nor a simple "
-            "variable this guard can verify")
-        assigned = re.search(rf"^\s*{re.escape(ident)}\s*=.*_dir_prefix", src, re.M)
-        assert assigned, (
-            f"path_prefix={{{ident}}} is not derived from _dir_prefix() — a FILE "
-            "path here returns HTTP 400 and silently disables the learn counter, "
-            "author reads and mirror-due")
+    listings = re.findall(r'_store_api\(\s*"GET",\s*f?"[^"]*?/memories\?[^)]*\)', src, re.S)
+    assert listings, "no /memories listing found — did the store access move?"
+    assert len(listings) == 1, (
+        f"{len(listings)} raw /memories listings; exactly one (inside "
+        "_store_list_all) is allowed so pagination + prefix shape stay enforced")
+    assert "next_page" in src, "the single listing does not follow the next_page cursor"
+
+
+def test_every_listing_caller_passes_a_directory_prefix():
+    """The API rejects a FILE path_prefix (HTTP 400). Every _store_list_all call
+    must therefore hand it a _dir_prefix(...) result."""
+    src = (LIB / "meta.py").read_text()
+    # (?<!def ) excludes the helper's own definition line
+    calls = re.findall(r"(?<!def )_store_list_all\(([^)]*\)?[^)]*)\)", src)
+    assert calls, "no _store_list_all call sites found"
+    for c in calls:
+        assert "_dir_prefix" in c, (
+            f"_store_list_all({c}) is not given a _dir_prefix() result — a file "
+            "path here returns HTTP 400 and silently disables the counter/reads")
+
+
+def test_both_modules_follow_the_next_page_cursor():
+    """Pagination parity, not just prefix parity."""
+    assert "next_page" in (LIB / "meta.py").read_text()
+    assert "next_page" in (LIB.parents[2] / "managed" / "memory_store.py").read_text(), \
+        "memory_store.py pagination contract changed — re-check meta.py's copy"

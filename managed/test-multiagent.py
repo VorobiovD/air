@@ -366,6 +366,46 @@ def test_no_require_dispatch_keeps_solo_sessions_working():
 
 
 # ---------------------------------------------------------------------------
+# Truncation (`stop=max_tokens`) must NEVER return as a clean success
+# ---------------------------------------------------------------------------
+
+
+def test_max_tokens_idle_raises_even_with_partial_output():
+    """A truncated turn is unrecoverable EVEN WITH partial text captured.
+
+    The realistic cutoff leaves a half-written review in `parts`, so a raise
+    gated only on `not output` never fires — the exact gap the first pass at
+    this fix had (dropping `max_tokens` from TERMINAL_SUCCESS alone is inert
+    here). A half-written `## Code Review` reaching the gate is the failure
+    mode; partial text is the DANGER, not a reason to accept the turn.
+    """
+    events = [_msg("## Code Review\n\n### Blockers\n\n**1. half-writt", "e1"),
+              _idle("e2", stop="max_tokens")]
+    with pytest.raises(SpecialistSessionError) as exc:
+        _run(events)
+    assert "max_tokens" in str(exc.value)
+
+
+def test_max_tokens_idle_raises_with_no_output():
+    # The narrow case (cut off before any agent.message landed) also raises.
+    with pytest.raises(SpecialistSessionError):
+        _run([_idle("e1", stop="max_tokens")])
+
+
+def test_other_nonclean_stops_keep_fail_open_with_output():
+    """Regression guard: the truncation raise must stay TRUNCATION-specific.
+
+    Any other non-clean stop keeps its pre-existing behavior — a session that
+    delivered a COMPLETE review and then hit a late/unknown stop still returns
+    that output rather than throwing it away. Widening the raise to every
+    `terminated_reason` would discard a complete, postable review.
+    """
+    events = [_msg("## Code Review\ncomplete body", "e1"),
+              _idle("e2", stop="some_future_stop_type")]
+    assert "complete body" in _run(events)
+
+
+# ---------------------------------------------------------------------------
 # Session attribution metadata (C8)
 # ---------------------------------------------------------------------------
 

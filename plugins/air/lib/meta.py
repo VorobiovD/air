@@ -102,17 +102,35 @@ def _dir_prefix(path: str) -> str:
     return (head + "/") if head else "/"
 
 
+def _store_list_all(store_id: str, prefix: str) -> list[dict]:
+    """Every memory under `prefix`, following the `next_page` cursor.
+
+    Switching from a FILE path_prefix (which returned at most one item) to a
+    DIRECTORY prefix made pagination load-bearing: `/authors/` lists EVERY author,
+    so on a repo with more authors than one page, a lookup that only read page 1
+    would find nothing and report a known author as NEW — precisely the
+    misclassification READ_AUTHOR_UNKNOWN exists to prevent, and silently. Mirrors
+    `managed/memory_store.py::_paginate` (same `next_page` contract); kept separate
+    only because this module is stdlib-only by design."""
+    items: list[dict] = []
+    page = None
+    while True:
+        q = f"path_prefix={urllib.parse.quote(prefix, safe='')}"
+        if page:
+            q += f"&page={urllib.parse.quote(page, safe='')}"
+        resp = _store_api("GET", f"/memory_stores/{store_id}/memories?{q}")
+        items.extend(resp.get("data", []))
+        page = resp.get("next_page")
+        if not page:
+            return items
+
+
 def _store_find_meta(store_id: str) -> tuple[dict, str, str] | None:
     """Return (meta, content_sha256, memory_id) or None when absent."""
     # No `depth`/`order_by`: the API dropped `order_by` and bounds `depth` to
     # 0-1. `path_prefix` must be DIRECTORY-shaped — a full file path 400s — so
     # list the containing directory and match the exact path in the loop below.
-    listing = _store_api(
-        "GET",
-        f"/memory_stores/{store_id}/memories"
-        f"?path_prefix={urllib.parse.quote(_dir_prefix(STORE_META_PATH), safe='')}",
-    )
-    for item in listing.get("data", []):
+    for item in _store_list_all(store_id, _dir_prefix(STORE_META_PATH)):
         # Live API lists memories as type "memory_metadata" (docs examples
         # show "memory") — accept both. Observed on the repo-D pilot.
         if item.get("type") in ("memory", "memory_metadata") \
@@ -363,11 +381,8 @@ def cmd_read_author(args) -> int:
     # The login therefore no longer reaches the query string at all — strictly
     # safer than the previous percent-encoded file path, and _LOGIN_RE above still
     # rejects anything outside GitHub's login charset.
-    q = urllib.parse.quote(_dir_prefix(path), safe="")
     try:
-        listing = _store_api(
-            "GET", f"/memory_stores/{store_id}/memories?path_prefix={q}")
-        for item in listing.get("data", []):
+        for item in _store_list_all(store_id, _dir_prefix(path)):
             if item.get("type") in ("memory", "memory_metadata") \
                     and item.get("path") == path:
                 mem = _store_api(
