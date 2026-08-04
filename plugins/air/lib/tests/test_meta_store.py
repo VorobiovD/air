@@ -466,6 +466,9 @@ def _memory_store_match_author_path():
     # bot authors carry brackets; case folding must not disturb them
     (["/authors/Dependabot[bot].md"], "dependabot[bot]",
      "/authors/Dependabot[bot].md"),
+    # a None entry must not crash either copy (the two used to differ: one had
+    # `p.lower()`, the other `(p or "").lower()`, and no fixture covered it)
+    ([None, "/authors/vorobiovd.md"], "VorobiovD", "/authors/vorobiovd.md"),
 ])
 def test_match_author_path_matches_memory_store(paths, login, expected):
     assert meta._match_author_path(paths, login) == expected

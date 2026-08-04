@@ -550,16 +550,31 @@ def fetch_issue_comments(repo: str, pr_number: int, token: str) -> list[dict]:
 
 
 def fetch_recent_review_bodies(repo: str, token: str, limit: int = 30,
-                               bot_login: str | None = None) -> list[dict]:
-    """Return [{'pr': <num>, 'body': <## Code Review body>}] for the most-recent
-    `limit` closed PRs that air reviewed — the input to the headless REVIEW-HISTORY
-    (KAIROS) regeneration. Newest-first.
+                               bot_login: str | None = None,
+                               bot_logins=None) -> list[dict]:
+    """Return [{'pr': <num>, 'body': …, 'author': <PR author login>}] for the
+    most-recent `limit` closed PRs that air reviewed — the input to the headless
+    REVIEW-HISTORY (KAIROS) regeneration and to author-file seeding. Newest-first.
 
-    Anti-spoof: only a comment whose body starts with `## Code Review\\n` AND
-    (when `bot_login` is given) is authored by the bot counts — same guard as
-    `find_prior_review`, so a PR participant can't inject a fake history row.
+    Anti-spoof: only a comment whose body starts with `## Code Review` AND is
+    authored by one of air's accounts counts — same guard as `find_prior_review`,
+    so a PR participant can't inject a fake history row. The allowed set is
+    `bot_logins | {bot_login}`: air rotates through PATs, so filtering on the
+    CURRENT token's login alone would drop legitimately-air reviews posted under
+    a previously-active account (`bot_logins` mirrors `review._air_bot_logins()`).
+
+    When the allowed set is EMPTY the filter is off and any `## Code Review`
+    comment counts — preserved because REVIEW-HISTORY has always behaved that
+    way and is wholesale-regenerated (self-healing) each learn. A consumer whose
+    write is NOT self-healing must refuse to run on unauthenticated bodies
+    rather than rely on this: `learn_headless.seed_missing_author_files` skips
+    entirely without a resolved identity, because its author-file write is
+    create-only and then protected by the curation fidelity check, so a poisoned
+    entry would be sticky.
+
     Best-effort: a per-PR fetch error skips that PR (a partial history is fine).
     """
+    allowed = {x for x in (set(bot_logins or ()) | {bot_login}) if x}
     try:
         prs = _github_paginate(
             f"https://api.github.com/repos/{repo}/pulls"
@@ -590,7 +605,7 @@ def fetch_recent_review_bodies(repo: str, token: str, limit: int = 30,
             # miss "## Code Review (Re-review)" and undercount the history.
             if not body.startswith(BOT_REVIEW_PREFIXES):
                 continue
-            if bot_login and (c.get("user") or {}).get("login") != bot_login:
+            if allowed and (c.get("user") or {}).get("login") not in allowed:
                 continue
             review = c  # comments are oldest-first; keep walking → ends on newest
         if review:

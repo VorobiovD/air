@@ -186,20 +186,25 @@ def match_author_path(paths, login: str) -> str | None:
     if canonical in paths:
         return canonical
     want = canonical.lower()
-    cands = sorted(p for p in paths if p.lower() == want)
+    cands = sorted(p for p in paths if (p or "").lower() == want)
     if len(cands) == 1:
         return cands[0]
     return None
 
 
-def resolve_author_path(store_id: str, login: str) -> str:
+def resolve_author_path(store_id: str, login: str, *, listing=None) -> str:
     """`match_author_path` against the live store, falling back to the
     canonical path when the author has no file (so a caller can create it).
+
+    Pass `listing` (a prior `list_memories(AUTHOR_PREFIX)` result) to reuse it
+    instead of re-listing — the per-review path calls this and then immediately
+    lists the same prefix again inside `update_with`.
 
     Logs the case-variant adoption and the ambiguous case — a silent resolution
     here is what made the repo-C orphan invisible for weeks.
     """
-    paths = list_memories(store_id, path_prefix=AUTHOR_PREFIX)
+    paths = list_memories(store_id, path_prefix=AUTHOR_PREFIX) \
+        if listing is None else listing
     canonical = author_path(login)
     hit = match_author_path(paths, login)
     if hit is None:

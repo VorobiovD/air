@@ -612,7 +612,7 @@ def test_seed_creates_files_for_authors_with_none(fake):
     store, _ = fake
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
-        pr_bodies=_bodies((10, "carol"), (11, "carol")))
+        authenticated=True, pr_bodies=_bodies((10, "carol"), (11, "carol")))
     assert res["seeded"] == ["/authors/carol.md"]
     assert "Sibling call site missed" in store.files["/authors/carol.md"]
 
@@ -621,7 +621,7 @@ def test_seed_skips_authors_that_already_have_a_file(fake):
     store, _ = fake
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
-        pr_bodies=_bodies((1, "alice"), (2, "alice")))
+        authenticated=True, pr_bodies=_bodies((1, "alice"), (2, "alice")))
     assert res["seeded"] == []
     assert store.files["/authors/alice.md"].startswith("# alice")   # untouched
 
@@ -633,7 +633,7 @@ def test_seed_is_case_tolerant_about_existing_files(fake):
     store.files["/authors/dave.md"] = "# dave\n- **Z** (1x: #5 | last 0 PRs: 0 clean): x"
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
-        pr_bodies=_bodies((20, "Dave"), (21, "Dave")))
+        authenticated=True, pr_bodies=_bodies((20, "Dave"), (21, "Dave")))
     assert res["seeded"] == []
     assert "/authors/Dave.md" not in store.files
 
@@ -642,7 +642,7 @@ def test_seed_defers_authors_below_the_review_floor(fake):
     store, _ = fake
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
-        pr_bodies=_bodies((30, "erin")))          # a single review isn't a pattern
+        authenticated=True, pr_bodies=_bodies((30, "erin")))          # a single review isn't a pattern
     assert res["seeded"] == [] and res["thin"] == ["erin"]
 
 
@@ -650,7 +650,7 @@ def test_seed_ignores_bot_authors(fake):
     store, _ = fake
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
-        pr_bodies=_bodies((40, "dependabot[bot]"), (41, "dependabot[bot]")))
+        authenticated=True, pr_bodies=_bodies((40, "dependabot[bot]"), (41, "dependabot[bot]")))
     assert res["seeded"] == []
 
 
@@ -662,7 +662,7 @@ def test_seed_refuses_a_fabricated_count(fake):
                 "- **Invented** (9x: #50, #51 | last 0 PRs: 0 clean): claims 9.")
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t", complete=inflated, log=lambda *_: None,
-        pr_bodies=_bodies((50, "frank"), (51, "frank")))
+        authenticated=True, pr_bodies=_bodies((50, "frank"), (51, "frank")))
     assert res["seeded"] == [] and "/authors/frank.md" not in store.files
 
 
@@ -674,7 +674,7 @@ def test_seed_refuses_invented_pr_refs(fake):
                 "- **Real name** (2x: #60, #999 | last 0 PRs: 0 clean): cites #999.")
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t", complete=invented, log=lambda *_: None,
-        pr_bodies=_bodies((60, "gina"), (61, "gina")))
+        authenticated=True, pr_bodies=_bodies((60, "gina"), (61, "gina")))
     assert res["seeded"] == [] and "/authors/gina.md" not in store.files
 
 
@@ -686,7 +686,7 @@ def test_seed_refuses_lifecycle_tags_on_a_new_file(fake):
                 "- **Thing** (2x: #70, #71 | last 0 PRs: 0 clean) (archived): x.")
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t", complete=tagged, log=lambda *_: None,
-        pr_bodies=_bodies((70, "hank"), (71, "hank")))
+        authenticated=True, pr_bodies=_bodies((70, "hank"), (71, "hank")))
     assert res["seeded"] == []
 
 
@@ -695,7 +695,7 @@ def test_seed_accepts_no_patterns_sentinel(fake):
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t",
         complete=lambda p, c, label="": "NO-PATTERNS", log=lambda *_: None,
-        pr_bodies=_bodies((80, "ivy"), (81, "ivy")))
+        authenticated=True, pr_bodies=_bodies((80, "ivy"), (81, "ivy")))
     assert res["seeded"] == [] and "/authors/ivy.md" not in store.files
 
 
@@ -712,7 +712,7 @@ def test_seed_never_overwrites_a_file_that_appeared_mid_run(fake):
     L.memory_store.update_with = racing
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
-        pr_bodies=_bodies((90, "jack"), (91, "jack")))
+        authenticated=True, pr_bodies=_bodies((90, "jack"), (91, "jack")))
     assert res["seeded"] == []
     assert store.files["/authors/jack.md"] == real
 
@@ -723,7 +723,7 @@ def test_seed_caps_authors_per_run(fake, monkeypatch):
     specs = [(100 + i, who) for who in ("kim", "lee") for i in (0, 1)]
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
-        pr_bodies=_bodies(*specs))
+        authenticated=True, pr_bodies=_bodies(*specs))
     assert len(res["seeded"]) == 1 and len(res["deferred"]) == 1
 
 
@@ -731,7 +731,7 @@ def test_seed_dry_run_writes_nothing(fake):
     store, _ = fake
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
-        dry_run=True, pr_bodies=_bodies((110, "mia"), (111, "mia")))
+        dry_run=True, authenticated=True, pr_bodies=_bodies((110, "mia"), (111, "mia")))
     assert res["seeded"] == ["/authors/mia.md"]
     assert "/authors/mia.md" not in store.files
 
@@ -743,5 +743,82 @@ def test_seed_failure_never_aborts_the_learn_run(fake):
         raise RuntimeError("model outage")
     res = L.seed_missing_author_files(
         "o/r", "store_1", token="t", complete=boom, log=lambda *_: None,
-        pr_bodies=_bodies((120, "nina"), (121, "nina")))
+        authenticated=True, pr_bodies=_bodies((120, "nina"), (121, "nina")))
     assert res["seeded"] == []
+
+
+def test_seed_refuses_unattested_bodies(fake):
+    """The blocker air's own review caught: any user who can comment on a merged
+    PR can post a `## Code Review` body. The seed write is create-only and then
+    protected by the curation fidelity check, so a poisoned pattern would be
+    STICKY — unlike REVIEW-HISTORY, which is regenerated wholesale each learn.
+    Supplied bodies must therefore be attested as air-authored."""
+    store, _ = fake
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
+        pr_bodies=_bodies((130, "oscar"), (131, "oscar")))   # no authenticated=True
+    assert res["skipped"] == "unauthenticated-bodies"
+    assert res["seeded"] == [] and "/authors/oscar.md" not in store.files
+
+
+def test_seed_skips_when_bot_identity_is_unresolvable(fake, monkeypatch):
+    """Fetching for ourselves requires a resolved identity to filter on; without
+    one we must NOT fall back to accepting every `## Code Review` comment."""
+    store, _ = fake
+    monkeypatch.setattr(L, "_air_review_identity", lambda token, log=print: frozenset())
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None)
+    assert res["skipped"] == "no-bot-identity" and res["seeded"] == []
+
+
+def test_seed_self_fetch_filters_on_air_identity(fake, monkeypatch):
+    """When the seed fetches for itself it must pass the identity allowlist
+    through to the fetcher — the guard is off when the set is empty."""
+    store, _ = fake
+    seen = {}
+    monkeypatch.setattr(L, "_air_review_identity",
+                        lambda token, log=print: frozenset({"air-bot"}))
+    import github_client as gc
+
+    def spy(repo, token, limit=30, bot_login=None, bot_logins=None):
+        seen["bot_logins"] = bot_logins
+        return _bodies((140, "pat"), (141, "pat"))
+    monkeypatch.setattr(gc, "fetch_recent_review_bodies", spy)
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None)
+    assert seen["bot_logins"] == frozenset({"air-bot"})
+    assert res["seeded"] == ["/authors/pat.md"]
+
+
+def test_seed_accepts_a_lifecycle_word_inside_prose(fake):
+    """The tag guard is anchored to where a lifecycle tag actually appears, so a
+    tendency sentence that merely parenthesizes the word is not refused."""
+    store, _ = fake
+
+    def prose(persona, content, *, label=""):
+        return ("# Author Patterns: quinn\n"
+                "- **Coverage slippage** (2x: #150, #151 | last 0 PRs: 0 clean): "
+                "test coverage is (declining) across touched modules.")
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=prose, log=lambda *_: None,
+        authenticated=True, pr_bodies=_bodies((150, "quinn"), (151, "quinn")))
+    assert res["seeded"] == ["/authors/quinn.md"]
+
+
+def test_seed_still_refuses_a_real_lifecycle_tag(fake):
+    store, _ = fake
+
+    def tagged(persona, content, *, label=""):
+        return ("# Author Patterns: rita\n"
+                "- **Thing** (2x: #160, #161 | last 0 PRs: 0 clean) (archived): x.")
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=tagged, log=lambda *_: None,
+        authenticated=True, pr_bodies=_bodies((160, "rita"), (161, "rita")))
+    assert res["seeded"] == []
+
+
+def test_seed_persona_frames_reviews_as_untrusted_data():
+    """Reviews quote diffs + PR conversation written by others, so the prompt
+    must mark them DATA — the same framing the curation path uses."""
+    assert "DATA" in L._SEED_PERSONA
+    assert "instructions" in L._SEED_PERSONA.lower()
