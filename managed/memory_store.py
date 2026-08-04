@@ -152,6 +152,70 @@ def _dir_prefix(path: str) -> str:
     return (head + "/") if head else "/"
 
 
+def author_path(login: str) -> str:
+    """The canonical store path for an author's pattern file."""
+    return f"{AUTHOR_PREFIX}{login}.md"
+
+
+def match_author_path(paths, login: str) -> str | None:
+    """Pick the author-file path for `login` from `paths`, tolerating a CASE
+    VARIANT. Returns None when the author has no file at all.
+
+    Pure + dependency-free so `plugins/air/lib/meta.py` (stdlib-only, its own
+    raw-REST copy of this API) can hold a byte-equivalent copy and a parity
+    test can lock the two together — same arrangement as `_dir_prefix`.
+
+    Why tolerate case: GitHub logins are case-INSENSITIVE for identity but
+    case-PRESERVING in the API, while store paths are case-SENSITIVE. So a file
+    written as `/authors/vorobiovd.md` (the one-shot wiki migration took the
+    login from a lowercased wiki heading) is INVISIBLE to a later exact-case
+    read for login `VorobiovD` — which silently orphans that history AND makes
+    every review for that author pattern-blind. Observed live on repo-C: 4
+    patterns frozen at the migration, `read-author` reporting "new author"
+    forever, `pattern_writer` no-opping on every review. Resolving
+    case-insensitively heals it in place — no migration, and no divergent
+    second file (the alternative, writing the canonical case, would leave two
+    half-histories).
+
+    Exact match wins. Otherwise a UNIQUE case-insensitive match is adopted.
+    Two or more non-exact candidates are AMBIGUOUS — never silently pick one of
+    two histories, so return None (treated as absent) and let the warning
+    surface it for a manual merge.
+    """
+    canonical = author_path(login)
+    if canonical in paths:
+        return canonical
+    want = canonical.lower()
+    cands = sorted(p for p in paths if p.lower() == want)
+    if len(cands) == 1:
+        return cands[0]
+    return None
+
+
+def resolve_author_path(store_id: str, login: str) -> str:
+    """`match_author_path` against the live store, falling back to the
+    canonical path when the author has no file (so a caller can create it).
+
+    Logs the case-variant adoption and the ambiguous case — a silent resolution
+    here is what made the repo-C orphan invisible for weeks.
+    """
+    paths = list_memories(store_id, path_prefix=AUTHOR_PREFIX)
+    canonical = author_path(login)
+    hit = match_author_path(paths, login)
+    if hit is None:
+        dupes = sorted(p for p in paths if p.lower() == canonical.lower())
+        if len(dupes) > 1:
+            print(f"  [store][warn] {len(dupes)} case-variant author files for "
+                  f"{login!r}: {dupes} — using {canonical}; merge them manually",
+                  file=sys.stderr)
+        return canonical
+    if hit != canonical:
+        print(f"  [store] author file {hit} matches login {login!r} "
+              f"case-insensitively — using it (canonical is {canonical})",
+              file=sys.stderr)
+    return hit
+
+
 def read_memory(store_id: str, path: str) -> tuple[str, str, str] | None:
     """Return (content, content_sha256, memory_id) or None if absent."""
     entry = list_memories(store_id, path_prefix=_dir_prefix(path)).get(path)

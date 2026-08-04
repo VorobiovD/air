@@ -5,6 +5,7 @@ Network-free: the store API + render + counter are faked, and the LLM
 orchestration + the safety guards (size-floor, isolation, race-yield, dry-run).
 """
 
+import re
 import sys
 import types
 from pathlib import Path
@@ -30,9 +31,14 @@ class FakeStore:
     def get_store_id(self, repo, flow="review"):
         return self.store_id
 
-    def list_memories(self, store_id, prefix="/"):
+    def list_memories(self, store_id, path_prefix="/"):
+        # Keyword name MUST match the real `memory_store.list_memories`
+        # (`path_prefix`) — it was `prefix` here, so a caller passing the real
+        # keyword TypeError'd against the fake only, and any code path doing so
+        # looked broken in tests while working in production (and vice versa).
         return {p: {"id": f"mem_{i}", "content_sha256": f"sha_{i}"}
-                for i, p in enumerate(self.files)}
+                for i, p in enumerate(self.files)
+                if p.startswith(path_prefix)}
 
     def read_memory(self, store_id, path):
         if path in self.files:
@@ -92,6 +98,10 @@ def _store_module(store):
         COMMON_FINDINGS_PATH=memory_store.COMMON_FINDINGS_PATH,
         SERVICE_PATTERNS_PATH=memory_store.SERVICE_PATTERNS_PATH,
         PROJECT_PROFILE_PATH=memory_store.PROJECT_PROFILE_PATH,
+        # Pure path helpers — use the REAL ones so a seeding test exercises the
+        # same case-tolerant resolution production does.
+        author_path=memory_store.author_path,
+        match_author_path=memory_store.match_author_path,
         get_store_id=store.get_store_id,
         list_memories=store.list_memories,
         read_memory=store.read_memory,
@@ -570,3 +580,168 @@ def test_record_usage_tags_batched_per_call():
     assert label == "/glossary.md" and u["input_tokens"] == 100 and batched is False
     assert L._usage_rows[1][3] is True
     L._usage_rows.clear()
+
+
+# ---------------------------------------------------------------------------
+# Author-file SEEDING (the bootstrap fix)
+# ---------------------------------------------------------------------------
+# `pattern_writer` defers author-file creation to learn (must_exist=True), but
+# learn only ever curated files that ALREADY existed — so nothing anywhere
+# created the first one. A store bootstrapped empty stayed empty forever (368
+# reviews on a real repo, 0 patterns learned), and a NEW author on a populated
+# store was never added either.
+
+def _bodies(*specs):
+    """specs = (pr, author) → the fetch_recent_review_bodies shape."""
+    return [{"pr": pr, "author": who,
+             "body": f"## Code Review\n\n**1. finding on PR {pr}**"}
+            for pr, who in specs]
+
+
+def _seed_ok(persona, content, *, label=""):
+    """A well-formed proposal citing only supplied PRs, counts within bounds."""
+    login = label.split(":", 1)[1]
+    prs = re.findall(r"#(\d+)", content.split("REVIEWS SUPPLIED")[1].split("\n")[0])
+    return (f"# Author Patterns: {login}\n"
+            f"- **Sibling call site missed** ({len(prs)}x: "
+            f"{', '.join('#' + p for p in prs)} | last 0 PRs: 0 clean): "
+            f"fixes one branch, misses the sibling.")
+
+
+def test_seed_creates_files_for_authors_with_none(fake):
+    store, _ = fake
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
+        pr_bodies=_bodies((10, "carol"), (11, "carol")))
+    assert res["seeded"] == ["/authors/carol.md"]
+    assert "Sibling call site missed" in store.files["/authors/carol.md"]
+
+
+def test_seed_skips_authors_that_already_have_a_file(fake):
+    store, _ = fake
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
+        pr_bodies=_bodies((1, "alice"), (2, "alice")))
+    assert res["seeded"] == []
+    assert store.files["/authors/alice.md"].startswith("# alice")   # untouched
+
+
+def test_seed_is_case_tolerant_about_existing_files(fake):
+    """An author whose file exists under a DIFFERENT case already has a history —
+    seeding a second file would split it in two (the repo-C orphan shape)."""
+    store, _ = fake
+    store.files["/authors/dave.md"] = "# dave\n- **Z** (1x: #5 | last 0 PRs: 0 clean): x"
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
+        pr_bodies=_bodies((20, "Dave"), (21, "Dave")))
+    assert res["seeded"] == []
+    assert "/authors/Dave.md" not in store.files
+
+
+def test_seed_defers_authors_below_the_review_floor(fake):
+    store, _ = fake
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
+        pr_bodies=_bodies((30, "erin")))          # a single review isn't a pattern
+    assert res["seeded"] == [] and res["thin"] == ["erin"]
+
+
+def test_seed_ignores_bot_authors(fake):
+    store, _ = fake
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
+        pr_bodies=_bodies((40, "dependabot[bot]"), (41, "dependabot[bot]")))
+    assert res["seeded"] == []
+
+
+def test_seed_refuses_a_fabricated_count(fake):
+    store, _ = fake
+
+    def inflated(persona, content, *, label=""):
+        return ("# Author Patterns: frank\n"
+                "- **Invented** (9x: #50, #51 | last 0 PRs: 0 clean): claims 9.")
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=inflated, log=lambda *_: None,
+        pr_bodies=_bodies((50, "frank"), (51, "frank")))
+    assert res["seeded"] == [] and "/authors/frank.md" not in store.files
+
+
+def test_seed_refuses_invented_pr_refs(fake):
+    store, _ = fake
+
+    def invented(persona, content, *, label=""):
+        return ("# Author Patterns: gina\n"
+                "- **Real name** (2x: #60, #999 | last 0 PRs: 0 clean): cites #999.")
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=invented, log=lambda *_: None,
+        pr_bodies=_bodies((60, "gina"), (61, "gina")))
+    assert res["seeded"] == [] and "/authors/gina.md" not in store.files
+
+
+def test_seed_refuses_lifecycle_tags_on_a_new_file(fake):
+    store, _ = fake
+
+    def tagged(persona, content, *, label=""):
+        return ("# Author Patterns: hank\n"
+                "- **Thing** (2x: #70, #71 | last 0 PRs: 0 clean) (archived): x.")
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=tagged, log=lambda *_: None,
+        pr_bodies=_bodies((70, "hank"), (71, "hank")))
+    assert res["seeded"] == []
+
+
+def test_seed_accepts_no_patterns_sentinel(fake):
+    store, _ = fake
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t",
+        complete=lambda p, c, label="": "NO-PATTERNS", log=lambda *_: None,
+        pr_bodies=_bodies((80, "ivy"), (81, "ivy")))
+    assert res["seeded"] == [] and "/authors/ivy.md" not in store.files
+
+
+def test_seed_never_overwrites_a_file_that_appeared_mid_run(fake):
+    """CREATE-ONLY: a concurrent learn (or a migration) landing a real history
+    between the listing and the write must win — a seed is the weaker claim."""
+    store, _ = fake
+    real = "# jack\n- **Real history** (5x: #1 | last 0 PRs: 0 clean): keep me"
+
+    def racing(store_id, path, fn, default="", must_exist=False):
+        store.files[path] = real            # appears after the listing
+        return store.update_with(store_id, path, fn, default=default,
+                                 must_exist=must_exist)
+    L.memory_store.update_with = racing
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
+        pr_bodies=_bodies((90, "jack"), (91, "jack")))
+    assert res["seeded"] == []
+    assert store.files["/authors/jack.md"] == real
+
+
+def test_seed_caps_authors_per_run(fake, monkeypatch):
+    store, _ = fake
+    monkeypatch.setattr(L, "_SEED_MAX_AUTHORS", 1)
+    specs = [(100 + i, who) for who in ("kim", "lee") for i in (0, 1)]
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
+        pr_bodies=_bodies(*specs))
+    assert len(res["seeded"]) == 1 and len(res["deferred"]) == 1
+
+
+def test_seed_dry_run_writes_nothing(fake):
+    store, _ = fake
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=_seed_ok, log=lambda *_: None,
+        dry_run=True, pr_bodies=_bodies((110, "mia"), (111, "mia")))
+    assert res["seeded"] == ["/authors/mia.md"]
+    assert "/authors/mia.md" not in store.files
+
+
+def test_seed_failure_never_aborts_the_learn_run(fake):
+    store, _ = fake
+
+    def boom(persona, content, *, label=""):
+        raise RuntimeError("model outage")
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=boom, log=lambda *_: None,
+        pr_bodies=_bodies((120, "nina"), (121, "nina")))
+    assert res["seeded"] == []

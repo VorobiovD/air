@@ -30,7 +30,10 @@ def apply_review_to_store(store_id: str, author_login: str, pr_number: int,
     file yet (creation is /air:learn's job — nothing mechanical to do).
     """
     matched = pattern_lifecycle.extract_matched_patterns(review_body)
-    path = f"{memory_store.AUTHOR_PREFIX}{author_login}.md"
+    # Case-tolerant: a migration-era `/authors/vorobiovd.md` must not be
+    # orphaned by an exact-case read for login `VorobiovD` (see
+    # memory_store.match_author_path).
+    path = memory_store.resolve_author_path(store_id, author_login)
     summary_holder: dict = {}
 
     def _update(content: str) -> str:
@@ -44,9 +47,27 @@ def apply_review_to_store(store_id: str, author_login: str, pr_number: int,
     # absence here is a normal no-op, not an error.
     written = memory_store.update_with(store_id, path, _update, must_exist=True)
     if written is None:
-        if matched:
-            print(f"  [patterns] {len(matched)} matched annotation(s) but no "
-                  f"author file at {path} — creation deferred to /air:learn",
+        # Warn UNCONDITIONALLY, not only when `matched` — an author with no file
+        # can never produce a match (matches come from the `[already raised by
+        # @author-pattern]` annotations a review only emits when patterns were
+        # loaded), so gating the warning on `matched` guaranteed silence exactly
+        # when the bootstrap gap was in play. That silence is why lifemd ran 368
+        # reviews learning nothing: creation is deferred to /air:learn, but learn
+        # only curates files that ALREADY exist, so nothing ever created the
+        # first one. `learn_headless.seed_missing_author_files` now closes that;
+        # this line stays as the detector if it ever regresses.
+        print(f"  [patterns] no author file at {path} — nothing to strengthen "
+              f"({len(matched)} matched annotation(s); creation is /air:learn's job)",
+              file=sys.stderr)
+        try:
+            n_authors = len(memory_store.list_memories(
+                store_id, path_prefix=memory_store.AUTHOR_PREFIX))
+        except Exception:
+            n_authors = -1          # diagnostic only — never fail the review
+        if n_authors == 0:
+            print(f"  [patterns][warn] {store_id} has ZERO author files — this "
+                  f"store was created empty and never seeded, so every review "
+                  f"on it is pattern-blind. The next /air:learn seeds it.",
                   file=sys.stderr)
         return None
     # Audit line per strengthen — spurious strengthens (e.g. an injected

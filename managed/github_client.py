@@ -594,7 +594,11 @@ def fetch_recent_review_bodies(repo: str, token: str, limit: int = 30,
                 continue
             review = c  # comments are oldest-first; keep walking → ends on newest
         if review:
-            out.append({"pr": num, "body": review["body"]})
+            # `author` is the PR's own author (NOT the review's) — the key
+            # `learn_headless.seed_missing_author_files` groups by to bootstrap
+            # per-author pattern files. Additive: existing readers use pr/body.
+            out.append({"pr": num, "body": review["body"],
+                        "author": (pr.get("user") or {}).get("login") or ""})
     return out
 
 
