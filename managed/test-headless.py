@@ -1070,3 +1070,37 @@ def test_post_incomplete_comment_ok_response_logs_posted(capsys):
     headless._post_incomplete_comment("o/r", 8, "tok", RuntimeError("x"), post_fn=lambda *a, **k: _Resp())
     err = capsys.readouterr().err
     assert "re-runnable" in err and "rejected" not in err
+
+
+# --- verifier output budget (repo-E #67) -------------------------------------
+# The verifier writes the ENTIRE review body — every carried `- **#N**` status
+# line with rationale, plus this round's findings. run_agent's 16K default is
+# sized for a SPECIALIST (a findings list). A round-3 re-review on a large PR
+# truncated at exactly out=16000, TWICE, ~$1.20 each: `stop=max_tokens` leaves no
+# extractable `## Code Review`, so the run exits 1 with no verdict and a stale
+# gating verdict stays standing. Deterministic — a re-run reproduces it, and the
+# footer salvage correctly refuses a truncated body.
+
+def test_verifier_gets_a_larger_output_budget_than_a_specialist():
+    import agent_loop
+    spec_default = agent_loop.run_agent.__defaults__ or ()
+    # run_agent's max_tokens is keyword-only with a 16000 default
+    import inspect
+    sig = inspect.signature(agent_loop.run_agent)
+    specialist_cap = sig.parameters["max_tokens"].default
+    assert headless._VERIFIER_MAX_TOKENS > specialist_cap, (
+        f"verifier cap {headless._VERIFIER_MAX_TOKENS} must exceed the specialist "
+        f"default {specialist_cap} — it emits the whole review body")
+    assert headless._VERIFIER_MAX_TOKENS >= 32_000, "too tight for a re-review status block"
+
+
+def test_verifier_call_passes_the_larger_cap(monkeypatch):
+    """Source-level: the verifier invocation must actually pass max_tokens, or the
+    16K default silently applies again (which is exactly what broke #67)."""
+    import pathlib, re
+    src = pathlib.Path(headless.__file__).read_text()
+    m = re.search(r'"label":\s*"verifier".*?\}\)', src, re.DOTALL)
+    assert m, "verifier run_agent invocation not found — did it move?"
+    assert "max_tokens" in m.group(0), (
+        "verifier invocation does not pass max_tokens — falls back to the 16K "
+        "specialist default and truncates on a large re-review (#67)")

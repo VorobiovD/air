@@ -82,6 +82,13 @@ AGENTS_DIR = _LIB.parent / "agents"
 SPECIALISTS = ["air-code-reviewer", "air-simplify", "air-security-auditor", "air-git-history-reviewer"]
 UI_SPECIALIST = "air-ui-copy-reviewer"
 VERIFIER = "air-review-verifier"
+# The verifier writes the whole review body, unlike a specialist that writes a
+# findings list — so it needs its own, much larger output budget (see the call
+# site). A truncated verifier is unrecoverable: `stop=max_tokens` leaves no
+# extractable `## Code Review`, the run exits 1 with no verdict, and any stale
+# gating verdict stays standing.
+_VERIFIER_MAX_TOKENS = env.env_int("AIR_VERIFIER_MAX_TOKENS", 64_000, minimum=1)
+
 _DIFF_CAP = env.env_int("AIR_HEADLESS_DIFF_CAP", 500_000, minimum=0)  # chars — managed parity
                              # (= managed's AIR_DIFF_MAX_BYTES). The diff is already
                              # apply_diff_hygiene'd (generated/vendored stubbed) before this
@@ -924,7 +931,21 @@ async def run_headless_review(args, bot_token: str) -> dict:
                 agent_loop.run_agent, client, **{
                     "model": vmodel, "persona": vpersona, "pr_context": pr_context,
                     "task": verifier_input, "sandbox": sandbox, "effort": "high", "label": "verifier",
-                    "max_turns": turn_budget, "cache_ttl": cache_ttl})
+                    "max_turns": turn_budget, "cache_ttl": cache_ttl,
+                    # The verifier emits the ENTIRE posted review — every carried
+                    # `- **#N**` status line with its rationale, plus this round's
+                    # findings, strengths and pre-existing section. run_agent's
+                    # 16K default is sized for a SPECIALIST (a findings list), and a
+                    # round-3 re-review on a large PR blows straight through it:
+                    # repo-E #67 truncated at exactly out=16000, twice, ~$1.20 each,
+                    # and `stop=max_tokens` means NO `## Code Review` block survives
+                    # to extract — exit 1, no verdict, and a stale CHANGES_REQUESTED
+                    # left standing. Deterministic, so a re-run reproduces it: the
+                    # footer salvage deliberately refuses a truncated body, and it
+                    # is right to. Sized to the model's real ceiling with headroom
+                    # (probed: 128K accepted). Costs nothing when unused — output is
+                    # billed as emitted.
+                    "max_tokens": _VERIFIER_MAX_TOKENS})
         except Exception as exc:
             # A terminal verifier failure (a transient overload/5xx/transport error
             # that outlasted agent_loop's retries — the #1710 sustained-overload case)
