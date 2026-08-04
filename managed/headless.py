@@ -82,15 +82,16 @@ AGENTS_DIR = _LIB.parent / "agents"
 SPECIALISTS = ["air-code-reviewer", "air-simplify", "air-security-auditor", "air-git-history-reviewer"]
 UI_SPECIALIST = "air-ui-copy-reviewer"
 VERIFIER = "air-review-verifier"
+# Output budget for the GATING lenses in SPECIALISTS (a truncated blocker lens
+# fail-closes into a false CHANGES_REQUESTED). Advisory lenses keep run_agent's
+# default.
+_BLOCKER_LENS_MAX_TOKENS = env.env_int("AIR_BLOCKER_LENS_MAX_TOKENS", 32_000, minimum=1)
+
 # The verifier writes the whole review body, unlike a specialist that writes a
 # findings list — so it needs its own, much larger output budget (see the call
 # site). A truncated verifier is unrecoverable: `stop=max_tokens` leaves no
 # extractable `## Code Review`, the run exits 1 with no verdict, and any stale
 # gating verdict stays standing.
-_BLOCKER_LENS_MAX_TOKENS = env.env_int("AIR_BLOCKER_LENS_MAX_TOKENS", 32_000, minimum=1)
-
-# Output budget for the GATING lenses above (a truncated blocker lens fail-closes
-# into a false CHANGES_REQUESTED). Advisory lenses keep run_agent's default.
 _VERIFIER_MAX_TOKENS = env.env_int("AIR_VERIFIER_MAX_TOKENS", 64_000, minimum=1)
 
 _DIFF_CAP = env.env_int("AIR_HEADLESS_DIFF_CAP", 500_000, minimum=0)  # chars — managed parity
