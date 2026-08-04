@@ -149,3 +149,23 @@ def test_listing_is_not_refetched_per_review(monkeypatch):
     store.list_calls = 0
     pattern_writer.apply_review_to_store("memstore_x", "carol", 6, _REVIEW_CLEAN)
     assert store.list_calls == 2      # resolve + update_with, no diagnostic re-list
+
+
+def test_resolve_author_path_tolerates_a_none_entry_and_warns(capsys):
+    """`resolve_author_path` reaches its ambiguous-case diagnostic only when
+    match_author_path returns None, and iterates the SAME collection — so it
+    needs the same `(p or "")` guard. Unguarded it raised there, replacing the
+    two-variant warning with a generic failure (masked by the caller's
+    try/except, i.e. silently)."""
+    listing = {None: {}, "/authors/vorobiovd.md": {}, "/authors/VOROBIOVD.md": {}}
+    got = memory_store.resolve_author_path("memstore_x", "VorobiovD", listing=listing)
+    assert got == "/authors/VorobiovD.md"          # ambiguous → canonical
+    err = capsys.readouterr().err
+    assert "case-variant author files" in err       # the diagnostic still fires
+
+
+def test_resolve_author_path_adopts_a_unique_case_variant(capsys):
+    got = memory_store.resolve_author_path(
+        "memstore_x", "VorobiovD", listing={None: {}, "/authors/vorobiovd.md": {}})
+    assert got == "/authors/vorobiovd.md"
+    assert "case-insensitively" in capsys.readouterr().err

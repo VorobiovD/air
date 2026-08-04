@@ -208,7 +208,12 @@ def resolve_author_path(store_id: str, login: str, *, listing=None) -> str:
     canonical = author_path(login)
     hit = match_author_path(paths, login)
     if hit is None:
-        dupes = sorted(p for p in paths if p.lower() == canonical.lower())
+        # Same `(p or "")` guard as match_author_path above — this line iterates
+        # the same collection, so leaving it unguarded would raise here and
+        # replace the ambiguous-case warning with a generic failure, losing
+        # exactly the observability this function exists to provide.
+        want = canonical.lower()
+        dupes = sorted(p for p in paths if (p or "").lower() == want)
         if len(dupes) > 1:
             print(f"  [store][warn] {len(dupes)} case-variant author files for "
                   f"{login!r}: {dupes} — using {canonical}; merge them manually",
