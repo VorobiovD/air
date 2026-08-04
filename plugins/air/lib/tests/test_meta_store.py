@@ -1,6 +1,7 @@
 """meta.py memory-store backend — exercised against a stateful fake API."""
 
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -381,3 +382,73 @@ def test_claim_learn_lock_false_when_not_due(fake):
     before = fake.content
     assert meta.claim_learn_lock("memstore_x") is False
     assert fake.content == before        # no write when not due
+
+
+# --- API-contract parity with managed/memory_store.py ------------------------
+# meta.py is stdlib-only by design (no SDK import, no cycle), so it duplicates
+# memory_store.py's Memories-API access. That duplication is exactly how the #283
+# fix repaired memory_store.py while leaving meta.py 400ing for weeks — silently
+# disabling the learn counter, author-pattern reads and the mirror-due check on
+# every store-backed repo, with no error anywhere because each caller shrugs off a
+# failed lookup. These tests lock the two implementations to one contract.
+
+def _memory_store_module():
+    """managed/memory_store.py, loaded without needing it on sys.path."""
+    import importlib.util
+    p = LIB.parents[2] / "managed" / "memory_store.py"
+    if not p.is_file():
+        pytest.skip("managed/memory_store.py not present")
+    spec = importlib.util.spec_from_file_location("_ms_parity", p)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as e:                     # needs the anthropic SDK
+        pytest.skip(f"memory_store import unavailable: {e}")
+    return mod
+
+
+@pytest.mark.parametrize("path,expected", [
+    ("/meta/air-meta.json", "/meta/"),
+    ("/authors/VorobiovD.md", "/authors/"),
+    ("/glossary.md", "/"),                     # root file -> "/"
+    ("/archive/a/b.md", "/archive/a/"),
+])
+def test_dir_prefix_matches_memory_store(path, expected):
+    """Both modules must derive the same directory prefix — a divergence here is
+    what a future API tweak would exploit to break one and not the other."""
+    assert meta._dir_prefix(path) == expected
+    ms = _memory_store_module()
+    assert ms._dir_prefix(path) == expected
+
+
+_DIR_SHAPED = re.compile(r"^(/([^/\x00]+/)*)?$")
+
+
+@pytest.mark.parametrize("path", ["/meta/air-meta.json", "/authors/someone.md", "/glossary.md"])
+def test_dir_prefix_is_always_api_legal(path):
+    """The API constrains path_prefix to this shape; a FILE path 400s. Asserting
+    the regex directly means the test fails even without network access."""
+    assert _DIR_SHAPED.match(meta._dir_prefix(path)), \
+        f"{meta._dir_prefix(path)!r} is not a legal path_prefix"
+
+
+def test_no_file_path_is_ever_sent_as_path_prefix():
+    """Source-level guard: neither store query may interpolate a FILE path into
+    path_prefix. Catches a regression even if nobody runs it against the API."""
+    src = (LIB / "meta.py").read_text()
+    sites = re.findall(r"path_prefix=\{([^}]*)\}", src)
+    assert sites, "no path_prefix query found — did the store API access move?"
+    for expr in sites:
+        if "_dir_prefix" in expr:
+            continue
+        # A bare identifier is allowed only if it is itself assigned from
+        # _dir_prefix (e.g. `q = quote(_dir_prefix(path))` used as `{q}`).
+        ident = expr.strip()
+        assert re.fullmatch(r"[A-Za-z_]\w*", ident), (
+            f"path_prefix={{{expr}}} is neither a _dir_prefix() call nor a simple "
+            "variable this guard can verify")
+        assigned = re.search(rf"^\s*{re.escape(ident)}\s*=.*_dir_prefix", src, re.M)
+        assert assigned, (
+            f"path_prefix={{{ident}}} is not derived from _dir_prefix() — a FILE "
+            "path here returns HTTP 400 and silently disables the learn counter, "
+            "author reads and mirror-due")

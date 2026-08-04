@@ -85,15 +85,32 @@ def _store_api(method: str, path: str, body: dict | None = None) -> dict:
         return json.loads(resp.read().decode())
 
 
+def _dir_prefix(path: str) -> str:
+    """Directory prefix for a store path — `/meta/air-meta.json` -> `/meta/`.
+
+    The Memories API constrains `path_prefix` to a DIRECTORY shape
+    (`^(/([^/\x00]+/)*)?$`); passing a full FILE path 400s. Both call sites here
+    already re-match the exact path client-side, so listing the containing
+    directory is equivalent — just legal. MUST stay behaviourally identical to
+    `managed/memory_store.py::_dir_prefix`: this module is stdlib-only by design
+    (no SDK import, no cycle), so the API access is deliberately duplicated, and
+    that duplication is exactly why the #283 fix repaired memory_store.py while
+    leaving this file 400ing — silently disabling the learn counter, author-pattern
+    reads and the mirror-due check on every store-backed repo. `test_meta_store.py`
+    now locks the two implementations together."""
+    head = path.rsplit("/", 1)[0]
+    return (head + "/") if head else "/"
+
+
 def _store_find_meta(store_id: str) -> tuple[dict, str, str] | None:
     """Return (meta, content_sha256, memory_id) or None when absent."""
-    # NOTE: no `depth` param — the API 400s with "depth requires
-    # order_by=path" (observed live on the repo-D pilot run).
-    # A bare path_prefix returns the exact-path match we need.
+    # No `depth`/`order_by`: the API dropped `order_by` and bounds `depth` to
+    # 0-1. `path_prefix` must be DIRECTORY-shaped — a full file path 400s — so
+    # list the containing directory and match the exact path in the loop below.
     listing = _store_api(
         "GET",
         f"/memory_stores/{store_id}/memories"
-        f"?path_prefix={STORE_META_PATH}",
+        f"?path_prefix={urllib.parse.quote(_dir_prefix(STORE_META_PATH), safe='')}",
     )
     for item in listing.get("data", []):
         # Live API lists memories as type "memory_metadata" (docs examples
@@ -342,7 +359,11 @@ def cmd_read_author(args) -> int:
     if not store_id:
         return READ_AUTHOR_UNKNOWN  # not a store-backed repo (or no key)
     path = f"/authors/{args.login}.md"
-    q = urllib.parse.quote(path, safe="")
+    # Directory-shaped prefix (a file path 400s); the exact path is matched below.
+    # The login therefore no longer reaches the query string at all — strictly
+    # safer than the previous percent-encoded file path, and _LOGIN_RE above still
+    # rejects anything outside GitHub's login charset.
+    q = urllib.parse.quote(_dir_prefix(path), safe="")
     try:
         listing = _store_api(
             "GET", f"/memory_stores/{store_id}/memories?path_prefix={q}")
