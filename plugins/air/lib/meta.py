@@ -102,6 +102,28 @@ def _dir_prefix(path: str) -> str:
     return (head + "/") if head else "/"
 
 
+def _match_author_path(paths, login: str) -> str | None:
+    """Pick the author-file path for `login`, tolerating a CASE VARIANT; None
+    when the author has no file.
+
+    MUST stay behaviourally identical to
+    `managed/memory_store.py::match_author_path` — same stdlib-only duplication
+    (and same parity test) as `_dir_prefix` above. Store paths are
+    case-SENSITIVE while GitHub logins are case-INSENSITIVE for identity, so a
+    migration-era `/authors/vorobiovd.md` would otherwise be invisible to a read
+    for login `VorobiovD`, reporting a dominant author as brand-new. Ambiguity
+    (>1 case variant) resolves to None rather than silently picking one of two
+    histories."""
+    canonical = f"/authors/{login}.md"
+    if canonical in paths:
+        return canonical
+    want = canonical.lower()
+    cands = sorted(p for p in paths if (p or "").lower() == want)
+    if len(cands) == 1:
+        return cands[0]
+    return None
+
+
 def _store_list_all(store_id: str, prefix: str) -> list[dict]:
     """Every memory under `prefix`, following the `next_page` cursor.
 
@@ -382,17 +404,23 @@ def cmd_read_author(args) -> int:
     # safer than the previous percent-encoded file path, and _LOGIN_RE above still
     # rejects anything outside GitHub's login charset.
     try:
-        for item in _store_list_all(store_id, _dir_prefix(path)):
-            if item.get("type") in ("memory", "memory_metadata") \
-                    and item.get("path") == path:
-                mem = _store_api(
-                    "GET", f"/memory_stores/{store_id}/memories/{item['id']}")
-                content = mem.get("content", "")
-                if content.strip():
-                    sys.stdout.write(content)
-                    return READ_AUTHOR_FOUND
-                return READ_AUTHOR_ABSENT  # present but empty == no patterns yet
-        return READ_AUTHOR_ABSENT  # store reachable, author has no file → new author
+        items = _store_list_all(store_id, _dir_prefix(path))
+        hit = _match_author_path(
+            [i.get("path") for i in items
+             if i.get("type") in ("memory", "memory_metadata")],
+            args.login)
+        if hit is None:
+            return READ_AUTHOR_ABSENT  # store reachable, no file → new author
+        if hit != path:
+            print(f"  [meta] author file {hit} matches login {args.login!r} "
+                  f"case-insensitively — using it", file=sys.stderr)
+        mem_id = next(i["id"] for i in items if i.get("path") == hit)
+        mem = _store_api("GET", f"/memory_stores/{store_id}/memories/{mem_id}")
+        content = mem.get("content", "")
+        if content.strip():
+            sys.stdout.write(content)
+            return READ_AUTHOR_FOUND
+        return READ_AUTHOR_ABSENT  # present but empty == no patterns yet
     except Exception as e:
         print(f"  [warn] meta: author read failed for {args.login} ({e})", file=sys.stderr)
         return READ_AUTHOR_UNKNOWN

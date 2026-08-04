@@ -392,23 +392,40 @@ def test_claim_learn_lock_false_when_not_due(fake):
 # every store-backed repo, with no error anywhere because each caller shrugs off a
 # failed lookup. These tests lock the two implementations to one contract.
 
-def _memory_store_dir_prefix():
-    """`memory_store._dir_prefix`, extracted WITHOUT importing the module.
+def _from_memory_store(name: str, *, needs=()):
+    """A single named function from memory_store.py, extracted WITHOUT importing it.
 
     Importing memory_store.py needs the anthropic SDK, which the air-lib-tests
     workflow does not install — so an import-and-skip made this parity check
-    vanish silently in exactly the CI that should enforce it. Compile just the one
-    function from source instead: no SDK, no skip, runs everywhere."""
+    vanish silently in exactly the CI that should enforce it. Compile just the
+    named function(s) from source instead: no SDK, no skip, runs everywhere.
+    `needs` names extra module-level defs the target calls (compiled first, into
+    the same namespace, so the call resolves)."""
     import ast
     src_path = LIB.parents[2] / "managed" / "memory_store.py"
     assert src_path.is_file(), "managed/memory_store.py missing — parity unverifiable"
     tree = ast.parse(src_path.read_text())
-    fn = next((n for n in tree.body
-               if isinstance(n, ast.FunctionDef) and n.name == "_dir_prefix"), None)
-    assert fn is not None, "memory_store._dir_prefix not found — did it get renamed?"
     ns: dict = {}
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(src_path), "exec"), ns)
-    return ns["_dir_prefix"]
+    # Module-level constants the extracted functions close over (e.g.
+    # AUTHOR_PREFIX) — assignments only, so no SDK-touching code executes.
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and all(
+                isinstance(t, ast.Name) for t in node.targets):
+            try:
+                exec(compile(ast.Module(body=[node], type_ignores=[]),
+                             str(src_path), "exec"), ns)
+            except Exception:
+                pass                     # non-literal (e.g. a client) — not needed
+    for want in (*needs, name):
+        fn = next((n for n in tree.body
+                   if isinstance(n, ast.FunctionDef) and n.name == want), None)
+        assert fn is not None, f"memory_store.{want} not found — did it get renamed?"
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), str(src_path), "exec"), ns)
+    return ns[name]
+
+
+def _memory_store_dir_prefix():
+    return _from_memory_store("_dir_prefix")
 
 
 @pytest.mark.parametrize("path,expected", [
@@ -422,6 +439,50 @@ def test_dir_prefix_matches_memory_store(path, expected):
     what a future API tweak would exploit to break one and not the other."""
     assert meta._dir_prefix(path) == expected
     assert _memory_store_dir_prefix()(path) == expected
+
+
+def _memory_store_match_author_path():
+    return _from_memory_store("match_author_path", needs=("author_path",))
+
+
+# (paths in store, login) -> resolved path or None. Both implementations must
+# agree on EVERY row: meta.py's read-author and pattern_writer's strengthen must
+# land on the SAME file, or a review reads one history and writes another.
+@pytest.mark.parametrize("paths,login,expected", [
+    # exact match wins, even when a case variant is also present
+    (["/authors/VorobiovD.md", "/authors/vorobiovd.md"], "VorobiovD",
+     "/authors/VorobiovD.md"),
+    # the repo-C orphan: only the lowercase migration file exists
+    (["/authors/vorobiovd.md"], "VorobiovD", "/authors/vorobiovd.md"),
+    # …and the reverse direction
+    (["/authors/VorobiovD.md"], "vorobiovd", "/authors/VorobiovD.md"),
+    # genuinely new author
+    (["/authors/someone-else.md"], "VorobiovD", None),
+    ([], "VorobiovD", None),
+    # AMBIGUOUS: two non-exact variants — never silently pick one history
+    (["/authors/vorobiovd.md", "/authors/VOROBIOVD.md"], "VorobiovD", None),
+    # a login that merely SHARES A PREFIX must not match
+    (["/authors/VorobiovDX.md"], "VorobiovD", None),
+    # bot authors carry brackets; case folding must not disturb them
+    (["/authors/Dependabot[bot].md"], "dependabot[bot]",
+     "/authors/Dependabot[bot].md"),
+    # a None entry must not crash either copy (the two used to differ: one had
+    # `p.lower()`, the other `(p or "").lower()`, and no fixture covered it)
+    ([None, "/authors/vorobiovd.md"], "VorobiovD", "/authors/vorobiovd.md"),
+])
+def test_match_author_path_matches_memory_store(paths, login, expected):
+    assert meta._match_author_path(paths, login) == expected
+    assert _memory_store_match_author_path()(paths, login) == expected
+
+
+def test_match_author_path_accepts_a_dict_of_paths():
+    """memory_store passes `list_memories(...)` — a {path: meta} DICT — while
+    meta.py passes a list. Iteration over a dict yields keys, so both must work;
+    a helper that assumed a list would silently match nothing in production."""
+    as_dict = {"/authors/vorobiovd.md": {"id": "mem_1"}}
+    assert meta._match_author_path(as_dict, "VorobiovD") == "/authors/vorobiovd.md"
+    assert _memory_store_match_author_path()(as_dict, "VorobiovD") == \
+        "/authors/vorobiovd.md"
 
 
 _DIR_SHAPED = re.compile(r"^(/([^/\x00]+/)*)?$")

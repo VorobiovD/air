@@ -235,6 +235,15 @@ Lifecycle:
 
 3 of 4 review agents (code-reviewer, security-auditor, git-history-reviewer) annotate findings with `[matches author pattern: <name> (<Nx>)]`. The orchestrator uses annotations to drive lifecycle transitions in Step 13.
 
+**Who creates an author's file** (store-backed repos). `pattern_writer` only ever *strengthens* an existing file (`must_exist=True`) — creating a pattern is semantic work, and the review session mounts the store read-only because PR content is untrusted. Creation belongs to learn: `learn_headless.seed_missing_author_files` bootstraps a file for an author who has none, from that author's recent review bodies. Before it existed nothing anywhere created the first file (the sole creator was the one-shot `migrate_wiki_to_store.py`), so a store bootstrapped empty stayed empty and a new author was never added to a populated one.
+
+- Knobs: `AIR_LEARN_SEED_MIN_REVIEWS` (default `2` — a pattern needs repetition), `AIR_LEARN_SEED_MAX_AUTHORS` (default `8` per run; `0` disables).
+- Only the bodies air itself posted are eligible (`fetch_recent_review_bodies(bot_logins=…)`, the union of `AIR_PAT_MAP`/`AIR_BOT_LOGINS` and the current token's login, since air rotates PATs). Without a resolved identity the seed **skips** rather than accept any `## Code Review` comment: the write is create-only and then protected by the curation fidelity check, so a spoofed body would plant a permanent, later-trusted pattern.
+- The proposal is refused unless every claim checks against the supplied input — ≥1 well-formed entry, no count above the number of reviews shown, no unsupplied PR reference, no `(archived)`/`(declining)` tag on a new file — and the write is create-only, so a real history appearing mid-run wins.
+- **Scope:** the seeding step lives in the headless (`messages-api`) learn path. A store-backed repo on the default `full` architecture runs the managed-session `learn.py`, whose orchestrator prompt has no create step, so the bootstrap gap remains there.
+
+Author-file *paths* are resolved case-tolerantly on every path (`memory_store.author_path` / `match_author_path` / `resolve_author_path`, duplicated into stdlib-only `plugins/air/lib/meta.py` and locked by a parity test). Store paths are case-sensitive while GitHub logins are case-insensitive for identity, so a migration-era `/authors/vorobiovd.md` was invisible to a read for login `VorobiovD` — orphaning that history and reporting a dominant author as brand-new. An exact match wins; a unique case variant is adopted in place (no migration, no divergent second file); two or more variants are ambiguous and treated as absent with a warning, because silently picking one of two histories is worse.
+
 ---
 
 ## Wiki Storage (6 pages per repo)
