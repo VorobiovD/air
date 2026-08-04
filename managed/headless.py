@@ -87,6 +87,10 @@ VERIFIER = "air-review-verifier"
 # site). A truncated verifier is unrecoverable: `stop=max_tokens` leaves no
 # extractable `## Code Review`, the run exits 1 with no verdict, and any stale
 # gating verdict stays standing.
+_BLOCKER_LENS_MAX_TOKENS = env.env_int("AIR_BLOCKER_LENS_MAX_TOKENS", 32_000, minimum=1)
+
+# Output budget for the GATING lenses above (a truncated blocker lens fail-closes
+# into a false CHANGES_REQUESTED). Advisory lenses keep run_agent's default.
 _VERIFIER_MAX_TOKENS = env.env_int("AIR_VERIFIER_MAX_TOKENS", 64_000, minimum=1)
 
 _DIFF_CAP = env.env_int("AIR_HEADLESS_DIFF_CAP", 500_000, minimum=0)  # chars — managed parity
@@ -856,7 +860,15 @@ async def run_headless_review(args, bot_token: str) -> dict:
                 client, model=model, persona=persona, pr_context=pr_context,
                 task=_specialist_task(), sandbox=sandbox,
                 effort="high" if agent in BLOCKER_LENSES else "medium",
-                label=agent.replace("air-", ""), max_turns=turn_budget, cache_ttl=cache_ttl)
+                label=agent.replace("air-", ""), max_turns=turn_budget, cache_ttl=cache_ttl,
+                # A truncated BLOCKER lens is a false GATE, not a lost opinion:
+                # _blocker_lens_incomplete fail-closes on stop=max_tokens, so the PR
+                # gets CHANGES_REQUESTED with no visible cause (the #1751 shape). A
+                # 925-turn audit measured security-auditor at 14254/16000 = 89% of
+                # the cap on a real PR — a fat tail (p95 4.6K), i.e. one unlucky
+                # security-heavy PR from firing. Advisory lenses peaked at 59% and
+                # keep run_agent's default.
+                **({"max_tokens": _BLOCKER_LENS_MAX_TOKENS} if agent in BLOCKER_LENSES else {}))
             r["agent"], r["tier"] = agent, tier
             return r
 

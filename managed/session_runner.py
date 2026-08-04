@@ -488,7 +488,14 @@ async def run_session(
     # Stop reasons we treat as a clean end-of-turn. Anything else (explicit
     # error, cancelled, unknown future types) is surfaced via
     # SpecialistSessionError so the caller can decide how to fail.
-    TERMINAL_SUCCESS = {"end_turn", "stop_sequence", "max_tokens"}
+    # `max_tokens` is deliberately NOT here: it means the model was CUT OFF
+    # mid-answer. Accepting a truncated turn as a clean end lets a half-written
+    # review reach the gate as if complete — the worst variant of the truncation
+    # class that hit the headless verifier (16K) and learn curation (32K). Surface
+    # it as SpecialistSessionError so the caller decides, exactly like any other
+    # non-clean stop. (Managed path only; the fleet runs headless, but public
+    # Managed-Agents users are on this code.)
+    TERMINAL_SUCCESS = {"end_turn", "stop_sequence"}
 
     # Multi-agent sessions emit `session.status_idle stop=end_turn` BETWEEN
     # the coordinator's turns while sub-agents are still running — the
