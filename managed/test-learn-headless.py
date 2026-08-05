@@ -822,3 +822,72 @@ def test_seed_persona_frames_reviews_as_untrusted_data():
     must mark them DATA — the same framing the curation path uses."""
     assert "DATA" in L._SEED_PERSONA
     assert "instructions" in L._SEED_PERSONA.lower()
+
+
+# ---------------------------------------------------------------------------
+# Class-aware size floor: the author-file deadlock
+# ---------------------------------------------------------------------------
+# The 0.5 byte floor contradicted _AUTHOR_PERSONA, which MANDATES windowing an
+# over-long PR-ref list to ~8 and trimming narrative to 3 examples. On a mature
+# file that is definitionally a >50% cut, so the only mechanism that shrinks the
+# file could never run while per-review appends kept growing it.
+
+# Shaped like the real repo-C file that deadlocked, and sized to REPRODUCE its
+# measured ratio: 14776B -> 4872B = 0.33, with _fidelity_violation reporting NONE
+# (every pattern name, count 239x/107x, and tag preserved; 199 PR refs -> 47).
+_NARRATIVE = (" Seen most recently in the terminator-path sibling miss, the "
+              "registry prefetch trim, and the envelope-only response branch;"
+              " each time one call site was fixed and its twin was missed.")
+_FAT_AUTHOR = ("# Author Patterns: heavy\n"
+               "- **Doc accuracy** (239x: " + ", ".join(f"#{n}" for n in range(100, 260))
+               + " | last 0 PRs: 0 clean): stale prose." + _NARRATIVE * 30 + "\n"
+               "- **Allowlist drift** (107x: " + ", ".join(f"#{n}" for n in range(100, 200))
+               + " | last 0 PRs: 0 clean): pairs missed." + _NARRATIVE * 30 + "\n")
+# Same patterns, same counts, refs windowed to ~8 and narrative trimmed to 3
+# examples — exactly the two operations _AUTHOR_PERSONA mandates.
+_WINDOWED = ("# Author Patterns: heavy\n"
+             "- **Doc accuracy** (239x: #252, #253, #254, #255, #256, #257, #258, #259"
+             " | last 0 PRs: 0 clean): stale prose." + _NARRATIVE * 10 + "\n"
+             "- **Allowlist drift** (107x: #192, #193, #194, #195, #196, #197, #198, #199"
+             " | last 0 PRs: 0 clean): pairs missed." + _NARRATIVE * 10 + "\n")
+
+
+def test_author_file_windowing_is_not_refused_by_the_byte_floor():
+    ratio = len(_WINDOWED) / len(_FAT_AUTHOR)
+    # Pinned to the live measurement (0.33) so the fixture keeps reproducing the
+    # real deadlock rather than drifting into a milder or harsher case.
+    assert 0.28 < ratio < 0.38, f"fixture drifted from the measured 0.33 ({ratio:.2f})"
+    out, status = L._apply_guards("/authors/heavy.md", _FAT_AUTHOR, _WINDOWED,
+                                  lambda *_: None)
+    assert status == "ok", f"windowed curation refused at ratio {ratio:.2f}"
+    assert out == _WINDOWED.strip()      # _apply_guards strips what it returns
+    # And fidelity — the authoritative guard for author files — is satisfied.
+    assert L._fidelity_violation("/authors/heavy.md", _FAT_AUTHOR, _WINDOWED) is None
+
+
+def test_author_file_catastrophic_collapse_is_still_refused():
+    """The residual floor must still catch a 'returned just the heading' reply."""
+    _, status = L._apply_guards("/authors/heavy.md", _FAT_AUTHOR,
+                                "# Author Patterns: heavy\n", lambda *_: None)
+    assert status == "refused"
+
+
+def test_author_floor_does_not_weaken_the_fidelity_guard():
+    """A big reduction that DROPS a pattern is still refused — the lower byte
+    floor only defers to fidelity, it doesn't bypass it."""
+    dropped = ("# Author Patterns: heavy\n"
+               "- **Doc accuracy** (239x: #252 | last 0 PRs: 0 clean): stale prose.\n")
+    _, status = L._apply_guards("/authors/heavy.md", _FAT_AUTHOR, dropped,
+                                lambda *_: None)
+    assert status == "refused"
+
+
+def test_findings_files_keep_the_stricter_byte_floor():
+    """Findings files have no per-entry fidelity check (entries may legitimately
+    merge), so the byte floor is their ONLY guard and must stay at 0.5."""
+    original = "\n".join(f"- finding number {i} with some detail" for i in range(40))
+    collapsed = "- finding number 0 with some detail"
+    _, status = L._apply_guards(memory_store.COMMON_FINDINGS_PATH, original,
+                                collapsed, lambda *_: None)
+    assert status == "refused"
+    assert L.MIN_KEEP_FRACTION == 0.5

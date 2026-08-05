@@ -569,6 +569,27 @@ jobs:
           # through, which review.py reads as ON. Safe-by-construction — falls
           # back to the coordinator relay on any ambiguity.
           AIR_POST_VERIFIER_BODY: ${{ vars.AIR_POST_VERIFIER_BODY }}
+          # The caller's reviewer-login → PAT-stem map. `review._air_bot_logins()`
+          # is documented as sourced from this, but it was NEVER forwarded into
+          # the job — so the allowlist has been EMPTY in CI since it shipped, and
+          # two features silently ran degraded:
+          #   * gate-orphan dismissal recognized only sentinel-stamped verdicts
+          #     (fine in practice — everything since the sentinel carries it), and
+          #   * author-file seeding accepted review bodies only from the CURRENTLY
+          #     active PAT, dropping reviews posted under a previously-rotated
+          #     account. Measured on repo-C 2026-08-05: air posts under 3 accounts
+          #     there, the filter saw 1, and the only seedable author's 2 reviews
+          #     were discarded — so the seed found nothing to do.
+          # Callers already set this variable (the trigger gate resolves the PAT
+          # stem from it), and `vars` in a reusable workflow resolves to the
+          # CALLER's variables, so forwarding it needs no caller change. Keys only
+          # are read (`json.loads(...).keys()`); the values are secret NAMES, not
+          # secrets. A repo where air also posts under an account OUTSIDE this map
+          # (a second review track) additionally needs AIR_BOT_LOGINS.
+          AIR_PAT_MAP: ${{ vars.AIR_PAT_MAP }}
+          # Optional comma-separated extra logins air posts under, unioned with
+          # AIR_PAT_MAP's keys by `_air_bot_logins()`.
+          AIR_BOT_LOGINS: ${{ vars.AIR_BOT_LOGINS }}
           # Absolute path to the local checkout. review.py uses it for
           # both `codex review` (when enabled) and client-side
           # pre-computation (blame/churn/file-status/diff-check
