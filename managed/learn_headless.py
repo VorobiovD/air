@@ -103,6 +103,25 @@ MAX_OUTPUT_TOKENS = env.env_int("AIR_LEARN_MAX_TOKENS", 64_000, minimum=1)
 # silently destroy content. The fidelity check below catches finer losses
 # (a single dropped pattern/term that stays above the byte floor).
 MIN_KEEP_FRACTION = env.env_float("AIR_LEARN_MIN_KEEP", 0.5)
+# Author files get a MUCH lower floor, because for them the byte floor and the
+# curation prompt were in direct contradiction — and the floor won, freezing the
+# file forever. `_AUTHOR_PERSONA` MANDATES windowing an over-long PR-ref list to
+# the most-recent ~8 and trimming per-entry narrative to 3 examples; on a mature
+# file that is definitionally a big reduction. Measured on repo-C's busiest author
+# file (2026-08-05): 14776B -> 4872B (ratio 0.33), with `_fidelity_violation`
+# reporting NONE — every pattern name, every count (107x/239x/11x) and every
+# lifecycle tag preserved, 199 PR refs windowed to 47. The 0.5 floor refused it,
+# so the only mechanism that shrinks that file could never run while per-review
+# appends kept growing it: the same ratchet as the 32K output wall (#292), via a
+# different guard.
+#
+# Safe because for author files `_fidelity_violation` is the AUTHORITATIVE guard
+# and is strictly more precise than a byte count: it refuses a curation that
+# drops a pattern, lowers a count, or removes an (archived)/(declining) tag. The
+# residual floor only has to catch a catastrophic "returned just the headings"
+# response. (Findings files have no per-entry fidelity check — entries may
+# legitimately merge — so they keep the 0.5 byte floor as their only guard.)
+MIN_KEEP_FRACTION_AUTHOR = env.env_float("AIR_LEARN_MIN_KEEP_AUTHOR", 0.15)
 
 # Shared, curatable store files (besides per-author files). REVIEW-HISTORY +
 # PROJECT-PROFILE are intentionally absent — see _STAGED.
@@ -353,9 +372,15 @@ def _apply_guards(path: str, original: str, curated: str, log) -> tuple[str | No
     if not curated:
         log(f"  [learn] empty curation for {path} — keeping current")
         return None, "failed"
-    if len(curated) < len(original) * MIN_KEEP_FRACTION:
+    # Author files: the fidelity check below is the authoritative guard (it
+    # preserves every pattern, count and lifecycle tag), and the persona mandates
+    # large structural reductions — so a 0.5 byte floor deadlocks them.
+    floor = (MIN_KEEP_FRACTION_AUTHOR
+             if path.startswith(memory_store.AUTHOR_PREFIX) else MIN_KEEP_FRACTION)
+    if len(curated) < len(original) * floor:
         log(f"  [learn] curation for {path} collapsed "
-            f"({len(original)}->{len(curated)} bytes) — REFUSED (size floor)")
+            f"({len(original)}->{len(curated)} bytes, floor {floor}) "
+            f"— REFUSED (size floor)")
         return None, "refused"
     viol = _fidelity_violation(path, original, curated)
     if viol:

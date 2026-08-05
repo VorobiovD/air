@@ -80,6 +80,15 @@ jobs:
           # out-of-band can afford a tighter count; MUST match the value on the
           # review caller, or the two paths disagree on when a repo is due.
           AIR_LEARN_REVIEWS_THRESHOLD: ${{ vars.AIR_LEARN_REVIEWS_THRESHOLD }}
+          # Reviewer-login → PAT-stem map (keys only). Author-file SEEDING runs in
+          # learn, so the cron needs the same allowlist as the review caller: with
+          # it empty, seeding accepts review bodies only from the currently-active
+          # PAT and discards those posted under a previously-rotated account.
+          # Required here specifically because AIR_LEARN_CRON_LIVE=true makes this
+          # cron the SOLE learn executor — a review-path-only fix would leave every
+          # cron-learning repo seeding from a one-account view.
+          AIR_PAT_MAP: ${{ vars.AIR_PAT_MAP }}
+          AIR_BOT_LOGINS: ${{ vars.AIR_BOT_LOGINS }}
           # inputs via env (NOT inline ${{ }} in run:) to avoid shell injection
           IN_REPO: ${{ inputs.repo }}
           IN_MODE: ${{ inputs.mode }}
