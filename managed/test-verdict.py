@@ -2368,6 +2368,9 @@ def test_every_conflict_gate_caller_uses_the_shared_reason():
             f"{fname} forces the conflict gate without the shared reason constant "
             f"— its explanation will match only by coincidence")
         # …and no hand-rolled look-alike literal left behind.
-        assert not re.search(r'"[^"]*merge-conflict marker[^"]*"', src), (
+        # `merge[- ]conflict`, not just the hyphenated spelling: review.py's SECOND
+        # conflict gate used the UNhyphenated wording, so a hyphen-only pattern
+        # walked straight past it and the assertion below was simply untrue.
+        assert not re.search(r'"[^"]*merge[- ]conflict marker[^"]*"', src), (
             f"{fname} still hardcodes a conflict-reason literal; use "
             f"_CONFLICT_GATE_REASON so the note can't drift out of match")

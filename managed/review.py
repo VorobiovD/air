@@ -2784,7 +2784,7 @@ async def run_review(args):
         # clean review body. `diff` and `diff_check_warnings` are in scope here.
         if not request_changes and has_conflict_markers(diff, diff_check_warnings):
             request_changes = True
-            reason = "unresolved merge conflict marker(s) in the diff"
+            reason = _CONFLICT_GATE_REASON
             print("  [gate] conflict markers detected — forcing REQUEST_CHANGES regardless of model verdict", file=sys.stderr)
         try:
             event = resolve_verdict_event(request_changes)  # honors AIR_NO_APPROVE
