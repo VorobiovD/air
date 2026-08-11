@@ -2199,3 +2199,178 @@ def test_gate_note_not_suppressed_by_a_quoted_marker_in_the_body():
     b = _gn_body() + "\n\nSomeone pasted <!-- air-gate-note --> into a finding.\n"
     out = append_gate_note(b, request_changes=True, reason="1 unfixed blocker", head_sha=_GN_SHA)
     assert "If no new review appears" in out
+
+
+# ---- the "No blockers" + CHANGES_REQUESTED self-contradiction (lifemd #17344) --
+# A `[sec:]`-tagged exposure the model rated MEDIUM is floored to a blocker by
+# count_category_floored, so the gate fires while the model's own lead — written
+# before the floor is applied in Python — still says "No blockers." Live on a real
+# PR the comment read as air contradicting itself: red banner, "No blockers.",
+# CHANGES_REQUESTED, and the only gating finding sitting under "Medium — consider
+# fixing" with nothing saying why.
+
+_FLOOR_BODY = (
+    "## Code Review\n\n"
+    "> [!CAUTION]\n"
+    "> **No blockers.** 10 to consider · 0 nits · ~10 min read\n"
+    "> Solid integration with a few non-blocking gaps.\n\n"
+    "### Medium — consider fixing\n\n"
+    "**1. Raw upstream error body can leak to the patient** [sec:data-exposure]\n\n"
+    f"Reviewed at: {_GN_SHA}\n"
+)
+
+
+def test_floor_gate_reason_is_produced_by_the_real_gate():
+    """Anchors the scenario: 0 labelled blockers, gate ON via the floor."""
+    assert count_blockers(_FLOOR_BODY) == 0
+    assert count_category_floored(_FLOOR_BODY) == (1, ["data-exposure"])
+    rc, reason = should_request_changes(_FLOOR_BODY)
+    assert rc is True and "floored to blocker" in reason
+
+
+def test_banner_lead_no_longer_denies_the_gate():
+    """`**No blockers.**` on a GATING verdict is rewritten; counts survive."""
+    out = normalize_verdict_banner(_FLOOR_BODY, request_changes=True)
+    assert "**Changes requested.** 10 to consider · 0 nits · ~10 min read" in out
+    assert "**No blockers.**" not in out
+    assert "> [!CAUTION]" in out
+
+
+def test_banner_lead_rewrite_is_gate_identical_and_idempotent():
+    out = normalize_verdict_banner(_FLOOR_BODY, request_changes=True)
+    assert count_blockers(out) == count_blockers(_FLOOR_BODY)
+    assert count_category_floored(out) == count_category_floored(_FLOOR_BODY)
+    assert should_request_changes(out) == should_request_changes(_FLOOR_BODY)
+    assert _extract_body(out, _GN_SHA) is not None
+    assert normalize_verdict_banner(out, request_changes=True) == out
+
+
+def test_no_blockers_lead_is_untouched_on_a_clean_verdict():
+    """The non-gating direction must not be inverted — a clean review still reads
+    'No blockers.' (this is the pre-existing behavior, guarded against a regression
+    from the new else-branch)."""
+    clean = _FLOOR_BODY.replace(" [sec:data-exposure]", "")
+    assert should_request_changes(clean)[0] is False
+    out = normalize_verdict_banner(clean, request_changes=False)
+    assert "**No blockers.**" in out and "Changes requested" not in out
+
+
+def test_gate_note_explains_a_floored_exposure():
+    rc, reason = should_request_changes(_FLOOR_BODY)
+    out = append_gate_note(_FLOOR_BODY, request_changes=rc, reason=reason, head_sha=_GN_SHA)
+    assert "Gated by a blocker-class exposure" in out
+    assert "data-exposure" in out
+    assert "[sec:" in out                      # tells the reader how to find it
+    # A floor gate is NOT a process failure: "re-run to clear it" would be wrong.
+    assert "Gated for a process reason" not in out
+    assert "Re-run the review to clear it" not in out
+
+
+def test_floor_note_absent_when_the_floor_is_not_the_reason():
+    out = append_gate_note(_gn_body(), request_changes=True,
+                           reason="2 blocker(s)", head_sha=_GN_SHA)
+    assert "Gated by a blocker-class exposure" not in out
+
+
+def test_floor_note_gate_identical_and_idempotent():
+    rc, reason = should_request_changes(_FLOOR_BODY)
+    out = append_gate_note(_FLOOR_BODY, request_changes=rc, reason=reason, head_sha=_GN_SHA)
+    assert should_request_changes(out) == should_request_changes(_FLOOR_BODY)
+    assert count_category_floored(out) == count_category_floored(_FLOOR_BODY)
+    assert count_blockers(out) == 0
+    assert _extract_body(out, _GN_SHA) is not None
+    assert append_gate_note(out, request_changes=rc, reason=reason, head_sha=_GN_SHA) == out
+
+
+def test_full_pipeline_on_the_floor_scenario():
+    """Both passes together, in caller order (normalize then note), end to end."""
+    rc, reason = should_request_changes(_FLOOR_BODY)
+    out = normalize_verdict_banner(_FLOOR_BODY, request_changes=rc)
+    out = append_gate_note(out, request_changes=rc, reason=reason, head_sha=_GN_SHA)
+    assert "**Changes requested.**" in out
+    assert "Gated by a blocker-class exposure" in out
+    assert should_request_changes(out) == (rc, reason)     # gate untouched
+    assert out.rstrip().endswith(_GN_SHA)                  # footer still last
+
+
+def test_gate_note_explains_a_conflict_marker_gate():
+    """The conflict gate fires from the DIFF, independently of the findings, so it
+    also produces the "No blockers" + CHANGES_REQUESTED shape and needs its own
+    note — the process remedy ("re-run") wouldn't fix an unresolved conflict."""
+    from verdict import _CONFLICT_GATE_REASON
+    out = append_gate_note(_gn_body(), request_changes=True,
+                           reason=_CONFLICT_GATE_REASON, head_sha=_GN_SHA)
+    assert "Gated on the diff itself" in out
+    assert "Gated for a process reason" not in out
+    assert "Gated by a blocker-class exposure" not in out
+
+
+def test_each_gate_cause_emits_exactly_one_explanation():
+    """The three causes are distinct branches; none may double-fire on another's
+    reason string (they are matched by substring, so overlap is the risk)."""
+    from verdict import _CONFLICT_GATE_REASON
+    cases = {
+        "blocker-class lens did not complete: air-code-reviewer": "Gated for a process reason",
+        "1 blocker-class exposure(s) [pii-exposure] floored to blocker":
+            "Gated by a blocker-class exposure",
+        _CONFLICT_GATE_REASON: "Gated on the diff itself",
+    }
+    heads = ["Gated for a process reason", "Gated by a blocker-class exposure",
+             "Gated on the diff itself"]
+    for reason, expected in cases.items():
+        out = append_gate_note(_gn_body(), request_changes=True,
+                               reason=reason, head_sha=_GN_SHA)
+        present = [h for h in heads if h in out]
+        assert present == [expected], f"{reason!r} -> {present}"
+
+
+def test_cli_normalize_banner_also_appends_the_gate_note(capsys):
+    """The CLI gap: `--normalize-banner` is the only verdict.py pass review.md
+    wires for the banner, and it used to emit no explanation at all — so a
+    CLI-driven review hitting the floor got the corrected lead and no reason.
+    Both passes must now come out of that one already-wired invocation."""
+    import verdict
+    rc, reason = should_request_changes(_FLOOR_BODY)
+    assert rc is True and "floored to blocker" in reason
+    import io, sys as _sys
+    orig = _sys.stdin
+    _sys.stdin = io.StringIO(_FLOOR_BODY)      # _main reads the body on stdin
+    try:
+        assert verdict._main(["--normalize-banner", "--head-sha", _GN_SHA]) == 0
+    finally:
+        _sys.stdin = orig
+    out = capsys.readouterr().out
+    assert "**Changes requested.**" in out          # banner normalized
+    assert "Gated by a blocker-class exposure" in out   # …and explained
+    # Gate parses identically out of the CLI pass.
+    assert should_request_changes(out) == (rc, reason)
+    assert count_blockers(out) == 0
+
+
+def test_every_conflict_gate_caller_uses_the_shared_reason():
+    """Lock the single-sourcing the comment claims, at the CALLERS.
+
+    `append_gate_note`'s conflict branch matches a SUBSTRING of the reason, so a
+    caller with its own literal can satisfy it by accident — headless.py did
+    exactly that (`_CONFLICT_GATE_MARKER` is singular, its literal was plural), and
+    a reword on either side would have silently dropped the explanation. Assert
+    the constant is what the callers actually reference, not a look-alike."""
+    import re
+    from pathlib import Path
+    from verdict import _CONFLICT_GATE_REASON, _CONFLICT_GATE_MARKER
+    assert _CONFLICT_GATE_MARKER in _CONFLICT_GATE_REASON
+    here = Path(__file__).resolve().parent
+    for fname in ("headless.py", "review.py"):
+        src = (here / fname).read_text()
+        # The conflict gate is forced right after a has_conflict_markers() check.
+        assert "has_conflict_markers(" in src, f"{fname}: conflict gate vanished"
+        assert "_CONFLICT_GATE_REASON" in src, (
+            f"{fname} forces the conflict gate without the shared reason constant "
+            f"— its explanation will match only by coincidence")
+        # …and no hand-rolled look-alike literal left behind.
+        # `merge[- ]conflict`, not just the hyphenated spelling: review.py's SECOND
+        # conflict gate used the UNhyphenated wording, so a hyphen-only pattern
+        # walked straight past it and the assertion below was simply untrue.
+        assert not re.search(r'"[^"]*merge[- ]conflict marker[^"]*"', src), (
+            f"{fname} still hardcodes a conflict-reason literal; use "
+            f"_CONFLICT_GATE_REASON so the note can't drift out of match")
