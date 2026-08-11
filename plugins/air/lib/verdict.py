@@ -252,18 +252,33 @@ _PROCESS_GATE_MARKERS = ("lens did not complete", "diff truncated", "decoy")
 # — exactly the case where the model's own lead says "No blockers".
 _FLOOR_GATE_MARKER = "floored to blocker"
 
+# The deterministic conflict-marker gate (`has_conflict_markers`). Also produces
+# the "No blockers" + CHANGES_REQUESTED shape, because it fires independently of
+# what the model wrote — so it needs a reason string and an explanation of its
+# own. Single-sourced here so the callers that force this gate all say the same
+# thing; `_CONFLICT_GATE_MARKER` is the substring `append_gate_note` keys on.
+_CONFLICT_GATE_MARKER = "merge-conflict marker"
+_CONFLICT_GATE_REASON = "unresolved merge-conflict marker(s) in the diff"
+
 
 def append_gate_note(body: str, *, request_changes: bool,
                      reason: str | None = None, head_sha: str | None = None) -> str:
     """Explain a gating verdict inside its own banner. Body-only; never parsed.
 
-    Two things a reader cannot currently work out from the comment:
+    Things a reader cannot otherwise work out from the comment:
 
-    1. WHY it gated when there are no blockers. A fail-closed run (a blocker-class
-       lens died, the diff was truncated, a decoy body) pairs a `[!CAUTION]` banner
-       with a body saying "No blockers" — which reads as air contradicting itself
-       and sent a real promote PR round in circles (repo-A #1751). Say the actual
-       reason instead.
+    1. WHY it gated when there are no blockers. THREE distinct causes produce that
+       shape, each with its own note because the right remedy differs:
+         a. a fail-closed process run (a blocker-class lens died, the diff was
+            truncated, a decoy body) — re-running can clear it. This pairs a
+            `[!CAUTION]` banner with a body saying "No blockers", which reads as
+            air contradicting itself and sent a real promote PR round in circles
+            (repo-A #1751).
+         b. the CATEGORY FLOOR — a `[sec:]`-tagged exposure the model rated below
+            blocker. NOT a process failure: there is a real finding and re-running
+            changes nothing, so the process remedy would be wrong advice.
+         c. the deterministic CONFLICT-MARKER gate — read from the diff, not from
+            the findings, so it fires regardless of what the review says.
     2. THAT PUSHING A FIX WON'T RE-TRIGGER. Fleet callers fire on
        `review_requested` only, so `fix -> push -> wait` never produces a
        re-review; the verdict simply stays stale against an old SHA. That has
@@ -319,6 +334,12 @@ def append_gate_note(body: str, *, request_changes: bool,
             "PII/authz/credential exposure cannot un-gate by being rated medium. "
             "Look for the finding carrying the `[sec:…]` tag; fix it, or have the "
             "review mark it DISPUTED if you disagree.")
+    if reason and _CONFLICT_GATE_MARKER in reason:
+        notes.append(
+            f"**Gated on the diff itself:** {reason}. This is detected directly "
+            "from the diff, independently of the findings above, so it can gate "
+            "even when the review lists no blockers. Resolve the conflict and "
+            "re-request the review.")
     # Phrased as a CONDITIONAL on purpose. Callers come in two shapes: push-driven
     # (`types: [opened, synchronize, reopened]` + cooldown_minutes) where a push DOES
     # re-review, and request-driven (`types: [review_requested]`) where it does not.
@@ -1629,8 +1650,19 @@ def _main(argv: list[str]) -> int:
             extracted, ok = _extract_review_body(body, args.head_sha)
             if ok:
                 decide_on = extracted
-        rc, _ = should_request_changes(decide_on, floor_exposures=floor)
-        sys.stdout.write(normalize_verdict_banner(body, request_changes=rc))
+        rc, reason = should_request_changes(decide_on, floor_exposures=floor)
+        out = normalize_verdict_banner(body, request_changes=rc)
+        # …and EXPLAIN it, in the same pass. Deliberately folded into this
+        # already-wired flag rather than added as a new one: the CLI never called
+        # `append_gate_note` at all, a gap flagged three times against separate
+        # PRs and never closed, because closing it needed a `review.md`
+        # orchestration edit that kept being deferred. This branch already
+        # computes the same gate and already receives --head-sha, so the existing
+        # Step-12 invocation gets both passes with no orchestration change — and
+        # in the same order managed/headless apply them (normalize, then note).
+        out = append_gate_note(out, request_changes=rc, reason=reason,
+                               head_sha=args.head_sha or None)
+        sys.stdout.write(out)
         return 0
     # AIR_CATEGORY_FLOOR=0/false/no is the fresh-gate floor kill switch (same
     # grammar as AIR_LEDGER_PIN). The CLI's Step 12 `--decide` inherits it from

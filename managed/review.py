@@ -104,6 +104,7 @@ from verdict import (  # noqa: E402,F401 — split modules; re-exported for test
     append_gate_note,
     NO_APPROVE_VERDICT_BODY,
     has_conflict_markers,
+    _CONFLICT_GATE_REASON,
     REVIEWED_AT_RE,
     _BLOCKERS_SECTION_RE,
     _BLOCKER_ENTRY_RE,
@@ -2678,12 +2679,20 @@ async def run_review(args):
     # a real extracted review only (never the run-failed diagnostic), and before
     # the dry-run print so --dry-run shows the same body that would post.
     if review_extracted:
-        _banner_rc, _ = should_request_changes(review_body, floor_exposures=_category_floor_enabled())
+        # Capture the REASON, don't discard it: `append_gate_note`'s explanatory
+        # branches are all `if reason and …`, so dropping it made every one of
+        # them unreachable here — the process-gate note has silently never
+        # rendered on this path since it shipped, and the floor note would have
+        # inherited the same silence. headless.py always passed it; this site
+        # didn't, so the default managed path was the one left mute.
+        _banner_rc, _banner_reason = should_request_changes(
+            review_body, floor_exposures=_category_floor_enabled())
         if not _banner_rc and has_conflict_markers(diff, diff_check_warnings):
             _banner_rc = True
+            _banner_reason = _CONFLICT_GATE_REASON
         review_body = normalize_verdict_banner(review_body, request_changes=_banner_rc)
         review_body = append_gate_note(review_body, request_changes=_banner_rc,
-                                       head_sha=head_sha)
+                                       reason=_banner_reason, head_sha=head_sha)
 
     if args.dry_run:
         print("\n" + "=" * 60)

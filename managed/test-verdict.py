@@ -2291,3 +2291,57 @@ def test_full_pipeline_on_the_floor_scenario():
     assert "Gated by a blocker-class exposure" in out
     assert should_request_changes(out) == (rc, reason)     # gate untouched
     assert out.rstrip().endswith(_GN_SHA)                  # footer still last
+
+
+def test_gate_note_explains_a_conflict_marker_gate():
+    """The conflict gate fires from the DIFF, independently of the findings, so it
+    also produces the "No blockers" + CHANGES_REQUESTED shape and needs its own
+    note — the process remedy ("re-run") wouldn't fix an unresolved conflict."""
+    from verdict import _CONFLICT_GATE_REASON
+    out = append_gate_note(_gn_body(), request_changes=True,
+                           reason=_CONFLICT_GATE_REASON, head_sha=_GN_SHA)
+    assert "Gated on the diff itself" in out
+    assert "Gated for a process reason" not in out
+    assert "Gated by a blocker-class exposure" not in out
+
+
+def test_each_gate_cause_emits_exactly_one_explanation():
+    """The three causes are distinct branches; none may double-fire on another's
+    reason string (they are matched by substring, so overlap is the risk)."""
+    from verdict import _CONFLICT_GATE_REASON
+    cases = {
+        "blocker-class lens did not complete: air-code-reviewer": "Gated for a process reason",
+        "1 blocker-class exposure(s) [pii-exposure] floored to blocker":
+            "Gated by a blocker-class exposure",
+        _CONFLICT_GATE_REASON: "Gated on the diff itself",
+    }
+    heads = ["Gated for a process reason", "Gated by a blocker-class exposure",
+             "Gated on the diff itself"]
+    for reason, expected in cases.items():
+        out = append_gate_note(_gn_body(), request_changes=True,
+                               reason=reason, head_sha=_GN_SHA)
+        present = [h for h in heads if h in out]
+        assert present == [expected], f"{reason!r} -> {present}"
+
+
+def test_cli_normalize_banner_also_appends_the_gate_note(capsys):
+    """The CLI gap: `--normalize-banner` is the only verdict.py pass review.md
+    wires for the banner, and it used to emit no explanation at all — so a
+    CLI-driven review hitting the floor got the corrected lead and no reason.
+    Both passes must now come out of that one already-wired invocation."""
+    import verdict
+    rc, reason = should_request_changes(_FLOOR_BODY)
+    assert rc is True and "floored to blocker" in reason
+    import io, sys as _sys
+    orig = _sys.stdin
+    _sys.stdin = io.StringIO(_FLOOR_BODY)      # _main reads the body on stdin
+    try:
+        assert verdict._main(["--normalize-banner", "--head-sha", _GN_SHA]) == 0
+    finally:
+        _sys.stdin = orig
+    out = capsys.readouterr().out
+    assert "**Changes requested.**" in out          # banner normalized
+    assert "Gated by a blocker-class exposure" in out   # …and explained
+    # Gate parses identically out of the CLI pass.
+    assert should_request_changes(out) == (rc, reason)
+    assert count_blockers(out) == 0
