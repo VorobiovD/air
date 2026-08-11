@@ -2199,3 +2199,95 @@ def test_gate_note_not_suppressed_by_a_quoted_marker_in_the_body():
     b = _gn_body() + "\n\nSomeone pasted <!-- air-gate-note --> into a finding.\n"
     out = append_gate_note(b, request_changes=True, reason="1 unfixed blocker", head_sha=_GN_SHA)
     assert "If no new review appears" in out
+
+
+# ---- the "No blockers" + CHANGES_REQUESTED self-contradiction (lifemd #17344) --
+# A `[sec:]`-tagged exposure the model rated MEDIUM is floored to a blocker by
+# count_category_floored, so the gate fires while the model's own lead — written
+# before the floor is applied in Python — still says "No blockers." Live on a real
+# PR the comment read as air contradicting itself: red banner, "No blockers.",
+# CHANGES_REQUESTED, and the only gating finding sitting under "Medium — consider
+# fixing" with nothing saying why.
+
+_FLOOR_BODY = (
+    "## Code Review\n\n"
+    "> [!CAUTION]\n"
+    "> **No blockers.** 10 to consider · 0 nits · ~10 min read\n"
+    "> Solid integration with a few non-blocking gaps.\n\n"
+    "### Medium — consider fixing\n\n"
+    "**1. Raw upstream error body can leak to the patient** [sec:data-exposure]\n\n"
+    f"Reviewed at: {_GN_SHA}\n"
+)
+
+
+def test_floor_gate_reason_is_produced_by_the_real_gate():
+    """Anchors the scenario: 0 labelled blockers, gate ON via the floor."""
+    assert count_blockers(_FLOOR_BODY) == 0
+    assert count_category_floored(_FLOOR_BODY) == (1, ["data-exposure"])
+    rc, reason = should_request_changes(_FLOOR_BODY)
+    assert rc is True and "floored to blocker" in reason
+
+
+def test_banner_lead_no_longer_denies_the_gate():
+    """`**No blockers.**` on a GATING verdict is rewritten; counts survive."""
+    out = normalize_verdict_banner(_FLOOR_BODY, request_changes=True)
+    assert "**Changes requested.** 10 to consider · 0 nits · ~10 min read" in out
+    assert "**No blockers.**" not in out
+    assert "> [!CAUTION]" in out
+
+
+def test_banner_lead_rewrite_is_gate_identical_and_idempotent():
+    out = normalize_verdict_banner(_FLOOR_BODY, request_changes=True)
+    assert count_blockers(out) == count_blockers(_FLOOR_BODY)
+    assert count_category_floored(out) == count_category_floored(_FLOOR_BODY)
+    assert should_request_changes(out) == should_request_changes(_FLOOR_BODY)
+    assert _extract_body(out, _GN_SHA) is not None
+    assert normalize_verdict_banner(out, request_changes=True) == out
+
+
+def test_no_blockers_lead_is_untouched_on_a_clean_verdict():
+    """The non-gating direction must not be inverted — a clean review still reads
+    'No blockers.' (this is the pre-existing behavior, guarded against a regression
+    from the new else-branch)."""
+    clean = _FLOOR_BODY.replace(" [sec:data-exposure]", "")
+    assert should_request_changes(clean)[0] is False
+    out = normalize_verdict_banner(clean, request_changes=False)
+    assert "**No blockers.**" in out and "Changes requested" not in out
+
+
+def test_gate_note_explains_a_floored_exposure():
+    rc, reason = should_request_changes(_FLOOR_BODY)
+    out = append_gate_note(_FLOOR_BODY, request_changes=rc, reason=reason, head_sha=_GN_SHA)
+    assert "Gated by a blocker-class exposure" in out
+    assert "data-exposure" in out
+    assert "[sec:" in out                      # tells the reader how to find it
+    # A floor gate is NOT a process failure: "re-run to clear it" would be wrong.
+    assert "Gated for a process reason" not in out
+    assert "Re-run the review to clear it" not in out
+
+
+def test_floor_note_absent_when_the_floor_is_not_the_reason():
+    out = append_gate_note(_gn_body(), request_changes=True,
+                           reason="2 blocker(s)", head_sha=_GN_SHA)
+    assert "Gated by a blocker-class exposure" not in out
+
+
+def test_floor_note_gate_identical_and_idempotent():
+    rc, reason = should_request_changes(_FLOOR_BODY)
+    out = append_gate_note(_FLOOR_BODY, request_changes=rc, reason=reason, head_sha=_GN_SHA)
+    assert should_request_changes(out) == should_request_changes(_FLOOR_BODY)
+    assert count_category_floored(out) == count_category_floored(_FLOOR_BODY)
+    assert count_blockers(out) == 0
+    assert _extract_body(out, _GN_SHA) is not None
+    assert append_gate_note(out, request_changes=rc, reason=reason, head_sha=_GN_SHA) == out
+
+
+def test_full_pipeline_on_the_floor_scenario():
+    """Both passes together, in caller order (normalize then note), end to end."""
+    rc, reason = should_request_changes(_FLOOR_BODY)
+    out = normalize_verdict_banner(_FLOOR_BODY, request_changes=rc)
+    out = append_gate_note(out, request_changes=rc, reason=reason, head_sha=_GN_SHA)
+    assert "**Changes requested.**" in out
+    assert "Gated by a blocker-class exposure" in out
+    assert should_request_changes(out) == (rc, reason)     # gate untouched
+    assert out.rstrip().endswith(_GN_SHA)                  # footer still last

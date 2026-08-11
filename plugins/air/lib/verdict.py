@@ -220,6 +220,16 @@ _BANNER_ALERT_RE = re.compile(r"(?m)^>[ \t]*\[!(?:CAUTION|WARNING|NOTE|TIP|IMPOR
 # Non-greedy to the first closing `**`, so trailing counts (`** 3 fixed · …`) survive.
 _BANNER_CHANGES_REQUESTED_RE = re.compile(
     r"(?mi)^(>[ \t]*\*\*)[ \t]*changes requested\b[^\n]*?(\*\*)")
+# The INVERSE under-escalation lead: `> **No blockers.** …counts…` on a verdict
+# that DOES gate. Happens whenever the gate fires without a blocker-labelled
+# finding — most often the category floor (a `[sec:]`-tagged exposure the model
+# rated medium), and also every fail-closed process gate. The model writes the
+# banner before the floor is applied in Python, so it cannot know. Left alone it
+# pairs "No blockers." with a red banner and a CHANGES_REQUESTED, which reads as
+# air contradicting itself — observed live on a real PR (a patient-data leak
+# floored from medium), where the whole review looked broken.
+_BANNER_NO_BLOCKERS_RE = re.compile(
+    r"(?mi)^(>[ \t]*\*\*)[ \t]*no blockers\b[^\n]*?(\*\*)")
 # The first "findings" marker — a section heading, a `**N.` blocker entry, or a
 # `- **#N**` re-review status line. The verdict banner always precedes all of
 # these; an alert AFTER the first marker is quoted inside a finding, not the banner.
@@ -232,6 +242,15 @@ _GATE_NOTE_MARK = "<!-- air-gate-note -->"
 # Reasons the gate fires WITHOUT a real blocker finding — a process failure, not
 # a code judgement. Keyed off the reason strings the callers already build.
 _PROCESS_GATE_MARKERS = ("lens did not complete", "diff truncated", "decoy")
+
+# The category-floor gate: a `[sec:<cat>]`-tagged exposure the model placed BELOW
+# blocker, floored to a blocker by `count_category_floored`. Deliberately NOT in
+# _PROCESS_GATE_MARKERS — it is the opposite of a process failure: there IS a real
+# finding, air simply overrode the severity the model gave it, so "re-run to
+# clear it" would be actively wrong advice. It needs its own sentence because
+# `should_request_changes` only emits this reason when the floor is the SOLE cause
+# — exactly the case where the model's own lead says "No blockers".
+_FLOOR_GATE_MARKER = "floored to blocker"
 
 
 def append_gate_note(body: str, *, request_changes: bool,
@@ -289,6 +308,17 @@ def append_gate_note(body: str, *, request_changes: bool,
         # send the reader in a loop.
         remedy = "" if "diff truncated" in reason else " Re-run the review to clear it."
         notes.append(f"**Gated for a process reason, not a finding:** {reason}.{remedy}")
+    if reason and _FLOOR_GATE_MARKER in reason:
+        # Name the finding class so the reader can locate it — it is sitting under
+        # a non-blocking heading ("Medium — consider fixing"), which is precisely
+        # why the comment looked self-contradictory.
+        notes.append(
+            f"**Gated by a blocker-class exposure:** {reason}. air floors any "
+            "confirmed, exploitable exposure to a blocker for the verdict "
+            "regardless of the severity written below it — so a real "
+            "PII/authz/credential exposure cannot un-gate by being rated medium. "
+            "Look for the finding carrying the `[sec:…]` tag; fix it, or have the "
+            "review mark it DISPUTED if you disagree.")
     # Phrased as a CONDITIONAL on purpose. Callers come in two shapes: push-driven
     # (`types: [opened, synchronize, reopened]` + cooldown_minutes) where a push DOES
     # re-review, and request-driven (`types: [review_requested]`) where it does not.
@@ -340,6 +370,12 @@ def normalize_verdict_banner(body: str, *, request_changes: bool) -> str:
     body = body[:m.start()] + f"> [!{want}]" + body[m.end():]
     if not request_changes:
         body = _BANNER_CHANGES_REQUESTED_RE.sub(r"\1No blockers.\2", body, count=1)
+    else:
+        # Under-escalation, the mirror of the case above: the gate fired but the
+        # model's lead says "No blockers." — true of what it labelled, false of
+        # the verdict. `append_gate_note` supplies the WHY; this only stops the
+        # lead from denying the gate outright.
+        body = _BANNER_NO_BLOCKERS_RE.sub(r"\1Changes requested.\2", body, count=1)
     return body
 
 
