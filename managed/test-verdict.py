@@ -2345,3 +2345,29 @@ def test_cli_normalize_banner_also_appends_the_gate_note(capsys):
     # Gate parses identically out of the CLI pass.
     assert should_request_changes(out) == (rc, reason)
     assert count_blockers(out) == 0
+
+
+def test_every_conflict_gate_caller_uses_the_shared_reason():
+    """Lock the single-sourcing the comment claims, at the CALLERS.
+
+    `append_gate_note`'s conflict branch matches a SUBSTRING of the reason, so a
+    caller with its own literal can satisfy it by accident — headless.py did
+    exactly that (`_CONFLICT_GATE_MARKER` is singular, its literal was plural), and
+    a reword on either side would have silently dropped the explanation. Assert
+    the constant is what the callers actually reference, not a look-alike."""
+    import re
+    from pathlib import Path
+    from verdict import _CONFLICT_GATE_REASON, _CONFLICT_GATE_MARKER
+    assert _CONFLICT_GATE_MARKER in _CONFLICT_GATE_REASON
+    here = Path(__file__).resolve().parent
+    for fname in ("headless.py", "review.py"):
+        src = (here / fname).read_text()
+        # The conflict gate is forced right after a has_conflict_markers() check.
+        assert "has_conflict_markers(" in src, f"{fname}: conflict gate vanished"
+        assert "_CONFLICT_GATE_REASON" in src, (
+            f"{fname} forces the conflict gate without the shared reason constant "
+            f"— its explanation will match only by coincidence")
+        # …and no hand-rolled look-alike literal left behind.
+        assert not re.search(r'"[^"]*merge-conflict marker[^"]*"', src), (
+            f"{fname} still hardcodes a conflict-reason literal; use "
+            f"_CONFLICT_GATE_REASON so the note can't drift out of match")

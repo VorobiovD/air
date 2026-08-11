@@ -67,6 +67,7 @@ from prompts import build_pr_context, build_verifier_task  # noqa: E402
 from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py; pure, network-free)
     should_request_changes, resolve_verdict_event, normalize_verdict_banner, append_gate_note, NO_APPROVE_VERDICT_BODY, _extract_review_body, has_conflict_markers,
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
+    _CONFLICT_GATE_REASON,
 )
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
 from agent_md import split_frontmatter, resolve_model_alias  # noqa: E402  (single-source frontmatter parser + AIR_MODEL_* override)
@@ -1048,8 +1049,13 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # "conflict markers in the diff = automatic blocker". Check the RAW (pre-html.escape)
     # diff — escaping turns `<<<<<<<` into `&lt;...` which the model can't recognize.
     if not rc and has_conflict_markers(diff):
-        rc, reason = True, "unresolved merge-conflict markers in the diff (automatic blocker)"
-        print(f"  [gate] {reason}", file=sys.stderr)
+        # Use the SHARED constant, not a local literal: `append_gate_note` keys its
+        # conflict explanation on a substring of it, and the old literal here only
+        # matched by coincidence (singular marker vs plural literal). Reword either
+        # side and this gate silently loses its explanation — the exact "No blockers
+        # + CHANGES_REQUESTED with no reason" bug the note exists to prevent.
+        rc, reason = True, _CONFLICT_GATE_REASON
+        print(f"  [gate] {reason} (automatic blocker)", file=sys.stderr)
     # Anti-decoy: also gate on the FULL raw verifier output. A single verifier emits
     # ONE review block; if a prompt-injected DECOY second `## Code Review` block (with
     # the real, public head SHA) made _extract_review_body select a clean block while an
