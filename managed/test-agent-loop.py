@@ -455,3 +455,57 @@ def test_malformed_error_body_never_raises_inside_the_handler(body):
     resp = httpx.Response(200, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
     e = anthropic.APIStatusError("x", response=resp, body=body)
     assert agent_loop._is_retryable_turn_error(e) is False
+
+
+# ---------------------------------------------------------------------------
+# Backoff arithmetic: the cap is a real ceiling AND the jitter survives
+# ---------------------------------------------------------------------------
+# This formula was wrong three different ways in three consecutive rounds — no
+# jitter (lockstep retries), jitter applied after the clamp (real ceiling 1.25x the
+# cap), then jitter that vanished once backoff saturated the cap — and no test
+# caught any of them, because each was verified by hand instead of pinned here.
+
+def _delays(monkeypatch, *, attempts, backoff, rnd):
+    """Delays `_final_message_with_retry` would sleep, with random() pinned."""
+    monkeypatch.setattr(agent_loop, "STREAM_RETRY_ATTEMPTS", attempts)
+    monkeypatch.setattr(agent_loop, "STREAM_RETRY_BACKOFF_S", backoff)
+    monkeypatch.setattr(agent_loop.random, "random", lambda: rnd)
+    slept = []
+    monkeypatch.setattr(agent_loop.time, "sleep", lambda d: slept.append(d))
+    client, _ = _client([_drop])                 # always fails → exhausts retries
+    with pytest.raises(Exception):
+        agent_loop._final_message_with_retry(
+            client, log=lambda *_a: None, label="t", model="m", messages=[], system=[])
+    return slept
+
+
+@pytest.mark.parametrize("rnd", [0.0, 0.5, 0.999999])
+def test_backoff_never_exceeds_the_cap_even_when_saturated(monkeypatch, rnd):
+    """A big backoff + many attempts must still respect _STREAM_RETRY_CAP_S. The
+    documented "capped 30s" was briefly untrue (jitter multiplied a clamped base)."""
+    slept = _delays(monkeypatch, attempts=10, backoff=8.0, rnd=rnd)
+    assert slept, "expected retries to sleep"
+    assert max(slept) <= agent_loop._STREAM_RETRY_CAP_S
+
+
+def test_jitter_still_spreads_once_backoff_saturates_the_cap(monkeypatch):
+    """At a saturating attempt the delay must NOT collapse to exactly the cap for
+    every caller — that's the lockstep the jitter exists to prevent, and it's the
+    regime a raised AIR_STREAM_RETRY_ATTEMPTS during a real outage lands in."""
+    lo = _delays(monkeypatch, attempts=10, backoff=8.0, rnd=0.999999)
+    hi = _delays(monkeypatch, attempts=10, backoff=8.0, rnd=0.0)
+    cap = agent_loop._STREAM_RETRY_CAP_S
+    # Compare the PLATEAU (the saturated tail), not every delay — the early
+    # attempts are legitimately below the cap because backoff hasn't reached it.
+    plateau_hi, plateau_lo = hi[-1], lo[-1]
+    assert plateau_hi == cap, "random()==0 should sleep exactly the cap"
+    assert plateau_lo < cap * 0.99, "jitter collapsed at saturation — back to lockstep"
+    assert cap * 0.74 <= plateau_lo <= cap, "jitter must stay bounded to ~25%, never negative"
+
+
+def test_backoff_grows_then_plateaus_at_the_cap(monkeypatch):
+    """Exponential up to the ceiling, then flat — no runaway, no shrinking."""
+    slept = _delays(monkeypatch, attempts=8, backoff=2.0, rnd=0.0)   # no jitter
+    assert slept == sorted(slept), "backoff must be non-decreasing"
+    assert slept[-1] == agent_loop._STREAM_RETRY_CAP_S
+    assert slept[0] == 2.0 and slept[1] == 4.0                       # 2^n growth
