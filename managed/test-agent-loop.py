@@ -393,3 +393,65 @@ def test_truncated_turn_with_tool_uses_fails_closed(monkeypatch):
     assert out["stop"] == "max_tokens"
     assert sandbox.dispatched == []    # never executed a truncated call
     assert calls["n"] == 1             # no continue, no nudge
+
+
+# ---------------------------------------------------------------------------
+# MID-STREAM overload: the shape a status-code-only classifier misses
+# ---------------------------------------------------------------------------
+# When the stream opens 200 OK and the server THEN sends an `error` event, the SDK
+# builds the exception with `response=<the 200 stream response>`; _make_status_error
+# dispatches on status_code, 200 matches no subclass, so an overloaded_error arrives
+# as a BASE APIStatusError carrying status_code=200. lifemd #17405: air-code-reviewer
+# died on exactly this with ZERO retry lines, fail-closing the gate with no finding.
+
+def _mid_stream_error(etype="overloaded_error"):
+    """The real shape: HTTP 200 + an in-stream `error` event body."""
+    anthropic = pytest.importorskip("anthropic")
+    body = {"type": "error", "error": {"details": None, "type": etype, "message": "Overloaded"}}
+    resp = httpx.Response(200, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    return anthropic.APIStatusError(f"{body}", response=resp, body=body)
+
+
+def test_mid_stream_overload_is_retryable_despite_status_200():
+    e = _mid_stream_error()
+    assert getattr(e, "status_code", None) == 200      # anchors WHY the code test failed
+    assert agent_loop._is_retryable_turn_error(e) is True
+
+
+@pytest.mark.parametrize("etype", ["overloaded_error", "api_error", "rate_limit_error",
+                                   "timeout_error"])
+def test_transient_in_stream_error_types_retry(etype):
+    assert agent_loop._is_retryable_turn_error(_mid_stream_error(etype)) is True
+
+
+@pytest.mark.parametrize("etype", ["invalid_request_error", "authentication_error",
+                                   "permission_error", "not_found_error",
+                                   "request_too_large"])
+def test_our_fault_in_stream_error_types_still_fail_loud(etype):
+    """A body-based fallback must not turn a real request error into an infinite
+    retry — those fail identically forever, so they must propagate."""
+    assert agent_loop._is_retryable_turn_error(_mid_stream_error(etype)) is False
+
+
+def test_mid_stream_overload_actually_recovers_through_the_retry():
+    """End-to-end through the retry helper, not just the predicate."""
+    ok = types.SimpleNamespace(usage=None,
+                               content=[types.SimpleNamespace(type="text", text="hi")],
+                               stop_reason="end_turn")
+    def boom(): raise _mid_stream_error()
+    client, calls = _client([boom, lambda: ok])
+    out = agent_loop._final_message_with_retry(
+        client, log=lambda *_a: None, label="code-reviewer", model="m",
+        messages=[], system=[])
+    assert out is ok and calls["n"] == 2
+
+
+@pytest.mark.parametrize("body", [None, "a bare string", 123, {"error": "not-a-dict"},
+                                  {"error": {"type": 7}}, {}])
+def test_malformed_error_body_never_raises_inside_the_handler(body):
+    """`_stream_error_type` runs inside an exception handler — a weird body must
+    simply not match, never raise a second exception over the first."""
+    anthropic = pytest.importorskip("anthropic")
+    resp = httpx.Response(200, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    e = anthropic.APIStatusError("x", response=resp, body=body)
+    assert agent_loop._is_retryable_turn_error(e) is False
