@@ -2374,3 +2374,83 @@ def test_every_conflict_gate_caller_uses_the_shared_reason():
         assert not re.search(r'"[^"]*merge[- ]conflict marker[^"]*"', src), (
             f"{fname} still hardcodes a conflict-reason literal; use "
             f"_CONFLICT_GATE_REASON so the note can't drift out of match")
+
+
+# --- find_prior_review across ROTATED bot accounts (repo-E #67) --------------
+# air posts under whichever reviewer's PAT was requested. Filtering on only the
+# CURRENT token's login made every prior round invisible after a rotation: air saw
+# "no prior review", ran a FRESH review, and silently discarded a 17-finding
+# carry-forward ledger — two findings stopped being adjudicated rather than being
+# confirmed fixed. That defeats the guarantee that a prior BLOCKER can't quietly
+# stop being tracked. The gate-orphan dismissal path was already allowlist-aware,
+# which is exactly why the stale verdicts got dismissed while detection didn't.
+
+_ROTATED = [  # 7 rounds under account A, as the endpoint delivers them (oldest-first)
+    {"user": {"login": "acct-a"}, "created_at": "2026-08-04T20:06:52Z",
+     "body": "## Code Review (Re-review)\n\nround 1\n\nReviewed at: aaaa\n"},
+    {"user": {"login": "acct-a"}, "created_at": "2026-08-04T21:35:59Z",
+     "body": "## Code Review (Re-review)\n\nround 7\n\nReviewed at: bbbb\n"},
+]
+
+
+def test_prior_review_found_when_the_reviewing_account_rotated():
+    got = find_prior_review(_ROTATED, "acct-b", {"acct-a", "acct-b"})
+    assert got is not None, "rotation must not hide the ledger"
+    assert "Reviewed at: bbbb" in got["body"]        # still the NEWEST round
+
+
+def test_prior_review_lost_without_the_allowlist():
+    """Anchors the bug this fixes: the old single-login call finds nothing."""
+    assert find_prior_review(_ROTATED, "acct-b") is None
+
+
+def test_allowlist_does_not_admit_a_non_air_author():
+    """Anti-spoof is preserved — the allowlist is air's OWN accounts only, so a
+    human (or an attacker) posting a review-shaped body is still ignored."""
+    spoof = [{"user": {"login": "random-human"}, "created_at": "2026-08-05T00:00:00Z",
+              "body": "## Code Review\n\nfake\n\nReviewed at: cccc\n"}]
+    assert find_prior_review(spoof, "acct-b", {"acct-a", "acct-b"}) is None
+
+
+def test_no_resolvable_identity_finds_nothing_rather_than_failing_open():
+    """With neither a token login nor an allowlist, match NOTHING — never treat
+    every review-shaped comment as air's own."""
+    assert find_prior_review(_ROTATED, "", set()) is None
+    assert find_prior_review(_ROTATED, None, None) is None
+
+
+def test_newest_wins_across_two_different_bot_accounts():
+    """Baseline selection is by created_at, not by which account posted it."""
+    mixed = _ROTATED + [
+        {"user": {"login": "acct-b"}, "created_at": "2026-08-11T19:37:08Z",
+         "body": "## Code Review\n\nnewer, other account\n\nReviewed at: dddd\n"},
+    ]
+    got = find_prior_review(mixed, "acct-b", {"acct-a", "acct-b"})
+    assert "Reviewed at: dddd" in got["body"]
+
+
+def test_allowlist_is_additive_to_the_current_login():
+    """bot_login must still match even when absent from the allowlist."""
+    got = find_prior_review(_ROTATED, "acct-a", {"someone-else"})
+    assert got is not None and "Reviewed at: bbbb" in got["body"]
+
+
+def test_every_find_prior_review_call_site_passes_the_allowlist():
+    """Wiring guard. The library fix is inert at any call site that still passes
+    only the current token's login — and there are FOUR (headless re-review detect,
+    review.py re-review detect, promote-sibling, concurrent-run recheck). A
+    library-only fix with untouched callers is the exact shape that made #300's
+    gate note render nowhere, so assert the callers, not just the function."""
+    import re
+    from pathlib import Path
+    here = Path(__file__).resolve().parent
+    sites = 0
+    for fname in ("headless.py", "review.py"):
+        for line in (here / fname).read_text().splitlines():
+            if "find_prior_review(" not in line or "import" in line:
+                continue
+            sites += 1
+            assert "_air_bot_logins()" in line, (
+                f"{fname}: `{line.strip()}` filters on one login — a rotated "
+                f"account hides the prior review and drops the ledger")
+    assert sites == 4, f"expected 4 call sites, found {sites} — re-check the wiring"

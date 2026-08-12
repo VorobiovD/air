@@ -637,12 +637,30 @@ def _is_rereview_body(body: str) -> bool:
 PRIOR_REVIEW_MAX_CHARS = 8000
 
 
-def find_prior_review(comments: list[dict], bot_login: str) -> dict | None:
+def find_prior_review(comments: list[dict], bot_login: str,
+                      bot_logins=None) -> dict | None:
     """Return the most recent bot-authored ## Code Review comment, or None.
 
     Filters on comment author so a PR participant can't hijack the
     auto-detect flow by posting a fake review body. Takes an already-
     fetched comment list to avoid re-paginating the endpoint.
+
+    `bot_logins` widens the author filter to EVERY account air posts under
+    (`review._air_bot_logins()` — `AIR_PAT_MAP` keys ∪ `AIR_BOT_LOGINS`), unioned
+    with the current token's `bot_login`. Without it, a single-login filter loses
+    the whole re-review ledger whenever the reviewing identity rotates between
+    rounds: on repo-E #67 the seven prior rounds were authored by one account, the
+    next run authenticated as another (a different reviewer was requested), NONE
+    matched, so air saw "no prior review", ran a FRESH review, and a 17-finding
+    ledger was silently discarded — two carried findings stopped being adjudicated
+    rather than being confirmed fixed. That defeats the carry-forward guarantee
+    that exists precisely so a prior BLOCKER can't quietly stop being tracked;
+    there it happened to land safe, but by luck, not by design. The gate-orphan
+    dismissal path was already allowlist-aware, which is exactly why the stale
+    verdicts were dismissed cross-account while the re-review detection wasn't.
+
+    Anti-spoof is preserved: the allowlist is air's OWN accounts, sourced from
+    caller config, never arbitrary commenters.
 
     Returns the NEWEST match by `created_at` — NOT the first in list order.
     The GitHub *issue-comments* endpoint IGNORES `sort`/`direction` and always
@@ -654,8 +672,9 @@ def find_prior_review(comments: list[dict], bot_login: str) -> dict | None:
     ISO-8601 UTC — lexicographically sortable; ties are vanishingly rare and
     either review is a valid baseline.)
     """
+    allowed = {x for x in (set(bot_logins or ()) | {bot_login}) if x}
     matches = [c for c in comments
-               if (c.get("user") or {}).get("login") == bot_login
+               if (c.get("user") or {}).get("login") in allowed
                and (c.get("body") or "").startswith(BOT_REVIEW_PREFIXES)]
     # Sort by (created_at, id): id breaks same-second ties deterministically.
     # (A comment missing created_at still sorts to the minimum — the `or ""`

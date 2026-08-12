@@ -967,7 +967,9 @@ def _detect_promote_fastpath(
     except (PartialPageError, RequestException) as e:
         print(f"  [promote] sibling #{sibling_num} comment fetch failed ({e}) — full review", file=sys.stderr)
         return None
-    sib_review = find_prior_review(sib_comments, bot_login)
+    # Allowlist: the sibling promote's review may have been posted under a
+    # different rotated account than this run authenticates as.
+    sib_review = find_prior_review(sib_comments, bot_login, _air_bot_logins())
     if sib_review is None:
         print(f"  [promote] sibling #{sibling_num} has no air review — full review", file=sys.stderr)
         return None
@@ -2018,7 +2020,9 @@ async def run_review(args):
     # Re-review detection (only when not --fresh). Reuses the same
     # all_comments fetch above so we don't re-paginate the endpoint.
     if not args.fresh and bot_login:
-        prior = find_prior_review(all_comments, bot_login)
+        # Allowlist — see find_prior_review: a single-login filter loses the
+        # whole ledger when the reviewing identity rotates between rounds.
+        prior = find_prior_review(all_comments, bot_login, _air_bot_logins())
         if prior:
             prior_sha = extract_reviewed_at_sha(prior["body"])
             if prior_sha is None:
@@ -2730,7 +2734,9 @@ async def run_review(args):
                 file=sys.stderr,
             )
             recheck_comments = []
-        concurrent = find_prior_review(recheck_comments, bot_login)
+        # Allowlist: a concurrent run under a DIFFERENT rotated account must
+        # still be detected, or both runs post a review for the same SHA.
+        concurrent = find_prior_review(recheck_comments, bot_login, _air_bot_logins())
         if concurrent and extract_reviewed_at_sha(concurrent.get("body", "")) == head_sha:
             print(
                 f"  [skip] a concurrent run already posted a review for "
