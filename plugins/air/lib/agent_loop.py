@@ -20,6 +20,7 @@ this orchestrator and are never handed to the Sandbox's git subprocess.
 """
 import datetime
 import os
+import random
 import re
 import time
 
@@ -145,6 +146,31 @@ def _transient_stream_errors():
 # silently omit a real transient 5xx the way a finite enum would.
 _RETRYABLE_4XX = frozenset({408, 409, 429})
 
+# Anthropic's own `error.type` vocabulary, split by whether re-issuing helps.
+# Needed because a status code is NOT always available (see below): the transient
+# ones are server-side/capacity, the rest are our request's fault and will fail
+# identically forever.
+_RETRYABLE_ERROR_TYPES = frozenset({
+    "overloaded_error", "api_error", "rate_limit_error", "timeout_error",
+})
+
+
+def _stream_error_type(e):
+    """The inner `error.type` of an Anthropic error body, or None.
+
+    The body is `{"type": "error", "error": {"type": "overloaded_error", …}}`.
+    Read defensively — a non-dict body (a bare string, or an httpx-level failure)
+    must simply not match rather than raise inside the error handler.
+    """
+    body = getattr(e, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            t = err.get("type")
+            if isinstance(t, str):
+                return t
+    return None
+
 
 def _is_retryable_turn_error(e) -> bool:
     """A transient error worth re-issuing the turn for: a mid-stream transport
@@ -164,7 +190,24 @@ def _is_retryable_turn_error(e) -> bool:
     if not isinstance(e, anthropic.APIStatusError):
         return False
     code = getattr(e, "status_code", None)
-    return isinstance(code, int) and (code >= 500 or code in _RETRYABLE_4XX)
+    if isinstance(code, int) and (code >= 500 or code in _RETRYABLE_4XX):
+        return True
+    # MID-STREAM overload — the case a status-code-only test silently misses, and
+    # the one that actually happens on a long turn. When the stream opens 200 OK
+    # and the server THEN emits an `error` event, `_streaming.py` builds the
+    # exception via `_make_status_error(response=<the 200 stream response>)`, and
+    # that dispatches purely on `response.status_code`. 200 matches no subclass,
+    # so an `overloaded_error` arrives as a BASE `APIStatusError` carrying
+    # **status_code=200** — not `OverloadedError`/529. The code test above then
+    # says "not retryable", the turn re-raises with no retry and no log, and a
+    # blocker lens dies → fail-closed CHANGES_REQUESTED with no finding behind it
+    # (lifemd #17405: `air-code-reviewer failed: APIStatusError … overloaded_error`
+    # with zero retry lines). So fall back to the error BODY's own type, which is
+    # populated on exactly this path. Re-issuing stays safe for the same reason as
+    # the transport-drop case: a mid-stream failure means no final message was
+    # read, so the request is still unmutated (tool_results are appended only
+    # after a clean read) and the retry is idempotent.
+    return _stream_error_type(e) in _RETRYABLE_ERROR_TYPES
 
 
 def _final_message_with_retry(client, *, log, label, **stream_kwargs):
@@ -182,7 +225,21 @@ def _final_message_with_retry(client, *, log, label, **stream_kwargs):
             last = e
             if attempt >= STREAM_RETRY_ATTEMPTS:
                 break
-            delay = min(STREAM_RETRY_BACKOFF_S * (2 ** (attempt - 1)), _STREAM_RETRY_CAP_S)
+            # Jitter (≤25%) so concurrent callers don't retry in lockstep into the
+            # same capacity spike: the specialist fan-out runs 4-5 at once and the
+            # learn map up to MAP_PARALLELISM (8), and an overload is exactly the
+            # correlated failure that puts them all in the same retry window.
+            # Jitter DOWNWARD from the clamped value, so both properties hold for
+            # every attempt and config: the cap is a true ceiling, and the spread
+            # never disappears. Jittering upward then clamping broke each in turn —
+            # first pushing the real max to 1.25x the cap (30s -> 37.5s, contradicting
+            # the documented "capped 30s"), then, once backoff saturates the cap,
+            # collapsing every retry back to exactly the cap and losing the
+            # decorrelation exactly where it matters most: a raised
+            # AIR_STREAM_RETRY_ATTEMPTS during a real outage, with the specialist
+            # fan-out and up to MAP_PARALLELISM learn curations all retrying at once.
+            base = min(STREAM_RETRY_BACKOFF_S * (2 ** (attempt - 1)), _STREAM_RETRY_CAP_S)
+            delay = base * (1 - random.random() * 0.25)
             log(f"  [warn] {label}: transient error ({type(e).__name__}: {str(e)[:80]}); "
                 f"retry {attempt}/{STREAM_RETRY_ATTEMPTS - 1} after {delay:.0f}s")
             time.sleep(delay)

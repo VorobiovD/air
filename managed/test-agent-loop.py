@@ -393,3 +393,119 @@ def test_truncated_turn_with_tool_uses_fails_closed(monkeypatch):
     assert out["stop"] == "max_tokens"
     assert sandbox.dispatched == []    # never executed a truncated call
     assert calls["n"] == 1             # no continue, no nudge
+
+
+# ---------------------------------------------------------------------------
+# MID-STREAM overload: the shape a status-code-only classifier misses
+# ---------------------------------------------------------------------------
+# When the stream opens 200 OK and the server THEN sends an `error` event, the SDK
+# builds the exception with `response=<the 200 stream response>`; _make_status_error
+# dispatches on status_code, 200 matches no subclass, so an overloaded_error arrives
+# as a BASE APIStatusError carrying status_code=200. lifemd #17405: air-code-reviewer
+# died on exactly this with ZERO retry lines, fail-closing the gate with no finding.
+
+def _mid_stream_error(etype="overloaded_error"):
+    """The real shape: HTTP 200 + an in-stream `error` event body."""
+    anthropic = pytest.importorskip("anthropic")
+    body = {"type": "error", "error": {"details": None, "type": etype, "message": "Overloaded"}}
+    resp = httpx.Response(200, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    return anthropic.APIStatusError(f"{body}", response=resp, body=body)
+
+
+def test_mid_stream_overload_is_retryable_despite_status_200():
+    e = _mid_stream_error()
+    assert getattr(e, "status_code", None) == 200      # anchors WHY the code test failed
+    assert agent_loop._is_retryable_turn_error(e) is True
+
+
+@pytest.mark.parametrize("etype", ["overloaded_error", "api_error", "rate_limit_error",
+                                   "timeout_error"])
+def test_transient_in_stream_error_types_retry(etype):
+    assert agent_loop._is_retryable_turn_error(_mid_stream_error(etype)) is True
+
+
+@pytest.mark.parametrize("etype", ["invalid_request_error", "authentication_error",
+                                   "permission_error", "not_found_error",
+                                   "request_too_large"])
+def test_our_fault_in_stream_error_types_still_fail_loud(etype):
+    """A body-based fallback must not turn a real request error into an infinite
+    retry — those fail identically forever, so they must propagate."""
+    assert agent_loop._is_retryable_turn_error(_mid_stream_error(etype)) is False
+
+
+def test_mid_stream_overload_actually_recovers_through_the_retry():
+    """End-to-end through the retry helper, not just the predicate."""
+    ok = types.SimpleNamespace(usage=None,
+                               content=[types.SimpleNamespace(type="text", text="hi")],
+                               stop_reason="end_turn")
+    def boom(): raise _mid_stream_error()
+    client, calls = _client([boom, lambda: ok])
+    out = agent_loop._final_message_with_retry(
+        client, log=lambda *_a: None, label="code-reviewer", model="m",
+        messages=[], system=[])
+    assert out is ok and calls["n"] == 2
+
+
+@pytest.mark.parametrize("body", [None, "a bare string", 123, {"error": "not-a-dict"},
+                                  {"error": {"type": 7}}, {}])
+def test_malformed_error_body_never_raises_inside_the_handler(body):
+    """`_stream_error_type` runs inside an exception handler — a weird body must
+    simply not match, never raise a second exception over the first."""
+    anthropic = pytest.importorskip("anthropic")
+    resp = httpx.Response(200, request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"))
+    e = anthropic.APIStatusError("x", response=resp, body=body)
+    assert agent_loop._is_retryable_turn_error(e) is False
+
+
+# ---------------------------------------------------------------------------
+# Backoff arithmetic: the cap is a real ceiling AND the jitter survives
+# ---------------------------------------------------------------------------
+# This formula was wrong three different ways in three consecutive rounds — no
+# jitter (lockstep retries), jitter applied after the clamp (real ceiling 1.25x the
+# cap), then jitter that vanished once backoff saturated the cap — and no test
+# caught any of them, because each was verified by hand instead of pinned here.
+
+def _delays(monkeypatch, *, attempts, backoff, rnd):
+    """Delays `_final_message_with_retry` would sleep, with random() pinned."""
+    monkeypatch.setattr(agent_loop, "STREAM_RETRY_ATTEMPTS", attempts)
+    monkeypatch.setattr(agent_loop, "STREAM_RETRY_BACKOFF_S", backoff)
+    monkeypatch.setattr(agent_loop.random, "random", lambda: rnd)
+    slept = []
+    monkeypatch.setattr(agent_loop.time, "sleep", lambda d: slept.append(d))
+    client, _ = _client([_drop])                 # always fails → exhausts retries
+    with pytest.raises(Exception):
+        agent_loop._final_message_with_retry(
+            client, log=lambda *_a: None, label="t", model="m", messages=[], system=[])
+    return slept
+
+
+@pytest.mark.parametrize("rnd", [0.0, 0.5, 0.999999])
+def test_backoff_never_exceeds_the_cap_even_when_saturated(monkeypatch, rnd):
+    """A big backoff + many attempts must still respect _STREAM_RETRY_CAP_S. The
+    documented "capped 30s" was briefly untrue (jitter multiplied a clamped base)."""
+    slept = _delays(monkeypatch, attempts=10, backoff=8.0, rnd=rnd)
+    assert slept, "expected retries to sleep"
+    assert max(slept) <= agent_loop._STREAM_RETRY_CAP_S
+
+
+def test_jitter_still_spreads_once_backoff_saturates_the_cap(monkeypatch):
+    """At a saturating attempt the delay must NOT collapse to exactly the cap for
+    every caller — that's the lockstep the jitter exists to prevent, and it's the
+    regime a raised AIR_STREAM_RETRY_ATTEMPTS during a real outage lands in."""
+    lo = _delays(monkeypatch, attempts=10, backoff=8.0, rnd=0.999999)
+    hi = _delays(monkeypatch, attempts=10, backoff=8.0, rnd=0.0)
+    cap = agent_loop._STREAM_RETRY_CAP_S
+    # Compare the PLATEAU (the saturated tail), not every delay — the early
+    # attempts are legitimately below the cap because backoff hasn't reached it.
+    plateau_hi, plateau_lo = hi[-1], lo[-1]
+    assert plateau_hi == cap, "random()==0 should sleep exactly the cap"
+    assert plateau_lo < cap * 0.99, "jitter collapsed at saturation — back to lockstep"
+    assert cap * 0.74 <= plateau_lo <= cap, "jitter must stay bounded to ~25%, never negative"
+
+
+def test_backoff_grows_then_plateaus_at_the_cap(monkeypatch):
+    """Exponential up to the ceiling, then flat — no runaway, no shrinking."""
+    slept = _delays(monkeypatch, attempts=8, backoff=2.0, rnd=0.0)   # no jitter
+    assert slept == sorted(slept), "backoff must be non-decreasing"
+    assert slept[-1] == agent_loop._STREAM_RETRY_CAP_S
+    assert slept[0] == 2.0 and slept[1] == 4.0                       # 2^n growth

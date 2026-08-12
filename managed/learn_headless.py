@@ -321,8 +321,15 @@ def _default_complete(persona: str, content: str, *, label: str = "") -> str:
     (stable prefix, 5m TTL = 1.25x write vs 1h's 2x) so a batch of same-class
     files shares it. Raises on a max_tokens truncation so the caller skips the
     file rather than writing a half-formed curation."""
-    with _client_get().messages.stream(**_curate_params(persona, content)) as stream:
-        msg = stream.get_final_message()
+    # Through the SHARED bounded retry, not a bare stream: a mid-stream overload
+    # arrives as a 200-status APIStatusError (see agent_loop._is_retryable_turn_error)
+    # and would otherwise kill this curation outright. Milder here than on a review
+    # lens — `_curate_one` isolates a failed file instead of fail-closing a gate —
+    # but a blip still costs a whole file's curation for no reason, and on a
+    # capacity spike it costs several at once since the map runs concurrently.
+    msg = agent_loop._final_message_with_retry(
+        _client_get(), log=lambda m: print(m, file=sys.stderr),
+        label=f"curate:{label or 'file'}", **_curate_params(persona, content))
     if getattr(msg, "usage", None) is not None:
         _record_usage(label or "curate", msg.usage)
     if getattr(msg, "stop_reason", None) == "max_tokens":
