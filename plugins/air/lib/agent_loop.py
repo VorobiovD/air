@@ -229,11 +229,17 @@ def _final_message_with_retry(client, *, log, label, **stream_kwargs):
             # same capacity spike: the specialist fan-out runs 4-5 at once and the
             # learn map up to MAP_PARALLELISM (8), and an overload is exactly the
             # correlated failure that puts them all in the same retry window.
-            # Clamp AFTER jittering, so _STREAM_RETRY_CAP_S is the real ceiling —
-            # jittering a pre-clamped value pushed the effective max to 1.25x the
-            # cap (30s -> 37.5s) and made the documented "capped 30s" untrue.
-            base = STREAM_RETRY_BACKOFF_S * (2 ** (attempt - 1))
-            delay = min(base * (1 + random.random() * 0.25), _STREAM_RETRY_CAP_S)
+            # Jitter DOWNWARD from the clamped value, so both properties hold for
+            # every attempt and config: the cap is a true ceiling, and the spread
+            # never disappears. Jittering upward then clamping broke each in turn —
+            # first pushing the real max to 1.25x the cap (30s -> 37.5s, contradicting
+            # the documented "capped 30s"), then, once backoff saturates the cap,
+            # collapsing every retry back to exactly the cap and losing the
+            # decorrelation exactly where it matters most: a raised
+            # AIR_STREAM_RETRY_ATTEMPTS during a real outage, with the specialist
+            # fan-out and up to MAP_PARALLELISM learn curations all retrying at once.
+            base = min(STREAM_RETRY_BACKOFF_S * (2 ** (attempt - 1)), _STREAM_RETRY_CAP_S)
+            delay = base * (1 - random.random() * 0.25)
             log(f"  [warn] {label}: transient error ({type(e).__name__}: {str(e)[:80]}); "
                 f"retry {attempt}/{STREAM_RETRY_ATTEMPTS - 1} after {delay:.0f}s")
             time.sleep(delay)
