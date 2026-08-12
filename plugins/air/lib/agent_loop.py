@@ -20,6 +20,7 @@ this orchestrator and are never handed to the Sandbox's git subprocess.
 """
 import datetime
 import os
+import random
 import re
 import time
 
@@ -224,7 +225,12 @@ def _final_message_with_retry(client, *, log, label, **stream_kwargs):
             last = e
             if attempt >= STREAM_RETRY_ATTEMPTS:
                 break
-            delay = min(STREAM_RETRY_BACKOFF_S * (2 ** (attempt - 1)), _STREAM_RETRY_CAP_S)
+            # Jitter (≤25%) so concurrent callers don't retry in lockstep into the
+            # same capacity spike: the specialist fan-out runs 4-5 at once and the
+            # learn map up to MAP_PARALLELISM (8), and an overload is exactly the
+            # correlated failure that puts them all in the same retry window.
+            base = min(STREAM_RETRY_BACKOFF_S * (2 ** (attempt - 1)), _STREAM_RETRY_CAP_S)
+            delay = base * (1 + random.random() * 0.25)
             log(f"  [warn] {label}: transient error ({type(e).__name__}: {str(e)[:80]}); "
                 f"retry {attempt}/{STREAM_RETRY_ATTEMPTS - 1} after {delay:.0f}s")
             time.sleep(delay)
