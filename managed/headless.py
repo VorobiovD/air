@@ -564,7 +564,10 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # detection ⇒ full. Both reused verbatim — no hand-rolled regex.
     prior = prior_sha = None
     if not getattr(args, "fresh", False) and bot_login and ic:
-        prior = find_prior_review(ic, bot_login)
+        # Allowlist, not just the current token's login: a rotation between
+        # rounds would otherwise hide every prior round and silently discard
+        # the carry-forward ledger (repo-E #67).
+        prior = find_prior_review(ic, bot_login, _air_bot_logins())
         prior_sha = extract_reviewed_at_sha(prior["body"]) if prior else None
     mode = "re-review" if (prior and prior_sha) else "full"
 
