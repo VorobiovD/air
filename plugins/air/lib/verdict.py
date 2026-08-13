@@ -1459,6 +1459,60 @@ _PIN_REWRITE_MARKER = (
 )
 
 
+_PIN_BANNER_NOTE_MARK = "<!-- air-pin-reconcile -->"
+
+
+def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int) -> str:
+    """State in the banner that the summary's counts predate the pin.
+
+    The verifier writes its banner prose ("4 prior blockers/mediums resolved · …")
+    BEFORE the pin runs, so a pin that rewrites `FIXED` -> `NOT FIXED` leaves the
+    comment contradicting itself: lifemd #16973 shipped "4 prior blockers/mediums
+    resolved" directly above four `NOT FIXED` lines, each carrying the pin marker.
+    A reader can't tell which half to believe, and the prose is the wrong half.
+
+    Not fixable by rewriting the counts: they're free-form prose in an
+    unconstrained sentence, and parsing them to recompute would be guesswork on
+    model text. Instead say plainly that the per-finding statuses win. Distinct
+    from `normalize_verdict_banner`, which only repairs the LEAD when it denies
+    the gate — here the lead is already "Changes requested", so that pass
+    correctly leaves it alone and this contradiction slips through it.
+
+    GATE-SAFE: blockquote lines only, inserted inside the banner — no
+    `### Blockers` heading, no `**N.` entry, no `- **#N**` status line, no
+    `[sec:]` tag. Every parser is line-anchored over those, so the body gates
+    byte-identically. Idempotent; no-op when the pin changed nothing.
+    """
+    if not (rewrites or resurrections):
+        return body
+    m = _BANNER_ALERT_RE.search(body)
+    if not m:
+        return body                      # legacy/flat body: per-line markers stand alone
+    fm = _FINDINGS_MARKER_RE.search(body)
+    if fm and fm.start() < m.start():
+        return body                      # an alert quoted inside a finding
+    lines = body.split("\n")
+    start = body[:m.start()].count("\n")
+    end = start
+    while end + 1 < len(lines) and lines[end + 1].lstrip().startswith(">"):
+        end += 1
+    if any(_PIN_BANNER_NOTE_MARK in ln for ln in lines[start:end + 1]):
+        return body
+    def _n(count, noun):
+        return f"{count} {noun}{'' if count == 1 else 's'}"
+    parts = []
+    if rewrites:
+        parts.append(f"{_n(rewrites, 'carried finding')} re-pinned **NOT FIXED**")
+    if resurrections:
+        parts.append(f"{_n(resurrections, 'silently-dropped finding')} re-inserted")
+    note = (f"**Carry-forward check ran after this summary was written:** "
+            f"{' and '.join(parts)}. Any fixed/resolved counts above predate that "
+            f"check and may overstate what cleared — the per-finding statuses "
+            f"below are authoritative.")
+    block = ["> ", f"> {note}", f"> {_PIN_BANNER_NOTE_MARK}"]
+    return "\n".join(lines[:end + 1] + block + lines[end + 1:])
+
+
 def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
     """The hard guard. Given the emitted re-review body + the ledger:
     pin each prior finding's severity to max(prior, emitted) unless its code
@@ -1565,7 +1619,12 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
         )
         log.append(f"[ledger] #{e.num} resurrected [{e.prior_severity}] NOT FIXED (silently dropped)")
 
-    return _ensure_rereview_shape(body, log, resurrected), log
+    body = _ensure_rereview_shape(body, log, resurrected)
+    # Reconcile the banner LAST, counting what actually changed. Done here rather
+    # than at the call sites so every path (managed, headless, CLI) gets it from
+    # one place and no caller can drift out of it.
+    return _reconcile_banner_with_ledger(
+        body, body.count(_PIN_REWRITE_MARKER), len(resurrected)), log
 
 
 def _main(argv: list[str]) -> int:
