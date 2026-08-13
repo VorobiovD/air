@@ -2462,7 +2462,9 @@ def test_every_find_prior_review_call_site_passes_the_allowlist():
 # before the pin rewrote those statuses. normalize_verdict_banner can't catch it:
 # the lead already says "Changes requested", so it correctly leaves it alone.
 
-from verdict import _reconcile_banner_with_ledger, _PIN_BANNER_NOTE_MARK  # noqa: E402
+from verdict import (  # noqa: E402
+    _reconcile_banner_with_ledger, _PIN_BANNER_NOTE_MARK, _PIN_REWRITE_MARKER,
+)
 
 _CONTRADICTORY = (
     "## Code Review (Re-review)\n\n"
@@ -2532,3 +2534,82 @@ def test_pin_and_resurrect_emits_the_reconcile_note_itself():
     assert "FIXED->NOT FIXED" in " ".join(log)          # the pin fired
     assert _PIN_BANNER_NOTE_MARK in out                 # …and the banner says so
     assert "Carry-forward check ran after" in out
+
+
+# --- the two paths that silently skipped the reconciliation note --------------
+
+def _banner_rr_body(status_line, *, with_section=True):
+    section = ("### Previous Findings Status\n\n" + status_line + "\n") if with_section else ""
+    return ("## Code Review (Re-review)\n\n"
+            "> [!CAUTION]\n"
+            "> **Changes requested.** 1 prior blocker resolved\n\n"
+            + section + f"\nReviewed at: {_GN_SHA}\n")
+
+
+def test_deferred_rewrite_also_triggers_the_reconcile_note():
+    """A DEFERRED->NOT FIXED flip changes the status WITHOUT appending the pin
+    marker, so counting marker occurrences missed it entirely — and a round whose
+    only rewrites are DEFERRED is exactly when the banner still lies."""
+    entry = LedgerEntry(num=1, prior_severity="blocker", prior_status="NOT FIXED",
+                        location=None, change=UNCHANGED, file_touched=False)
+    out, log = pin_and_resurrect(
+        _banner_rr_body("- **#1** [blocker] — DEFERRED — will do later"), [entry])
+    assert "blocker DEFERRED->NOT FIXED" in " ".join(log)     # the flip happened
+    assert _PIN_BANNER_NOTE_MARK in out                        # …and is reported
+    assert "1 carried finding re-pinned" in out
+
+
+def test_reconcile_note_survives_a_missing_status_section():
+    """The worst case: the verifier dropped the whole `### Previous Findings
+    Status` section. `_ensure_rereview_shape` then splices it in AHEAD of the
+    banner, so reconciling afterwards made the quoted-inside-a-finding guard fire
+    on legitimately-spliced content and skip the note."""
+    entry = LedgerEntry(num=7, prior_severity="blocker", prior_status="NOT FIXED",
+                        location=None, change=UNCHANGED, file_touched=False)
+    out, log = pin_and_resurrect(_banner_rr_body("", with_section=False), [entry])
+    assert "resurrected" in " ".join(log)
+    assert "- **#7**" in out                                   # spliced back in
+    assert _PIN_BANNER_NOTE_MARK in out, "note skipped on the worst-case drop"
+    assert "1 silently-dropped finding re-inserted" in out
+
+
+def test_reconcile_count_is_not_inflated_by_a_quoted_marker():
+    """A body that merely QUOTES the marker (a review of this very feature does)
+    must not inflate the count — the old substring search over-counted."""
+    entry = LedgerEntry(num=1, prior_severity="blocker", prior_status="NOT FIXED",
+                        location=None, change=UNCHANGED, file_touched=False)
+    # Quote the marker TWICE against ONE real flip, so the old substring count (2)
+    # and the true flip count (1) genuinely differ — otherwise the test passes
+    # under both implementations and proves nothing.
+    quoting = _banner_rr_body("- **#1** [blocker] — DEFERRED — see below").replace(
+        "> **Changes requested.** 1 prior blocker resolved",
+        "> **Changes requested.** discussing `" + _PIN_REWRITE_MARKER + "` and again `"
+        + _PIN_REWRITE_MARKER + "` verbatim")
+    out, _ = pin_and_resurrect(quoting, [entry])
+    assert "1 carried finding re-pinned" in out                # exactly one flip
+    assert "2 carried findings" not in out
+
+
+def test_no_flip_no_note_even_with_the_marker_quoted():
+    """Inverse: zero real flips must stay a no-op no matter what the body quotes."""
+    entry = LedgerEntry(num=1, prior_severity="blocker", prior_status="FIXED",
+                        location=None, change=CHANGED, file_touched=True)
+    body = _banner_rr_body("- **#1** [blocker] — FIXED — genuinely fixed, code changed")
+    body = body.replace("1 prior blocker resolved",
+                        "1 resolved — " + _PIN_REWRITE_MARKER)
+    out, _ = pin_and_resurrect(body, [entry])
+    assert _PIN_BANNER_NOTE_MARK not in out
+
+
+def test_locate_banner_block_is_the_single_source():
+    """Guard the extraction: all three banner-editing functions must go through
+    the shared locator, or a change to how the block is found drifts across three
+    near-identical copies (this repo's tracked duplicate-regex pattern)."""
+    import inspect, verdict as V
+    # Per-FUNCTION source: `verdict` here is the managed shim that re-exports
+    # plugins/air/lib/verdict.py, so getsource(module) would read the shim.
+    for fn in ("normalize_verdict_banner", "append_gate_note",
+               "_reconcile_banner_with_ledger"):
+        body_src = inspect.getsource(getattr(V, fn))
+        assert "_locate_banner_block(" in body_src, f"{fn} does not use the locator"
+        assert "_BANNER_ALERT_RE.search" not in body_src, f"{fn} re-implements the search"

@@ -295,19 +295,10 @@ def append_gate_note(body: str, *, request_changes: bool,
     """
     if not request_changes:
         return body
-    m = _BANNER_ALERT_RE.search(body)
-    if not m:
-        return body
-    fm = _FINDINGS_MARKER_RE.search(body)
-    if fm and fm.start() < m.start():
-        return body  # an alert quoted inside a finding, not the verdict banner
-
-    # Locate the banner's own blockquote: the consecutive `>` run from the alert.
-    lines = body.split("\n")
-    start = body[:m.start()].count("\n")
-    end = start
-    while end + 1 < len(lines) and lines[end + 1].lstrip().startswith(">"):
-        end += 1
+    located = _locate_banner_block(body)
+    if located is None:
+        return body  # legacy/flat body, or an alert quoted inside a finding
+    lines, start, end, _ = located
 
     # Idempotency keyed to THOSE LINES ONLY, not a body-wide (or windowed) scan:
     # the rest of the body is model-written text that can legitimately quote the
@@ -377,16 +368,12 @@ def normalize_verdict_banner(body: str, *, request_changes: bool) -> str:
     changes only what a human reads, never the verdict; the body re-parses to
     the identical gate. Idempotent. No-op on a legacy/flat body (no alert line).
     """
-    m = _BANNER_ALERT_RE.search(body)
-    if not m:
-        return body  # legacy/flat format or a body with no verdict banner
-    # Only the TOP banner is the verdict banner. If the first alert line falls
-    # AFTER the first findings marker (a heading / `**N.` / `- **#N**` line), it's
-    # an alert quoted inside a finding, not the banner — leave it alone. The real
-    # banner always sits in the preamble, right under the `## Code Review` header.
-    fm = _FINDINGS_MARKER_RE.search(body)
-    if fm and fm.start() < m.start():
-        return body
+    # Only the TOP banner is the verdict banner — an alert AFTER the first findings
+    # marker is quoted inside a finding, not the banner (see _locate_banner_block).
+    located = _locate_banner_block(body)
+    if located is None:
+        return body  # legacy/flat format, or an alert that belongs to a finding
+    _, _, _, m = located
     want = "CAUTION" if request_changes else "NOTE"
     body = body[:m.start()] + f"> [!{want}]" + body[m.end():]
     if not request_changes:
@@ -1462,6 +1449,39 @@ _PIN_REWRITE_MARKER = (
 _PIN_BANNER_NOTE_MARK = "<!-- air-pin-reconcile -->"
 
 
+def _locate_banner_block(body: str):
+    """`(lines, start, end, match)` for the TOP verdict banner's blockquote, or None.
+
+    Single source for the "find the banner block" sequence that
+    `normalize_verdict_banner`, `append_gate_note` and
+    `_reconcile_banner_with_ledger` all need: locate the alert line, reject an
+    alert that is QUOTED INSIDE A FINDING (one appearing after the first findings
+    marker is not the verdict banner), then walk the contiguous `>` run that
+    forms the banner's own blockquote. Three near-identical copies had already
+    accumulated, which is this repo's tracked "single source of truth for pinned
+    strings and shared regexes" pattern — a change to how the block is located
+    would otherwise need mirroring in three places.
+
+    `start`/`end` are inclusive line indices into `lines`; `match` is the alert
+    match (the banner rewrite needs its span). None means "no verdict banner
+    here" — a legacy/flat body, or an alert that belongs to a finding.
+    """
+    m = _BANNER_ALERT_RE.search(body)
+    if not m:
+        return None
+    fm = _FINDINGS_MARKER_RE.search(body)
+    if fm and fm.start() < m.start():
+        return None
+    lines = body.split("\n")
+    start = body[:m.start()].count("\n")
+    end = start
+    while end + 1 < len(lines) and lines[end + 1].lstrip().startswith(">"):
+        end += 1
+    return lines, start, end, m
+
+
+
+
 def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int) -> str:
     """State in the banner that the summary's counts predate the pin.
 
@@ -1485,17 +1505,10 @@ def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int) 
     """
     if not (rewrites or resurrections):
         return body
-    m = _BANNER_ALERT_RE.search(body)
-    if not m:
+    located = _locate_banner_block(body)
+    if located is None:
         return body                      # legacy/flat body: per-line markers stand alone
-    fm = _FINDINGS_MARKER_RE.search(body)
-    if fm and fm.start() < m.start():
-        return body                      # an alert quoted inside a finding
-    lines = body.split("\n")
-    start = body[:m.start()].count("\n")
-    end = start
-    while end + 1 < len(lines) and lines[end + 1].lstrip().startswith(">"):
-        end += 1
+    lines, start, end, _ = located
     if any(_PIN_BANNER_NOTE_MARK in ln for ln in lines[start:end + 1]):
         return body
     def _n(count, noun):
@@ -1529,6 +1542,14 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
     # prefix tolerance; this handles the WORD. Seeds the log.
     review_body, log = _canonicalize_status_synonyms(review_body, by_num)
     seen: set = set()
+    # Count status flips WHERE THEY HAPPEN. Deriving this from
+    # `body.count(_PIN_REWRITE_MARKER)` was wrong both ways: it MISSED the two
+    # DEFERRED->NOT FIXED branches (which flip the status without appending the
+    # marker), so a round whose only rewrites were DEFERRED silently skipped the
+    # reconciliation note — exactly the contradiction it exists to close; and it
+    # could OVER-count on a body that merely quotes the marker string verbatim
+    # (a review OF this feature does precisely that).
+    flips = {"n": 0}
 
     def _rewrite(m):
         num = int(m.group(1))
@@ -1588,6 +1609,7 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
             # reader sees WHY it reads NOT FIXED (repo-A #1422 confusion). The gate
             # parses only the STATUS token, so the marker in the tail is inert.
             tail = f"{tail.rstrip()} {_PIN_REWRITE_MARKER}"
+            flips["n"] += 1
             log.append(f"[pin] #{num} FIXED->NOT FIXED (no cross-region edit; change={entry.change}, file_touched={entry.file_touched})")
         elif (status == "FIXED" and cross_region_fix
                 and _SEVERITY_RANK.get(new_sev, 3) >= 2):
@@ -1598,9 +1620,11 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
         elif status == "DEFERRED":
             if new_sev == "blocker":
                 new_status = "NOT FIXED"
+                flips["n"] += 1
                 log.append(f"[pin] #{num} blocker DEFERRED->NOT FIXED")
             elif entry.change == CHANGED:
                 new_status = "NOT FIXED"
+                flips["n"] += 1
                 log.append(f"[pin] #{num} DEFERRED->NOT FIXED (code changed; re-evaluate)")
         return f"- **#{num}** [{new_sev}] — {new_status}{tail}"
 
@@ -1619,12 +1643,17 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
         )
         log.append(f"[ledger] #{e.num} resurrected [{e.prior_severity}] NOT FIXED (silently dropped)")
 
-    body = _ensure_rereview_shape(body, log, resurrected)
-    # Reconcile the banner LAST, counting what actually changed. Done here rather
-    # than at the call sites so every path (managed, headless, CLI) gets it from
-    # one place and no caller can drift out of it.
-    return _reconcile_banner_with_ledger(
-        body, body.count(_PIN_REWRITE_MARKER), len(resurrected)), log
+    # Reconcile the banner BEFORE splicing resurrections. `_ensure_rereview_shape`
+    # inserts a missing `### Previous Findings Status` section (with its `- **#N**`
+    # lines) immediately after the `## Code Review` header — i.e. AHEAD of the
+    # banner — so doing this afterwards made `_locate_banner_block`'s
+    # quoted-inside-a-finding guard fire on legitimately-spliced content and skip
+    # the note entirely, in the worst case of all: the verifier dropping the whole
+    # status section. Counts don't depend on the splice, so reconcile first.
+    # Done inside pin_and_resurrect (not at the call sites) so managed, headless
+    # and the CLI all inherit it and no caller can drift out of it.
+    body = _reconcile_banner_with_ledger(body, flips["n"], len(resurrected))
+    return _ensure_rereview_shape(body, log, resurrected), log
 
 
 def _main(argv: list[str]) -> int:
