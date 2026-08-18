@@ -562,6 +562,18 @@ jobs:
           # cron path decides it when AIR_LEARN_CRON_LIVE=true, and a mismatch
           # makes the two disagree about when a repo is due.
           AIR_LEARN_REVIEWS_THRESHOLD: ${{ vars.AIR_LEARN_REVIEWS_THRESHOLD }}
+          # AIR_LEARN_BATCH is DELIBERATELY NOT FORWARDED HERE — do not "fix" this.
+          # It is forwarded by air-learn-cron.yml only. Batch trades wall-clock for a
+          # 50% discount: the submit is async and `_batch_curate` polls to
+          # AIR_LEARN_BATCH_TIMEOUT (default 1800s / 30 min). An inline learn rides
+          # THIS job's tail, so batching here would hold the job — and therefore the
+          # check's "in progress" state and the concurrency slot — for up to half an
+          # hour after the review comment is already posted. That is the exact cost
+          # the out-of-band cron exists to avoid ("moves a threshold-fired learn OFF
+          # the PR critical path"). Fine at 04:00 on a schedule; wrong on a PR.
+          # Stated explicitly because a missing forward is otherwise indistinguishable
+          # from an oversight — AIR_PAT_MAP missing here WAS a real bug (#299), this
+          # one is a decision, and nothing else in the file tells them apart.
           # Direct-post: post the verifier's body verbatim instead of the
           # coordinator's relay (bypasses the relay-drop failure mode for any
           # coordinator model). Default ON for MA full; set a caller repo/org
