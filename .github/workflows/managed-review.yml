@@ -348,15 +348,35 @@ jobs:
               # a GitHub App installation token — say NOTHING rather than guess:
               # a false reassurance and a false alarm are both worse than silence.
               if [ -n "${REQUESTED_REVIEWER}" ]; then
-                token_login=$(curl -sS \
+                # This probe must NEVER be able to fail the step. The runner's
+                # default shell is `bash -eo pipefail`, so an unguarded
+                # `var=$(curl ... | jq ...)` aborts the whole script on any
+                # transport error (DNS blip, reset, timeout) — turning a
+                # best-effort diagnostic into a hard CI failure while the real
+                # repo-access probe above already SUCCEEDED. That is strictly
+                # worse than the false warning this replaced, and contradicts the
+                # "say nothing rather than guess" guarantee below. So: the same
+                # `-o file -w %{http_code} || echo 000` shape as the sibling probe,
+                # `--max-time` so a hung connection can't stall the job, and a jq
+                # that cannot propagate failure either. The HTTP code is carried
+                # into the unresolved message — this whole check exists because a
+                # misleading operator signal cost real diagnosis time, so when it
+                # can't answer it should at least say why.
+                # Truncate FIRST: on a transport failure curl writes nothing, and
+                # a leftover body would be parsed as this run's identity.
+                : > "${RUNNER_TEMP}/air-token-identity.json"
+                ucode=$(curl -sS --max-time 10 \
+                  -o "${RUNNER_TEMP}/air-token-identity.json" -w '%{http_code}' \
                   -H "Authorization: Bearer ${AIR_BOT_TOKEN}" \
                   -H "Accept: application/vnd.github+json" \
                   -H "X-GitHub-Api-Version: 2022-11-28" \
-                  "https://api.github.com/user" 2>/dev/null | jq -r '.login // empty')
+                  "https://api.github.com/user" 2>/dev/null || echo 000)
+                token_login=$(jq -r '.login // empty' \
+                  "${RUNNER_TEMP}/air-token-identity.json" 2>/dev/null || echo '')
                 want=$(printf '%s' "${REQUESTED_REVIEWER}" | tr '[:upper:]' '[:lower:]')
                 got=$(printf '%s' "${token_login}" | tr '[:upper:]' '[:lower:]')
                 if [ -z "$got" ]; then
-                  echo "auth preflight: token identity unresolved — skipping the reviewer-identity check"
+                  echo "auth preflight: token identity unresolved (GET /user -> HTTP ${ucode}) — skipping the reviewer-identity check"
                 elif [ "$got" != "$want" ]; then
                   echo "::warning::air: @${REQUESTED_REVIEWER} has no PAT on ${REPO} — reviewing as @${token_login} instead. Add/rotate it via air-rotate to review under your own identity."
                 else
