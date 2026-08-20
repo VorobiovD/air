@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.51.0](https://github.com/VorobiovD/air/compare/v1.50.0...v1.51.0) (2026-08-20)
+
+
+### Features
+
+* **gate:** explain a gating verdict in its own banner ([#293](https://github.com/VorobiovD/air/issues/293)) ([48ac69b](https://github.com/VorobiovD/air/commit/48ac69b24f80b83a8b7373cf1154d27fbd94909d))
+
+
+### Bug Fixes
+
+* **agent-loop:** answer tool_use blocks regardless of stop_reason ([#290](https://github.com/VorobiovD/air/issues/290)) ([79ed18e](https://github.com/VorobiovD/air/commit/79ed18e5e8216c14e6d7a8984304400ee52f585b))
+* **agent-loop:** retry a MID-STREAM overload, not just one at request init ([#301](https://github.com/VorobiovD/air/issues/301)) ([39e759c](https://github.com/VorobiovD/air/commit/39e759c64a0d74a95d3508e04f2c99fb707c5cb9))
+* **caps:** close the rest of the max_tokens audit + meta pagination guards ([#297](https://github.com/VorobiovD/air/issues/297)) ([7ded21c](https://github.com/VorobiovD/air/commit/7ded21cf3a2784b3eadd6072d1fda158dda215bf))
+* **gate:** stop a floored exposure reading as "No blockers" + CHANGES_REQUESTED ([#300](https://github.com/VorobiovD/air/issues/300)) ([49559fd](https://github.com/VorobiovD/air/commit/49559fd0d4c4d5b965bbdb42bbd4658a21b2ff87))
+* **headless:** give the verifier its own output budget (16K truncated a real review) ([#296](https://github.com/VorobiovD/air/issues/296)) ([b3c9ee5](https://github.com/VorobiovD/air/commit/b3c9ee534d0efeaf88418e12959a5a21bbe990fc))
+* **learn:** create author pattern files — nothing ever created the first one ([#298](https://github.com/VorobiovD/air/issues/298)) ([25b600c](https://github.com/VorobiovD/air/commit/25b600c494b039278c2e6b4ba1670998cfc00970))
+* **learn:** unfreeze author-file curation and populate the bot-login allowlist ([#299](https://github.com/VorobiovD/air/issues/299)) ([ab584b4](https://github.com/VorobiovD/air/commit/ab584b42201e5225fadd365034ae291b9c888a83))
+* **learn:** unfreeze curation past the 32K output wall; size REVIEW.md's ceiling to its aggregate ([#292](https://github.com/VorobiovD/air/issues/292)) ([065e38b](https://github.com/VorobiovD/air/commit/065e38bcb5293c96ecb5a3ddf25c10f7ad63c8c9))
+* **meta:** directory-shaped path_prefix — unbreaks the learn counter fleet-wide ([#295](https://github.com/VorobiovD/air/issues/295)) ([cc75987](https://github.com/VorobiovD/air/commit/cc759871da9f2ed467a48b10daf3c46da23cdf3f))
+* **pin:** credit a cross-region fix when a finding cites a dotfile path ([#305](https://github.com/VorobiovD/air/issues/305)) ([d776f81](https://github.com/VorobiovD/air/commit/d776f81ed93b126c95126ae1b6cd051c8f2db6ba))
+* **pin:** stop the banner contradicting its own carry-forward ledger ([#303](https://github.com/VorobiovD/air/issues/303)) ([aa905b6](https://github.com/VorobiovD/air/commit/aa905b6f5d145c9ba5a0e168487db7597353a922))
+* **preflight:** ground the reviewer-PAT warning in the token's own identity ([#306](https://github.com/VorobiovD/air/issues/306)) ([ac3c99f](https://github.com/VorobiovD/air/commit/ac3c99f2e01648a41376b350f8e643fc5cbe05ea))
+* **rereview:** find a prior review across rotated bot accounts ([#302](https://github.com/VorobiovD/air/issues/302)) ([302550e](https://github.com/VorobiovD/air/commit/302550e05a4554da53d0a23916b9c0136a51186d))
+
 ## [1.50.0](https://github.com/VorobiovD/air/compare/v1.49.1...v1.50.0) (2026-07-25)
 
 
