@@ -961,11 +961,7 @@ def test_extract_finding_files_paths_only():
     files = extract_finding_files(body, _XFILE_SHA)[1]
     assert "src/a.py" in files                                # blob-link anchor
     assert "scripts/deploy.sh" in files                       # backtick path (has /)
-    # #341: bare basenames are now KEPT here — the ambiguity guard moved to
-    # _referenced_file_touched, which has the diff index and credits a basename
-    # only when exactly one touched path carries it. See the two #341 tests below;
-    # test_bare_basename_alone_does_not_credit_a_fix still pins the safe outcome.
-    assert "Helper.php" in files
+    assert "Helper.php" not in files                          # bare basename excluded
     assert not any(" " in f for f in files)                   # no prose fragments
 
 
@@ -979,20 +975,23 @@ def test_extract_finding_files_paths_only():
 #                                  rejected, so EVERY `.github/**` finding (i.e.
 #                                  every CI/CD finding) lost the exemption even
 #                                  with the path written out in full
-#   `deploy.yml`                   dropped by the old blanket `/` guard
 # A landed fix never re-enters a later inter-diff, so the rewrite was permanent.
+# Bare basenames stay excluded: crediting a "unique" one was tried and reverted
+# (uniqueness over TOUCHED paths let an unrelated same-basename edit credit a
+# finding), and #341 clears via the full dotfile path regardless.
 def test_extract_finding_files_recovers_341_shapes():
     from verdict import extract_finding_files
     body = (
         "**1. guard is inverted**\n\n"
         "`deploy.yml:446-455` and `.github/workflows/deploy.yml` and "
-        "`.github/workflows/deploy.yml:524-533` and a non-path `jq -r` and `..`\n\n"
+        "`.github/workflows/deploy.yml:524-533` and `jq -r` and `..` and `1.50.0`\n\n"
     )
     files = extract_finding_files(body, "")[1]
-    assert ".github/workflows/deploy.yml" in files             # dotfile dir path
-    assert "deploy.yml" in files                               # basename, :lines stripped
-    assert not any(":" in f for f in files)                    # line refs never in a path
+    assert ".github/workflows/deploy.yml" in files             # dotfile dir path (the #341 fix)
+    assert "deploy.yml" not in files                           # bare basename still excluded
+    assert not any(":" in f for f in files)                    # trailing line ref never in a path
     assert not any(f in {".", ".."} for f in files)            # no degenerate tokens
+    assert "1.50.0" not in files                               # a version string is not a path
 
 
 def test_dotfile_dir_path_credits_cross_region_fix_341():
@@ -1023,23 +1022,19 @@ def test_dotfile_dir_path_credits_cross_region_fix_341():
     assert any("FIXED trusted" in l for l in log)
 
 
-def test_ambiguous_basename_does_not_credit_341():
-    # #244's concern preserved: a bare basename credits ONLY when unambiguous. Two
-    # touched files share the basename -> neither credits -> the fake FIXED still
-    # gates. (A slashed token still requires an EXACT match, never a suffix.)
+def test_unique_basename_never_credits_an_unrelated_touch_341():
+    # Regression guard for the reverted half of #305. Crediting a "unique" bare
+    # basename measured uniqueness over TOUCHED paths only, so a finding anchored at
+    # an UNTOUCHED `src/config.php` was credited by an unrelated edit to
+    # `other/config.php` — reopening the hole #244 closed. Exact match only.
     from verdict import _referenced_file_touched, parse_changed_lines
-    diff = (
-        "diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml\n"
-        "--- a/.github/workflows/deploy.yml\n+++ b/.github/workflows/deploy.yml\n"
-        "@@ -1,2 +1,3 @@ x\n a\n+b\n"
-        "diff --git a/infra/deploy.yml b/infra/deploy.yml\n"
-        "--- a/infra/deploy.yml\n+++ b/infra/deploy.yml\n"
-        "@@ -1,2 +1,3 @@ y\n c\n+d\n"
-    )
-    idx = parse_changed_lines(diff)
-    assert _referenced_file_touched({"deploy.yml"}, idx) is False          # ambiguous
-    assert _referenced_file_touched({"infra/deploy.yml"}, idx) is True     # exact
-    assert _referenced_file_touched({"workflows/deploy.yml"}, idx) is False  # suffix refused
+    idx = parse_changed_lines(
+        "diff --git a/other/config.php b/other/config.php\n"
+        "--- a/other/config.php\n+++ b/other/config.php\n@@ -1,2 +1,3 @@ x\n a\n+b\n")
+    assert _referenced_file_touched({"src/config.php", "config.php"}, idx) is False
+    assert _referenced_file_touched({"other/config.php"}, idx) is True      # exact
+    assert _referenced_file_touched({"config.php"}, idx) is False           # basename alone
+    assert _referenced_file_touched({"dir/config.php"}, idx) is False       # suffix refused
 
 
 # --- #198 origin-anchor: un-poison round-3+ carried fixes (gate-safe) -------

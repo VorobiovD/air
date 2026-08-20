@@ -1092,10 +1092,10 @@ def extract_fresh_finding_locations(body: str, base_sha: str) -> dict:
 #                                   EVERY `.github/**` finding lost the exemption
 #                                   (i.e. every CI/CD finding) even when the path
 #                                   was written out in full.
-#   `deploy.yml`                   — a bare basename, dropped here by the old `/`
-#                                   guard. Now kept; crediting policy moved to
-#                                   _referenced_file_touched, which has the diff
-#                                   index and can require it be UNAMBIGUOUS.
+# A bare basename stays EXCLUDED (the `/` guard below) — too loose to match a
+# touched path safely (#244), and crediting one is unnecessary anyway: #341's fix
+# lands via the full dotfile path, which the leading-dot fix now recovers. The
+# guard also keeps non-path tokens (a version string like `1.50.0`) out of the set.
 # The optional trailing group is consumed but NOT captured, so group(1) is the
 # bare path. `\.?[A-Za-z0-9_]` allows ONE leading dot (not `..` or a lone `.`).
 _FILE_PATH_TOKEN_RE = re.compile(
@@ -1130,43 +1130,33 @@ def extract_finding_files(body: str, base_sha: str) -> dict:
             if prefix and am.group(1).lower()[:_SHA_PREFIX_LEN] == prefix:
                 files.add(am.group(2))
         for tm in _FILE_PATH_TOKEN_RE.finditer(body, nm.end(), seg_end):
-            files.add(tm.group(1))              # incl. bare basenames — see below
+            tok = tm.group(1)
+            if "/" in tok:                      # require a path, not a bare basename
+                files.add(tok)
         out[num] = files
     return out
 
 
 def _referenced_file_touched(files: set, index: ChangedIndex) -> bool:
-    """True iff ANY referenced repo path has a real content hunk in the inter-diff.
+    """True iff ANY referenced repo path has a real content hunk in the inter-diff,
+    by EXACT path match. Both sides are repo-root-relative full paths — a blob-link
+    anchor / backtick'd prose path vs a `diff --git` path — so exact match is
+    correct and avoids a loose suffix crediting a same-basename file in a different
+    directory (#244 review). Keys on non-empty `hunk_old` (a real `@@` hunk), NOT
+    mere `present`, so a metadata-only segment can't qualify. Over-crediting is the
+    SAFE direction (it only honors a verifier's already-source-grounded FIXED, never
+    un-gates a dropped/downgraded finding — those guards are independent).
 
-    A token CONTAINING a `/` must match a diff path EXACTLY. Both sides are
-    repo-root-relative full paths — a blob-link anchor / backtick'd prose path vs a
-    `diff --git` path — so exact is correct, and a loose suffix would let
-    `Grading/Svc.php` credit `app/Services/Grading/Svc.php` (#244 review). That
-    stays off.
-
-    A BARE BASENAME (no `/`) credits only when EXACTLY ONE touched path carries it.
-    This is the #341 fix: carried-finding status lines cite files as
-    `deploy.yml:446-455`, never as a full path, so keeping the old blanket refusal
-    meant a verifier's source-grounded FIXED on a file the dev demonstrably edited
-    was rewritten to NOT FIXED — permanently, since a landed fix never re-enters a
-    later inter-diff. Requiring uniqueness preserves #244's actual concern: two
-    same-basename files in different directories are ambiguous, so neither credits.
-
-    Keys on non-empty `hunk_old` (a real `@@` hunk), NOT mere `present`, so a
-    metadata-only segment can't qualify. Over-crediting is the SAFE direction (it
-    only honors a verifier's already-source-grounded FIXED, never un-gates a
-    dropped/downgraded finding — those guards are independent)."""
+    #341 was a defect in what reaches `files` (see _FILE_PATH_TOKEN_RE), not in this
+    match rule: a `.github/**` path was never extracted, so a finding about it had
+    no file evidence at all. Basename crediting was tried here and REVERTED — with
+    uniqueness measured only over TOUCHED paths, an unrelated edit to
+    `other/config.php` credited a finding anchored at `src/config.php`, reopening
+    exactly the hole #244 closed."""
     if not files:
         return False
     touched = {f for f, spanned in index.hunk_old.items() if spanned}
-    if files & touched:                          # exact full-path hit
-        return True
-    for tok in files:
-        if "/" in tok:                           # slashed paths: exact only
-            continue
-        if len({t for t in touched if t.rsplit("/", 1)[-1] == tok}) == 1:
-            return True                          # unambiguous basename
-    return False
+    return bool(files & touched)
 
 
 class LedgerEntry:
