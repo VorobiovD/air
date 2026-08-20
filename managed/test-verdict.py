@@ -961,8 +961,85 @@ def test_extract_finding_files_paths_only():
     files = extract_finding_files(body, _XFILE_SHA)[1]
     assert "src/a.py" in files                                # blob-link anchor
     assert "scripts/deploy.sh" in files                       # backtick path (has /)
-    assert "Helper.php" not in files                          # bare basename excluded
+    # #341: bare basenames are now KEPT here — the ambiguity guard moved to
+    # _referenced_file_touched, which has the diff index and credits a basename
+    # only when exactly one touched path carries it. See the two #341 tests below;
+    # test_bare_basename_alone_does_not_credit_a_fix still pins the safe outcome.
+    assert "Helper.php" in files
     assert not any(" " in f for f in files)                   # no prose fragments
+
+
+# --- #341: the three prose path shapes that silently yielded NOTHING -----------
+# Live false-block (repo-C #341, round 5): a blocker the verifier and all four
+# specialists read as correct-in-source was rewritten FIXED->NOT FIXED with
+# `file_touched=False`, while the inter-diff touched EXACTLY the one file the
+# finding is about. Cause was entirely in the prose path extractor:
+#   `deploy.yml:446-455`           `:` not in the char class -> whole token failed
+#   `.github/workflows/deploy.yml` pattern opened [A-Za-z0-9_] -> leading `.`
+#                                  rejected, so EVERY `.github/**` finding (i.e.
+#                                  every CI/CD finding) lost the exemption even
+#                                  with the path written out in full
+#   `deploy.yml`                   dropped by the old blanket `/` guard
+# A landed fix never re-enters a later inter-diff, so the rewrite was permanent.
+def test_extract_finding_files_recovers_341_shapes():
+    from verdict import extract_finding_files
+    body = (
+        "**1. guard is inverted**\n\n"
+        "`deploy.yml:446-455` and `.github/workflows/deploy.yml` and "
+        "`.github/workflows/deploy.yml:524-533` and a non-path `jq -r` and `..`\n\n"
+    )
+    files = extract_finding_files(body, "")[1]
+    assert ".github/workflows/deploy.yml" in files             # dotfile dir path
+    assert "deploy.yml" in files                               # basename, :lines stripped
+    assert not any(":" in f for f in files)                    # line refs never in a path
+    assert not any(f in {".", ".."} for f in files)            # no degenerate tokens
+
+
+def test_dotfile_dir_path_credits_cross_region_fix_341():
+    # End-to-end replay of repo-C #341 finding #1: anchored in the Makefile, but
+    # the prose names `.github/workflows/deploy.yml`, and THAT is the only file the
+    # inter-diff touches. The verifier's source-grounded FIXED must survive.
+    sha = "10afc0bb65c394612c7f8446f87da72f1a943a27"
+    prior = (
+        "## Code Review\n\n### Blockers\n\n"
+        "**1. `Makefile` change will break the next auto-deploy**\n\n"
+        f"[`patient-data-api/Makefile#L19`](https://github.com/o/r/blob/{sha}/patient-data-api/Makefile#L19)"
+        " — `deploy.yml` derives its Lambda list from build output; traced the"
+        " mechanism in `.github/workflows/deploy.yml` (lines 404-475).\n\n"
+        f"Reviewed at: {sha}\n"
+    )
+    diff = (
+        "diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml\n"
+        "--- a/.github/workflows/deploy.yml\n+++ b/.github/workflows/deploy.yml\n"
+        "@@ -524,3 +524,5 @@ jobs\n ctx\n+  echo \"no :live alias — skipping\"\n ctx\n"
+    )
+    led = build_carry_forward_ledger(prior, diff, sha)
+    assert led[0].change == UNCHANGED                          # anchor file untouched
+    assert led[0].file_touched is True                         # but a REFERENCED file was
+    out, log = pin_and_resurrect(
+        _rr_body("- **#1** [blocker] — FIXED — guard verified correct by direct read"), led)
+    assert not _gates(out)                                     # APPROVE — no false block
+    assert "- **#1** [blocker] — FIXED" in out                 # honored, not rewritten
+    assert any("FIXED trusted" in l for l in log)
+
+
+def test_ambiguous_basename_does_not_credit_341():
+    # #244's concern preserved: a bare basename credits ONLY when unambiguous. Two
+    # touched files share the basename -> neither credits -> the fake FIXED still
+    # gates. (A slashed token still requires an EXACT match, never a suffix.)
+    from verdict import _referenced_file_touched, parse_changed_lines
+    diff = (
+        "diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml\n"
+        "--- a/.github/workflows/deploy.yml\n+++ b/.github/workflows/deploy.yml\n"
+        "@@ -1,2 +1,3 @@ x\n a\n+b\n"
+        "diff --git a/infra/deploy.yml b/infra/deploy.yml\n"
+        "--- a/infra/deploy.yml\n+++ b/infra/deploy.yml\n"
+        "@@ -1,2 +1,3 @@ y\n c\n+d\n"
+    )
+    idx = parse_changed_lines(diff)
+    assert _referenced_file_touched({"deploy.yml"}, idx) is False          # ambiguous
+    assert _referenced_file_touched({"infra/deploy.yml"}, idx) is True     # exact
+    assert _referenced_file_touched({"workflows/deploy.yml"}, idx) is False  # suffix refused
 
 
 # --- #198 origin-anchor: un-poison round-3+ carried fixes (gate-safe) -------

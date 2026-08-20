@@ -1082,10 +1082,24 @@ def extract_fresh_finding_locations(body: str, base_sha: str) -> dict:
     return out
 
 
-# A backtick-wrapped token that looks like a repo file path (`.ext` suffix). We
-# require a `/` at match time (a bare `File.php` basename is too loose to match a
-# touched path safely). Captures prose file references beyond the blob-link anchor.
-_FILE_PATH_TOKEN_RE = re.compile(r"`([A-Za-z0-9_][\w./-]*\.[A-Za-z0-9]+)`")
+# A backtick-wrapped token that looks like a repo file path (`.ext` suffix).
+# Captures prose file references beyond the blob-link anchor. Three shapes the
+# verifier actually writes, all of which silently yielded NOTHING before (#341):
+#   `deploy.yml:446-455`          — a trailing :line / :start-end ref. `:` is not
+#                                   in the char class, so the whole token failed.
+#   `.github/workflows/deploy.yml` — a DOTFILE-DIRECTORY path. The pattern opened
+#                                   with [A-Za-z0-9_], excluding a leading `.`, so
+#                                   EVERY `.github/**` finding lost the exemption
+#                                   (i.e. every CI/CD finding) even when the path
+#                                   was written out in full.
+#   `deploy.yml`                   — a bare basename, dropped here by the old `/`
+#                                   guard. Now kept; crediting policy moved to
+#                                   _referenced_file_touched, which has the diff
+#                                   index and can require it be UNAMBIGUOUS.
+# The optional trailing group is consumed but NOT captured, so group(1) is the
+# bare path. `\.?[A-Za-z0-9_]` allows ONE leading dot (not `..` or a lone `.`).
+_FILE_PATH_TOKEN_RE = re.compile(
+    r"`(\.?[A-Za-z0-9_][\w./-]*\.[A-Za-z0-9]+)(?::\d+(?:-\d+)?)?`")
 
 
 def extract_finding_files(body: str, base_sha: str) -> dict:
@@ -1116,26 +1130,43 @@ def extract_finding_files(body: str, base_sha: str) -> dict:
             if prefix and am.group(1).lower()[:_SHA_PREFIX_LEN] == prefix:
                 files.add(am.group(2))
         for tm in _FILE_PATH_TOKEN_RE.finditer(body, nm.end(), seg_end):
-            tok = tm.group(1)
-            if "/" in tok:                      # require a path, not a bare basename
-                files.add(tok)
+            files.add(tm.group(1))              # incl. bare basenames — see below
         out[num] = files
     return out
 
 
 def _referenced_file_touched(files: set, index: ChangedIndex) -> bool:
-    """True iff ANY referenced repo path has a real content hunk in the inter-diff,
-    by EXACT path match. Both sides are repo-root-relative full paths — a blob-link
-    anchor / backtick'd prose path vs a `diff --git` path — so exact match is
-    correct and avoids a loose suffix crediting a same-basename file in a different
-    directory (#244 review). Keys on non-empty `hunk_old` (a real `@@` hunk), NOT
-    mere `present`, so a metadata-only segment can't qualify. Over-crediting is the
-    SAFE direction (it only honors a verifier's already-source-grounded FIXED, never
-    un-gates a dropped/downgraded finding — those guards are independent)."""
+    """True iff ANY referenced repo path has a real content hunk in the inter-diff.
+
+    A token CONTAINING a `/` must match a diff path EXACTLY. Both sides are
+    repo-root-relative full paths — a blob-link anchor / backtick'd prose path vs a
+    `diff --git` path — so exact is correct, and a loose suffix would let
+    `Grading/Svc.php` credit `app/Services/Grading/Svc.php` (#244 review). That
+    stays off.
+
+    A BARE BASENAME (no `/`) credits only when EXACTLY ONE touched path carries it.
+    This is the #341 fix: carried-finding status lines cite files as
+    `deploy.yml:446-455`, never as a full path, so keeping the old blanket refusal
+    meant a verifier's source-grounded FIXED on a file the dev demonstrably edited
+    was rewritten to NOT FIXED — permanently, since a landed fix never re-enters a
+    later inter-diff. Requiring uniqueness preserves #244's actual concern: two
+    same-basename files in different directories are ambiguous, so neither credits.
+
+    Keys on non-empty `hunk_old` (a real `@@` hunk), NOT mere `present`, so a
+    metadata-only segment can't qualify. Over-crediting is the SAFE direction (it
+    only honors a verifier's already-source-grounded FIXED, never un-gates a
+    dropped/downgraded finding — those guards are independent)."""
     if not files:
         return False
     touched = {f for f, spanned in index.hunk_old.items() if spanned}
-    return bool(files & touched)
+    if files & touched:                          # exact full-path hit
+        return True
+    for tok in files:
+        if "/" in tok:                           # slashed paths: exact only
+            continue
+        if len({t for t in touched if t.rsplit("/", 1)[-1] == tok}) == 1:
+            return True                          # unambiguous basename
+    return False
 
 
 class LedgerEntry:
