@@ -965,6 +965,78 @@ def test_extract_finding_files_paths_only():
     assert not any(" " in f for f in files)                   # no prose fragments
 
 
+# --- #341: the three prose path shapes that silently yielded NOTHING -----------
+# Live false-block (repo-C #341, round 5): a blocker the verifier and all four
+# specialists read as correct-in-source was rewritten FIXED->NOT FIXED with
+# `file_touched=False`, while the inter-diff touched EXACTLY the one file the
+# finding is about. Cause was entirely in the prose path extractor:
+#   `deploy.yml:446-455`           `:` not in the char class -> whole token failed
+#   `.github/workflows/deploy.yml` pattern opened [A-Za-z0-9_] -> leading `.`
+#                                  rejected, so EVERY `.github/**` finding (i.e.
+#                                  every CI/CD finding) lost the exemption even
+#                                  with the path written out in full
+# A landed fix never re-enters a later inter-diff, so the rewrite was permanent.
+# Bare basenames stay excluded: crediting a "unique" one was tried and reverted
+# (uniqueness over TOUCHED paths let an unrelated same-basename edit credit a
+# finding), and #341 clears via the full dotfile path regardless.
+def test_extract_finding_files_recovers_341_shapes():
+    from verdict import extract_finding_files
+    body = (
+        "**1. guard is inverted**\n\n"
+        "`deploy.yml:446-455` and `.github/workflows/deploy.yml` and "
+        "`.github/workflows/deploy.yml:524-533` and `jq -r` and `..` and `1.50.0`\n\n"
+    )
+    files = extract_finding_files(body, "")[1]
+    assert ".github/workflows/deploy.yml" in files             # dotfile dir path (the #341 fix)
+    assert "deploy.yml" not in files                           # bare basename still excluded
+    assert not any(":" in f for f in files)                    # trailing line ref never in a path
+    assert not any(f in {".", ".."} for f in files)            # no degenerate tokens
+    assert "1.50.0" not in files                               # a version string is not a path
+
+
+def test_dotfile_dir_path_credits_cross_region_fix_341():
+    # End-to-end replay of repo-C #341 finding #1: anchored in the Makefile, but
+    # the prose names `.github/workflows/deploy.yml`, and THAT is the only file the
+    # inter-diff touches. The verifier's source-grounded FIXED must survive.
+    sha = "10afc0bb65c394612c7f8446f87da72f1a943a27"
+    prior = (
+        "## Code Review\n\n### Blockers\n\n"
+        "**1. `Makefile` change will break the next auto-deploy**\n\n"
+        f"[`patient-data-api/Makefile#L19`](https://github.com/o/r/blob/{sha}/patient-data-api/Makefile#L19)"
+        " — `deploy.yml` derives its Lambda list from build output; traced the"
+        " mechanism in `.github/workflows/deploy.yml` (lines 404-475).\n\n"
+        f"Reviewed at: {sha}\n"
+    )
+    diff = (
+        "diff --git a/.github/workflows/deploy.yml b/.github/workflows/deploy.yml\n"
+        "--- a/.github/workflows/deploy.yml\n+++ b/.github/workflows/deploy.yml\n"
+        "@@ -524,3 +524,5 @@ jobs\n ctx\n+  echo \"no :live alias — skipping\"\n ctx\n"
+    )
+    led = build_carry_forward_ledger(prior, diff, sha)
+    assert led[0].change == UNCHANGED                          # anchor file untouched
+    assert led[0].file_touched is True                         # but a REFERENCED file was
+    out, log = pin_and_resurrect(
+        _rr_body("- **#1** [blocker] — FIXED — guard verified correct by direct read"), led)
+    assert not _gates(out)                                     # APPROVE — no false block
+    assert "- **#1** [blocker] — FIXED" in out                 # honored, not rewritten
+    assert any("FIXED trusted" in l for l in log)
+
+
+def test_unique_basename_never_credits_an_unrelated_touch_341():
+    # Regression guard for the reverted half of #305. Crediting a "unique" bare
+    # basename measured uniqueness over TOUCHED paths only, so a finding anchored at
+    # an UNTOUCHED `src/config.php` was credited by an unrelated edit to
+    # `other/config.php` — reopening the hole #244 closed. Exact match only.
+    from verdict import _referenced_file_touched, parse_changed_lines
+    idx = parse_changed_lines(
+        "diff --git a/other/config.php b/other/config.php\n"
+        "--- a/other/config.php\n+++ b/other/config.php\n@@ -1,2 +1,3 @@ x\n a\n+b\n")
+    assert _referenced_file_touched({"src/config.php", "config.php"}, idx) is False
+    assert _referenced_file_touched({"other/config.php"}, idx) is True      # exact
+    assert _referenced_file_touched({"config.php"}, idx) is False           # basename alone
+    assert _referenced_file_touched({"dir/config.php"}, idx) is False       # suffix refused
+
+
 # --- #198 origin-anchor: un-poison round-3+ carried fixes (gate-safe) -------
 # A blocker carried in a round-3+ status block, GENUINELY fixed in an EARLIER
 # round, so absent from baseline..head. v1 pins it INDETERMINATE/file_touched=False

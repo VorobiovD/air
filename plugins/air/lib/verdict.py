@@ -1082,10 +1082,24 @@ def extract_fresh_finding_locations(body: str, base_sha: str) -> dict:
     return out
 
 
-# A backtick-wrapped token that looks like a repo file path (`.ext` suffix). We
-# require a `/` at match time (a bare `File.php` basename is too loose to match a
-# touched path safely). Captures prose file references beyond the blob-link anchor.
-_FILE_PATH_TOKEN_RE = re.compile(r"`([A-Za-z0-9_][\w./-]*\.[A-Za-z0-9]+)`")
+# A backtick-wrapped token that looks like a repo file path (`.ext` suffix).
+# Captures prose file references beyond the blob-link anchor. Three shapes the
+# verifier actually writes, all of which silently yielded NOTHING before (#341):
+#   `deploy.yml:446-455`          — a trailing :line / :start-end ref. `:` is not
+#                                   in the char class, so the whole token failed.
+#   `.github/workflows/deploy.yml` — a DOTFILE-DIRECTORY path. The pattern opened
+#                                   with [A-Za-z0-9_], excluding a leading `.`, so
+#                                   EVERY `.github/**` finding lost the exemption
+#                                   (i.e. every CI/CD finding) even when the path
+#                                   was written out in full.
+# A bare basename stays EXCLUDED (the `/` guard below) — too loose to match a
+# touched path safely (#244), and crediting one is unnecessary anyway: #341's fix
+# lands via the full dotfile path, which the leading-dot fix now recovers. The
+# guard also keeps non-path tokens (a version string like `1.50.0`) out of the set.
+# The optional trailing group is consumed but NOT captured, so group(1) is the
+# bare path. `\.?[A-Za-z0-9_]` allows ONE leading dot (not `..` or a lone `.`).
+_FILE_PATH_TOKEN_RE = re.compile(
+    r"`(\.?[A-Za-z0-9_][\w./-]*\.[A-Za-z0-9]+)(?::\d+(?:-\d+)?)?`")
 
 
 def extract_finding_files(body: str, base_sha: str) -> dict:
@@ -1131,7 +1145,14 @@ def _referenced_file_touched(files: set, index: ChangedIndex) -> bool:
     directory (#244 review). Keys on non-empty `hunk_old` (a real `@@` hunk), NOT
     mere `present`, so a metadata-only segment can't qualify. Over-crediting is the
     SAFE direction (it only honors a verifier's already-source-grounded FIXED, never
-    un-gates a dropped/downgraded finding — those guards are independent)."""
+    un-gates a dropped/downgraded finding — those guards are independent).
+
+    #341 was a defect in what reaches `files` (see _FILE_PATH_TOKEN_RE), not in this
+    match rule: a `.github/**` path was never extracted, so a finding about it had
+    no file evidence at all. Basename crediting was tried here and REVERTED — with
+    uniqueness measured only over TOUCHED paths, an unrelated edit to
+    `other/config.php` credited a finding anchored at `src/config.php`, reopening
+    exactly the hole #244 closed."""
     if not files:
         return False
     touched = {f for f, spanned in index.hunk_old.items() if spanned}
