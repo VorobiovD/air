@@ -259,6 +259,35 @@ if [ -f managed/github_client.py ] && [ -f plugins/air/commands/review.md ]; the
   fi
 fi
 
+# Check K: the auth-preflight reviewer-identity warning must be grounded in the
+# TOKEN's own identity (GET /user), never inferred from the OPTIONAL
+# `expected_reviewer` input. That input is wired by only some callers (4 of 7 on
+# the fleet when this was written), so treating its absence as "this reviewer has
+# no PAT" made the warning permanently FALSE on the rest — it claimed "reviewing
+# under the shared bot" on runs that were demonstrably using the reviewer's own
+# PAT, and that false line misdirected a live 403 diagnosis onto AIR_BOT_TOKEN
+# (which the `||` short-circuit means was never even consulted). A regression
+# here is silent and only shows up as a misleading operator signal.
+MRW=.github/workflows/managed-review.yml
+if [ -f "$MRW" ]; then
+  # (a) the warning must exist (it is the Tier-1 PAT-visibility signal)
+  grep -qF 'has no PAT on' "$MRW" \
+    || fail "Check K-a: the reviewer-identity warning is gone from $MRW — Tier-1 PAT visibility lost"
+  # (b) the preflight must resolve the token owner
+  grep -qF 'api.github.com/user' "$MRW" \
+    || fail "Check K-b: auth preflight must resolve the token owner via GET /user, not infer identity"
+  # (c) FAIL-CLOSED core: the bare $EXPECTED_REVIEWER shell var must not be
+  #     referenced ANYWHERE in this workflow. Its env binding was removed with
+  #     the inference it fed, so any reference is either dead or a reintroduction
+  #     of the false-warning bug. Anchored on the `$`-reference form so the
+  #     legitimate AIR_EXPECTED_REVIEWER env KEY (the engine's hard assert) is
+  #     untouched. A proximity-scoped grep was tried first and was INERT — the
+  #     guard now sits >4 lines from the warning it guards.
+  if grep -qE '[$]\{?EXPECTED_REVIEWER\b' "$MRW"; then
+    fail "Check K-c: \$EXPECTED_REVIEWER is referenced in $MRW — that input is optional per caller, so its absence proves nothing about whether a PAT exists; compare the GET /user login instead"
+  fi
+fi
+
 if [ "$status" -eq 0 ]; then
   printf 'air drift-check: all checks passed.\n'
 fi

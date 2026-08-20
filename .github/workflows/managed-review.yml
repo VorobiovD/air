@@ -306,10 +306,12 @@ jobs:
         env:
           AIR_BOT_TOKEN: ${{ secrets.AIR_BOT_TOKEN }}
           REPO: ${{ github.repository }}
-          # Naming-only (Tier 1 PAT visibility): who was requested, and whether
-          # their own <STEM>_PAT was present (expected_reviewer is set only then).
+          # Naming-only (Tier 1 PAT visibility): who was requested. Whether we
+          # are actually running as them is resolved from the TOKEN below, not
+          # from `expected_reviewer` — that input is optional per caller, so its
+          # absence carries no information. (The engine still receives it at
+          # AIR_EXPECTED_REVIEWER for the hard identity assert, line ~536.)
           REQUESTED_REVIEWER: ${{ inputs.requested_reviewer }}
-          EXPECTED_REVIEWER: ${{ inputs.expected_reviewer }}
         run: |
           # Prefix the messages with the named reviewer when the caller passed one
           # (multi-reviewer PAT model) — turns a generic "the review token" into
@@ -323,11 +325,63 @@ jobs:
           case "$code" in
             200)
               echo "auth preflight OK — review token can access ${REPO}"
-              # Reviewer was requested but their own <STEM>_PAT isn't set (the run
-              # fell back to the shared AIR_BOT_TOKEN, which happened to work).
-              # Surface it — named, on the PR's Checks tab — but never block.
-              if [ -n "${REQUESTED_REVIEWER}" ] && [ -z "${EXPECTED_REVIEWER}" ]; then
-                echo "::warning::air: @${REQUESTED_REVIEWER} has no PAT on ${REPO} — reviewing under the shared bot. Add/rotate it via air-rotate to review under your own identity."
+              # Is this run actually using the requested reviewer's own PAT? Ask
+              # the token who it is (GET /user is ground truth) instead of
+              # inferring it from `expected_reviewer`.
+              #
+              # Why: `expected_reviewer` is an OPTIONAL caller input, so an empty
+              # value means one of two different things — "their <STEM>_PAT is
+              # absent" (a caller with a gate job) or "this caller never wires the
+              # assert at all". The old check treated both as the first, so on the
+              # 3-of-7 fleet callers that don't pass it, EVERY named-reviewer run
+              # warned "has no PAT — reviewing under the shared bot" while
+              # demonstrably reviewing under that reviewer's own PAT. That false
+              # line is not harmless: it sent a live qai-be 403 diagnosis at
+              # AIR_BOT_TOKEN (never even consulted — <STEM>_PAT short-circuits
+              # the `||`) instead of the reviewer PAT that was actually failing.
+              #
+              # Identity comparison needs no caller wiring, works on every caller
+              # variant, and names who we really are. Logins are compared
+              # case-insensitively (GitHub logins are case-insensitive for
+              # identity; the API returns canonical case). If /user does not
+              # resolve — transient error, or a token type that has no user, e.g.
+              # a GitHub App installation token — say NOTHING rather than guess:
+              # a false reassurance and a false alarm are both worse than silence.
+              if [ -n "${REQUESTED_REVIEWER}" ]; then
+                # This probe must NEVER be able to fail the step. The runner's
+                # default shell is `bash -eo pipefail`, so an unguarded
+                # `var=$(curl ... | jq ...)` aborts the whole script on any
+                # transport error (DNS blip, reset, timeout) — turning a
+                # best-effort diagnostic into a hard CI failure while the real
+                # repo-access probe above already SUCCEEDED. That is strictly
+                # worse than the false warning this replaced, and contradicts the
+                # "say nothing rather than guess" guarantee below. So: the same
+                # `-o file -w %{http_code} || echo 000` shape as the sibling probe,
+                # `--max-time` so a hung connection can't stall the job, and a jq
+                # that cannot propagate failure either. The HTTP code is carried
+                # into the unresolved message — this whole check exists because a
+                # misleading operator signal cost real diagnosis time, so when it
+                # can't answer it should at least say why.
+                # Truncate FIRST: on a transport failure curl writes nothing, and
+                # a leftover body would be parsed as this run's identity.
+                : > "${RUNNER_TEMP}/air-token-identity.json"
+                ucode=$(curl -sS --max-time 10 \
+                  -o "${RUNNER_TEMP}/air-token-identity.json" -w '%{http_code}' \
+                  -H "Authorization: Bearer ${AIR_BOT_TOKEN}" \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  "https://api.github.com/user" 2>/dev/null || echo 000)
+                token_login=$(jq -r '.login // empty' \
+                  "${RUNNER_TEMP}/air-token-identity.json" 2>/dev/null || echo '')
+                want=$(printf '%s' "${REQUESTED_REVIEWER}" | tr '[:upper:]' '[:lower:]')
+                got=$(printf '%s' "${token_login}" | tr '[:upper:]' '[:lower:]')
+                if [ -z "$got" ]; then
+                  echo "auth preflight: token identity unresolved (GET /user -> HTTP ${ucode}) — skipping the reviewer-identity check"
+                elif [ "$got" != "$want" ]; then
+                  echo "::warning::air: @${REQUESTED_REVIEWER} has no PAT on ${REPO} — reviewing as @${token_login} instead. Add/rotate it via air-rotate to review under your own identity."
+                else
+                  echo "auth preflight: reviewing as @${token_login} (the requested reviewer)"
+                fi
               fi
               ;;
             401|403|404) echo "::error::air: ${who}review token for ${REPO} is missing, expired, or has no access (HTTP ${code}). No review ran — \$0 spent. Add/rotate ${who}*_PAT via air-rotate (or fix AIR_BOT_TOKEN / its rotation fan-out)." ; exit 1 ;;
