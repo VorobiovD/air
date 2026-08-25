@@ -89,6 +89,7 @@ from github_client import (  # noqa: E402,F401 — split modules; re-exported fo
     fetch_inter_diff,
     fetch_pr_changed_files,
     fetch_compare_status,
+    fetch_blob_sha,
     fetch_related_prs,
     count_diff_changed_lines,
     DIFF_TRUNCATION_MARKER,
@@ -340,14 +341,16 @@ def make_origin_resolver(comments, bot_login, head_sha, repo, token, base_sha=No
     for _, sha, created in chain3:            # oldest-first; first (oldest) wins
         created_by_sha.setdefault(sha, created)
     index_cache: dict = {}
-    base_diff_cache: list = []
+    base_index_cache: list = []
+    blob_cache: dict = {}
 
-    def _base_diff():
+    def _base_index():
         # The PR's own base...head diff (three-dot merge-base window) — rebase-proof,
-        # fetched once, shared by every temporal origin. [None] caches a failure.
-        if not base_diff_cache:
-            base_diff_cache.append(fetch_inter_diff(repo, base_sha, head_sha, token))
-        return base_diff_cache[0]
+        # fetched + parsed ONCE, shared by every temporal origin. [None] caches a failure.
+        if not base_index_cache:
+            diff = fetch_inter_diff(repo, base_sha, head_sha, token)
+            base_index_cache.append(None if diff is None else parse_changed_lines(diff))
+        return base_index_cache[0]
 
     def _temporal_index(origin_sha):
         if not (temporal_anchor_enabled() and base_sha):
@@ -355,19 +358,54 @@ def make_origin_resolver(comments, bot_login, head_sha, repo, token, base_sha=No
         cutoff = _parse_iso_utc(created_by_sha.get(origin_sha, ""))
         checkout = os.environ.get("AIR_TARGET_REPO", "")
         if not (cutoff and checkout):
+            print(f"  [origin] temporal window for {origin_sha[:8]} unavailable "
+                  f"({'no review timestamp' if not cutoff else 'no checkout'}); "
+                  f"v1 fallback", file=sys.stderr)
             return None
-        diff = _base_diff()
-        if diff is None:
+        full_idx = _base_index()
+        if full_idx is None:
+            print(f"  [origin] temporal window for {origin_sha[:8]} unavailable "
+                  f"(base diff fetch failed); v1 fallback", file=sys.stderr)
             return None
         eligible = _files_authored_after(checkout, base_sha, head_sha, cutoff)
         if not eligible:
             print(f"  [origin] temporal window for {origin_sha[:8]} — no commit "
                   f"authored after its review; v1 fallback", file=sys.stderr)
             return None
-        idx = restrict_index_to_files(parse_changed_lines(diff), eligible)
+        idx = restrict_index_to_files(full_idx, eligible)
         print(f"  [origin] temporal fallback for {origin_sha[:8]} — "
               f"{len(eligible)} file(s) authored after its review", file=sys.stderr)
         return idx
+
+    def _blob_changed(origin_sha, path):
+        """Content-addressed confirmation that `path`'s bytes at HEAD differ from
+        the ORIGIN review's tree — the anti-forgery half of the temporal anchor.
+        Author dates alone are forgeable (`git commit --amend --date=now` on the
+        commit that already carries the unfixed hunk satisfies the date window
+        with zero content change — the dogfood medium on this feature); blob shas
+        are not: identical bytes ⇒ identical blob sha, at any date. head side is
+        the local checkout (`git rev-parse HEAD:path`, free); origin side is one
+        contents-API call per (origin, path), cached — a force-pushed-away origin
+        commit is API-fetchable by sha even though no local ref reaches it.
+        True  = content differs (incl. path absent on exactly one side — a rename/
+                move/delete IS a post-review content change at that path);
+        False = byte-identical, absent on both sides, or origin side UNKNOWN
+                (API error — conservative: no credit without positive evidence)."""
+        key = (origin_sha, path)
+        if key not in blob_cache:
+            changed = False
+            try:
+                checkout = os.environ.get("AIR_TARGET_REPO", "")
+                head_blob = _git(checkout, "rev-parse", f"{head_sha}:{path}").strip() \
+                    if checkout else ""
+                origin_blob = fetch_blob_sha(repo, origin_sha, path, token)
+                if origin_blob is not None and (head_blob or origin_blob):
+                    changed = head_blob != origin_blob
+            except Exception as e:
+                print(f"  [origin][warn] blob check {origin_sha[:8]}:{path} failed "
+                      f"({type(e).__name__}: {e}) — not credited", file=sys.stderr)
+            blob_cache[key] = changed
+        return blob_cache[key]
 
     def _origin_index(origin_sha):
         """(ChangedIndex|None, temporal: bool), cached per origin SHA."""
@@ -401,8 +439,17 @@ def make_origin_resolver(comments, bot_login, head_sha, repo, token, base_sha=No
         idx, temporal = _origin_index(origin_sha)
         if idx is None:
             return None
-        return (origin_sha, loc, idx, files, True) if temporal \
-            else (origin_sha, loc, idx, files)
+        if temporal:
+            # Anti-forgery: temporal credit additionally requires each referenced
+            # file's CONTENT to differ from the origin review's tree (blob-sha
+            # identity — see _blob_changed). Date eligibility alone is spoofable;
+            # date + content-diff is not. Files failing the blob check drop out,
+            # so file_touched degrades to False → conservative pin. Bounded: one
+            # cached API call per (origin, referenced file) — findings reference
+            # a handful of files, never the whole diff.
+            files = {f for f in files if _blob_changed(origin_sha, f)}
+            return (origin_sha, loc, idx, files, True)
+        return (origin_sha, loc, idx, files)
 
     return resolver
 

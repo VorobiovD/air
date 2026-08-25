@@ -1198,6 +1198,10 @@ def restrict_index_to_files(index: ChangedIndex, files: set) -> ChangedIndex:
             out.changed_old[f] = set(index.changed_old[f])
         if index.hunk_old.get(f):
             out.hunk_old[f] = set(index.hunk_old[f])
+        if f in index.renames:
+            out.renames[f] = index.renames[f]
+        if f in index.touched_by_rename:
+            out.touched_by_rename.add(f)
     return out
 
 
@@ -1747,8 +1751,8 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
         # diff. Same trust class as cross_region (file-level evidence honoring a
         # verifier's source-grounded FIXED); `change` is INDETERMINATE by
         # construction on the temporal path, so it needs its own clause.
-        temporal_fix = (getattr(entry, "temporal", False) and entry.file_touched
-                        and entry.change != CHANGED)
+        is_temporal = getattr(entry, "temporal", False)   # tolerate pre-slot entries (tests/pickles)
+        temporal_fix = is_temporal and entry.file_touched and entry.change != CHANGED
         cross_region_fix = ((entry.change == UNCHANGED and entry.file_touched)
                             or temporal_fix)
         if (status == "FIXED" and entry.change != CHANGED and not cross_region_fix
@@ -1761,11 +1765,10 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
             # Rebase-flavored marker when the temporal window RAN and found no
             # post-review edit — the dev learns why verification is limited and
             # exactly how to clear it.
-            marker = (_PIN_REWRITE_MARKER_REBASE if getattr(entry, "temporal", False)
-                      else _PIN_REWRITE_MARKER)
+            marker = _PIN_REWRITE_MARKER_REBASE if is_temporal else _PIN_REWRITE_MARKER
             tail = f"{tail.rstrip()} {marker}"
             flips["n"] += 1
-            log.append(f"[pin] #{num} FIXED->NOT FIXED (no cross-region edit; change={entry.change}, file_touched={entry.file_touched}, temporal={getattr(entry, 'temporal', False)})")
+            log.append(f"[pin] #{num} FIXED->NOT FIXED (no cross-region edit; change={entry.change}, file_touched={entry.file_touched}, temporal={is_temporal})")
         elif (status == "FIXED" and temporal_fix
                 and _SEVERITY_RANK.get(new_sev, 3) >= 2):
             log.append(f"[pin] #{num} temporal-anchor FIXED trusted (rebased branch; post-review-authored edit to finding's file; verifier-judged)")

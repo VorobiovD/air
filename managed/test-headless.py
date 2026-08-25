@@ -1124,11 +1124,18 @@ _TA_GIT_LOG = ("\x012026-08-23T10:00:00Z\n\nsvc.py\n"
 
 
 def _ta_resolver(monkeypatch, *, git_log=_TA_GIT_LOG, base_sha=_TA_BASE,
-                 base_diff=_OA_TOUCH_DIFF, comments=None, checkout="/tmp/checkout"):
+                 base_diff=_OA_TOUCH_DIFF, comments=None, checkout="/tmp/checkout",
+                 head_blob="beef" * 10, origin_blob="cafe" * 10):
+    # _git serves BOTH the author-date log and the head-side blob rev-parse;
+    # fetch_blob_sha is the origin-side contents call. Defaults make the blobs
+    # DIFFER (content genuinely changed since the review — the honest case).
+    def _git_mock(repo_dir, *args, **kwargs):
+        return head_blob if args and args[0] == "rev-parse" else git_log
     monkeypatch.setattr(review, "_air_bot_logins", lambda: frozenset({"air-machine"}))
     monkeypatch.setattr(review, "fetch_compare_status", lambda *a, **k: "diverged")
     monkeypatch.setattr(review, "fetch_inter_diff", lambda *a, **k: base_diff)
-    monkeypatch.setattr(review, "_git", lambda *a, **k: git_log)
+    monkeypatch.setattr(review, "_git", _git_mock)
+    monkeypatch.setattr(review, "fetch_blob_sha", lambda *a, **k: origin_blob)
     if checkout:
         monkeypatch.setenv("AIR_TARGET_REPO", checkout)
     else:
@@ -1249,3 +1256,38 @@ def test_parse_iso_utc_variants():
     assert review._parse_iso_utc("") is None
     assert review._parse_iso_utc("not-a-date") is None
     assert review._parse_iso_utc("2026-08-22T18:55:56") is None   # naive → unusable → None
+
+
+def test_temporal_forged_date_without_content_change_not_credited(monkeypatch):
+    # THE dogfood medium on this feature: `git commit --amend --date=now` on the
+    # commit that ALREADY carries the unfixed hunk satisfies the date window with
+    # zero content change. The blob check kills it: byte-identical content ⇒
+    # identical blob shas ⇒ no credit ⇒ the conservative pin stands.
+    resolver = _ta_resolver(monkeypatch, head_blob="same" * 10, origin_blob="same" * 10)
+    res = resolver(1)
+    assert res and len(res) == 5 and res[4] is True
+    assert res[3] == set()                       # referenced file filtered out
+    from verdict import build_carry_forward_ledger, pin_and_resurrect
+    led = build_carry_forward_ledger(_OA_R2_BODY, "", "d" * 40, origin_resolver=resolver)
+    assert led[0].file_touched is False
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [blocker] — FIXED — claims fixed\n\nReviewed at: abc\n")
+    out, log = pin_and_resurrect(body, led)
+    assert "NOT FIXED" in out and any("FIXED->NOT FIXED" in l for l in log)
+
+
+def test_temporal_blob_api_error_not_credited(monkeypatch):
+    # Origin-side contents call fails (None) → UNKNOWN → no credit (conservative:
+    # positive content evidence is required, never assumed).
+    resolver = _ta_resolver(monkeypatch, origin_blob=None)
+    res = resolver(1)
+    assert res and res[3] == set()
+
+
+def test_temporal_path_absent_at_origin_is_credited(monkeypatch):
+    # The finding's file doesn't exist at the origin tree (fetch_blob_sha → "" on
+    # 404): a rename/move landed after the review — its content at this path IS a
+    # post-review change (the lifemd #17537 package-move shape). Credited.
+    resolver = _ta_resolver(monkeypatch, origin_blob="")
+    res = resolver(1)
+    assert res and res[3] == {"svc.py"}

@@ -1048,9 +1048,25 @@ if [ "$ORIGIN_OFF" = "0" ] && [ "$LEDGER_OFF" = "0" ] && [ "${CROSS_REPO:-false}
         CUTOFF=$(python3 -c "import sys;from datetime import datetime;print(int(datetime.fromisoformat(sys.argv[1].replace('Z','+00:00')).timestamp()))" "$CREATED" 2>/dev/null)
         [ -n "$CUTOFF" ] || continue
         # %at = author-date epoch; keep files from commits STRICTLY after cutoff.
+        # Two-dot on purpose (the diff below is three-dot): git LOG wants "commits
+        # reachable from head, not base" (two-dot); a three-dot log would be the
+        # symmetric difference and pull in base-side commits. The asymmetry can
+        # only shrink the eligible set — the safe direction; don't "fix" it.
+        # python3 (already required for CUTOFF above), not awk: matching the \x01
+        # separator in awk relies on gawk's \x escape and silently never matches
+        # on mawk/BSD awk — which would disable this whole path with no error.
         git log --no-renames --format='%x01%at' --name-only "origin/<baseRefName>..<headRefOid>" 2>/dev/null | \
-          awk -v c="$CUTOFF" '/^\x01/ { keep = (substr($0,2)+0 > c+0); next } keep && NF { print }' | \
-          sort -u > "$TDIR/${SHA:0:12}.tfiles"
+          python3 -c "
+import sys
+cutoff = int(sys.argv[1]); keep = False; out = set()
+for ln in sys.stdin.read().split('\n'):
+    if ln.startswith('\x01'):
+        try: keep = int(ln[1:]) > cutoff
+        except ValueError: keep = False
+    elif keep and ln.strip():
+        out.add(ln.strip())
+sys.stdout.write('\n'.join(sorted(out)))
+" "$CUTOFF" > "$TDIR/${SHA:0:12}.tfiles"
         [ -s "$TDIR/${SHA:0:12}.tfiles" ] || rm -f "$TDIR/${SHA:0:12}.tfiles"
         if [ ! -s "$TDIR/base.diff" ]; then
           git diff "origin/<baseRefName>"...<headRefOid> > "$TDIR/base.diff" 2>/dev/null
