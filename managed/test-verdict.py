@@ -2685,3 +2685,153 @@ def test_locate_banner_block_is_the_single_source():
         body_src = inspect.getsource(getattr(V, fn))
         assert "_locate_banner_block(" in body_src, f"{fn} does not use the locator"
         assert "_BANNER_ALERT_RE.search" not in body_src, f"{fn} re-implements the search"
+
+
+# --- temporal anchor (#294 successor): pin-level trust + markers ---
+# A rebased branch has no ancestor-confirmed origin window; the temporal path
+# evidences file_touched by AUTHOR DATE (a post-review-authored commit touches the
+# finding's file) and marks the entry temporal=True with change=INDETERMINATE.
+
+def _temporal_entry(num, sev, status, *, file_touched):
+    return LedgerEntry(num, sev, status, None, INDETERMINATE,
+                       file_touched, "a" * 40, temporal=True)
+
+
+def test_temporal_fix_on_post_review_edit_is_trusted():
+    # The lifemd #17537 shape: blocker genuinely fixed, branch then rebased ~15x.
+    # Verifier reads current source and emits FIXED; temporal evidence shows the
+    # finding's file was edited by a commit authored after the review → trusted,
+    # APPROVE — where v1 number-identity pinned NOT FIXED forever.
+    e = _temporal_entry(1, "blocker", "NOT FIXED", file_touched=True)
+    body = _rr_body("- **#1** [blocker] — FIXED — verified against current source")
+    out, log = pin_and_resurrect(body, [e])
+    assert not _gates(out)
+    assert "NOT FIXED" not in out
+    assert any("temporal-anchor FIXED trusted" in l for l in log)
+
+
+def test_temporal_without_post_review_edit_still_pins_with_rebase_marker():
+    # Temporal window ran but NO commit authored after the review touches the
+    # finding's file → conservative rewrite stands, and the marker is the
+    # rebase-flavored one so the dev learns WHY verification is limited and how
+    # to clear it (the DISPUTED exit that lifemd #17537's dev never found).
+    from verdict import _PIN_REWRITE_MARKER_REBASE
+    e = _temporal_entry(1, "blocker", "NOT FIXED", file_touched=False)
+    body = _rr_body("- **#1** [blocker] — FIXED — claims fixed")
+    out, log = pin_and_resurrect(body, [e])
+    assert _gates(out) and "NOT FIXED" in out
+    assert _PIN_REWRITE_MARKER_REBASE in out
+    assert any("FIXED->NOT FIXED" in l and "temporal=True" in l for l in log)
+
+
+def test_temporal_trust_does_not_unpin_severity():
+    # Temporal trust honors the STATUS only — a severity downgrade on an
+    # INDETERMINATE entry is still reverted to max(prior, emitted). The date
+    # signal can clear a fixed finding; it can never soften an unfixed one.
+    e = _temporal_entry(1, "blocker", "NOT FIXED", file_touched=True)
+    body = _rr_body("- **#1** [medium] — NOT FIXED — still open")
+    out, log = pin_and_resurrect(body, [e])
+    assert "- **#1** [blocker]" in out                # downgrade reverted
+    assert _gates(out)
+    assert any("severity medium->blocker" in l for l in log)
+
+
+def test_non_temporal_indeterminate_touch_is_not_trusted():
+    # Scope lock: file_touched=True on a NON-temporal INDETERMINATE entry (e.g. a
+    # hypothetical caller bug) must NOT be trusted — the temporal flag, not the
+    # touch bit alone, is what widens the trust class beyond UNCHANGED.
+    e = LedgerEntry(1, "blocker", "NOT FIXED", None, INDETERMINATE,
+                    True, None, temporal=False)
+    body = _rr_body("- **#1** [blocker] — FIXED — claims fixed")
+    out, _ = pin_and_resurrect(body, [e])
+    assert _gates(out) and "NOT FIXED" in out
+
+
+def test_ledger_temporal_resolver_drops_line_evidence():
+    # A temporal (5-tuple) resolver result must never grant line-level CHANGED —
+    # its coordinates are merge-base-space (the #294 round-1 blocker). Even with
+    # a location and an index whose hunks span the anchor, change stays
+    # INDETERMINATE and only file_touched carries.
+    from verdict import parse_changed_lines, build_carry_forward_ledger, INDETERMINATE
+    prior = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+             "- **#1** [blocker] — NOT FIXED — carried\n\nReviewed at: " + "d" * 40 + "\n")
+    idx = parse_changed_lines(
+        "diff --git a/svc.py b/svc.py\n--- a/svc.py\n+++ b/svc.py\n"
+        "@@ -1,9 +1,10 @@\n ctx\n+fix\n ctx\n")
+    resolver = lambda num: ("a" * 40, ("svc.py", 5, 5), idx, {"svc.py"}, True)
+    led = build_carry_forward_ledger(prior, "", "d" * 40, origin_resolver=resolver)
+    assert led[0].change == INDETERMINATE and led[0].location is None
+    assert led[0].file_touched is True and led[0].temporal is True
+
+
+def test_ledger_four_tuple_resolver_back_compat():
+    # The pre-temporal 4-tuple resolver contract must parse identically (no
+    # temporal flag → temporal=False, line evidence honored as before).
+    from verdict import parse_changed_lines, build_carry_forward_ledger, CHANGED
+    prior = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+             "- **#1** [blocker] — NOT FIXED — carried\n\nReviewed at: " + "d" * 40 + "\n")
+    idx = parse_changed_lines(
+        "diff --git a/svc.py b/svc.py\n--- a/svc.py\n+++ b/svc.py\n"
+        "@@ -1,9 +1,10 @@\n ctx\n+fix\n ctx\n")
+    resolver = lambda num: ("a" * 40, ("svc.py", 5, 5), idx, {"svc.py"})
+    led = build_carry_forward_ledger(prior, "", "d" * 40, origin_resolver=resolver)
+    assert led[0].change == CHANGED and led[0].temporal is False
+
+
+def test_restrict_index_to_files_scopes_evidence():
+    # The temporal index = the PR's base...head diff narrowed to date-eligible
+    # files. Evidence for excluded files must vanish (monotone: an unrelated
+    # edit can't credit a finding); stub/truncation state carries over.
+    from verdict import parse_changed_lines, restrict_index_to_files, _referenced_file_touched
+    idx = parse_changed_lines(
+        "diff --git a/eligible.py b/eligible.py\n--- a/eligible.py\n+++ b/eligible.py\n"
+        "@@ -1,3 +1,4 @@\n ctx\n+fix\n ctx\n"
+        "diff --git a/stale.py b/stale.py\n--- a/stale.py\n+++ b/stale.py\n"
+        "@@ -7,2 +7,3 @@\n ctx\n+edit\n")
+    out = restrict_index_to_files(idx, {"eligible.py"})
+    assert _referenced_file_touched({"eligible.py"}, out) is True
+    assert _referenced_file_touched({"stale.py"}, out) is False
+    assert "stale.py" not in out.present
+
+
+def test_file_origin_resolver_temporal_dir_fallback(tmp_path):
+    # CLI parity: no <sha12>.diff (local ancestor gate rejected the origin) but a
+    # temporal dir with base.diff + <sha12>.tfiles → 5-tuple temporal result.
+    # Missing tfiles for the sha → None (v1). Kill switch off → None.
+    from verdict import make_file_origin_resolver
+    r1_sha = "aaaa00000000" + "0" * 28
+    r1 = ("## Code Review\n\n### Blockers\n\n**1. flaw**\n\n"
+          "[`svc.py#L5`](https://github.com/o/r/blob/aaaa00000000/svc.py#L5) — x\n\n"
+          "Reviewed at: " + r1_sha + "\n")
+    chain = [(r1, r1_sha)]
+    diffs = tmp_path / "diffs"; diffs.mkdir()          # empty: origin NOT confirmed
+    tdir = tmp_path / "temporal"; tdir.mkdir()
+    (tdir / "base.diff").write_text(
+        "diff --git a/svc.py b/svc.py\n--- a/svc.py\n+++ b/svc.py\n"
+        "@@ -40,3 +40,4 @@\n ctx\n+fix\n ctx\n")
+    (tdir / f"{r1_sha[:12]}.tfiles").write_text("svc.py\n")
+    res = make_file_origin_resolver(chain, str(diffs), temporal_dir=str(tdir))(1)
+    assert res and len(res) == 5 and res[4] is True
+    assert res[0] == r1_sha
+    # sha with no tfiles → v1 fallback
+    (tdir / f"{r1_sha[:12]}.tfiles").unlink()
+    assert make_file_origin_resolver(chain, str(diffs), temporal_dir=str(tdir))(1) is None
+    # no temporal dir at all → pre-temporal behavior
+    assert make_file_origin_resolver(chain, str(diffs))(1) is None
+
+
+def test_file_origin_resolver_temporal_kill_switch(tmp_path, monkeypatch):
+    from verdict import make_file_origin_resolver
+    r1_sha = "aaaa00000000" + "0" * 28
+    r1 = ("## Code Review\n\n### Blockers\n\n**1. flaw**\n\n"
+          "[`svc.py#L5`](https://github.com/o/r/blob/aaaa00000000/svc.py#L5) — x\n\n"
+          "Reviewed at: " + r1_sha + "\n")
+    diffs = tmp_path / "diffs"; diffs.mkdir()
+    tdir = tmp_path / "temporal"; tdir.mkdir()
+    (tdir / "base.diff").write_text(
+        "diff --git a/svc.py b/svc.py\n--- a/svc.py\n+++ b/svc.py\n"
+        "@@ -40,3 +40,4 @@\n ctx\n+fix\n ctx\n")
+    (tdir / f"{r1_sha[:12]}.tfiles").write_text("svc.py\n")
+    monkeypatch.setenv("AIR_TEMPORAL_ANCHOR", "0")
+    assert make_file_origin_resolver([(r1, r1_sha)], str(diffs),
+                                     temporal_dir=str(tdir))(1) is None

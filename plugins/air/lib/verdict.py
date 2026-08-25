@@ -1159,12 +1159,54 @@ def _referenced_file_touched(files: set, index: ChangedIndex) -> bool:
     return bool(files & touched)
 
 
+def temporal_anchor_enabled() -> bool:
+    """Temporal anchor (#294 successor): when a rebase/force-push makes every prior
+    reviewed-at SHA a non-ancestor of head (the ancestor gate correctly rejects
+    them all), fall back to AUTHOR-DATE evidence — "was this finding's file edited
+    by a commit authored AFTER the review that raised it?" — instead of collapsing
+    to v1 number-identity, which pins a genuinely-fixed finding NOT FIXED forever
+    (repo-C #17065, lifemd #16973/#17395/#17537). Author dates survive the rebase
+    that destroys SHA ancestry, and the review's created_at is a server-side lower
+    bound, so the "edited after the finding was raised" property — whose loss killed
+    the rejected base..head approach on #294 — is preserved. Author dates are
+    forgeable where SHA ancestry is not; accepted because forging one buys nothing
+    cheaper than what a one-line real edit already grants (file_touched), the
+    verifier still reads current source, and the date-independent guards (severity
+    pin, resurrection) are untouched. Wrong-direction failures (clock skew, an
+    amended/cherry-picked older commit) exclude the file → conservative.
+    Default ON; AIR_TEMPORAL_ANCHOR=0/false/no is the kill switch. Lives inside the
+    origin-anchor resolver, so AIR_ORIGIN_ANCHOR=0 and AIR_LEDGER_PIN=0 disable it too."""
+    return os.environ.get("AIR_TEMPORAL_ANCHOR", "1").strip().lower() not in ("0", "false", "no")
+
+
+def restrict_index_to_files(index: ChangedIndex, files: set) -> ChangedIndex:
+    """A copy of `index` keeping content evidence ONLY for `files` — the temporal
+    anchor's index construction: the PR's own rebase-proof base...head diff,
+    narrowed to files with a post-review-authored commit. Line coordinates in the
+    result are merge-base-space and MUST NOT feed `finding_changed` against an
+    origin-space anchor (the #294 round-1 blocker) — the temporal ledger path
+    drops `loc` so `change` stays INDETERMINATE and only the coordinate-free
+    `file_touched` signal is consumed. `stubbed`/`truncated` carry over so the
+    stub guard keeps excluding generated files."""
+    out = ChangedIndex()
+    out.truncated = index.truncated
+    out.stubbed = set(index.stubbed)
+    for f in files:
+        if f in index.present:
+            out.present.add(f)
+        if index.changed_old.get(f):
+            out.changed_old[f] = set(index.changed_old[f])
+        if index.hunk_old.get(f):
+            out.hunk_old[f] = set(index.hunk_old[f])
+    return out
+
+
 class LedgerEntry:
     __slots__ = ("num", "prior_severity", "prior_status", "location", "change",
-                 "file_touched", "origin_sha")
+                 "file_touched", "origin_sha", "temporal")
 
     def __init__(self, num, prior_severity, prior_status, location, change,
-                 file_touched=False, origin_sha=None):
+                 file_touched=False, origin_sha=None, temporal=False):
         self.num = num
         self.prior_severity = prior_severity
         self.prior_status = prior_status
@@ -1184,6 +1226,14 @@ class LedgerEntry:
         # [pin][origin] telemetry only — the gate decision flows through
         # change/file_touched (computed against the origin window) exactly as round-2.
         self.origin_sha = origin_sha
+        # Temporal anchor: True when file_touched came from the AUTHOR-DATE window
+        # (rebased branch — no ancestor-confirmed origin diff; see
+        # temporal_anchor_enabled). `change` is INDETERMINATE by construction on
+        # this path (the base...head diff's coordinates are merge-base-space, never
+        # fed to finding_changed), so pin_and_resurrect trusts a verifier FIXED via
+        # `temporal and file_touched` — the same cross_region trust class, evidenced
+        # by dates instead of SHA ancestry.
+        self.temporal = temporal
 
 
 def find_origin(chain, finding_num: int):
@@ -1213,7 +1263,7 @@ def find_origin(chain, finding_num: int):
     return None, None, set()
 
 
-def make_file_origin_resolver(chain, diffs_dir):
+def make_file_origin_resolver(chain, diffs_dir, temporal_dir=None):
     """PURE (no network) origin_resolver for the CLI path (#198) — the managed
     analogue is `review.make_origin_resolver`, but the CLI orchestrator
     (review.md Step 11.5) has ALREADY run the ancestor gate locally
@@ -1228,9 +1278,41 @@ def make_file_origin_resolver(chain, diffs_dir):
     `chain` is `[(body, reviewed_sha)]` OLDEST-FIRST (the orchestrator builds it
     from the prior bot-review comments, same anti-spoof author filter as the
     baseline selection). Returns a `resolver(num) -> (origin_sha, location,
-    ChangedIndex, referenced_files) | None` matching `build_carry_forward_ledger`'s
-    contract."""
+    ChangedIndex, referenced_files[, temporal]) | None` matching
+    `build_carry_forward_ledger`'s contract.
+
+    TEMPORAL ANCHOR (CLI parity): when `temporal_dir` is supplied, an origin with
+    NO confirmed diff (rebased branch — the local ancestor gate rejected it) falls
+    back to `<sha12>.tfiles` (newline list of files edited by commits AUTHORED
+    AFTER that review's created_at — the orchestrator computes it from local git)
+    intersected with `base.diff` (the PR's own rebase-proof base...head diff) via
+    `restrict_index_to_files`. Returned with `temporal=True` so the ledger drops
+    line coordinates and pin trusts only the file-level signal. Missing/empty
+    tfiles or base.diff → None → v1 number-identity (conservative)."""
     cache: dict = {}
+    base_index_cache: dict = {}
+
+    def _base_index():
+        if "idx" not in base_index_cache:
+            try:
+                text = (Path(temporal_dir) / "base.diff").read_text()
+                base_index_cache["idx"] = parse_changed_lines(text)
+            except (OSError, UnicodeDecodeError):
+                base_index_cache["idx"] = None
+        return base_index_cache["idx"]
+
+    def _temporal_index(key):
+        if not (temporal_dir and temporal_anchor_enabled()):
+            return None
+        try:
+            names = (Path(temporal_dir) / f"{key}.tfiles").read_text()
+        except (OSError, UnicodeDecodeError):
+            return None
+        eligible = {ln.strip() for ln in names.splitlines() if ln.strip()}
+        base_idx = _base_index()
+        if not (eligible and base_idx is not None):
+            return None
+        return restrict_index_to_files(base_idx, eligible)
 
     def resolver(num):
         sha, loc, files = find_origin(chain, num)
@@ -1238,13 +1320,20 @@ def make_file_origin_resolver(chain, diffs_dir):
             return None
         key = sha[:_SHA_PREFIX_LEN]
         if key not in cache:
+            temporal = False
             try:
                 text = (Path(diffs_dir) / f"{key}.diff").read_text()
-                cache[key] = parse_changed_lines(text)
+                idx = parse_changed_lines(text)
             except (OSError, UnicodeDecodeError):
-                cache[key] = None        # diff absent/unreadable ⇒ origin not ancestor-confirmed
-        idx = cache[key]
-        return (sha, loc, idx, files) if idx is not None else None
+                # diff absent/unreadable ⇒ origin not ancestor-confirmed →
+                # temporal author-date fallback (None when unavailable).
+                idx = _temporal_index(key)
+                temporal = idx is not None
+            cache[key] = (idx, temporal)
+        idx, temporal = cache[key]
+        if idx is None:
+            return None
+        return (sha, loc, idx, files, True) if temporal else (sha, loc, idx, files)
 
     return resolver
 
@@ -1298,17 +1387,30 @@ def build_carry_forward_ledger(prior_body: str, inter_diff: str, base_sha: str,
         out = []
         for num, sev, status in triples:
             loc, change, file_touched, origin_sha = None, INDETERMINATE, False, None
+            temporal = False
             if origin_resolver is not None:
-                res = origin_resolver(num)   # (origin_sha, location, ChangedIndex, referenced_files) | None
+                # (origin_sha, location, ChangedIndex, referenced_files[, temporal])
+                # | None. The optional 5th element marks a TEMPORAL index (rebased
+                # branch — author-date window over the PR's own base...head diff);
+                # a 4-tuple resolver is the pre-temporal contract, unchanged.
+                res = origin_resolver(num)
                 if res:
-                    origin_sha, loc, oidx, ofiles = res
-                    change = finding_changed(loc, oidx) if loc else INDETERMINATE
+                    origin_sha, loc, oidx, ofiles = res[:4]
+                    temporal = len(res) > 4 and bool(res[4])
+                    if temporal:
+                        # Merge-base-space coordinates: NEVER feed finding_changed
+                        # (the #294 round-1 blocker — a coordinate collision would
+                        # grant full severity re-rating). File-level evidence only.
+                        loc, change = None, INDETERMINATE
+                    else:
+                        change = finding_changed(loc, oidx) if loc else INDETERMINATE
                     # Cross-FILE parity with round-2: honor a fix in ANY file the
                     # origin finding references (its anchor is in the set), not just
                     # the single anchor — so a round-3+ cross-file fix isn't rewritten
                     # to NOT FIXED while the verifier's narrative says fixed (#244).
                     file_touched = _referenced_file_touched(ofiles, oidx)
-            out.append(LedgerEntry(num, sev, status, loc, change, file_touched, origin_sha))
+            out.append(LedgerEntry(num, sev, status, loc, change, file_touched,
+                                   origin_sha, temporal=temporal))
         return out
     # Round 2: fresh prior — line evidence is safe and honors real fixes.
     fresh = extract_fresh_findings(prior_body)
@@ -1458,12 +1560,30 @@ def _ensure_rereview_shape(body: str, log: list, resurrected: list) -> str:
 # Appended to a status line when the pin rewrites a verifier FIXED→NOT FIXED, so
 # the label is self-explaining rather than contradicting its own "fixed" rationale
 # (the repo-A #1422 report). Inert to the gate — the STATUS token is parsed, the
-# tail is free prose.
+# tail is free prose. The dispute exit leads and is imperative: lifemd #17537
+# showed the old passive phrasing ("or via a DISPUTED reply") never got a dev to
+# the right exit — three manual review-dismissals over two days instead.
 _PIN_REWRITE_MARKER = (
-    "[air: pinned NOT FIXED — the verifier judged this fixed, but the re-review "
-    "inter-diff shows no code change to this finding's file(s); verify manually. "
-    "Clears on a later review once the fix lands in the inter-diff, or via a "
-    "DISPUTED reply.]"
+    "[air: pinned NOT FIXED — the verifier judged this fixed, but air could not "
+    "verify a code change to this finding's file(s) since it was raised. "
+    "**If this IS fixed**, reply on the PR naming the finding and where the fix "
+    "lives (e.g. \"finding #2 is fixed in <file/commit> — dispute\") and the next "
+    "review clears it as DISPUTED; it also clears once a fix shows up in the "
+    "re-review diff.]"
+)
+
+# The rebase-flavored variant: the temporal anchor RAN (the branch was
+# rebased/force-pushed, so no prior SHA is an ancestor of head) and still found
+# no post-review-authored edit to the finding's file(s). Same gate inertness;
+# names the rebase so the dev understands WHY automatic verification is limited.
+_PIN_REWRITE_MARKER_REBASE = (
+    "[air: pinned NOT FIXED — the verifier judged this fixed, but this branch "
+    "was rebased/force-pushed (which hides fix history) and no commit authored "
+    "after this finding was raised touches its file(s). "
+    "**If this IS fixed**, reply on the PR naming the finding and where the fix "
+    "lives (e.g. \"finding #2 is fixed in <file/commit> — dispute\") and the next "
+    "review clears it as DISPUTED; it also clears once a fix shows up in the "
+    "re-review diff.]"
 )
 
 
@@ -1621,7 +1741,16 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
         # OTHER guards, not this one: severity is still pinned to max(prior,
         # emitted) so a downgrade can't un-gate, and a silently-dropped finding
         # is still resurrected.
-        cross_region_fix = entry.change == UNCHANGED and entry.file_touched
+        # TEMPORAL trust (rebased branch): file_touched was evidenced by the
+        # author-date window — a commit authored AFTER the review that raised
+        # this finding touches its file(s) — instead of an ancestor-confirmed
+        # diff. Same trust class as cross_region (file-level evidence honoring a
+        # verifier's source-grounded FIXED); `change` is INDETERMINATE by
+        # construction on the temporal path, so it needs its own clause.
+        temporal_fix = (getattr(entry, "temporal", False) and entry.file_touched
+                        and entry.change != CHANGED)
+        cross_region_fix = ((entry.change == UNCHANGED and entry.file_touched)
+                            or temporal_fix)
         if (status == "FIXED" and entry.change != CHANGED and not cross_region_fix
                 and _SEVERITY_RANK.get(new_sev, 3) >= 2):
             new_status = "NOT FIXED"
@@ -1629,9 +1758,17 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
             # verifier's (retained) "fixed" rationale + the summary header — the
             # reader sees WHY it reads NOT FIXED (repo-A #1422 confusion). The gate
             # parses only the STATUS token, so the marker in the tail is inert.
-            tail = f"{tail.rstrip()} {_PIN_REWRITE_MARKER}"
+            # Rebase-flavored marker when the temporal window RAN and found no
+            # post-review edit — the dev learns why verification is limited and
+            # exactly how to clear it.
+            marker = (_PIN_REWRITE_MARKER_REBASE if getattr(entry, "temporal", False)
+                      else _PIN_REWRITE_MARKER)
+            tail = f"{tail.rstrip()} {marker}"
             flips["n"] += 1
-            log.append(f"[pin] #{num} FIXED->NOT FIXED (no cross-region edit; change={entry.change}, file_touched={entry.file_touched})")
+            log.append(f"[pin] #{num} FIXED->NOT FIXED (no cross-region edit; change={entry.change}, file_touched={entry.file_touched}, temporal={getattr(entry, 'temporal', False)})")
+        elif (status == "FIXED" and temporal_fix
+                and _SEVERITY_RANK.get(new_sev, 3) >= 2):
+            log.append(f"[pin] #{num} temporal-anchor FIXED trusted (rebased branch; post-review-authored edit to finding's file; verifier-judged)")
         elif (status == "FIXED" and cross_region_fix
                 and _SEVERITY_RANK.get(new_sev, 3) >= 2):
             # Trace the trust decision — every other rewrite logs, so the
@@ -1722,6 +1859,7 @@ def _main(argv: list[str]) -> int:
     parser.add_argument("--base-sha", default="", help="Prior-reviewed SHA (inter-diff base) for anchor validation.")
     parser.add_argument("--origin-chain", help="Path to a JSON array [{\"body\":..,\"sha\":..}] of prior bot reviews OLDEST-FIRST (#198 origin-anchor; CLI Step 11.5).")
     parser.add_argument("--origin-diffs", help="Directory of ancestor-confirmed origin..head diffs named <sha12>.diff (#198 origin-anchor; pairs with --origin-chain).")
+    parser.add_argument("--temporal-dir", help="Temporal-anchor evidence dir for rebased branches (pairs with --origin-chain/--origin-diffs): base.diff (the PR's own base...head diff) + <sha12>.tfiles (files edited by commits AUTHORED AFTER that review posted). Used only for origins with no confirmed diff; absent → v1 number-identity.")
     parser.add_argument("--head-sha", default="", help="Reviewed HEAD SHA; when set, --decide gates on the SHA-validated `## Code Review` block (anti-decoy), falling back to the raw body if none matches.")
     args = parser.parse_args(argv)
     if not (args.decide or args.count_blockers or args.pin or args.normalize_banner):
@@ -1751,7 +1889,8 @@ def _main(argv: list[str]) -> int:
                          for e in json.loads(Path(args.origin_chain).read_text())
                          if isinstance(e, dict) and e.get("sha") and e.get("body")]
                 if chain:
-                    origin_resolver = make_file_origin_resolver(chain, args.origin_diffs)
+                    origin_resolver = make_file_origin_resolver(
+                        chain, args.origin_diffs, temporal_dir=args.temporal_dir)
             except (OSError, ValueError, TypeError, KeyError) as exc:
                 print(f"  [pin][origin][warn] origin-chain unreadable ({exc}); "
                       f"number-identity pin", file=sys.stderr)

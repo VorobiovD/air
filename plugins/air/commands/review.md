@@ -992,6 +992,8 @@ git diff <REVIEWED_AT_SHA>...<headRefOid> > $AIR_TMP/ledger-diff-<number>.diff 2
 If this fails or produces nothing (cross-repo fallback, SHA not local): skip Step 11.5. Print "Step 11.5: ledger inter-diff unavailable — severity-pin skipped (no-op)." Number-identity pinning still needs both the prior body AND a parseable diff, so a missing diff is a clean no-op (the un-pinned body posts; the verdict is computed the pre-PR7 way).
 
 2.5. **Origin-anchor (#198) — round-3+ only, same-repo, best-effort.** This is the CLI half of the round-3+ un-poison managed/headless apply (`lib/verdict.py:find_origin` + `make_file_origin_resolver`). When the prior body is **itself a re-review** (round 3+), a blocker genuinely fixed in an *earlier* round is absent from the `baseline...head` ledger diff above, so number-identity pinning would rewrite the verifier's `FIXED` to `NOT FIXED` forever. Origin-anchor recovers each carried `#N`'s first-raise anchor by walking the bot-review chain and tests it against the wider `origin...head` window. **verdict.py stays pure (no network):** the orchestrator runs the **ancestor gate locally** (`git merge-base --is-ancestor`) and writes ONLY confirmed `origin...head` diffs — a diff file present ⟺ the origin is a confirmed ancestor of head ⇒ `origin...head` is a clean superset of `baseline...head` ⇒ `file_touched` can only widen (the same gate-safety proof as managed; it can never un-gate). Disabled by `AIR_ORIGIN_ANCHOR` ∈ `0`/`false`/`no` (and by `AIR_LEDGER_PIN=0`, since this only feeds the pin). Skip silently on cross-repo, when the prior body has no `### Previous Findings Status` block (round ≤ 2 — the round-2 hunk-evidence path already handles it), or on any error (→ number-identity fallback, conservative).
+
+   **Temporal anchor (rebased branches — the CLI half of managed's author-date fallback.)** A rebase/force-push makes EVERY prior reviewed-at SHA a non-ancestor of head, so the loop below confirms zero origin diffs and the pin re-asserts `NOT FIXED` on genuinely-fixed carried findings forever (the lifemd #17537 false-block). For each REJECTED origin the orchestrator instead writes `<sha12>.tfiles` — the files edited by PR commits whose **author date** (which survives a rebase) is strictly after that review's `created_at` — plus one `base.diff` (the PR's own rebase-proof `base...head` diff). `make_file_origin_resolver` narrows `base.diff` to those files and returns a temporal (file-level-only) index: line coordinates are never used, and the signal feeds only the pin's existing cross-region trust class. Same kill switches, plus `AIR_TEMPORAL_ANCHOR` ∈ `0`/`false`/`no`; any missing input → v1 number-identity (conservative).
 ```bash
 # Self-contained kill-switch reads (origin-anchor is gated by BOTH its own switch
 # and the ledger switch, since it only feeds the pin). Mirrors managed exactly.
@@ -1020,28 +1022,58 @@ if [ "$ORIGIN_OFF" = "0" ] && [ "$LEDGER_OFF" = "0" ] && [ "${CROSS_REPO:-false}
     # Guide`-style lookalikes can't match.
     gh api repos/<owner>/<repo>/issues/<number>/comments --paginate --jq \
       "[.[] | select(((.body|startswith(\"## Code Review\\n\")) or (.body|startswith(\"## Code Review (Re-review)\\n\"))) and .user.login==\"$PRIOR_AUTHOR\")
-         | {body:.body, sha:(try (.body|capture(\"Reviewed at: (?<s>[0-9a-f]{40})\").s) catch null)}
+         | {body:.body, created_at:.created_at, sha:(try (.body|capture(\"Reviewed at: (?<s>[0-9a-f]{40})\").s) catch null)}
          | select(.sha != null)]" 2>/dev/null | jq -s 'add // []' > "$CHAIN_JSON"
-    # For each DISTINCT chain SHA that is a confirmed ancestor of head, write the
-    # hygiene'd origin...head diff named <sha12>.diff. Present ⟺ ancestor-confirmed.
+    # For each DISTINCT chain SHA: ancestor-confirmed → write the hygiene'd
+    # origin...head diff named <sha12>.diff (present ⟺ ancestor-confirmed);
+    # REJECTED (rebased branch) → temporal fallback: write <sha12>.tfiles = files
+    # edited by PR commits AUTHORED strictly after that review posted (author
+    # dates survive the rebase that broke ancestry) + one shared base.diff (the
+    # PR's own rebase-proof base...head window).
+    TDIR="$AIR_TMP/origin-temporal-<number>"; mkdir -p "$TDIR"
+    case "$(printf '%s' "${AIR_TEMPORAL_ANCHOR:-1}" | tr '[:upper:]' '[:lower:]')" in
+      0|false|no) TEMPORAL_OFF=1 ;; *) TEMPORAL_OFF=0 ;;
+    esac
     for SHA in $(jq -r '.[].sha' "$CHAIN_JSON" 2>/dev/null | sort -u); do
-      git merge-base --is-ancestor "$SHA" "<headRefOid>" 2>/dev/null || continue
-      if git diff "$SHA"...<headRefOid> > "$ODIR/${SHA:0:12}.diff" 2>/dev/null && [ -s "$ODIR/${SHA:0:12}.diff" ]; then
-        [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" ] && \
-          python3 "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" --diff-file "$ODIR/${SHA:0:12}.diff"
-      else
-        rm -f "$ODIR/${SHA:0:12}.diff"
+      if git merge-base --is-ancestor "$SHA" "<headRefOid>" 2>/dev/null; then
+        if git diff "$SHA"...<headRefOid> > "$ODIR/${SHA:0:12}.diff" 2>/dev/null && [ -s "$ODIR/${SHA:0:12}.diff" ]; then
+          [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" ] && \
+            python3 "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" --diff-file "$ODIR/${SHA:0:12}.diff"
+        else
+          rm -f "$ODIR/${SHA:0:12}.diff"
+        fi
+      elif [ "$TEMPORAL_OFF" = "0" ]; then
+        # created_at → epoch (UTC); unparseable/missing → skip (conservative).
+        CREATED=$(jq -r --arg s "$SHA" '[.[]|select(.sha==$s)][0].created_at // empty' "$CHAIN_JSON" 2>/dev/null)
+        CUTOFF=$(python3 -c "import sys;from datetime import datetime;print(int(datetime.fromisoformat(sys.argv[1].replace('Z','+00:00')).timestamp()))" "$CREATED" 2>/dev/null)
+        [ -n "$CUTOFF" ] || continue
+        # %at = author-date epoch; keep files from commits STRICTLY after cutoff.
+        git log --no-renames --format='%x01%at' --name-only "origin/<baseRefName>..<headRefOid>" 2>/dev/null | \
+          awk -v c="$CUTOFF" '/^\x01/ { keep = (substr($0,2)+0 > c+0); next } keep && NF { print }' | \
+          sort -u > "$TDIR/${SHA:0:12}.tfiles"
+        [ -s "$TDIR/${SHA:0:12}.tfiles" ] || rm -f "$TDIR/${SHA:0:12}.tfiles"
+        if [ ! -s "$TDIR/base.diff" ]; then
+          git diff "origin/<baseRefName>"...<headRefOid> > "$TDIR/base.diff" 2>/dev/null
+          [ -s "$TDIR/base.diff" ] && [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" ] && \
+            python3 "$AIR_PLUGIN_ROOT/lib/diff_hygiene.py" --diff-file "$TDIR/base.diff"
+        fi
       fi
     done
   fi
-  # Only pass the flags if at least one confirmed origin diff exists.
-  if [ -s "$CHAIN_JSON" ] && [ -n "$(ls -A "$ODIR" 2>/dev/null)" ]; then
+  # Pass the flags when at least one confirmed origin diff OR one temporal
+  # evidence pair (base.diff + <sha12>.tfiles) exists. The temporal-only case is
+  # the whole point on a fully-rebased branch: EVERY origin is rejected, ODIR is
+  # empty, and gating the flags on ODIR alone would disable exactly the path
+  # built for it.
+  TEMPORAL_DIR=""
+  [ -s "$TDIR/base.diff" ] && [ -n "$(ls "$TDIR" 2>/dev/null | grep '\.tfiles$')" ] && TEMPORAL_DIR="$TDIR"
+  if [ -s "$CHAIN_JSON" ] && { [ -n "$(ls -A "$ODIR" 2>/dev/null)" ] || [ -n "$TEMPORAL_DIR" ]; }; then
     ORIGIN_CHAIN="$CHAIN_JSON"; ORIGIN_DIFFS="$ODIR"
-    echo "Step 11.5: origin-anchor active — $(ls "$ODIR" | wc -l | tr -d ' ') confirmed origin diff(s)." >&2
+    echo "Step 11.5: origin-anchor active — $(ls "$ODIR" | wc -l | tr -d ' ') confirmed origin diff(s), $(ls "$TDIR" 2>/dev/null | grep -c '\.tfiles$' | tr -d ' ') temporal file-list(s)." >&2
   fi
 fi
 ```
-`ORIGIN_CHAIN`/`ORIGIN_DIFFS` stay empty on any skip (disabled, cross-repo, round ≤ 2, no ancestor-confirmed origin, or any error), making the flags in step 3 a no-op — byte-identical to the pre-#198 CLI pin.
+`ORIGIN_CHAIN`/`ORIGIN_DIFFS`/`TEMPORAL_DIR` stay empty on any skip (disabled, cross-repo, round ≤ 2, no ancestor-confirmed origin AND no temporal evidence, or any error), making the flags in step 3 a no-op — byte-identical to the pre-#198 CLI pin.
 
 3. Pipe the formatted body through `verdict.py --pin`, inside the same `$AIR_PLUGIN_ROOT` guard Step 12 uses (an empty variable must take the no-op branch, not expand to `python3 "/lib/verdict.py"`). Redirect stdout straight to a file (no command substitution — that strips the trailing newline and would break byte-parity with the parser); `mv` over the original only on success. **A non-zero exit must fail LOUD**, not silently revert to the un-pinned body — otherwise the "HARD deterministic guarantee" would silently degrade to advisory-only and Step 12 would gate on un-pinned content with no signal. Distinguish that failure from the clean disabled/missing-input skip:
 ```bash
@@ -1057,6 +1089,10 @@ esac
 ORIGIN_ARGS=()
 [ -n "${ORIGIN_CHAIN:-}" ] && [ -n "${ORIGIN_DIFFS:-}" ] && \
   ORIGIN_ARGS=(--origin-chain "$ORIGIN_CHAIN" --origin-diffs "$ORIGIN_DIFFS")
+# Temporal-anchor evidence (rebased branches) — set by step 2.5 only when
+# base.diff + ≥1 <sha12>.tfiles exist; appended to the same guarded flag array.
+[ -n "${ORIGIN_CHAIN:-}" ] && [ -n "${TEMPORAL_DIR:-}" ] && \
+  ORIGIN_ARGS+=(--temporal-dir "$TEMPORAL_DIR")
 if [ "$LEDGER_PIN_OFF" = "0" ] \
    && [ -n "${AIR_PLUGIN_ROOT:-}" ] && [ -f "$AIR_PLUGIN_ROOT/lib/verdict.py" ] \
    && [ -s "$AIR_TMP/prior-body-<number>.md" ] && [ -s "$AIR_TMP/ledger-diff-<number>.diff" ]; then

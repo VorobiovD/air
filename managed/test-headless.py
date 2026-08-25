@@ -1104,3 +1104,148 @@ def test_verifier_call_passes_the_larger_cap(monkeypatch):
     assert "max_tokens" in m.group(0), (
         "verifier invocation does not pass max_tokens — falls back to the 16K "
         "specialist default and truncates on a large re-review (#67)")
+
+
+# --- temporal anchor (#294 successor): rebased-branch author-date fallback ---
+# A diverged (rebased/force-pushed) origin no longer collapses straight to v1
+# number-identity: the resolver falls back to the PR's own base...head diff
+# narrowed to files edited by commits AUTHORED AFTER the origin review posted.
+
+_TA_CREATED = "2026-08-22T18:55:56Z"
+_TA_COMMENTS = [
+    {"user": {"login": "air-machine"}, "created_at": _TA_CREATED, "body": _OA_R1},
+    {"user": {"login": "air-machine"}, "created_at": "2026-08-22T22:35:16Z", "body": _OA_R2_BODY},
+]
+_TA_BASE = "c" * 40
+# git log --format=%x01%aI --name-only output (format verified against real git):
+# one commit authored AFTER the review touching svc.py, one BEFORE touching other.py.
+_TA_GIT_LOG = ("\x012026-08-23T10:00:00Z\n\nsvc.py\n"
+               "\x012026-08-21T09:00:00Z\n\nother.py\n")
+
+
+def _ta_resolver(monkeypatch, *, git_log=_TA_GIT_LOG, base_sha=_TA_BASE,
+                 base_diff=_OA_TOUCH_DIFF, comments=None, checkout="/tmp/checkout"):
+    monkeypatch.setattr(review, "_air_bot_logins", lambda: frozenset({"air-machine"}))
+    monkeypatch.setattr(review, "fetch_compare_status", lambda *a, **k: "diverged")
+    monkeypatch.setattr(review, "fetch_inter_diff", lambda *a, **k: base_diff)
+    monkeypatch.setattr(review, "_git", lambda *a, **k: git_log)
+    if checkout:
+        monkeypatch.setenv("AIR_TARGET_REPO", checkout)
+    else:
+        monkeypatch.delenv("AIR_TARGET_REPO", raising=False)
+    return review.make_origin_resolver(comments or _TA_COMMENTS, "air-machine",
+                                       _OA_HEAD, "o/r", "tok", base_sha=base_sha)
+
+
+def test_temporal_fallback_unpoisons_rebased_branch(monkeypatch):
+    # The lifemd #17537 shape: origin diverged (rebase), but svc.py was edited by
+    # a commit authored after the origin review → temporal 5-tuple; ledger keeps
+    # file_touched without line evidence; pin honors the verifier's FIXED.
+    resolver = _ta_resolver(monkeypatch)
+    res = resolver(1)
+    assert res and len(res) == 5 and res[4] is True
+    assert res[0] == _OA_R1_SHA
+    from verdict import build_carry_forward_ledger, pin_and_resurrect, INDETERMINATE
+    led = build_carry_forward_ledger(_OA_R2_BODY, "", "d" * 40, origin_resolver=resolver)
+    assert led[0].change == INDETERMINATE and led[0].file_touched is True
+    assert led[0].temporal is True
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [blocker] — FIXED — verified in current source\n\nReviewed at: abc\n")
+    out, log = pin_and_resurrect(body, led)
+    assert "NOT FIXED" not in out
+    assert any("temporal-anchor FIXED trusted" in l for l in log)
+
+
+def test_temporal_excludes_pre_review_authored_commits(monkeypatch):
+    # Only a commit authored BEFORE the review touches the finding's file (e.g. the
+    # bug-introducing commit itself, or a cherry-picked old commit) → not eligible →
+    # v1 fallback. This is the temporal guarantee whose loss killed #294's base..head.
+    resolver = _ta_resolver(
+        monkeypatch, git_log="\x012026-08-21T09:00:00Z\n\nsvc.py\n")
+    assert resolver(1) is None
+
+
+def test_temporal_requires_checkout(monkeypatch):
+    resolver = _ta_resolver(monkeypatch, checkout=None)
+    assert resolver(1) is None
+
+
+def test_temporal_requires_base_sha(monkeypatch):
+    resolver = _ta_resolver(monkeypatch, base_sha=None)
+    assert resolver(1) is None
+
+
+def test_temporal_kill_switch(monkeypatch):
+    monkeypatch.setenv("AIR_TEMPORAL_ANCHOR", "0")
+    resolver = _ta_resolver(monkeypatch)
+    assert resolver(1) is None
+
+
+def test_temporal_requires_review_created_at(monkeypatch):
+    # _OA_COMMENTS carry no created_at → no cutoff → conservative v1 fallback.
+    resolver = _ta_resolver(monkeypatch, comments=_OA_COMMENTS)
+    assert resolver(1) is None
+
+
+def test_temporal_base_diff_fetch_failure_falls_back(monkeypatch):
+    resolver = _ta_resolver(monkeypatch, base_diff=None)
+    assert resolver(1) is None
+
+
+def test_temporal_unrelated_eligible_file_not_credited(monkeypatch):
+    # Monotone: the eligible-file set names other.py only; the finding references
+    # svc.py → the restricted index carries no svc.py evidence → file_touched
+    # False → the pin still rewrites (conservative). The temporal window can only
+    # credit files that BOTH changed in the PR and were edited post-review.
+    resolver = _ta_resolver(
+        monkeypatch, git_log="\x012026-08-23T10:00:00Z\n\nother.py\n",
+        base_diff=(_OA_TOUCH_DIFF +
+                   "diff --git a/other.py b/other.py\n--- a/other.py\n+++ b/other.py\n"
+                   "@@ -1,2 +1,3 @@\n ctx\n+edit\n"))
+    res = resolver(1)
+    assert res and len(res) == 5 and res[4] is True
+    from verdict import build_carry_forward_ledger, pin_and_resurrect
+    led = build_carry_forward_ledger(_OA_R2_BODY, "", "d" * 40, origin_resolver=resolver)
+    assert led[0].file_touched is False and led[0].temporal is True
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [blocker] — FIXED — claims fixed\n\nReviewed at: abc\n")
+    out, log = pin_and_resurrect(body, led)
+    assert "NOT FIXED" in out
+    assert any("FIXED->NOT FIXED" in l for l in log)
+
+
+def test_files_authored_after_parses_real_git_format():
+    # Format locked against real `git log --no-renames --format=%x01%aI
+    # --name-only` output (incl. git normalizing +00:00 → Z, and offset dates).
+    from datetime import datetime, timezone
+    cutoff = datetime(2026, 8, 22, 18, 55, 56, tzinfo=timezone.utc)
+    out = ("\x012026-08-23T10:00:00Z\n\na.py\nb.py\n"
+           "\x012026-08-23T08:00:00+03:00\n\nafter-offset.py\n"   # = 08-23T05:00Z > cutoff → INCLUDED (offset handled)
+           "\x012026-08-22T18:55:56Z\n\nboundary.py\n"            # == cutoff → excluded (strictly after)
+           "\x01not-a-date\n\ngarbage.py\n")
+    review_git = review._git
+    try:
+        review._git = lambda *a, **k: out
+        files = review._files_authored_after("/x", "b" * 40, "h" * 40, cutoff)
+    finally:
+        review._git = review_git
+    assert files == {"a.py", "b.py", "after-offset.py"}
+
+
+def test_files_authored_after_git_failure_is_empty():
+    from datetime import datetime, timezone
+    cutoff = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    review_git = review._git
+    try:
+        review._git = lambda *a, **k: ""
+        assert review._files_authored_after("/x", "b", "h", cutoff) == set()
+    finally:
+        review._git = review_git
+
+
+def test_parse_iso_utc_variants():
+    assert review._parse_iso_utc("2026-08-22T18:55:56Z") is not None
+    assert review._parse_iso_utc("2026-08-23T08:00:00+03:00") is not None
+    assert review._parse_iso_utc("") is None
+    assert review._parse_iso_utc("not-a-date") is None
+    assert review._parse_iso_utc("2026-08-22T18:55:56") is None   # naive → unusable → None
