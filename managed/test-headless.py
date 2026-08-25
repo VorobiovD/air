@@ -1126,15 +1126,15 @@ _TA_GIT_LOG = ("\x012026-08-23T10:00:00Z\n\nsvc.py\n"
 def _ta_resolver(monkeypatch, *, git_log=_TA_GIT_LOG, base_sha=_TA_BASE,
                  base_diff=_OA_TOUCH_DIFF, comments=None, checkout="/tmp/checkout",
                  head_blob="beef" * 10, origin_blob="cafe" * 10):
-    # _git serves BOTH the author-date log and the head-side blob rev-parse;
-    # fetch_blob_sha is the origin-side contents call. Defaults make the blobs
-    # DIFFER (content genuinely changed since the review — the honest case).
-    def _git_mock(repo_dir, *args, **kwargs):
-        return head_blob if args and args[0] == "rev-parse" else git_log
+    # _git serves the author-date log; _head_blob/fetch_blob_sha are the two
+    # three-state blob lookups (head local / origin contents API). Defaults make
+    # the blobs DIFFER (content genuinely changed since the review — the honest
+    # case). Pass head_blob/origin_blob as ""/None to exercise absence/UNKNOWN.
     monkeypatch.setattr(review, "_air_bot_logins", lambda: frozenset({"air-machine"}))
     monkeypatch.setattr(review, "fetch_compare_status", lambda *a, **k: "diverged")
     monkeypatch.setattr(review, "fetch_inter_diff", lambda *a, **k: base_diff)
-    monkeypatch.setattr(review, "_git", _git_mock)
+    monkeypatch.setattr(review, "_git", lambda *a, **k: git_log)
+    monkeypatch.setattr(review, "_head_blob", lambda *a, **k: head_blob)
     monkeypatch.setattr(review, "fetch_blob_sha", lambda *a, **k: origin_blob)
     if checkout:
         monkeypatch.setenv("AIR_TARGET_REPO", checkout)
@@ -1291,3 +1291,44 @@ def test_temporal_path_absent_at_origin_is_credited(monkeypatch):
     resolver = _ta_resolver(monkeypatch, origin_blob="")
     res = resolver(1)
     assert res and res[3] == {"svc.py"}
+
+
+def test_temporal_head_blob_unknown_not_credited(monkeypatch):
+    # Round-2 dogfood medium: `_git` collapses every failure to "", so a local
+    # git hiccup on the head side used to read as "path absent" → "" != <origin
+    # sha> → credited with zero positive evidence. _head_blob is three-state;
+    # UNKNOWN (None) on either side must never credit.
+    resolver = _ta_resolver(monkeypatch, head_blob=None)
+    res = resolver(1)
+    assert res and res[3] == set()
+
+
+def test_temporal_head_blob_confirmed_absent_is_credited(monkeypatch):
+    # POSITIVE absence at head (git's own "does not exist" message) vs a real
+    # origin blob = the file was deleted/moved after the review — a genuine
+    # content change at that path. Credited.
+    resolver = _ta_resolver(monkeypatch, head_blob="")
+    res = resolver(1)
+    assert res and res[3] == {"svc.py"}
+
+
+def test_head_blob_three_states(tmp_path):
+    # Against a REAL git repo: hex sha for an existing path, "" (confirmed
+    # absent) for a missing path, None (UNKNOWN) for a bad ref — the case where
+    # plain rev-parse ECHOES the arg to stdout with rc=0, which a naive
+    # implementation reads as a sha.
+    import subprocess as sp
+    repo = tmp_path / "r"; repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "--allow-empty", "-qm", "root"], cwd=repo, check=True)
+    (repo / "f.py").write_text("x\n")
+    sp.run(["git", "add", "."], cwd=repo, check=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "-qm", "one"], cwd=repo, check=True)
+    head = sp.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                  capture_output=True, text=True).stdout.strip()
+    sha = review._head_blob(str(repo), head, "f.py")
+    assert sha and all(c in "0123456789abcdef" for c in sha)
+    assert review._head_blob(str(repo), head, "missing.py") == ""
+    assert review._head_blob(str(repo), "deadbeef00", "f.py") is None

@@ -280,7 +280,8 @@ def _parse_iso_utc(stamp: str):
     return dt if dt.tzinfo is not None else None
 
 
-def _files_authored_after(checkout: str, base_sha: str, head_sha: str, cutoff) -> set:
+def _files_authored_after(checkout: str, base_sha: str, head_sha: str, cutoff,
+                          log_output: str | None = None) -> set:
     """Files edited by PR commits whose AUTHOR date is strictly after `cutoff`
     (an aware datetime — the origin review's created_at). This is the temporal
     anchor's eligibility set: author dates survive the rebase that destroys SHA
@@ -289,9 +290,12 @@ def _files_authored_after(checkout: str, base_sha: str, head_sha: str, cutoff) -
     answerable on a force-pushed branch. `--no-renames` keeps paths literal
     (matching the diff-side segment paths); a commit with an unparseable date is
     skipped (conservative — its files aren't counted). Empty set on git failure
-    or no eligible commits → caller falls back to v1 (conservative)."""
+    or no eligible commits → caller falls back to v1 (conservative).
+    `log_output` lets a caller with several rejected origins run the (cutoff-
+    independent) git walk ONCE and re-filter it per cutoff."""
     out = _git(checkout, "log", "--no-renames", "--format=%x01%aI",
-               "--name-only", f"{base_sha}..{head_sha}", timeout=60.0)
+               "--name-only", f"{base_sha}..{head_sha}", timeout=60.0) \
+        if log_output is None else log_output
     if not out:
         return set()
     files: set = set()
@@ -305,6 +309,38 @@ def _files_authored_after(checkout: str, base_sha: str, head_sha: str, cutoff) -
             continue
         files.update(ln.strip() for ln in lines[1:] if ln.strip())
     return files
+
+
+def _head_blob(checkout: str, head_sha: str, path: str) -> str | None:
+    """Three-state head-side blob lookup for the temporal anchor's content check:
+    a 40/64-hex blob sha, "" for POSITIVELY-CONFIRMED absence at head, or None
+    for UNKNOWN (git error/timeout/anything else) — mirroring fetch_blob_sha's
+    origin-side contract exactly, so a local git hiccup is never credited as a
+    content change (the dogfood medium on the blob check: `_git` collapses every
+    failure to "", indistinguishable from real absence, and "" != <origin sha>
+    read as changed). Runs git directly rather than through `_git` because the
+    DISTINCTION between exit states is the whole point here.
+
+    Absence is recognized from git's own message ("path '...' does not exist
+    in ..." / "exists on disk, but not in ..."), and a success stdout must be a
+    hex sha — plain rev-parse (no --verify) ECHOES an unresolvable arg to stdout
+    with rc=0 (verified live), and --verify can't distinguish an absent path
+    from a bad ref, so this pairing (plain + hex validation + stderr match) is
+    the only shape that yields all three states correctly."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", checkout, "rev-parse", f"{head_sha}:{path}"],
+            capture_output=True, timeout=30.0, encoding="utf-8", errors="replace",
+        )
+    except Exception:
+        return None
+    out = (result.stdout or "").strip()
+    if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{40,64}", out):
+        return out
+    err = result.stderr or ""
+    if "does not exist in" in err or "exists on disk, but not in" in err:
+        return ""
+    return None
 
 
 def make_origin_resolver(comments, bot_login, head_sha, repo, token, base_sha=None):
@@ -343,6 +379,15 @@ def make_origin_resolver(comments, bot_login, head_sha, repo, token, base_sha=No
     index_cache: dict = {}
     base_index_cache: list = []
     blob_cache: dict = {}
+    log_cache: list = []
+
+    def _authored_log(checkout):
+        # The git author-date walk is cutoff-independent — run it once and let
+        # _files_authored_after re-filter it per rejected origin's cutoff.
+        if not log_cache:
+            log_cache.append(_git(checkout, "log", "--no-renames", "--format=%x01%aI",
+                                  "--name-only", f"{base_sha}..{head_sha}", timeout=60.0))
+        return log_cache[0]
 
     def _base_index():
         # The PR's own base...head diff (three-dot merge-base window) — rebase-proof,
@@ -367,7 +412,8 @@ def make_origin_resolver(comments, bot_login, head_sha, repo, token, base_sha=No
             print(f"  [origin] temporal window for {origin_sha[:8]} unavailable "
                   f"(base diff fetch failed); v1 fallback", file=sys.stderr)
             return None
-        eligible = _files_authored_after(checkout, base_sha, head_sha, cutoff)
+        eligible = _files_authored_after(checkout, base_sha, head_sha, cutoff,
+                                         log_output=_authored_log(checkout))
         if not eligible:
             print(f"  [origin] temporal window for {origin_sha[:8]} — no commit "
                   f"authored after its review; v1 fallback", file=sys.stderr)
@@ -387,19 +433,23 @@ def make_origin_resolver(comments, bot_login, head_sha, repo, token, base_sha=No
         the local checkout (`git rev-parse HEAD:path`, free); origin side is one
         contents-API call per (origin, path), cached — a force-pushed-away origin
         commit is API-fetchable by sha even though no local ref reaches it.
-        True  = content differs (incl. path absent on exactly one side — a rename/
-                move/delete IS a post-review content change at that path);
-        False = byte-identical, absent on both sides, or origin side UNKNOWN
-                (API error — conservative: no credit without positive evidence)."""
+        True  = content differs (incl. path POSITIVELY absent on exactly one
+                side — a rename/move/delete IS a post-review content change);
+        False = byte-identical, absent on both sides, or EITHER side UNKNOWN
+                (git failure / API error — conservative: no credit without
+                positive evidence; both lookups are three-state on purpose)."""
         key = (origin_sha, path)
         if key not in blob_cache:
             changed = False
             try:
                 checkout = os.environ.get("AIR_TARGET_REPO", "")
-                head_blob = _git(checkout, "rev-parse", f"{head_sha}:{path}").strip() \
-                    if checkout else ""
+                head_blob = _head_blob(checkout, head_sha, path) if checkout else None
                 origin_blob = fetch_blob_sha(repo, origin_sha, path, token)
-                if origin_blob is not None and (head_blob or origin_blob):
+                if head_blob is None or origin_blob is None:
+                    print(f"  [origin][warn] blob check {origin_sha[:8]}:{path} — "
+                          f"{'head' if head_blob is None else 'origin'} side unknown; "
+                          f"not credited", file=sys.stderr)
+                elif head_blob or origin_blob:      # both "" = absent both sides
                     changed = head_blob != origin_blob
             except Exception as e:
                 print(f"  [origin][warn] blob check {origin_sha[:8]}:{path} failed "
