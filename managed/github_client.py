@@ -742,6 +742,31 @@ def fetch_compare_status(repo: str, base_sha: str, head_sha: str, token: str) ->
         return None
 
 
+def fetch_blob_sha(repo: str, ref: str, path: str, token: str) -> str | None:
+    """The git BLOB sha of `path` at `ref`, "" when the path doesn't exist at that
+    ref (404), None on any other API error (unknown — callers treat it
+    conservatively). Content-addressed: two refs hold byte-identical file content
+    iff their blob shas match, which no author-date forgery can fake — the
+    temporal anchor uses this to require that a credited file's content actually
+    DIFFERS from the origin review's tree (a force-pushed-away origin commit is
+    still fetchable by sha on the API even when no local ref reaches it)."""
+    from urllib.parse import quote
+    resp = _gh_request(
+        "GET",
+        f"https://api.github.com/repos/{repo}/contents/{quote(path)}?ref={quote(ref)}",
+        token=token,
+    )
+    if resp.status_code == 404:
+        return ""
+    if not resp.ok:
+        return None
+    try:
+        sha = resp.json().get("sha")
+        return sha if isinstance(sha, str) else None
+    except (ValueError, AttributeError):
+        return None
+
+
 _OWN_FILE_PAGES = 3   # #3d: cap this PR's own files at 300 — the overlap base set
 
 

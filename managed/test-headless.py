@@ -1104,3 +1104,231 @@ def test_verifier_call_passes_the_larger_cap(monkeypatch):
     assert "max_tokens" in m.group(0), (
         "verifier invocation does not pass max_tokens — falls back to the 16K "
         "specialist default and truncates on a large re-review (#67)")
+
+
+# --- temporal anchor (#294 successor): rebased-branch author-date fallback ---
+# A diverged (rebased/force-pushed) origin no longer collapses straight to v1
+# number-identity: the resolver falls back to the PR's own base...head diff
+# narrowed to files edited by commits AUTHORED AFTER the origin review posted.
+
+_TA_CREATED = "2026-08-22T18:55:56Z"
+_TA_COMMENTS = [
+    {"user": {"login": "air-machine"}, "created_at": _TA_CREATED, "body": _OA_R1},
+    {"user": {"login": "air-machine"}, "created_at": "2026-08-22T22:35:16Z", "body": _OA_R2_BODY},
+]
+_TA_BASE = "c" * 40
+# git log --format=%x01%aI --name-only output (format verified against real git):
+# one commit authored AFTER the review touching svc.py, one BEFORE touching other.py.
+_TA_GIT_LOG = ("\x012026-08-23T10:00:00Z\n\nsvc.py\n"
+               "\x012026-08-21T09:00:00Z\n\nother.py\n")
+
+
+def _ta_resolver(monkeypatch, *, git_log=_TA_GIT_LOG, base_sha=_TA_BASE,
+                 base_diff=_OA_TOUCH_DIFF, comments=None, checkout="/tmp/checkout",
+                 head_blob="beef" * 10, origin_blob="cafe" * 10):
+    # _git serves the author-date log; _head_blob/fetch_blob_sha are the two
+    # three-state blob lookups (head local / origin contents API). Defaults make
+    # the blobs DIFFER (content genuinely changed since the review — the honest
+    # case). Pass head_blob/origin_blob as ""/None to exercise absence/UNKNOWN.
+    monkeypatch.setattr(review, "_air_bot_logins", lambda: frozenset({"air-machine"}))
+    monkeypatch.setattr(review, "fetch_compare_status", lambda *a, **k: "diverged")
+    monkeypatch.setattr(review, "fetch_inter_diff", lambda *a, **k: base_diff)
+    monkeypatch.setattr(review, "_git", lambda *a, **k: git_log)
+    monkeypatch.setattr(review, "_head_blob", lambda *a, **k: head_blob)
+    monkeypatch.setattr(review, "fetch_blob_sha", lambda *a, **k: origin_blob)
+    if checkout:
+        monkeypatch.setenv("AIR_TARGET_REPO", checkout)
+    else:
+        monkeypatch.delenv("AIR_TARGET_REPO", raising=False)
+    return review.make_origin_resolver(comments or _TA_COMMENTS, "air-machine",
+                                       _OA_HEAD, "o/r", "tok", base_sha=base_sha)
+
+
+def test_temporal_fallback_unpoisons_rebased_branch(monkeypatch):
+    # The lifemd #17537 shape: origin diverged (rebase), but svc.py was edited by
+    # a commit authored after the origin review → temporal 5-tuple; ledger keeps
+    # file_touched without line evidence; pin honors the verifier's FIXED.
+    resolver = _ta_resolver(monkeypatch)
+    res = resolver(1)
+    assert res and len(res) == 5 and res[4] is True
+    assert res[0] == _OA_R1_SHA
+    from verdict import build_carry_forward_ledger, pin_and_resurrect, INDETERMINATE
+    led = build_carry_forward_ledger(_OA_R2_BODY, "", "d" * 40, origin_resolver=resolver)
+    assert led[0].change == INDETERMINATE and led[0].file_touched is True
+    assert led[0].temporal is True
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [blocker] — FIXED — verified in current source\n\nReviewed at: abc\n")
+    out, log = pin_and_resurrect(body, led)
+    assert "NOT FIXED" not in out
+    assert any("temporal-anchor FIXED trusted" in l for l in log)
+
+
+def test_temporal_excludes_pre_review_authored_commits(monkeypatch):
+    # Only a commit authored BEFORE the review touches the finding's file (e.g. the
+    # bug-introducing commit itself, or a cherry-picked old commit) → not eligible →
+    # v1 fallback. This is the temporal guarantee whose loss killed #294's base..head.
+    resolver = _ta_resolver(
+        monkeypatch, git_log="\x012026-08-21T09:00:00Z\n\nsvc.py\n")
+    assert resolver(1) is None
+
+
+def test_temporal_requires_checkout(monkeypatch):
+    resolver = _ta_resolver(monkeypatch, checkout=None)
+    assert resolver(1) is None
+
+
+def test_temporal_requires_base_sha(monkeypatch):
+    resolver = _ta_resolver(monkeypatch, base_sha=None)
+    assert resolver(1) is None
+
+
+def test_temporal_kill_switch(monkeypatch):
+    monkeypatch.setenv("AIR_TEMPORAL_ANCHOR", "0")
+    resolver = _ta_resolver(monkeypatch)
+    assert resolver(1) is None
+
+
+def test_temporal_requires_review_created_at(monkeypatch):
+    # _OA_COMMENTS carry no created_at → no cutoff → conservative v1 fallback.
+    resolver = _ta_resolver(monkeypatch, comments=_OA_COMMENTS)
+    assert resolver(1) is None
+
+
+def test_temporal_base_diff_fetch_failure_falls_back(monkeypatch):
+    resolver = _ta_resolver(monkeypatch, base_diff=None)
+    assert resolver(1) is None
+
+
+def test_temporal_unrelated_eligible_file_not_credited(monkeypatch):
+    # Monotone: the eligible-file set names other.py only; the finding references
+    # svc.py → the restricted index carries no svc.py evidence → file_touched
+    # False → the pin still rewrites (conservative). The temporal window can only
+    # credit files that BOTH changed in the PR and were edited post-review.
+    resolver = _ta_resolver(
+        monkeypatch, git_log="\x012026-08-23T10:00:00Z\n\nother.py\n",
+        base_diff=(_OA_TOUCH_DIFF +
+                   "diff --git a/other.py b/other.py\n--- a/other.py\n+++ b/other.py\n"
+                   "@@ -1,2 +1,3 @@\n ctx\n+edit\n"))
+    res = resolver(1)
+    assert res and len(res) == 5 and res[4] is True
+    from verdict import build_carry_forward_ledger, pin_and_resurrect
+    led = build_carry_forward_ledger(_OA_R2_BODY, "", "d" * 40, origin_resolver=resolver)
+    assert led[0].file_touched is False and led[0].temporal is True
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [blocker] — FIXED — claims fixed\n\nReviewed at: abc\n")
+    out, log = pin_and_resurrect(body, led)
+    assert "NOT FIXED" in out
+    assert any("FIXED->NOT FIXED" in l for l in log)
+
+
+def test_files_authored_after_parses_real_git_format():
+    # Format locked against real `git log --no-renames --format=%x01%aI
+    # --name-only` output (incl. git normalizing +00:00 → Z, and offset dates).
+    from datetime import datetime, timezone
+    cutoff = datetime(2026, 8, 22, 18, 55, 56, tzinfo=timezone.utc)
+    out = ("\x012026-08-23T10:00:00Z\n\na.py\nb.py\n"
+           "\x012026-08-23T08:00:00+03:00\n\nafter-offset.py\n"   # = 08-23T05:00Z > cutoff → INCLUDED (offset handled)
+           "\x012026-08-22T18:55:56Z\n\nboundary.py\n"            # == cutoff → excluded (strictly after)
+           "\x01not-a-date\n\ngarbage.py\n")
+    review_git = review._git
+    try:
+        review._git = lambda *a, **k: out
+        files = review._files_authored_after("/x", "b" * 40, "h" * 40, cutoff)
+    finally:
+        review._git = review_git
+    assert files == {"a.py", "b.py", "after-offset.py"}
+
+
+def test_files_authored_after_git_failure_is_empty():
+    from datetime import datetime, timezone
+    cutoff = datetime(2026, 8, 22, tzinfo=timezone.utc)
+    review_git = review._git
+    try:
+        review._git = lambda *a, **k: ""
+        assert review._files_authored_after("/x", "b", "h", cutoff) == set()
+    finally:
+        review._git = review_git
+
+
+def test_parse_iso_utc_variants():
+    assert review._parse_iso_utc("2026-08-22T18:55:56Z") is not None
+    assert review._parse_iso_utc("2026-08-23T08:00:00+03:00") is not None
+    assert review._parse_iso_utc("") is None
+    assert review._parse_iso_utc("not-a-date") is None
+    assert review._parse_iso_utc("2026-08-22T18:55:56") is None   # naive → unusable → None
+
+
+def test_temporal_forged_date_without_content_change_not_credited(monkeypatch):
+    # THE dogfood medium on this feature: `git commit --amend --date=now` on the
+    # commit that ALREADY carries the unfixed hunk satisfies the date window with
+    # zero content change. The blob check kills it: byte-identical content ⇒
+    # identical blob shas ⇒ no credit ⇒ the conservative pin stands.
+    resolver = _ta_resolver(monkeypatch, head_blob="same" * 10, origin_blob="same" * 10)
+    res = resolver(1)
+    assert res and len(res) == 5 and res[4] is True
+    assert res[3] == set()                       # referenced file filtered out
+    from verdict import build_carry_forward_ledger, pin_and_resurrect
+    led = build_carry_forward_ledger(_OA_R2_BODY, "", "d" * 40, origin_resolver=resolver)
+    assert led[0].file_touched is False
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [blocker] — FIXED — claims fixed\n\nReviewed at: abc\n")
+    out, log = pin_and_resurrect(body, led)
+    assert "NOT FIXED" in out and any("FIXED->NOT FIXED" in l for l in log)
+
+
+def test_temporal_blob_api_error_not_credited(monkeypatch):
+    # Origin-side contents call fails (None) → UNKNOWN → no credit (conservative:
+    # positive content evidence is required, never assumed).
+    resolver = _ta_resolver(monkeypatch, origin_blob=None)
+    res = resolver(1)
+    assert res and res[3] == set()
+
+
+def test_temporal_path_absent_at_origin_is_credited(monkeypatch):
+    # The finding's file doesn't exist at the origin tree (fetch_blob_sha → "" on
+    # 404): a rename/move landed after the review — its content at this path IS a
+    # post-review change (the lifemd #17537 package-move shape). Credited.
+    resolver = _ta_resolver(monkeypatch, origin_blob="")
+    res = resolver(1)
+    assert res and res[3] == {"svc.py"}
+
+
+def test_temporal_head_blob_unknown_not_credited(monkeypatch):
+    # Round-2 dogfood medium: `_git` collapses every failure to "", so a local
+    # git hiccup on the head side used to read as "path absent" → "" != <origin
+    # sha> → credited with zero positive evidence. _head_blob is three-state;
+    # UNKNOWN (None) on either side must never credit.
+    resolver = _ta_resolver(monkeypatch, head_blob=None)
+    res = resolver(1)
+    assert res and res[3] == set()
+
+
+def test_temporal_head_blob_confirmed_absent_is_credited(monkeypatch):
+    # POSITIVE absence at head (git's own "does not exist" message) vs a real
+    # origin blob = the file was deleted/moved after the review — a genuine
+    # content change at that path. Credited.
+    resolver = _ta_resolver(monkeypatch, head_blob="")
+    res = resolver(1)
+    assert res and res[3] == {"svc.py"}
+
+
+def test_head_blob_three_states(tmp_path):
+    # Against a REAL git repo: hex sha for an existing path, "" (confirmed
+    # absent) for a missing path, None (UNKNOWN) for a bad ref — the case where
+    # plain rev-parse ECHOES the arg to stdout with rc=0, which a naive
+    # implementation reads as a sha.
+    import subprocess as sp
+    repo = tmp_path / "r"; repo.mkdir()
+    sp.run(["git", "init", "-q"], cwd=repo, check=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "--allow-empty", "-qm", "root"], cwd=repo, check=True)
+    (repo / "f.py").write_text("x\n")
+    sp.run(["git", "add", "."], cwd=repo, check=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+            "commit", "-qm", "one"], cwd=repo, check=True)
+    head = sp.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                  capture_output=True, text=True).stdout.strip()
+    sha = review._head_blob(str(repo), head, "f.py")
+    assert sha and all(c in "0123456789abcdef" for c in sha)
+    assert review._head_blob(str(repo), head, "missing.py") == ""
+    assert review._head_blob(str(repo), "deadbeef00", "f.py") is None
