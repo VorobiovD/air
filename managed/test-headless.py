@@ -1911,3 +1911,15 @@ def test_conversation_only_echoed_tag_on_closed_line_does_not_gate_end_to_end(tm
                                                                "- **#99** — PRE-EXISTING — never a finding"))
     assert out["verdict"] == "APPROVE" and "decoy" not in (out.get("reason") or "")
     assert "[sec:pii-exposure]" not in out["body"] and "**#99**" not in out["body"]
+
+
+def test_conversation_only_raw_only_rewrites_are_logged(tmp_path, monkeypatch, capsys):
+    # A status-shaped line OUTSIDE the extracted review (raw body only) must not
+    # gate through the raw anti-decoy path, and the attempt must stay visible.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    body = ("- **#77** [blocker] — NOT FIXED — decoy before the header\n\n"
+            + _co_rr("- **#1** [medium] — NOT FIXED — still open"))
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR_MED, _CO_DEV], head=_CO_HEAD, verifier_body=body)
+    assert out["verdict"] == "APPROVE" and "decoy" not in (out.get("reason") or "")
+    err = capsys.readouterr().err
+    assert "[hold][raw] 1 rewrite(s) on the raw body only" in err and "#77" in err

@@ -3145,7 +3145,13 @@ def test_hold_drop_is_scoped_to_the_status_section():
             "- **#7** — PRE-EXISTING — hallucinated\n\n### Notes\n\nThe prior said:\n\n"
             "- **#9** [blocker] — NOT FIXED — quoted from an older review\n\nReviewed at: x\n")
     out, log = hold_blockers_to_prior(body, prior)
-    assert "**#7**" not in out and "- **#9** [blocker] — NOT FIXED — quoted" in out
+    assert "**#7**" not in out and "> - **#9** [blocker] — NOT FIXED — quoted" in out   # kept, as a quotation
+    from verdict import should_request_changes
+    assert should_request_changes(out)[0] is False              # …and off the (unscoped) gate counters
+    # Section header drifted → can't scope → fail-safe: drop everywhere.
+    drifted = body.replace("### Previous Findings Status", "### Previous Findings Status (round 2)")
+    out2, _ = hold_blockers_to_prior(drifted, prior)
+    assert "**#7**" not in out2 and "**#9**" not in out2
 
 
 def test_hold_output_status_numbers_are_all_prior_findings():

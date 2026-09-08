@@ -1921,9 +1921,11 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
       exact policy (same status, same closed set), extended to the findings the
       ledger lacks.
 
-    A status line for a number the prior never raised is DROPPED (a hallucinated
-    `#99 — PRE-EXISTING` with no severity tag would otherwise normalize to a
-    gating blocker). Non-blocker findings may still clear via DISPUTED / DEFERRED
+    A status line for a number the prior never raised is DROPPED from the status
+    block (a hallucinated `#99 — PRE-EXISTING` with no severity tag would
+    otherwise normalize to a gating blocker) and BLOCKQUOTED elsewhere in the
+    body (a quotation stays readable but leaves the line-anchored gate counters,
+    which are unscoped); if the section can't be located, everything drops. Non-blocker findings may still clear via DISPUTED / DEFERRED
     — exactly what a "please re-check my comment" pass exists for. The banner
     note is reconciled
     here (status rewrites + resurrections, BEFORE the status-block splice — the
@@ -1959,10 +1961,15 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
             # Not a prior finding. Nothing changed, so a status line for a number
             # the prior round never raised is a hallucination — and one with no
             # severity tag defaults to a gating blocker downstream. Conversation-
-            # only may not introduce a finding by ANY route: drop the line — but
-            # only inside the status section (a quoted line elsewhere is prose).
-            if not (sec_span[0] <= m.start() < sec_span[1]):
-                return m.group(0)
+            # only may not introduce a finding by ANY route. Inside the status
+            # section (or when the section can't be located — fail-safe) the line is
+            # DROPPED. Outside it the only legitimate reason for such a line is a
+            # quotation, so it is turned into one: a `> ` prefix keeps the prose
+            # intact while taking the line off the line-anchored gate counters,
+            # which scan the whole body (extracted AND raw).
+            if sec_span[0] >= 0 and not (sec_span[0] <= m.start() < sec_span[1]):
+                log.append(f"[hold] #{num} blockquoted outside the status block — not a prior finding")
+                return "> " + m.group(0)
             log.append(f"[hold] #{num} dropped — not a prior finding (no new findings without code)")
             return _DROPPED_LINE
         seen.add(num)
