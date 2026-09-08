@@ -1309,6 +1309,11 @@ def _is_human_dev_entry(entry: dict, bot_logins) -> bool:
         return False
     if body.endswith(AIR_VERDICT_SENTINEL):
         return False
+    # A drive-by account with no relationship to the repo is not "the developer
+    # responding": its text still reaches the agents as untrusted conversation
+    # context, but it must not TRIGGER a paid pass or be framed as authoritative.
+    if (entry.get("author_association") or "").upper() in ("NONE", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR"):
+        return False
     return True
 
 
@@ -1349,7 +1354,15 @@ def format_developer_responses(comments: list[dict]) -> str:
     for c in comments:
         author = html.escape(c.get("user", {}).get("login", "?"))
         body = html.escape((c.get("body") or "")[:4000])
-        blocks.append(f'<developer-comment author="{author}">\n{body}\n</developer-comment>')
+        attrs = f'author="{author}"'
+        role = (c.get("author_association") or "").strip()
+        if role:
+            attrs += f' role="{html.escape(role.lower())}"'
+        path = (c.get("path") or "").strip()            # inline review comments
+        if path:
+            line = c.get("line") or c.get("original_line") or ""
+            attrs += f' path="{html.escape(f"{path}:{line}" if line else path)}"'
+        blocks.append(f'<developer-comment {attrs}>\n{body}\n</developer-comment>')
     return "\n\n".join(blocks)
 
 
@@ -2321,12 +2334,13 @@ async def run_review(args):
         # This managed/MA path routes through the coordinator session and does not
         # run it (v1) — surface the situation so the skip isn't silent.
         n_dev = 0
-        if os.environ.get("AIR_REREVIEW_ON_COMMENTS", "1").strip().lower() not in ("0", "false", "no"):
+        if env.env_bool("AIR_REREVIEW_ON_COMMENTS", True):
             try:
                 n_dev = len(developer_comments_after(all_comments, prior["id"],
                                                      _air_bot_logins() | {bot_login}))
-            except Exception:
-                n_dev = 0
+            except Exception as e:
+                print(f"  [warn] developer-comment check failed: {type(e).__name__}: {e}",
+                      file=sys.stderr)
         if n_dev:
             print(f"  [re-review] {n_dev} developer comment(s) since that review — a "
                   f"conversation-only re-review runs in messages-api mode only "

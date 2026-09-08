@@ -1643,3 +1643,88 @@ def test_developer_comments_after_ignores_air_verdict_reviews():
     from github_client import AIR_VERDICT_SENTINEL
     verdict_like = {"id": 12, "user": {"login": "rotated-unlisted"}, "body": "1 blocker(s)\n\n" + AIR_VERDICT_SENTINEL}
     assert review.developer_comments_after([_CO_PRIOR, verdict_like], 10, {"air-bot"}) == []
+
+
+# --- conversation-only: dogfood round-3 findings (hold COVERAGE) ---
+def test_conversation_only_new_in_prior_blocker_is_held(tmp_path, monkeypatch):
+    # Round-3 blocker 1: a blocker the prior round raised as NEW sits under
+    # `### New Findings / #### Blockers` — in neither the status block nor the
+    # ledger. Its DISPUTED must still be held.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    prior = {"id": 60, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+             "body": ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+                      "- **#1** [medium] — NOT FIXED — open\n\n"
+                      "### New Findings (introduced since last review)\n\n#### Blockers\n\n"
+                      "**2. brand-new blocker last round**\n\n"
+                      "[`g.py#L4`](https://github.com/o/r/blob/aaaaaaaaaaaa/g.py#L4) — bad\n\n"
+                      "Reviewed at: " + _CO_HEAD + "\n")}
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [medium] — DISPUTED — guarded\n"
+            "- **#2** [blocker] — DISPUTED — dev says it's fine\n\nReviewed at: " + _CO_HEAD + "\n")
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[prior, dict(_CO_DEV, id=61)], head=_CO_HEAD,
+                           verifier_body=body)
+    assert "- **#2** [blocker] — NOT FIXED" in out["body"] and out["verdict"] == "REQUEST_CHANGES"
+    assert "- **#1** [medium] — DISPUTED" in out["body"]
+
+
+def test_conversation_only_sec_floored_medium_is_held(tmp_path, monkeypatch):
+    # Round-3 blocker 2: a `[sec:]`-tagged exposure rated medium is a blocker for
+    # the gate (category floor) — the hold must treat it as blocker-class too.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    prior = {"id": 70, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+             "body": ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+                      "- **#1** [medium] — NOT FIXED — patient ids in logs [sec:pii-exposure]\n\n"
+                      "Reviewed at: " + _CO_HEAD + "\n")}
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [medium] — DISPUTED — dev says the log is internal-only\n\nReviewed at: " + _CO_HEAD + "\n")
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[prior, dict(_CO_DEV, id=71)], head=_CO_HEAD,
+                           verifier_body=body)
+    assert "- **#1** [medium] — NOT FIXED" in out["body"]
+    assert out["verdict"] == "REQUEST_CHANGES"
+
+
+def test_conversation_only_fixed_on_new_in_prior_medium_is_held(tmp_path, monkeypatch):
+    # The ledger cannot pin a finding it never saw (new-in-prior); the hold's
+    # "no code ⇒ nothing FIXED" rule must.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    prior = {"id": 80, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+             "body": ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+                      "- **#1** [low] — NOT FIXED — open\n\n"
+                      "### New Findings (introduced since last review)\n\n#### Medium\n\n"
+                      "**2. new medium last round**\n\n"
+                      "[`g.py#L4`](https://github.com/o/r/blob/aaaaaaaaaaaa/g.py#L4) — meh\n\n"
+                      "Reviewed at: " + _CO_HEAD + "\n")}
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [low] — NOT FIXED — open\n"
+            "- **#2** [medium] — FIXED — dev says done\n\nReviewed at: " + _CO_HEAD + "\n")
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[prior, dict(_CO_DEV, id=81)], head=_CO_HEAD,
+                           verifier_body=body)
+    assert "- **#2** [medium] — NOT FIXED" in out["body"] and "no code changed" in out["body"]
+
+
+def test_conversation_only_superseded_process_verdict_does_not_block(tmp_path, monkeypatch):
+    # Low #10: an earlier process CHANGES_REQUESTED superseded by a later APPROVE
+    # at the same head is not "standing" — the pass may run.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    from github_client import AIR_VERDICT_SENTINEL
+    medium_prior = {"id": 90, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+                    "body": ("## Code Review\n\n### Medium — consider fixing\n\n**1. tidy**\n\n"
+                             "[`f.py#L2`](https://github.com/o/r/blob/aaaaaaaaaaaa/f.py#L2) — x\n\n"
+                             "Reviewed at: " + _CO_HEAD + "\n")}
+    reviews = [{"user": {"login": "air-bot"}, "state": "CHANGES_REQUESTED", "commit_id": _CO_HEAD,
+                "submitted_at": "2026-09-01T10:00:05Z", "body": "diff truncated\n" + AIR_VERDICT_SENTINEL},
+               {"user": {"login": "air-bot"}, "state": "APPROVED", "commit_id": _CO_HEAD,
+                "submitted_at": "2026-09-01T10:30:00Z", "body": AIR_VERDICT_SENTINEL}]
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[medium_prior, dict(_CO_DEV, id=91)],
+                           head=_CO_HEAD, reviews=reviews)
+    assert out.get("conversation_only") is True
+
+
+def test_developer_entry_requires_repo_relationship():
+    # Medium #3: a drive-by account (author_association NONE) is not "the developer".
+    drive_by = dict(_CO_DEV, id=99, author_association="NONE")
+    member = dict(_CO_DEV, id=98, author_association="MEMBER")
+    got = review.developer_comments_after([_CO_PRIOR, drive_by, member], 10, {"air-bot"})
+    assert [c["id"] for c in got] == [98]
+    rendered = review.format_developer_responses([member, {"user": {"login": "z"}, "body": "b", "path": "f.py", "line": 2}])
+    assert 'role="member"' in rendered and 'path="f.py:2"' in rendered

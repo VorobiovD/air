@@ -2911,3 +2911,40 @@ def test_hold_blockers_to_prior_only_touches_changed_blockers():
     fresh = ("## Code Review\n\n### Blockers\n\n**1. flaw**\n\n[`f.py#L2`](https://github.com/o/r/blob/aaaaaaaaaaaa/f.py#L2) — x\n\nReviewed at: aaaaaaaaaaaa" + "0" * 28 + "\n")
     out2, log2 = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — DISPUTED — argued"), fresh)
     assert "- **#1** [blocker] — NOT FIXED" in out2 and len(log2) == 1
+
+
+def test_strip_new_findings_takes_details_wrapper_along():
+    from verdict import strip_new_findings
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n- **#1** [low] — DISPUTED — ok\n\n"
+            "<details>\n<summary>Medium (1)</summary>\n\n### Medium — consider fixing\n\n**1. invented**\n\nx\n\n</details>\n\n"
+            "### Strengths\n\n- g\n\nReviewed at: " + "a" * 40 + "\n")
+    out, n = strip_new_findings(body)
+    assert n == 1 and "invented" not in out
+    assert out.count("<details>") == out.count("</details>") == 0
+    assert "### Strengths" in out
+
+
+def test_false_positive_hyphenated_synonym():
+    e = _ledger_entry(1, "medium", "NOT FIXED")
+    out, _ = pin_and_resurrect(_rr_body("- **#1** [medium] — FALSE-POSITIVE — guarded"), [e])
+    assert "- **#1** [medium] — DISPUTED" in out and "re-inserted" not in out
+
+
+def test_hold_covers_new_in_prior_and_sec_floored():
+    from verdict import hold_blockers_to_prior, _BLOCKER_HOLD_MARKER, _NO_CODE_FIXED_MARKER
+    prior = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+             "- **#1** [medium] — NOT FIXED — logs leak ids [sec:pii-exposure]\n"
+             "- **#2** [medium] — FIXED — done earlier\n\n"
+             "### New Findings (introduced since last review)\n\n#### Blockers\n\n**3. new blocker**\n\nx\n\n"
+             "#### Low\n\n**4. new low**\n\ny\n\nReviewed at: x\n")
+    body = _rr_body("- **#1** [medium] — DISPUTED — internal only",
+                    "- **#2** [medium] — FIXED — still done",
+                    "- **#3** [blocker] — DISPUTED — argued",
+                    "- **#4** [low] — FIXED — dev says done")
+    out, log = hold_blockers_to_prior(body, prior)
+    assert "- **#1** [medium] — NOT FIXED" in out and _BLOCKER_HOLD_MARKER in out     # sec-floored held
+    assert "[sec:pii-exposure]" in out.split("- **#1**")[1].split("\n")[0]       # tag carried → floor gates
+    assert "- **#2** [medium] — FIXED — still done" in out                              # re-asserted closure untouched
+    assert "- **#3** [blocker] — NOT FIXED" in out                                       # new-in-prior blocker held
+    assert "- **#4** [low] — NOT FIXED" in out and _NO_CODE_FIXED_MARKER in out          # FIXED without code held
+    assert len(log) == 3

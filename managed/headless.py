@@ -69,33 +69,44 @@ from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
     _CONFLICT_GATE_REASON,
 )
-from verdict import extract_prior_statuses, extract_fresh_findings, strip_new_findings, hold_blockers_to_prior  # noqa: E402  (conversation-only re-review guards)
+from verdict import extract_prior_statuses, extract_fresh_findings, strip_new_findings, hold_blockers_to_prior, _reconcile_banner_with_ledger  # noqa: E402  (conversation-only re-review guards)
 from github_client import AIR_VERDICT_SENTINEL  # noqa: E402  (prior-verdict fail-close detection)
+from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
 
 
 def _prior_verdict_process_fail_closed(rv, prior_body: str, head_sha: str, bot_logins) -> bool:
-    """True when air's standing verdict at this head is CHANGES_REQUESTED but the
+    """True when air's STANDING verdict at this head is CHANGES_REQUESTED but the
     prior review body carries NO gating content — i.e. the gate fail-closed on a
     PROCESS reason (truncated diff, a blocker-class lens that didn't complete,
     conflict markers, a decoy body). Those gates are inert on a conversation-only
     pass (no diff, no lenses), so its clean body would APPROVE and un-gate a PR
     that no code change has touched. A conversation cannot clear a process
     fail-close; only a re-run or a code change can — so the pass must not run.
-    Content-gated priors return False: the ledger handles those."""
+    Content-gated priors return False: the ledger handles those.
+
+    "Air's verdict" = the trailing sentinel OR an allowlisted login (the same
+    OR-contract as `_is_air_verdict`, so a pre-sentinel legacy verdict or an
+    unlisted rotated account both count). "Standing" = the LATEST non-dismissed
+    air review at this head — a later APPROVE/COMMENT supersedes an earlier
+    CHANGES_REQUESTED, so ordering matters."""
     if should_request_changes(prior_body or "", floor_exposures=True)[0]:
         return False
     bots = {b.lower() for b in (bot_logins or set()) if b}
+    mine = []
     for r in rv or []:
         r = r or {}
-        login = ((r.get("user") or {}).get("login") or "").lower()
-        if login not in bots or (r.get("state") or "") != "CHANGES_REQUESTED":
-            continue
         if (r.get("commit_id") or "").lower() != (head_sha or "").lower():
             continue
-        if (r.get("body") or "").rstrip().endswith(AIR_VERDICT_SENTINEL):
-            return True
-    return False
-from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
+        if (r.get("state") or "") == "DISMISSED":
+            continue
+        login = ((r.get("user") or {}).get("login") or "").lower()
+        is_air = (r.get("body") or "").rstrip().endswith(AIR_VERDICT_SENTINEL) or login in bots
+        if is_air:
+            mine.append(r)
+    if not mine:
+        return False
+    mine.sort(key=lambda r: r.get("submitted_at") or "")
+    return (mine[-1].get("state") or "") == "CHANGES_REQUESTED"
 from agent_md import split_frontmatter, resolve_model_alias  # noqa: E402  (single-source frontmatter parser + AIR_MODEL_* override)
 
 import memory_store  # noqa: E402  (managed/ — client-side store reads for pattern staging)
@@ -619,12 +630,15 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # The ledger pin IS this pass's safety construction (no code delta → every
         # FIXED pinned). With the pin disabled there is nothing deterministic
         # standing behind a verifier-only body → no pass, plain skip.
+        air_logins = _air_bot_logins() | {bot_login}
         if env.env_bool("AIR_REREVIEW_ON_COMMENTS", True) and _ledger_pin_enabled():
             try:
                 # All three surfaces — an inline reply on the flagged line is the
                 # most natural dispute gesture and must count like an issue comment.
+                # Tail-capped like the conversation block: the newest entries are
+                # the ones that answer the prior review.
                 trigger_comments = developer_activity_after(
-                    ic, rv, inl, prior, _air_bot_logins() | {bot_login})
+                    ic, rv, inl, prior, air_logins)[-CONVERSATION_MAX_ENTRIES:]
             except Exception as e:
                 print(f"  [warn] developer-comment trigger check failed: "
                       f"{type(e).__name__}: {e} — treating as none", file=sys.stderr)
@@ -639,7 +653,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
                   f"at head, but it carries no findings — nothing to re-adjudicate; skipping")
             trigger_comments = []
         if trigger_comments and _prior_verdict_process_fail_closed(
-                rv, prior_body_at_head, head_sha, _air_bot_logins() | {bot_login}):
+                rv, prior_body_at_head, head_sha, air_logins):
             print(f"  [re-review] developer comment(s) since the review at head, but the standing "
                   f"verdict fail-closed on a process reason (truncated diff / lens incomplete / "
                   f"conflict markers) — a conversation can't clear that; skipping")
@@ -789,7 +803,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
                       "— precomp/codex context degraded (review diff unaffected)", file=sys.stderr)
 
     def _precomp():
-        if not have_checkout:
+        if not have_checkout or conversation_only:    # no code delta → nothing to precompute
             return ("", "", "", "")
         try:
             statuses, paths = compute_file_statuses(checkout, precomp_base, head_sha)
@@ -868,7 +882,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # Concurrent open PRs touching the same files (#3d) — advisory context, never
     # gates. Best-effort + bounded; off-loop so nothing blocks on the scan.
     related_prs = "none"
-    if _related_prs_enabled():
+    if _related_prs_enabled() and not conversation_only:   # no code delta → no overlap question
         related_prs = await asyncio.to_thread(
             fetch_related_prs, args.repo, args.pr_number, bot_token
         )
@@ -1192,6 +1206,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
             # full pipeline. After the pin, so severity is already restored to max.
             review_body, hold_log = hold_blockers_to_prior(review_body, prior_body_at_head)
             pin_log = list(pin_log) + hold_log
+            # The banner's counts were written before the hold, same as before the pin.
+            review_body = _reconcile_banner_with_ledger(review_body, len(hold_log), 0)
         for line in pin_log:
             print(f"  {line}", file=sys.stderr)
 
