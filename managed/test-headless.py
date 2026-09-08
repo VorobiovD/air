@@ -1861,3 +1861,34 @@ def test_conversation_only_skips_when_standing_verdict_has_no_commit_id_or_time(
     # a prior with NO gating content + that unplaceable CHANGES_REQUESTED → fail-closed skip
     from headless import _prior_verdict_process_fail_closed
     assert _prior_verdict_process_fail_closed(reviews, "## Code Review\n\nclean\n\nReviewed at: x", _CO_HEAD, {"air-bot"}) is True
+
+
+def test_process_fail_close_guard_is_asymmetric_on_identity():
+    # Local dogfood round-6 medium: the sentinel is body-controlled, so it may
+    # only make the guard STRICTER. A planted APPROVED/COMMENTED with the sentinel
+    # must not switch the guard off; an allowlisted APPROVED does supersede.
+    from headless import _prior_verdict_process_fail_closed
+    clean = "## Code Review\n\nclean\n\nReviewed at: x"
+    block = {"id": 1, "state": "CHANGES_REQUESTED", "commit_id": _CO_HEAD, "submitted_at": "2026-09-01T10:00:00Z",
+             "user": {"login": "air-bot"}, "body": "diff truncated <!-- air-review-verdict -->"}
+    planted_ok = {"id": 2, "state": "APPROVED", "commit_id": _CO_HEAD, "submitted_at": "2026-09-01T11:00:00Z",
+                  "user": {"login": "mallory"}, "body": "lgtm <!-- air-review-verdict -->"}
+    planted_cmt = dict(planted_ok, id=3, state="COMMENTED", user={"login": "air-bot"})
+    real_ok = dict(planted_ok, id=4, user={"login": "air-bot"})
+    assert _prior_verdict_process_fail_closed([block, planted_ok], clean, _CO_HEAD, {"air-bot"}) is True
+    assert _prior_verdict_process_fail_closed([block, planted_cmt], clean, _CO_HEAD, {"air-bot"}) is True
+    assert _prior_verdict_process_fail_closed([block, real_ok], clean, _CO_HEAD, {"air-bot"}) is False
+
+
+def test_conversation_only_pin_and_hold_both_reported_in_one_banner(tmp_path, monkeypatch):
+    # The pin (ledger entry) and the hold (new-in-prior) both rewrite in one pass:
+    # the banner note must carry BOTH sources' counts, once.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    body = ("## Code Review (Re-review)\n\n> [!NOTE]\n> **No blockers.** 2 fixed\n\n### Previous Findings Status\n\n"
+            "- **#1** [medium] — FIXED — dev says done\n- **#2** [low] — DISPUTED — dev says fine\n\n"
+            "Reviewed at: " + _CO_HEAD + "\n")
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[_CO_NEWBLK_PRIOR, dict(_CO_DEV, id=111)],
+                           head=_CO_HEAD, verifier_body=body)
+    assert "- **#1** [medium] — NOT FIXED" in out["body"] and "- **#2** [blocker] — NOT FIXED" in out["body"]
+    assert out["body"].count("Carry-forward check ran") == 1
+    assert "pin=1/0" in out["body"] and "hold=1/0" in out["body"]

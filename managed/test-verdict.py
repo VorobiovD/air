@@ -3050,3 +3050,41 @@ def test_hold_strips_echoed_sec_tag_from_a_closed_line():
     assert "- **#1** [medium] — FIXED — scrubbed\n" in out                       # echoed tag on a closed line stripped
     assert "- **#2** [medium] — NOT FIXED — dev explained [sec:idor]" in out      # blocker-class held, tag kept
     assert count_category_floored(out)[0] == 1 and any("stripped" in l for l in log)
+
+
+def test_status_sets_are_derived_from_one_ranking():
+    from verdict import (_STATUS_GATING_RANK, _CLEARING_STATUSES, _FIX_STATUSES, _CLOSED_STATUSES,
+                         _OPEN_STATUSES, _GATING_STATUSES)
+    vocab = set(_STATUS_GATING_RANK)
+    assert _OPEN_STATUSES | _CLOSED_STATUSES == vocab and not (_OPEN_STATUSES & _CLOSED_STATUSES)
+    assert _CLEARING_STATUSES == vocab - {"NOT FIXED"} and _FIX_STATUSES < vocab
+    assert set(_GATING_STATUSES) <= _OPEN_STATUSES          # what the gate counts is open by definition
+
+
+def test_hold_direction_clamp_keeps_a_reopened_blocker_open():
+    # Local dogfood round-6 BLOCKER: prior FIXED blocker (tagged) re-opened as
+    # PARTIALLY FIXED was reverted to FIXED and lost its tag → clean APPROVE with
+    # zero code. The stricter direction must always survive, tag carried.
+    from verdict import hold_blockers_to_prior, count_category_floored, _NO_CODE_FIXED_MARKER, _BLOCKER_HOLD_MARKER
+    prior = _rr_body("- **#1** [blocker] — FIXED — done", "- **#2** [medium] — DISPUTED — by design [sec:pii-exposure]",
+                     "- **#3** [blocker] — DISPUTED — by design")
+    out, log = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — PARTIALLY FIXED — dev admits one path still open",
+                                               "- **#2** [medium] — PARTIALLY FIXED — dev admits it",
+                                               "- **#3** [blocker] — NOT FIXED — dev retracted the dispute"), prior)
+    assert "- **#1** [blocker] — PARTIALLY FIXED — dev admits one path still open" in out
+    assert "- **#2** [medium] — PARTIALLY FIXED — dev admits it [sec:pii-exposure]" in out
+    assert "- **#3** [blocker] — NOT FIXED — dev retracted the dispute" in out
+    assert _NO_CODE_FIXED_MARKER not in out and _BLOCKER_HOLD_MARKER not in out
+    assert count_category_floored(out)[0] == 1 and not any(" status " in l for l in log)
+
+
+def test_hold_normalizes_synonyms_without_a_ledger():
+    # Local dogfood round-6 medium: the synonym backstop lived only in the pin,
+    # which is a no-op on an empty ledger — the hold must normalize too.
+    from verdict import hold_blockers_to_prior
+    prior = ("## Code Review (Re-review)\n\n### New Findings (introduced since last review)\n\n#### Blockers\n\n"
+             "**1. new blocker**\n\nx\n\n#### Low\n\n**2. tidy**\n\ny\n\nReviewed at: z\n")
+    out, log = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — FALSE POSITIVE — dev explained",
+                                               "- **#2** [low] — PRE-EXISTING — was there before"), prior)
+    assert out.count("**#1**") == 1 and out.count("**#2**") == 1                  # one line each, no twin
+    assert "- **#1** [blocker] — NOT FIXED" in out and "- **#2** [low] — DISPUTED" in out

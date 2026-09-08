@@ -84,11 +84,13 @@ def _prior_verdict_process_fail_closed(rv, prior_body: str, head_sha: str, bot_l
     fail-close; only a re-run or a code change can — so the pass must not run.
     Content-gated priors return False: the ledger handles those.
 
-    "Air's verdict" = the trailing sentinel OR an allowlisted login (the same
-    OR-contract as `_is_air_verdict`, so a pre-sentinel legacy verdict or an
-    unlisted rotated account both count). "Standing" = the LATEST non-dismissed
-    air review at this head — a later APPROVE/COMMENT supersedes an earlier
-    CHANGES_REQUESTED, so ordering matters. A review with NO `commit_id` is
+    "Air's verdict" = the trailing sentinel OR an allowlisted login for a
+    CHANGES_REQUESTED (a pre-sentinel legacy verdict or an unlisted rotated
+    account both count — the strict direction), but an allowlisted login ONLY
+    for a superseding APPROVE (the sentinel is body-controlled, so it must never
+    be able to switch the guard OFF). "Standing" = the LATEST non-dismissed air
+    review at this head — a later APPROVE supersedes an earlier
+    CHANGES_REQUESTED (a COMMENT does not, per GitHub), so ordering matters. A review with NO `commit_id` is
     admitted regardless of head, and one with no `submitted_at` sorts as the
     latest: an unplaceable air verdict is treated as standing (conservative)."""
     if should_request_changes(prior_body or "", floor_exposures=True)[0]:
@@ -105,8 +107,19 @@ def _prior_verdict_process_fail_closed(rv, prior_body: str, head_sha: str, bot_l
         if (r.get("state") or "") == "DISMISSED":
             continue
         login = ((r.get("user") or {}).get("login") or "").lower()
-        is_air = (r.get("body") or "").rstrip().endswith(AIR_VERDICT_SENTINEL) or login in bots
-        if is_air:
+        state = r.get("state") or ""
+        by_sentinel = (r.get("body") or "").rstrip().endswith(AIR_VERDICT_SENTINEL)
+        # ASYMMETRIC identity: the sentinel is public and review bodies are
+        # participant-controlled, so it may only ever make the guard STRICTER. A
+        # CHANGES_REQUESTED counts by sentinel OR allowlisted login (a planted one
+        # merely skips the pass); a superseding APPROVE counts by allowlisted login
+        # ONLY (a planted one must not switch the guard off). COMMENTED never
+        # supersedes — GitHub semantics: a COMMENT leaves a CHANGES_REQUESTED
+        # standing (air's own no-approve path dismisses it explicitly, and a
+        # DISMISSED review is already excluded above).
+        if state == "CHANGES_REQUESTED" and (by_sentinel or login in bots):
+            mine.append(r)
+        elif state == "APPROVED" and login in bots:
             mine.append(r)
     if not mine:
         return False

@@ -13,6 +13,7 @@ in depth), the deterministic conflict-marker gate, and the SHA-validated
 import json
 import os
 import re
+from types import SimpleNamespace
 import sys
 from pathlib import Path
 
@@ -1759,9 +1760,14 @@ _COLLISION_HOLD_MARKER = (
     "prior review, so the two cannot be told apart — held NOT FIXED until a code change "
     "is reviewed, or a maintainer forces a full re-review.]"
 )
-_CLEARING_STATUSES = frozenset({"DISPUTED", "DEFERRED", "FIXED", "PARTIALLY FIXED"})
-_FIX_STATUSES = frozenset({"FIXED", "PARTIALLY FIXED"})
-_CLOSED_STATUSES = frozenset({"FIXED", "DISPUTED"})   # same non-resurrection set as the pin
+# THE status vocabulary, ordered most-gating first. Every other status set below
+# is DERIVED from this ranking (locked by test), so a direction test uses the
+# ordering and the vocabulary grows in exactly one place.
+_STATUS_GATING_RANK = {"NOT FIXED": 0, "PARTIALLY FIXED": 1, "DEFERRED": 2, "DISPUTED": 3, "FIXED": 4}
+_CLEARING_STATUSES = frozenset(set(_STATUS_GATING_RANK) - {"NOT FIXED"})   # anything but the fully-open status
+_FIX_STATUSES = frozenset({"FIXED", "PARTIALLY FIXED"})                       # claims that need code
+_CLOSED_STATUSES = frozenset({"FIXED", "DISPUTED"})                           # never resurrected (pin + hold)
+_OPEN_STATUSES = frozenset(set(_STATUS_GATING_RANK) - _CLOSED_STATUSES)      # the partition's other half
 # `#{3,4}` so the `#### Blockers` sub-headers of a re-review body's
 # `### New Findings` block are seen (extract_fresh_findings deliberately reads
 # only `###` — it is documented as fresh-body-only).
@@ -1829,13 +1835,6 @@ def _sec_flagged_nums(body: str) -> dict:
     return nums
 
 
-# Most-gating first. Used to resolve a prior body carrying the SAME `#N` twice with
-# different statuses: the gate counts every occurrence, so the record must keep the
-# one that gated (last-wins would let `NOT FIXED` + a later `DISPUTED` clear).
-_STATUS_GATING_RANK = {"NOT FIXED": 0, "PARTIALLY FIXED": 1, "DEFERRED": 2, "DISPUTED": 3, "FIXED": 4}
-_OPEN_STATUSES = frozenset({"NOT FIXED", "PARTIALLY FIXED", "DEFERRED"})
-
-
 def _prior_record(prior_body: str) -> dict:
     """The prior round's COMPLETE record of its findings: `{num: {"sev", "status",
     "sec", "collision"}}` — the status block (carried findings) UNIONED with the
@@ -1894,7 +1893,8 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
     - **blocker-class may not move to a clearing status** on a discussion thread
       (the pass has the least evidence and least judgment redundancy of any
       round, and a blocker's DISPUTED is a complete un-gate) → prior status; the
-      stricter direction (DISPUTED → NOT FIXED) is allowed; a number collision
+      stricter direction is always allowed (a direction clamp guarantees no
+      branch ever makes a line less gating than emitted); a number collision
       with a new blocker → NOT FIXED with its own marker;
     - a prior finding **omitted** from the emitted block and not closed last
       round is **resurrected NOT FIXED** at its prior severity/tag — the pin's
@@ -1910,7 +1910,13 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
     `… resurrected …`."""
     rec = _prior_record(prior_body)
     seen: set = set()
-    log: list = []
+    # Off-enum synonyms (FALSE POSITIVE / PRE-EXISTING / …) are normalized by the
+    # pin — but the pin is a no-op on an EMPTY ledger (a New-Findings-only prior),
+    # and an un-normalized line doesn't match the frozen regex, so the finding
+    # would be resurrected NOT FIXED *beside* the verifier's own line. Normalize
+    # here too (idempotent; the prior's recorded severity governs the blocker rule).
+    body, log = _canonicalize_status_synonyms(
+        body, {num: SimpleNamespace(prior_severity=r["sev"]) for num, r in rec.items()})
     n_status = 0
 
     def _hold(m):
@@ -1935,6 +1941,13 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
             new_status, marker = r["status"], _NO_CODE_FIXED_MARKER
         elif blocker_class and status != r["status"] and status in _CLEARING_STATUSES:
             new_status, marker = r["status"], _BLOCKER_HOLD_MARKER
+        if _STATUS_GATING_RANK[new_status] > _STATUS_GATING_RANK[status]:
+            # DIRECTION CLAMP: no branch may make a line LESS gating than the verifier
+            # emitted. A prior FIXED/DISPUTED blocker re-opened as PARTIALLY FIXED must
+            # stay re-opened — reverting it to the prior's clearing status (and, with
+            # it, dropping the floor tag below) would make the result weaker than what
+            # the verifier just asserted (local dogfood round-6 blocker).
+            new_status, marker = status, ""
         if r["sec"] and not line_has_tag and new_status in _OPEN_STATUSES:
             tail = f"{tail} [sec:{r['sec']}]"
             log.append(f"[hold] #{num} tag [sec:{r['sec']}] carried forward (floor gates on this body only)")
