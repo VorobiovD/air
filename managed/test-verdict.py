@@ -1,4 +1,3 @@
-import re
 #!/usr/bin/env python3
 """Direct unit tests for the verdict-gating decision tree (managed/verdict.py).
 
@@ -15,6 +14,7 @@ the deterministic conflict-marker gate).
 
 Pure functions, no network. Run: python -m pytest managed/test-verdict.py
 """
+import re
 import sys
 from pathlib import Path
 
@@ -1598,7 +1598,6 @@ def test_cli_two_call_flow_matches_one_call_decide():
 # was spuriously RESURRECTED as a phantom NOT FIXED — gating a PR whose blocker
 # the verifier had marked FIXED/ACCEPTED. These lock in the parse fix.
 # ---------------------------------------------------------------------------
-import re  # noqa: E402
 from verdict import _PRIOR_STATUS_LINE_RE, _canonicalize_status_synonyms  # noqa: E402
 
 
@@ -3103,6 +3102,7 @@ def test_hold_drops_status_lines_for_numbers_the_prior_never_raised():
     out, log = hold_blockers_to_prior(_rr_body("- **#1** [medium] — NOT FIXED — still open",
                                                "- **#99** — PRE-EXISTING — never a finding"), prior)
     assert "**#99**" not in out and any("#99 dropped" in l for l in log)
+    assert "\n\n\n" not in out                       # the dropped line took its newline with it
     assert should_request_changes(out)[0] is False
 
 
@@ -3133,3 +3133,27 @@ def test_pin_then_hold_both_reach_the_banner_when_status_block_missing():
     prior2 = prior.replace("Reviewed at", "### New Findings (introduced since last review)\n\n#### Medium\n\n**2. new**\n\nx\n\nReviewed at")
     held, log = hold_blockers_to_prior(pinned, prior2)
     assert "hold=0/1 pin=0/1" in held and held.count("Carry-forward check ran") == 1   # sorted tally
+
+
+def test_hold_drop_is_scoped_to_the_status_section():
+    # Local round-8 low: a `- **#N**` line QUOTED in prose for an out-of-record
+    # number must not vanish from the posted comment — only the status block is
+    # subject to the drop.
+    from verdict import hold_blockers_to_prior
+    prior = _rr_body("- **#1** [medium] — NOT FIXED — open")
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n- **#1** [medium] — NOT FIXED — open\n"
+            "- **#7** — PRE-EXISTING — hallucinated\n\n### Notes\n\nThe prior said:\n\n"
+            "- **#9** [blocker] — NOT FIXED — quoted from an older review\n\nReviewed at: x\n")
+    out, log = hold_blockers_to_prior(body, prior)
+    assert "**#7**" not in out and "- **#9** [blocker] — NOT FIXED — quoted" in out
+
+
+def test_hold_output_status_numbers_are_all_prior_findings():
+    # Parity invariant behind the drop: every number the gate counters see in the
+    # status block after the hold is a number the prior record contains.
+    from verdict import hold_blockers_to_prior, _prior_record, extract_prior_statuses
+    prior = _rr_body("- **#1** [medium] — NOT FIXED — a", "- **#2** [blocker] — FIXED — b")
+    body = _rr_body("- **#1** [medium] — DISPUTED — dev", "- **#2** [blocker] — FIXED — b",
+                    "- **#3** [blocker] — NOT FIXED — invented", "- **#42** — ACCEPTED — invented too")
+    out, _ = hold_blockers_to_prior(body, prior)
+    assert {n for n, _, _ in extract_prior_statuses(out)} == set(_prior_record(prior))

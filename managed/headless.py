@@ -1253,7 +1253,14 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # not-a-prior-finding line drop — and both must reach the raw body too, or
         # rc_raw re-gates exactly what the hold just corrected (and posts a false
         # "injected decoy" reason). Same precedent as strip_new_findings above.
-        review_body_raw, _ = hold_blockers_to_prior(review_body_raw, prior_body_at_head)
+        review_body_raw, raw_hold_log = hold_blockers_to_prior(review_body_raw, prior_body_at_head)
+        raw_only = [l for l in raw_hold_log if l not in hold_log]
+        if raw_only:
+            # Something the extracted body did NOT have — e.g. an injected status line
+            # in a decoy region. Correct to drop, but the attempt must stay visible.
+            print(f"  [hold][raw] {len(raw_only)} rewrite(s) on the raw body only:", file=sys.stderr)
+            for line in raw_only:
+                print(f"    {line}", file=sys.stderr)
     for line in pin_log:   # the [pin]/[ledger]/[hold] stderr trail — every re-review
         print(f"  {line}", file=sys.stderr)
 

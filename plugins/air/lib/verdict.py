@@ -1494,7 +1494,7 @@ _SYNONYM_STATUS_RE = re.compile(
 )
 
 
-def _canonicalize_status_synonyms(review_body: str, by_num: dict, tag: str = "pin") -> tuple:
+def _canonicalize_status_synonyms(review_body: str, by_num: dict, tag: str = "pin", escalated_out: set | None = None) -> tuple:
     """Rewrite a known off-enum status synonym on a `### Previous Findings
     Status` line to its canonical token before the frozen regexes parse it.
     Returns (body, log_lines). Only a synonym that is the COMPLETE leading
@@ -1529,6 +1529,8 @@ def _canonicalize_status_synonyms(review_body: str, by_num: dict, tag: str = "pi
             prior_sev = entry.prior_severity if entry else (emitted_sev or "blocker")
             if _max_severity(prior_sev, emitted_sev or prior_sev) == "blocker":
                 canon = "NOT FIXED"  # accept-by-design must not auto-clear a blocker
+                if escalated_out is not None:
+                    escalated_out.add(int(m.group("num")))
         log.append(f"[{tag}] #{m.group('num')} normalized status synonym {m.group('word')!r} -> {canon}")
         return m.group("prefix") + canon
 
@@ -1611,6 +1613,7 @@ _PIN_REWRITE_MARKER_REBASE = (
 
 
 _PIN_BANNER_NOTE_MARK = "<!-- air-pin-reconcile -->"
+_PIN_COUNTS_MARK = "air-pin-reconcile-counts"   # per-source tally comment (emit + parse share this literal)
 
 
 def _locate_banner_block(body: str):
@@ -1681,8 +1684,12 @@ def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int, 
     counts: dict = {}
     mi = next((i for i in range(start, end + 1) if _PIN_BANNER_NOTE_MARK in lines[i]), None)
     if mi is not None:
-        cm = re.search(r"<!-- air-pin-reconcile-counts ((?:\w+=\d+/\d+ ?)+)-->", lines[mi])
-        found = re.findall(r"\b(\w+)=(\d+)/(\d+)\b", cm.group(1)) if cm else []
+        # `[A-Za-z_]+` (not `\w+`) so a digit run can't be split between one unit's
+        # `\d+` and the next unit's key — with `\w+` the group was ambiguous and a
+        # line missing its `-->` backtracked exponentially (dogfood: ReDoS on the
+        # pin path of every re-review).
+        cm = re.search(r"<!-- " + _PIN_COUNTS_MARK + r" ((?:[A-Za-z_]+=\d+/\d+ ?)+)-->", lines[mi])
+        found = re.findall(r"\b([A-Za-z_]+)=(\d+)/(\d+)\b", cm.group(1)) if cm else []
         if not found:
             return body                  # a pre-counts note (legacy body): leave it alone
         counts = {k: (int(x), int(y)) for k, x, y in found}
@@ -1707,7 +1714,7 @@ def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int, 
             f"check and may overstate what cleared — the per-finding statuses "
             f"below are authoritative.")
     tally = " ".join(f"{k}={v[0]}/{v[1]}" for k, v in sorted(counts.items()))
-    block = ["> ", f"> {note}", f"> {_PIN_BANNER_NOTE_MARK} <!-- air-pin-reconcile-counts {tally} -->"]
+    block = ["> ", f"> {note}", f"> {_PIN_BANNER_NOTE_MARK} <!-- {_PIN_COUNTS_MARK} {tally} -->"]
     return "\n".join(lines[:end + 1] + block + lines[end + 1:])
 
 
@@ -1775,6 +1782,7 @@ _COLLISION_HOLD_MARKER = (
 # hand-picked subsets. The property the direction clamp relies on — every gating
 # status ranks strictly below every non-gating one — is locked by test.
 _STATUS_GATING_RANK = {"NOT FIXED": 0, "PARTIALLY FIXED": 1, "DEFERRED": 2, "DISPUTED": 3, "FIXED": 4}
+_DROPPED_LINE = "\x00air-dropped-line\x00"   # placeholder a dropped status line becomes before cleanup
 _CLEARING_STATUSES = frozenset(set(_STATUS_GATING_RANK) - {"NOT FIXED"})   # anything but the fully-open status
 _FIX_STATUSES = frozenset({"FIXED", "PARTIALLY FIXED"})                       # claims that need code
 _CLOSED_STATUSES = frozenset({"FIXED", "DISPUTED"})                           # never resurrected (pin + hold)
@@ -1930,13 +1938,18 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
     # and an un-normalized line doesn't match the frozen regex, so the finding
     # would be resurrected NOT FIXED *beside* the verifier's own line. Normalize
     # here too (idempotent; the prior's recorded severity governs the blocker rule).
-    body, log = _canonicalize_status_synonyms(
-        body, {num: SimpleNamespace(prior_severity=r["sev"]) for num, r in rec.items()}, tag="hold")
-    # An accept-word on a blocker-class finding was escalated to NOT FIXED by the
+    # An accept-word on a blocker-class finding is escalated to NOT FIXED by the
     # canonicalizer; that reverses the verifier's stated verdict, so it is counted
     # as a hold rewrite and marked on the line like any other blocker hold.
-    escalated = {int(m.group(1)) for m in re.finditer(r"#(\d+) normalized status synonym .* -> NOT FIXED$", "\n".join(log), re.MULTILINE)}
+    escalated: set = set()
+    body, log = _canonicalize_status_synonyms(
+        body, {num: SimpleNamespace(prior_severity=r["sev"]) for num, r in rec.items()},
+        tag="hold", escalated_out=escalated)
     n_status = 0
+    # The drop (below) is scoped to the status SECTION: a `- **#N**` line quoted in
+    # finding prose / <details> elsewhere in the body must survive untouched.
+    _sec = _PRIOR_STATUS_SECTION_RE.search(body)
+    sec_span = (_sec.end(), _section_end(body, _sec.end())) if _sec else (-1, -1)
 
     def _hold(m):
         nonlocal n_status
@@ -1946,9 +1959,12 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
             # Not a prior finding. Nothing changed, so a status line for a number
             # the prior round never raised is a hallucination — and one with no
             # severity tag defaults to a gating blocker downstream. Conversation-
-            # only may not introduce a finding by ANY route: drop the line.
+            # only may not introduce a finding by ANY route: drop the line — but
+            # only inside the status section (a quoted line elsewhere is prose).
+            if not (sec_span[0] <= m.start() < sec_span[1]):
+                return m.group(0)
             log.append(f"[hold] #{num} dropped — not a prior finding (no new findings without code)")
-            return ""
+            return _DROPPED_LINE
         seen.add(num)
         emitted_sev = (m.group(2) or "blocker").lower()
         status = re.sub(r"\s+", " ", m.group(3).upper()).strip()
@@ -1967,6 +1983,7 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
             new_status, marker = r["status"], _BLOCKER_HOLD_MARKER
         if not marker and num in escalated and new_status == "NOT FIXED":
             marker = _BLOCKER_HOLD_MARKER
+            escalated.discard(num)     # mark + count once per finding
             n_status += 1
             log.append(f"[hold] #{num} status (accept-word on a blocker-class finding)->NOT FIXED (conversation-only)")
         if _STATUS_GATING_RANK[new_status] > _STATUS_GATING_RANK[status]:
@@ -1996,6 +2013,7 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
         return f"- **#{num}** [{new_sev}] — {new_status}{tail}{(' ' + marker) if marker else ''}"
 
     body = _PRIOR_STATUS_LINE_RE.sub(_hold, body)
+    body = re.sub(re.escape(_DROPPED_LINE) + r"\n?", "", body)   # take the dropped line's newline with it
     resurrected = []
     for num, r in sorted(rec.items()):
         if num in seen or r["status"] in _CLOSED_STATUSES:
