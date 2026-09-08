@@ -267,7 +267,7 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
                   head="a" * 40, fresh=False, ledger=None, pin=None,
                   ledger_pin_env=None, ledger_calls=None, full_diff=None, codex=None,
                   no_codex=False, promote_env=None, promote_fp=None, verifier_body=None,
-                  dry_run=True, reviews=None, inline=None):
+                  dry_run=True, reviews=None, inline=None, reviews_exc=None):
     """Drive run_headless_review (dry-run) for re-review-path tests. Returns
     (result, calls) where calls counts which diff fetcher fired. inter_diff is the
     fetch_inter_diff RETURN (str / "" / None); inter_exc, if set, makes it RAISE.
@@ -291,7 +291,11 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
     monkeypatch.setattr(headless, "fetch_pr_metadata", lambda *a, **k: meta)
     monkeypatch.setattr(headless, "fetch_bot_login", lambda *a, **k: "air-bot")
     monkeypatch.setattr(headless, "fetch_issue_comments", lambda *a, **k: comments)
-    monkeypatch.setattr(headless, "fetch_pr_reviews", lambda *a, **k: reviews or [])
+    def _reviews(*a, **k):
+        if reviews_exc is not None:
+            raise reviews_exc
+        return reviews or []
+    monkeypatch.setattr(headless, "fetch_pr_reviews", _reviews)
     monkeypatch.setattr(headless, "fetch_pr_review_comments", lambda *a, **k: inline or [])
     def _origin_spy(*a, **k):
         calls["origin_resolver_built"] = calls.get("origin_resolver_built", 0) + 1
@@ -1728,3 +1732,79 @@ def test_developer_entry_requires_repo_relationship():
     assert [c["id"] for c in got] == [98]
     rendered = review.format_developer_responses([member, {"user": {"login": "z"}, "body": "b", "path": "f.py", "line": 2}])
     assert 'role="member"' in rendered and 'path="f.py:2"' in rendered
+
+
+# --- conversation-only: dogfood round-4 findings (hold RECONCILIATION) ---
+_CO_SEC_PRIOR = {"id": 100, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+                 "body": ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+                          "- **#1** [medium] — NOT FIXED — patient ids in logs [sec:pii-exposure]\n\n"
+                          "Reviewed at: " + _CO_HEAD + "\n")}
+_CO_NEWBLK_PRIOR = {"id": 110, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+                    "body": ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+                             "- **#1** [medium] — NOT FIXED — open\n\n"
+                             "### New Findings (introduced since last review)\n\n#### Blockers\n\n"
+                             "**2. brand-new blocker last round**\n\n"
+                             "[`g.py#L4`](https://github.com/o/r/blob/aaaaaaaaaaaa/g.py#L4) — bad\n\n"
+                             "Reviewed at: " + _CO_HEAD + "\n")}
+
+
+def _co_rr(*lines):
+    return ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n" + "\n".join(lines)
+            + "\n\nReviewed at: " + _CO_HEAD + "\n")
+
+
+def test_conversation_only_restated_status_keeps_floor_tag(tmp_path, monkeypatch):
+    # Round-4 blocker 1: the verifier honestly restates NOT FIXED but drops the
+    # [sec:] tag → the floor (which gates only on THIS body) would stop gating.
+    # The tag must be carried on the same-status path too.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[_CO_SEC_PRIOR, dict(_CO_DEV, id=101)],
+                           head=_CO_HEAD, verifier_body=_co_rr("- **#1** [medium] — NOT FIXED — dev's argument noted"))
+    assert "[sec:pii-exposure]" in out["body"] and out["verdict"] == "REQUEST_CHANGES"
+    # …and on the no-code-FIXED path
+    out2, _ = _rereview_run(monkeypatch, tmp_path, comments=[_CO_SEC_PRIOR, dict(_CO_DEV, id=101)],
+                            head=_CO_HEAD, verifier_body=_co_rr("- **#1** [medium] — FIXED — dev says done"))
+    assert "- **#1** [medium] — NOT FIXED" in out2["body"] and "[sec:pii-exposure]" in out2["body"]
+    assert out2["verdict"] == "REQUEST_CHANGES"
+
+
+def test_conversation_only_new_in_prior_blocker_downgrade_is_pinned(tmp_path, monkeypatch):
+    # Round-4 blocker 2a: emitted as [low] DISPUTED — the ledger never saw this
+    # finding, so the hold must pin severity to the prior's own classification.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[_CO_NEWBLK_PRIOR, dict(_CO_DEV, id=111)],
+                           head=_CO_HEAD, verifier_body=_co_rr("- **#1** [medium] — NOT FIXED — open",
+                                                               "- **#2** [low] — DISPUTED — dev says fine"))
+    assert "- **#2** [blocker] — NOT FIXED" in out["body"] and out["verdict"] == "REQUEST_CHANGES"
+
+
+def test_conversation_only_omitted_new_in_prior_blocker_is_resurrected(tmp_path, monkeypatch):
+    # Round-4 blocker 2b: no emitted line at all → resurrected at prior sev/status.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_NEWBLK_PRIOR, dict(_CO_DEV, id=111)],
+                               head=_CO_HEAD, verifier_body=_co_rr("- **#1** [medium] — NOT FIXED — open"))
+    assert "- **#2** [blocker] — NOT FIXED" in out["body"] and "re-inserted" in out["body"]
+    assert out["verdict"] == "REQUEST_CHANGES"
+    assert "#2 [blocker]" in calls["verifier_task"]          # and the directive told the verifier about it
+
+
+def test_conversation_only_restated_new_section_is_stripped_then_resurrected(tmp_path, monkeypatch):
+    # Round-4 blocker 2c: the verifier re-states the new blocker as a New-Findings
+    # section (stripped) and gives it no status line → resurrection covers it.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n- **#1** [medium] — NOT FIXED — open\n\n"
+            "### New Findings (introduced since last review)\n\n#### Blockers\n\n**2. brand-new blocker last round**\n\nx\n\n"
+            "Reviewed at: " + _CO_HEAD + "\n")
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[_CO_NEWBLK_PRIOR, dict(_CO_DEV, id=111)],
+                           head=_CO_HEAD, verifier_body=body)
+    assert "**2. brand-new" not in out["body"] and "- **#2** [blocker] — NOT FIXED" in out["body"]
+    assert out["verdict"] == "REQUEST_CHANGES"
+
+
+def test_conversation_only_skips_when_reviews_fetch_fails(tmp_path, monkeypatch):
+    # Round-4 medium 4: the process-fail-close guard cannot check without the
+    # reviews → fail CLOSED (skip), never silently stop guarding.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD,
+                               reviews_exc=RuntimeError("reviews 502"))
+    assert out["reason"] == "already reviewed at head" and "verifier_task" not in calls

@@ -1735,8 +1735,14 @@ _NO_CODE_FIXED_MARKER = (
     "[air: pinned to the prior status — no code changed since the prior review, "
     "so nothing was fixed.]"
 )
+_COLLISION_HOLD_MARKER = (
+    "[air: this finding number was both carried and newly raised as a blocker in the "
+    "prior review, so the two cannot be told apart — held NOT FIXED until a code change "
+    "is reviewed, or a maintainer forces a full re-review.]"
+)
 _CLEARING_STATUSES = frozenset({"DISPUTED", "DEFERRED", "FIXED", "PARTIALLY FIXED"})
 _FIX_STATUSES = frozenset({"FIXED", "PARTIALLY FIXED"})
+_CLOSED_STATUSES = frozenset({"FIXED", "DISPUTED"})   # same non-resurrection set as the pin
 # `#{3,4}` so the `#### Blockers` sub-headers of a re-review body's
 # `### New Findings` block are seen (extract_fresh_findings deliberately reads
 # only `###` — it is documented as fresh-body-only).
@@ -1748,8 +1754,8 @@ def _prior_new_findings(body: str) -> dict:
     round (`**N.` entries under `### New Findings` → `#### <severity>`), plus a
     fresh body's plain sections. These are in neither the body's status block nor
     the next round's ledger triples, so a conversation-only pass would otherwise
-    see them as unconstrained — a new-in-prior blocker could be DISPUTED away
-    with zero code change (the round-3 local-dogfood blocker on this feature)."""
+    see them as unconstrained — a new-in-prior blocker could be DISPUTED away,
+    downgraded, or simply omitted, all with zero code change."""
     if not body:
         return {}
     headers = [(m.start(), _section_severity(m.group(1))) for m in _ANY_SECTION_HEADER_RE.finditer(body)]
@@ -1767,11 +1773,11 @@ def _prior_new_findings(body: str) -> dict:
 
 
 def _sec_flagged_nums(body: str) -> dict:
-    """`{num: token}` for findings in `body` carrying a blocker-class `[sec:<token>]` tag —
-    either on a `- **#N**` status line or anywhere in a `**N.` entry's block (up
-    to the next entry/header). The category floor makes such a finding a BLOCKER
-    for the gate regardless of its `[medium]` label; the hold must see it the
-    same way or a floored PHI/authz exposure could be cleared by discussion."""
+    """`{num: token}` for findings in `body` carrying a blocker-class `[sec:<token>]`
+    tag — on a `- **#N**` status line or anywhere in a `**N.` entry's block (up to
+    the next entry/header). The category floor makes such a finding a BLOCKER for
+    the gate regardless of its `[medium]` label; the hold must see it the same way,
+    and must carry the tag forward because the floor scans only the body under gate."""
     nums: dict = {}
     if not body:
         return nums
@@ -1797,63 +1803,106 @@ def _sec_flagged_nums(body: str) -> dict:
     return nums
 
 
-def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
-    """Conversation-only re-review guard, run AFTER pin_and_resurrect. Two rules,
-    both keyed on the PRIOR round's own record so the result can never be weaker
-    than the verdict already standing:
+def _prior_record(prior_body: str) -> dict:
+    """The prior round's COMPLETE record of its findings: `{num: {"sev", "status",
+    "sec", "collision"}}` — the status block (carried findings) UNIONED with the
+    findings that round raised as NEW (status NOT FIXED — they were open when
+    raised). A number present in BOTH is the documented per-round renumbering
+    collision; it is resolved by honoring the recorded status (mirroring the
+    pin's re-assertion rule) UNLESS the colliding new finding is blocker-class,
+    where the ambiguity is held NOT FIXED — the false-block direction, chosen
+    only for the highest-stakes case and explained on the line."""
+    rec: dict = {}
+    sec = _sec_flagged_nums(prior_body)
+    for num, sev, status in extract_prior_statuses(prior_body):
+        rec[num] = {"sev": sev, "status": status, "sec": sec.get(num), "collision": False}
+    for num, sev in _prior_new_findings(prior_body).items():
+        new_is_blocker = sev == "blocker" or num in sec
+        if num in rec:
+            r = rec[num]
+            r["sev"] = _max_severity(r["sev"], sev)
+            if new_is_blocker:
+                r["status"], r["collision"] = "NOT FIXED", True
+            r["sec"] = r["sec"] or sec.get(num)
+        else:
+            rec[num] = {"sev": sev, "status": "NOT FIXED", "sec": sec.get(num), "collision": False}
+    return rec
 
-    1. **No code changed ⇒ nothing was FIXED.** Any `FIXED`/`PARTIALLY FIXED` on a
-       finding the prior round did not already record in that status is pinned
-       back to the prior status. This covers what the ledger cannot: a finding
-       the prior round raised as NEW (its `**N.` entry is in neither the status
-       block nor the ledger triples).
-    2. **A BLOCKER-CLASS finding may not change status on a discussion thread.**
-       The pass runs one verifier over no code delta — the least evidence and
-       least judgment redundancy of any round — while a blocker's DISPUTED is a
-       complete un-gate. Blocker-class = the `[blocker]` tag, OR a blocker-class
-       `[sec:]` tag on the emitted line or on the prior's record of #N (the
-       category floor gates those as blockers whatever the model labels them).
-       Held to the prior status; a blocker not recorded CLOSED by the prior round
-       (new-in-prior, fresh prior, or a number collision between a carried #N
-       and a same-numbered new finding — resolved conservatively) defaults to
-       NOT FIXED.
+
+def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
+    """Conversation-only re-review guard, run AFTER pin_and_resurrect: reconcile
+    the emitted status block against the PRIOR round's complete record
+    (`_prior_record` — carried statuses ∪ the findings it raised as new, which the
+    ledger never sees). No code changed, so the result can never be weaker than
+    the verdict already standing. Per prior finding:
+
+    - **severity** is pinned to max(prior, emitted) — a new-in-prior blocker
+      re-emitted as `[low]` cannot dodge blocker-class (the pin only covers ledger
+      entries);
+    - the prior's blocker-class **`[sec:]` tag is carried** onto the line whenever
+      the emitted line lacks one — on EVERY path, including an honest same-status
+      restatement — because the category floor gates only on tags in the body
+      under gate, and a restated `[medium] — NOT FIXED` without its tag would
+      silently stop gating;
+    - **no code ⇒ nothing FIXED**: FIXED/PARTIALLY FIXED where the prior did not
+      already record that status → prior status;
+    - **blocker-class may not change status** on a discussion thread (the pass has
+      the least evidence and least judgment redundancy of any round, and a
+      blocker's DISPUTED is a complete un-gate) → prior status; a number
+      collision with a new blocker → NOT FIXED with its own marker;
+    - a prior finding **omitted** from the emitted block (not closed last round)
+      is **resurrected** at its prior severity/status/tag — the same policy the
+      pin applies to ledger entries, extended to the findings the ledger lacks.
 
     Non-blocker findings may still clear via DISPUTED / DEFERRED — exactly what a
     "please re-check my comment" pass exists for. Returns `(body, log)`."""
-    statuses = {num: status for num, _sev, status in extract_prior_statuses(prior_body)}
-    new_prior = _prior_new_findings(prior_body)
-    prior = dict(statuses)
-    for num in new_prior:
-        # A number both carried AND newly raised last round is ambiguous
-        # (per-round renumbering) → the conservative reading wins.
-        prior[num] = "NOT FIXED" if num in statuses else "NOT FIXED"
-    prior_sec = _sec_flagged_nums(prior_body)
-    log = []
+    rec = _prior_record(prior_body)
+    seen: set = set()
+    log: list = []
+
+    def _has_blocker_tag(text):
+        return any(t.lower() in _BLOCKER_CATEGORIES for t in _SEC_TAG_RE.findall(text))
 
     def _hold(m):
         num = int(m.group(1))
-        sev = (m.group(2) or "blocker").lower()
+        r = rec.get(num)
+        if r is None:
+            return m.group(0)
+        seen.add(num)
+        emitted_sev = (m.group(2) or "blocker").lower()
         status = re.sub(r"\s+", " ", m.group(3).upper()).strip()
         tail = re.sub(r"^\*{0,2}", "", m.group(4)).rstrip()
-        prior_status = prior.get(num, "NOT FIXED")
-        line_sec = any(t.lower() in _BLOCKER_CATEGORIES for t in _SEC_TAG_RE.findall(m.group(0)))
-        blocker_class = sev == "blocker" or line_sec or num in prior_sec
-        if status == prior_status:
+        new_sev = _max_severity(r["sev"], emitted_sev)
+        if r["sec"] and not _has_blocker_tag(m.group(0)):
+            tail = f"{tail} [sec:{r['sec']}]"
+            log.append(f"[hold] #{num} carried [sec:{r['sec']}] forward (floor gates on this body only)")
+        blocker_class = new_sev == "blocker" or bool(r["sec"]) or _has_blocker_tag(m.group(0))
+        new_status, marker = status, ""
+        if r["collision"] and status != "NOT FIXED":
+            new_status, marker = "NOT FIXED", _COLLISION_HOLD_MARKER
+        elif status in _FIX_STATUSES and r["status"] not in _FIX_STATUSES:
+            new_status, marker = r["status"], _NO_CODE_FIXED_MARKER
+        elif blocker_class and status != r["status"] and status in _CLEARING_STATUSES:
+            new_status, marker = r["status"], _BLOCKER_HOLD_MARKER
+        if new_status != status:
+            log.append(f"[hold] #{num} {status}->{new_status} (conversation-only: no code change)")
+        if new_sev != emitted_sev:
+            log.append(f"[hold] #{num} severity {emitted_sev}->{new_sev} (pinned to prior)")
+        if new_status == status and new_sev == emitted_sev and tail == re.sub(r"^\*{0,2}", "", m.group(4)).rstrip():
             return m.group(0)
-        if status in _FIX_STATUSES and prior_status not in _FIX_STATUSES:
-            log.append(f"[hold] #{num} {status}->{prior_status} (conversation-only: no code change)")
-            return f"- **#{num}** [{sev}] — {prior_status}{tail} {_NO_CODE_FIXED_MARKER}"
-        if blocker_class and status in _CLEARING_STATUSES:
-            # The floor gates on tags in THIS body: when the blocker-class came from
-            # the prior's tag and the verifier dropped it, carry it onto the held
-            # line — otherwise the status is held but the gate still sees a medium.
-            if not line_sec and num in prior_sec:
-                tail = f"{tail} [sec:{prior_sec[num]}]"
-            log.append(f"[hold] #{num} blocker-class {status}->{prior_status} (conversation-only: no code change)")
-            return f"- **#{num}** [{sev}] — {prior_status}{tail} {_BLOCKER_HOLD_MARKER}"
-        return m.group(0)
+        return f"- **#{num}** [{new_sev}] — {new_status}{tail}{(' ' + marker) if marker else ''}"
 
-    return _PRIOR_STATUS_LINE_RE.sub(_hold, body), log
+    body = _PRIOR_STATUS_LINE_RE.sub(_hold, body)
+    resurrected = []
+    for num, r in sorted(rec.items()):
+        if num in seen or r["status"] in _CLOSED_STATUSES:
+            continue
+        tag = f" [sec:{r['sec']}]" if r["sec"] else ""
+        resurrected.append(
+            f"- **#{num}** [{r['sev']}] — {r['status']} — "
+            f"[air: re-inserted — prior finding absent from this re-review; pinned from prior round]{tag}")
+        log.append(f"[hold] #{num} resurrected [{r['sev']}] {r['status']} (absent from the emitted block)")
+    return _ensure_rereview_shape(body, log, resurrected), log
 
 
 def pin_and_resurrect(review_body: str, ledger: list) -> tuple:

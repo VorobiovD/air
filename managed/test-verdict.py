@@ -2947,4 +2947,26 @@ def test_hold_covers_new_in_prior_and_sec_floored():
     assert "- **#2** [medium] — FIXED — still done" in out                              # re-asserted closure untouched
     assert "- **#3** [blocker] — NOT FIXED" in out                                       # new-in-prior blocker held
     assert "- **#4** [low] — NOT FIXED" in out and _NO_CODE_FIXED_MARKER in out          # FIXED without code held
-    assert len(log) == 3
+    assert len([l for l in log if "->" in l]) == 3   # three status rewrites (plus the [sec:] carry line)
+
+
+def test_hold_collision_honors_recorded_status_unless_new_is_blocker():
+    # Round-4 medium 3: carried #1 FIXED + new `**1.` (renumbering collision).
+    from verdict import hold_blockers_to_prior, _COLLISION_HOLD_MARKER
+    prior_low = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n- **#1** [blocker] — FIXED — done\n\n"
+                 "### New Findings (introduced since last review)\n\n#### Low\n\n**1. tidy**\n\nx\n\nReviewed at: y\n")
+    out, log = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — FIXED — still done"), prior_low)
+    assert "- **#1** [blocker] — FIXED — still done" in out and not log       # recorded FIXED honored
+    prior_blk = prior_low.replace("#### Low\n\n**1. tidy**", "#### Blockers\n\n**1. new blocker")
+    out2, log2 = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — FIXED — still done"), prior_blk)
+    assert "- **#1** [blocker] — NOT FIXED" in out2 and _COLLISION_HOLD_MARKER in out2
+
+
+def test_hold_resurrects_omitted_open_prior_findings_only():
+    from verdict import hold_blockers_to_prior
+    prior = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+             "- **#1** [medium] — NOT FIXED — a\n- **#2** [low] — DISPUTED — closed\n- **#3** [blocker] — FIXED — closed\n\n"
+             "### New Findings (introduced since last review)\n\n#### Medium\n\n**4. new medium [sec:idor]**\n\nx\n\nReviewed at: y\n")
+    out, log = hold_blockers_to_prior(_rr_body("- **#1** [medium] — NOT FIXED — a"), prior)
+    assert "- **#4** [medium] — NOT FIXED — [air: re-inserted" in out and "[sec:idor]" in out
+    assert "**#2**" not in out and "**#3**" not in out                          # closed last round → not resurrected

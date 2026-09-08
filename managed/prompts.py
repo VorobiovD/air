@@ -359,7 +359,7 @@ def _render_carry_forward_ledger(ledger) -> str:
     )
 
 
-def conversation_only_directive(prior_sha: str, n_comments: int) -> str:
+def conversation_only_directive(prior_sha: str, n_comments: int, new_in_prior: dict | None = None) -> str:
     """The verifier's task framing for a CONVERSATION-ONLY re-review: the PR is
     already reviewed at this exact head and a reviewer was re-requested after
     new developer discussion, with no new commits. There is no code delta to
@@ -398,6 +398,12 @@ def conversation_only_directive(prior_sha: str, n_comments: int) -> str:
         f"hold, stays at its prior status with a one-line reason.\n"
         f"Keep the full re-review format (status block, banner, footer) so the outcome is "
         f"machine-parseable.\n"
+        + (
+            "- The prior review ALSO raised these as NEW findings (see its New Findings "
+            "section) — they are prior findings too; include a status line for EACH: "
+            + ", ".join(f"#{n} [{sev}]" for n, sev in sorted(new_in_prior.items())) + ".\n"
+            if new_in_prior else ""
+        )
     )
 
 

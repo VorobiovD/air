@@ -69,7 +69,7 @@ from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
     _CONFLICT_GATE_REASON,
 )
-from verdict import extract_prior_statuses, extract_fresh_findings, strip_new_findings, hold_blockers_to_prior, _reconcile_banner_with_ledger  # noqa: E402  (conversation-only re-review guards)
+from verdict import extract_prior_statuses, extract_fresh_findings, strip_new_findings, hold_blockers_to_prior, _reconcile_banner_with_ledger, _prior_new_findings  # noqa: E402  (conversation-only re-review guards)
 from github_client import AIR_VERDICT_SENTINEL  # noqa: E402  (prior-verdict fail-close detection)
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
 
@@ -95,7 +95,10 @@ def _prior_verdict_process_fail_closed(rv, prior_body: str, head_sha: str, bot_l
     mine = []
     for r in rv or []:
         r = r or {}
-        if (r.get("commit_id") or "").lower() != (head_sha or "").lower():
+        # A review with NO commit_id can't be placed — if it is air's and gating,
+        # treat it as standing (conservative) rather than invisible.
+        cid = (r.get("commit_id") or "").lower()
+        if cid and cid != (head_sha or "").lower():
             continue
         if (r.get("state") or "") == "DISMISSED":
             continue
@@ -652,6 +655,13 @@ async def run_headless_review(args, bot_token: str) -> dict:
             print(f"  [re-review] {len(trigger_comments)} developer comment(s) since the review "
                   f"at head, but it carries no findings — nothing to re-adjudicate; skipping")
             trigger_comments = []
+        if trigger_comments and isinstance(rv_res, BaseException):
+            # The process-fail-close guard reads the PR's reviews; if that fetch
+            # failed we cannot know whether a fail-closed verdict is standing.
+            # A guard that can't check must fail CLOSED (skip), not stop guarding.
+            print("  [gate] conversation-only re-review: reviews fetch failed, so the standing "
+                  "verdict can't be verified — skipping", file=sys.stderr)
+            trigger_comments = []
         if trigger_comments and _prior_verdict_process_fail_closed(
                 rv, prior_body_at_head, head_sha, air_logins):
             print(f"  [re-review] developer comment(s) since the review at head, but the standing "
@@ -1079,7 +1089,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
             findings_block = [
                 "===== No specialist findings this round =====\n"
                 "(conversation-only re-review — no code changed; see the task directive)"]
-            verifier_task = verifier_task + conversation_only_directive(prior_sha, len(trigger_comments))
+            verifier_task = verifier_task + conversation_only_directive(
+                prior_sha, len(trigger_comments), _prior_new_findings(prior_body_at_head))
         verifier_input = (
             "Specialist findings to verify (verify each against source per your system prompt; "
             "drop FALSE POSITIVE / below-threshold; emit [sec:<token>] tags on confirmed exposures). "
