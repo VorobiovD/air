@@ -1267,6 +1267,37 @@ def filter_comments_after(
     return matches
 
 
+def developer_comments_after(comments: list[dict], after_comment_id: int,
+                             bot_logins) -> list[dict]:
+    """The HUMAN developer comments posted after `after_comment_id` — the
+    trigger set for a conversation-only re-review (a re-request at an already-
+    reviewed head with new discussion, but no new code). `filter_comments_after`
+    returns EVERY later comment, which is right for context but wrong as a
+    trigger: air's own follow-ups (a `## air review — could not complete` note,
+    a CLI verdict), third-party bots (Notion/Dependabot/CI linkers) and any
+    `[bot]` account would otherwise re-fire a paid pass — and air's own next
+    post would re-trigger itself. So drop: any login in `bot_logins` (the
+    AIR_PAT_MAP/AIR_BOT_LOGINS allowlist ∪ the current token), any GitHub Bot-
+    typed user or `[bot]`-suffixed login, and any body carrying air's own
+    review/non-review prefixes regardless of author (a human quoting one whole
+    is vanishingly rare; an air post under an unlisted rotated account is not).
+    Chronological order is inherited from filter_comments_after."""
+    bots = {b.lower() for b in (bot_logins or set()) if b}
+    prefixes = pr_conversation.BOT_REVIEW_PREFIXES + pr_conversation.BOT_NONREVIEW_PREFIXES
+    out = []
+    for c in filter_comments_after(comments, after_comment_id):
+        user = (c or {}).get("user") or {}
+        login = (user.get("login") or "").strip()
+        if not login or login.lower() in bots or login.lower().endswith("[bot]"):
+            continue
+        if (user.get("type") or "").lower() == "bot":
+            continue
+        if ((c or {}).get("body") or "").startswith(prefixes):
+            continue
+        out.append(c)
+    return out
+
+
 def format_developer_responses(comments: list[dict]) -> str:
     """Render PR comments as untrusted <developer-comment> blocks."""
     if not comments:
@@ -2241,6 +2272,20 @@ async def run_review(args):
             f"Already reviewed at {prior_sha[:8]}. No changes since; skipping. "
             f"Pass --fresh to force a full review."
         )
+        # The conversation-only re-review (re-request at head after new developer
+        # discussion → verifier-only re-adjudication) is implemented on the
+        # messages-api (headless) path, which orchestrates the verifier directly.
+        # This managed/MA path routes through the coordinator session and does not
+        # run it (v1) — surface the situation so the skip isn't silent.
+        try:
+            n_dev = len(developer_comments_after(all_comments, prior["id"],
+                                                 _air_bot_logins() | {bot_login}))
+        except Exception:
+            n_dev = 0
+        if n_dev:
+            print(f"  [re-review] {n_dev} developer comment(s) since that review — a "
+                  f"conversation-only re-review runs in messages-api mode only "
+                  f"(AIR_REVIEW_MODE); this managed path skips.", file=sys.stderr)
         # A kill between the comment POST and the verdict POST used to lose
         # the verdict for this SHA permanently — this gate refused to look
         # again. The posted comment is deterministic state: recompute the

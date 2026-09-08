@@ -266,7 +266,8 @@ def _prior_comment(prior_sha):
 def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc=None,
                   head="a" * 40, fresh=False, ledger=None, pin=None,
                   ledger_pin_env=None, ledger_calls=None, full_diff=None, codex=None,
-                  no_codex=False, promote_env=None, promote_fp=None):
+                  no_codex=False, promote_env=None, promote_fp=None, verifier_body=None,
+                  dry_run=True):
     """Drive run_headless_review (dry-run) for re-review-path tests. Returns
     (result, calls) where calls counts which diff fetcher fired. inter_diff is the
     fetch_inter_diff RETURN (str / "" / None); inter_exc, if set, makes it RAISE.
@@ -350,13 +351,24 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
         calls.setdefault("efforts", {})[kw.get("label", "")] = kw.get("effort")
         if kw.get("label") == "verifier":
             calls["verifier_task"] = kw.get("task", "")
-            body = f"## Code Review\n\nClean.\n\nNo blockers.\n\nReviewed at: {head}\n"
+            calls["verifier_context"] = kw.get("pr_context", "")
+            body = verifier_body or f"## Code Review\n\nClean.\n\nNo blockers.\n\nReviewed at: {head}\n"
         else:
+            calls["specialists_run"] = calls.get("specialists_run", 0) + 1
             body = "## Code Review\n\nlens.\n"
         return {"text": body, "usage": {}, "turns": 1, "tool_calls": 0, "wall_s": 0.0, "stop": "end_turn"}
 
     monkeypatch.setattr(headless.agent_loop, "run_agent", fake_run_agent)
-    args = types.SimpleNamespace(repo="o/r", pr_number=7, dry_run=True, closed=False, fresh=fresh,
+    if not dry_run:
+        # Non-dry-run: stub the post path + learning tail so the REAL tail wiring
+        # (which the dry-run early-return never reaches) is observable via spies.
+        monkeypatch.setattr(headless, "_post_review_comment_with_retry",
+                            lambda *a, **k: types.SimpleNamespace(ok=True, status_code=201))
+        monkeypatch.setattr(headless, "_submit_verdict_guarded", lambda *a, **k: None)
+        def _learn_spy(*a, **k):
+            calls["learn_counter"] = calls.get("learn_counter", 0) + 1
+        monkeypatch.setattr(review, "_update_learn_counter", _learn_spy)
+    args = types.SimpleNamespace(repo="o/r", pr_number=7, dry_run=dry_run, closed=False, fresh=fresh,
                                  no_codex=no_codex)
     return asyncio.run(headless.run_headless_review(args, "tok")), calls
 
@@ -1332,3 +1344,122 @@ def test_head_blob_three_states(tmp_path):
     assert sha and all(c in "0123456789abcdef" for c in sha)
     assert review._head_blob(str(repo), head, "missing.py") == ""
     assert review._head_blob(str(repo), "deadbeef00", "f.py") is None
+
+
+# --- conversation-only re-review (re-request at an already-reviewed head after
+# new developer discussion, no new commits) ------------------------------------
+_CO_HEAD = "a" * 40
+_CO_PRIOR = {"id": 10, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+             "body": ("## Code Review\n\n### Blockers\n\n**1. flaw**\n\n"
+                      "[`f.py#L2`](https://github.com/o/r/blob/aaaaaaaaaaaa/f.py#L2) — x\n\n"
+                      "Reviewed at: " + _CO_HEAD + "\n")}
+_CO_DEV = {"id": 11, "created_at": "2026-09-01T11:00:00Z", "user": {"login": "alice", "type": "User"},
+           "body": "Finding 1 is already covered by the auth middleware — see auth.py L40."}
+_CO_BOT = {"id": 12, "created_at": "2026-09-01T11:05:00Z",
+           "user": {"login": "notion-workspace[bot]", "type": "Bot"}, "body": "Linked a page."}
+_CO_AIR_NOTE = {"id": 13, "created_at": "2026-09-01T11:06:00Z", "user": {"login": "air-bot"},
+                "body": "## air review — could not complete\n\ntransient error"}
+
+
+def test_at_head_with_dev_comment_runs_conversation_only_rereview(tmp_path, monkeypatch):
+    # The Nathan case: reviewed at head, dev adds context, re-requests. Before: the
+    # at-head skip ($0, silent). Now: a verifier-only re-adjudication — no diff
+    # fetch, no specialists, no codex; the verifier sees the directive AND the
+    # developer's comment, and the <diff> block says explicitly that nothing changed.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD)
+    assert out["ok"] and out.get("conversation_only") is True
+    assert out["verdict"] is not None                        # a real verdict was produced
+    assert calls["inter"] == 0 and calls["full"] == 0         # no diff fetched at all
+    assert calls.get("specialists_run", 0) == 0               # verifier only
+    assert "CONVERSATION-ONLY RE-REVIEW" in calls["verifier_task"]
+    assert "Do NOT mark any prior finding FIXED" in calls["verifier_task"]
+    assert "conversation-only re-review" in calls["verifier_context"]   # the <diff> marker
+    assert 'author="alice"' in calls["verifier_context"]                # dev comment reached the verifier
+
+
+def test_at_head_without_dev_comment_still_skips(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR], head=_CO_HEAD)
+    assert out["reason"] == "already reviewed at head" and out["verdict"] is None
+    assert "verifier_task" not in calls
+
+
+def test_at_head_bot_and_own_comments_do_not_trigger(tmp_path, monkeypatch):
+    # Loop/cost guard: a third-party bot's comment and air's OWN diagnostic note
+    # after the review must not re-fire a paid pass.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    out, calls = _rereview_run(monkeypatch, tmp_path,
+                               comments=[_CO_PRIOR, _CO_BOT, _CO_AIR_NOTE], head=_CO_HEAD)
+    assert out["reason"] == "already reviewed at head"
+    assert "verifier_task" not in calls
+
+
+def test_conversation_only_kill_switch_restores_plain_skip(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIR_REREVIEW_ON_COMMENTS", "0")
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD)
+    assert out["reason"] == "already reviewed at head"
+    assert "verifier_task" not in calls
+
+
+def test_conversation_only_self_terminates(tmp_path, monkeypatch):
+    # The review the pass posts is NEWER than the triggering comment → the next
+    # re-request finds no human comment after the (new) prior → plain skip. No loop.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    newer_air = {"id": 14, "created_at": "2026-09-01T12:00:00Z", "user": {"login": "air-bot"},
+                 "body": ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+                          "- **#1** [blocker] — DISPUTED — covered by middleware\n\n"
+                          "Reviewed at: " + _CO_HEAD + "\n")}
+    out, calls = _rereview_run(monkeypatch, tmp_path,
+                               comments=[_CO_PRIOR, _CO_DEV, newer_air], head=_CO_HEAD)
+    assert out["reason"] == "already reviewed at head"
+    assert "verifier_task" not in calls
+
+
+def test_conversation_only_pins_fixed_without_code_but_honors_disputed(tmp_path, monkeypatch):
+    # Gate-safety by construction: with an EMPTY inter-diff the carry-forward ledger
+    # sees every anchor UNCHANGED and no file touched, so a verifier FIXED on the
+    # blocker is rewritten to NOT FIXED (nothing changed ⇒ nothing was fixed) and the
+    # PR stays gated; a DISPUTED — the evidence-bearing exit — passes and un-gates.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    fixed_body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+                  "- **#1** [blocker] — FIXED — dev says it's covered\n\n"
+                  "Reviewed at: " + _CO_HEAD + "\n")
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD,
+                           verifier_body=fixed_body)
+    assert out["conversation_only"] is True
+    assert "— NOT FIXED" in out["body"] and "[air: pinned NOT FIXED" in out["body"]
+    assert out["verdict"] == "REQUEST_CHANGES"
+    disputed_body = fixed_body.replace("— FIXED — dev says it's covered",
+                                       "— DISPUTED — auth middleware at auth.py L40 guards this path")
+    out2, _ = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD,
+                            verifier_body=disputed_body)
+    assert "— DISPUTED" in out2["body"] and "NOT FIXED" not in out2["body"]
+    assert out2["verdict"] == "APPROVE"
+
+
+def test_conversation_only_skips_learning_tail(tmp_path, monkeypatch):
+    # Non-dry-run wiring: the pass posts + submits a verdict but must NOT advance the
+    # learn cadence or re-strengthen author patterns (it reviewed no new code) —
+    # while a normal re-review (real inter-diff) still does.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD,
+                               dry_run=False)
+    assert out["ok"] and out.get("conversation_only") is True
+    assert calls.get("learn_counter", 0) == 0
+    prior_older = dict(_CO_PRIOR, body=_CO_PRIOR["body"].replace(_CO_HEAD, "b" * 40))
+    out2, calls2 = _rereview_run(monkeypatch, tmp_path, comments=[prior_older], head=_CO_HEAD,
+                                 inter_diff="diff --git a/f.py b/f.py\n@@ -1 +1 @@\n-x\n+y\n",
+                                 dry_run=False)
+    assert out2["ok"] and calls2.get("learn_counter", 0) == 1
+
+
+def test_developer_comments_after_filters_bots_and_air():
+    bots = {"air-bot"}
+    got = review.developer_comments_after(
+        [_CO_PRIOR, _CO_DEV, _CO_BOT, _CO_AIR_NOTE,
+         {"id": 15, "user": {"login": "rotated-air"}, "body": "## Code Review\n\nposted by an unlisted air account\n"},
+         {"id": 16, "user": {"login": "bob"}, "body": "also human"}],
+        10, bots)
+    assert [c["id"] for c in got] == [11, 16]
+    assert review.developer_comments_after([_CO_PRIOR, _CO_DEV], 0, bots) == []   # no prior → nothing

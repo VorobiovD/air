@@ -359,6 +359,43 @@ def _render_carry_forward_ledger(ledger) -> str:
     )
 
 
+def conversation_only_directive(prior_sha: str, n_comments: int) -> str:
+    """The verifier's task framing for a CONVERSATION-ONLY re-review: the PR is
+    already reviewed at this exact head and a reviewer was re-requested after
+    new developer discussion, with no new commits. There is no code delta to
+    review, so no specialists ran — the verifier's job is purely to re-adjudicate
+    the PRIOR findings against what the developer said, verified against source.
+
+    The status vocabulary is deliberately narrowed: without a code change a
+    finding cannot become FIXED (the deterministic ledger pins any such claim
+    back to NOT FIXED anyway), and NO new findings may be raised (nothing new
+    exists to find, and inventing findings from a discussion thread is the
+    hallucination shape the specialist+verifier split exists to prevent). The
+    legitimate movements are the evidence-bearing exits — DISPUTED / FALSE
+    POSITIVE / PRE-EXISTING / DEFERRED-with-ticket — each grounded in the
+    developer's stated evidence AND your own read of the current source."""
+    return (
+        f"\nCONVERSATION-ONLY RE-REVIEW — READ FIRST:\n\n"
+        f"No code has changed since the prior review at {prior_sha[:8]} (the inter-diff "
+        f"is empty), and no specialist pass ran this round. The developer added "
+        f"{n_comments} comment(s) after that review and re-requested a look. Your ONLY "
+        f"task is to re-adjudicate the PRIOR findings against those developer responses "
+        f"(in <developer-comment> blocks), verifying each claim against the CURRENT "
+        f"source:\n"
+        f"- Do NOT emit any new finding. There is no new code to find anything in.\n"
+        f"- Do NOT mark any prior finding FIXED — nothing changed, so nothing was fixed. "
+        f"(A FIXED here is rewritten to NOT FIXED deterministically.)\n"
+        f"- A prior finding MAY move to DISPUTED, FALSE POSITIVE, or PRE-EXISTING when the "
+        f"developer's explanation holds up against the source (an existing compensating "
+        f"control, a misread, code that predates this PR), or to DEFERRED when a non-"
+        f"blocker is explicitly punted with a ticket reference. Cite the evidence.\n"
+        f"- A prior finding the developer did not address, or whose explanation does not "
+        f"hold, stays at its prior status with a one-line reason.\n"
+        f"Keep the full re-review format (status block, banner, footer) so the outcome is "
+        f"machine-parseable.\n"
+    )
+
+
 def build_verifier_task(
     mode: str, repo: str, head_sha: str, prior_sha: str | None, prior_body: str,
     ledger=None,

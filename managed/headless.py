@@ -63,7 +63,7 @@ from github_client import (  # noqa: E402
     fetch_issue_comments, fetch_pr_reviews, fetch_pr_review_comments, fetch_related_prs,
     _post_review_comment_with_retry, submit_review_verdict, dismiss_stale_air_verdicts,
 )
-from prompts import build_pr_context, build_verifier_task  # noqa: E402
+from prompts import build_pr_context, build_verifier_task, conversation_only_directive  # noqa: E402
 from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py; pure, network-free)
     should_request_changes, resolve_verdict_event, normalize_verdict_banner, append_gate_note, NO_APPROVE_VERDICT_BODY, _extract_review_body, has_conflict_markers,
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
@@ -506,7 +506,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
     from review import (  # noqa: E402
         compute_file_statuses, compute_blame_summaries, compute_churn_data,
         compute_diff_check_warnings, CONVERSATION_MAX_ENTRIES,
-        filter_comments_after, format_developer_responses, _ledger_pin_enabled,
+        filter_comments_after, format_developer_responses, developer_comments_after,
+        _ledger_pin_enabled,
         _update_learn_counter, _maybe_render_mirror, _backfill_verdict_if_missing,
         _collect_changed_paths, _path_is_ui, _user_facing_copy_globs, _path_matches_globs,
         run_codex_session, _codex_skip_tiny_delta, _related_prs_enabled, _ensure_respond_footer,
@@ -571,8 +572,37 @@ async def run_headless_review(args, bot_token: str) -> dict:
         prior_sha = extract_reviewed_at_sha(prior["body"]) if prior else None
     mode = "re-review" if (prior and prior_sha) else "full"
 
-    # Already reviewed at this exact head → nothing to do (mirror review.py's skip).
+    # Already reviewed at this exact head. Normally nothing to do (mirror review.py's
+    # skip) — EXCEPT when a human re-requested after adding discussion with no new
+    # commits: "I explained why finding #2 isn't a bug — please re-check." Before,
+    # that re-request fired the workflow and silently hit this skip ($0, no signal),
+    # and the only way to get a re-adjudication was to push a throwaway commit.
+    # Now it runs a CONVERSATION-ONLY re-review: verifier only (no specialists, no
+    # codex — there is no code delta to find anything in), re-adjudicating the prior
+    # findings against the developer's comments. Gate-safe by construction: the
+    # empty inter-diff makes the carry-forward ledger pin any FIXED back to NOT FIXED
+    # (nothing changed ⇒ nothing was fixed), so the only movements are the evidence-
+    # bearing exits (DISPUTED / FALSE POSITIVE / PRE-EXISTING / DEFERRED) the normal
+    # re-review already allows. Self-terminating: the review it posts is newer than
+    # the comments that triggered it, so the next re-request finds no HUMAN comment
+    # after the prior and skips (developer_comments_after excludes air's own posts
+    # and other bots — the loop guard). Kill switch AIR_REREVIEW_ON_COMMENTS=0.
+    conversation_only = False
     if mode == "re-review" and prior_sha == head_sha:
+        trigger_comments = []
+        if env.env_bool("AIR_REREVIEW_ON_COMMENTS", True):
+            try:
+                trigger_comments = developer_comments_after(
+                    ic, prior["id"], _air_bot_logins() | {bot_login})
+            except Exception as e:
+                print(f"  [warn] developer-comment trigger check failed: "
+                      f"{type(e).__name__}: {e} — treating as none", file=sys.stderr)
+        if trigger_comments:
+            conversation_only = True
+            print(f"  [re-review] already reviewed at head {head_sha[:8]}, but "
+                  f"{len(trigger_comments)} developer comment(s) landed since — "
+                  f"conversation-only re-review (verifier only, no code delta)")
+    if mode == "re-review" and prior_sha == head_sha and not conversation_only:
         print(f"  [gate] already reviewed at head {head_sha[:8]} — skipping")
         # headless posts comment → verdict → dismissal as three separate
         # non-transactional REST calls (the post path below); a SIGTERM/network
@@ -616,7 +646,14 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # fall back to a FULL review; "" = a genuinely-empty successful compare (no new
     # commits) → skip. The None/"" distinction is load-bearing. fetch_inter_diff
     # RAISES on retry exhaustion, so wrap it.
-    if mode == "re-review":
+    if conversation_only:
+        # No code delta by definition (prior_sha == head_sha) — fetching the
+        # compare would return "" and trip the empty-compare skip below. The
+        # verifier re-adjudicates against the CURRENT source (sandbox reads),
+        # not a diff.
+        diff = ""
+        print(f"  [re-review] conversation-only: no code changes since {prior_sha[:8]}")
+    elif mode == "re-review":
         # Re-review inter-diff scope (parity with review.py; kill switch
         # AIR_REREVIEW_FILE_SCOPE): restrict `prior_sha...head` to THIS PR's own
         # changed files so a base-branch merge after the prior review can't balloon
@@ -787,7 +824,10 @@ async def run_headless_review(args, bot_token: str) -> dict:
                     diff_check_warnings=diff_check_warnings,
                     related_prs=related_prs,
                     patterns_dir=patterns_rel or "")
-                  + f"\n\n<diff>\n{html.escape(diff)}\n</diff>\n")
+                  + ("\n\n<diff>\n[air: no code changes since the prior review at "
+                     f"{prior_sha[:8]} — conversation-only re-review]\n</diff>\n"
+                     if conversation_only else
+                     f"\n\n<diff>\n{html.escape(diff)}\n</diff>\n"))
 
     # Everything from here through the verifier reads the staged patterns dir, so
     # wrap it in try/finally: the staged .air-patterns/ is removed on ANY failure
@@ -830,6 +870,14 @@ async def run_headless_review(args, bot_token: str) -> dict:
             ui_reason = "declared copy paths" if ui_in_scope else ""
         print(f"[headless] ui-copy: {f'in scope ({ui_reason})' if ui_in_scope else 'skipped (no user-facing files)'}")
         in_scope = list(SPECIALISTS) + ([UI_SPECIALIST] if ui_in_scope else [])
+        if conversation_only:
+            # Nothing new to review: no specialist pass, no codex. The verifier
+            # alone re-adjudicates the prior findings against the developer's
+            # comments (see the directive folded into its task below). This is
+            # also what keeps the pass cheap (~one verifier leg) and what makes
+            # "no new findings" structurally true rather than merely instructed.
+            in_scope = []
+            print("[headless] conversation-only: specialists + codex skipped (no code delta)")
 
         # Codex external second-opinion (P3) — launched CONCURRENTLY with the
         # specialists and folded into the verifier input like another finding
@@ -841,7 +889,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # verifier, which assigns severity; a codex failure never gates.
         codex_base_sha = (prior_sha if mode == "re-review" else meta["base"].get("sha")) or ""
         codex_enabled = bool(
-            not getattr(args, "no_codex", False) and have_checkout and codex_base_sha
+            not conversation_only
+            and not getattr(args, "no_codex", False) and have_checkout and codex_base_sha
             and shutil.which("codex") and os.environ.get("OPENAI_API_KEY")
             and _codex_skip_tiny_delta(mode, diff) is None)
         codex_task = None
@@ -935,6 +984,15 @@ async def run_headless_review(args, bot_token: str) -> dict:
         verifier_task = build_verifier_task(
             mode, args.repo, head_sha, prior_sha,
             (prior.get("body", "") if prior else ""), ledger=ledger)
+        if conversation_only:
+            # No specialist output exists; the "findings to verify" slot carries the
+            # conversation-only directive instead (single-sourced in prompts.py so
+            # a future managed/CLI implementation frames the pass identically).
+            findings_block = [
+                "===== No specialist findings this round =====\n"
+                "(conversation-only re-review — see the directive below)",
+                conversation_only_directive(prior_sha, len(trigger_comments)),
+            ]
         verifier_input = (
             "Specialist findings to verify (verify each against source per your system prompt; "
             "drop FALSE POSITIVE / below-threshold; emit [sec:<token>] tags on confirmed exposures). "
@@ -1100,7 +1158,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
         print(f"\n===== DRY RUN — verdict: {verdict} ({reason or 'clean'}) =====\n")
         print(_ensure_respond_footer(review_body))
         return {"ok": True, "verdict": verdict, "reason": reason, "body": review_body,
-                "wall": wall, "cost": cost, "dry_run": True,
+                "wall": wall, "cost": cost, "dry_run": True, "conversation_only": conversation_only,
                 "specialists": {a: (r["tool_calls"] if r else None) for a, r in specialist_results.items()}}
 
     # If the comment POST fails (e.g. a second 422), don't proceed to submit a formal
@@ -1134,6 +1192,14 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # the guard above; dry-run returned earlier, so this only runs on a real posted
     # review.) On air (wiki-backed, store_id empty) only the counter/learn-trigger
     # half fires — pattern_writer + mirror are store-only no-ops.
+    # A conversation-only pass re-adjudicated OLD findings over NO new code: there
+    # is no new author pattern to strengthen (re-running pattern_writer would
+    # double-count the prior round's findings) and it is not a review of new work
+    # for the learn cadence — skip the whole tail.
+    if conversation_only:
+        print("  [learn] conversation-only re-review — learning write-back skipped (no new code)")
+        return {"ok": True, "verdict": verdict, "reason": reason, "wall": wall, "cost": cost,
+                "conversation_only": True}
     if store_id:
         try:
             import pattern_writer  # noqa: E402 (lazy — managed/, store-only path)

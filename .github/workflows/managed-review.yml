@@ -589,6 +589,14 @@ jobs:
           # deterministic carry-forward guard fleet-lessly. Fails closed, so
           # disabling only removes the guard — it never breaks a review.
           AIR_LEDGER_PIN: ${{ vars.AIR_LEDGER_PIN }}
+          # Conversation-only re-review (messages-api mode). Default ON: a
+          # reviewer re-requested at an already-reviewed head AFTER new developer
+          # comments runs a verifier-only re-adjudication of the prior findings
+          # against those comments (no specialists, no code delta — a FIXED
+          # without code is pinned back to NOT FIXED; only DISPUTED / FALSE
+          # POSITIVE / PRE-EXISTING / DEFERRED can move). Set a caller repo/org
+          # VARIABLE AIR_REREVIEW_ON_COMMENTS=0 to restore the plain at-head skip.
+          AIR_REREVIEW_ON_COMMENTS: ${{ vars.AIR_REREVIEW_ON_COMMENTS }}
           # Fresh-gate exposure floor. Default ON (review.py treats unset/empty
           # as enabled); set a caller repo/org VARIABLE AIR_CATEGORY_FLOOR=0 in
           # Settings → Variables to disable the deterministic "active exposure =
