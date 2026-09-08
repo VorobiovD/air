@@ -1972,7 +1972,7 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
                 # body with no line anchor, so a quoted tag would still gate.
                 quoted = re.sub(r"\s*\[sec:[a-z0-9-]+\]", "", m.group(0), flags=re.IGNORECASE).rstrip()
                 log.append(f"[hold] #{num} blockquoted outside the status block — not a prior finding"
-                           + (" (tag removed)" if quoted != m.group(0) else ""))
+                           + (" (tag removed)" if quoted != m.group(0).rstrip() else ""))
                 return "> " + quoted
             log.append(f"[hold] #{num} dropped — not a prior finding (no new findings without code)")
             return _DROPPED_LINE
