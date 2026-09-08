@@ -1968,8 +1968,12 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
             # intact while taking the line off the line-anchored gate counters,
             # which scan the whole body (extracted AND raw).
             if sec_span[0] >= 0 and not (sec_span[0] <= m.start() < sec_span[1]):
-                log.append(f"[hold] #{num} blockquoted outside the status block — not a prior finding")
-                return "> " + m.group(0)
+                # …and without any `[sec:]` tag: the category floor scans the whole
+                # body with no line anchor, so a quoted tag would still gate.
+                quoted = re.sub(r"\s*\[sec:[a-z0-9-]+\]", "", m.group(0), flags=re.IGNORECASE).rstrip()
+                log.append(f"[hold] #{num} blockquoted outside the status block — not a prior finding"
+                           + (" (tag removed)" if quoted != m.group(0) else ""))
+                return "> " + quoted
             log.append(f"[hold] #{num} dropped — not a prior finding (no new findings without code)")
             return _DROPPED_LINE
         seen.add(num)

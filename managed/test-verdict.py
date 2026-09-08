@@ -3146,8 +3146,12 @@ def test_hold_drop_is_scoped_to_the_status_section():
             "- **#9** [blocker] — NOT FIXED — quoted from an older review\n\nReviewed at: x\n")
     out, log = hold_blockers_to_prior(body, prior)
     assert "**#7**" not in out and "> - **#9** [blocker] — NOT FIXED — quoted" in out   # kept, as a quotation
-    from verdict import should_request_changes
+    from verdict import should_request_changes, count_category_floored
     assert should_request_changes(out)[0] is False              # …and off the (unscoped) gate counters
+    tagged = body.replace("quoted from an older review", "quoted from an older review [sec:pii-exposure]")
+    out_t, _ = hold_blockers_to_prior(tagged, prior)
+    assert "[sec:" not in out_t and count_category_floored(out_t)[0] == 0   # the floor is body-wide too
+    assert should_request_changes(out_t, floor_exposures=True)[0] is False
     # Section header drifted → can't scope → fail-safe: drop everywhere.
     drifted = body.replace("### Previous Findings Status", "### Previous Findings Status (round 2)")
     out2, _ = hold_blockers_to_prior(drifted, prior)
