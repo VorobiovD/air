@@ -2835,3 +2835,38 @@ def test_file_origin_resolver_temporal_kill_switch(tmp_path, monkeypatch):
     monkeypatch.setenv("AIR_TEMPORAL_ANCHOR", "0")
     assert make_file_origin_resolver([(r1, r1_sha)], str(diffs),
                                      temporal_dir=str(tdir))(1) is None
+
+
+# --- prior-FIXED re-assertion (conversation-only follow-up) + strip_new_findings ---
+
+def test_pin_keeps_fixed_when_prior_round_already_fixed_it():
+    # Re-asserting a closure the prior round honored is not a new fix claim: no
+    # inter-diff evidence needed. Without this, every round-3+ number-identity
+    # ledger re-poisoned already-fixed findings back to NOT FIXED.
+    already = _ledger_entry(1, "blocker", "FIXED")               # INDETERMINATE, untouched
+    still_open = _ledger_entry(2, "blocker", "NOT FIXED")
+    body = _rr_body("- **#1** [blocker] — FIXED — unchanged since last round",
+                    "- **#2** [blocker] — FIXED — claims fixed with no evidence")
+    out, log = pin_and_resurrect(body, [already, still_open])
+    assert "- **#1** [blocker] — FIXED" in out
+    assert "- **#2** [blocker] — NOT FIXED" in out
+    assert any("re-asserted" in l for l in log) and any("#2 FIXED->NOT FIXED" in l for l in log)
+
+
+def test_strip_new_findings_removes_only_new_sections():
+    from verdict import strip_new_findings
+    body = ("## Code Review (Re-review)\n\n> [!NOTE]\n> banner\n\n"
+            "### Previous Findings Status\n\n- **#1** [blocker] — DISPUTED — ok\n\n"
+            "### New Findings (introduced since last review)\n\n#### Blockers\n\n**1. invented**\n\nx\n\n"
+            "### Medium — consider fixing\n\n**2. also invented**\n\n"
+            "### Strengths\n\n- good\n\n### Pre-existing Issues\n\n- old\n\n"
+            "Reviewed at: " + "a" * 40 + "\n")
+    out, n = strip_new_findings(body)
+    assert n == 2
+    assert "invented" not in out
+    assert "### Previous Findings Status" in out and "— DISPUTED" in out
+    assert "### Strengths" in out and "### Pre-existing Issues" in out
+    assert out.rstrip().endswith("Reviewed at: " + "a" * 40)
+    assert strip_new_findings("")[1] == 0
+    same, n0 = strip_new_findings("## Code Review (Re-review)\n\n### Previous Findings Status\n\n- **#1** [low] — FIXED — x\n")
+    assert n0 == 0 and "FIXED" in same

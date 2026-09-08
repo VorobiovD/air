@@ -267,7 +267,7 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
                   head="a" * 40, fresh=False, ledger=None, pin=None,
                   ledger_pin_env=None, ledger_calls=None, full_diff=None, codex=None,
                   no_codex=False, promote_env=None, promote_fp=None, verifier_body=None,
-                  dry_run=True):
+                  dry_run=True, reviews=None, inline=None):
     """Drive run_headless_review (dry-run) for re-review-path tests. Returns
     (result, calls) where calls counts which diff fetcher fired. inter_diff is the
     fetch_inter_diff RETURN (str / "" / None); inter_exc, if set, makes it RAISE.
@@ -291,8 +291,14 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
     monkeypatch.setattr(headless, "fetch_pr_metadata", lambda *a, **k: meta)
     monkeypatch.setattr(headless, "fetch_bot_login", lambda *a, **k: "air-bot")
     monkeypatch.setattr(headless, "fetch_issue_comments", lambda *a, **k: comments)
-    monkeypatch.setattr(headless, "fetch_pr_reviews", lambda *a, **k: [])
-    monkeypatch.setattr(headless, "fetch_pr_review_comments", lambda *a, **k: [])
+    monkeypatch.setattr(headless, "fetch_pr_reviews", lambda *a, **k: reviews or [])
+    monkeypatch.setattr(headless, "fetch_pr_review_comments", lambda *a, **k: inline or [])
+    def _origin_spy(*a, **k):
+        calls["origin_resolver_built"] = calls.get("origin_resolver_built", 0) + 1
+        return None
+    # Lazily imported inside run_headless_review (`from review import …`), so the
+    # attribute to patch lives on `review`, not `headless`.
+    monkeypatch.setattr(review, "make_origin_resolver", _origin_spy)
     monkeypatch.setattr(headless.memory_store, "get_store_id", lambda *a, **k: None)
     monkeypatch.setattr(headless, "stage_patterns", lambda *a, **k: (None, None, "mock"))
     monkeypatch.setattr(review, "compute_file_statuses", lambda *a, **k: ("", []))
@@ -1463,3 +1469,86 @@ def test_developer_comments_after_filters_bots_and_air():
         10, bots)
     assert [c["id"] for c in got] == [11, 16]
     assert review.developer_comments_after([_CO_PRIOR, _CO_DEV], 0, bots) == []   # no prior → nothing
+
+
+# --- conversation-only: the dogfood-round-1 findings (blocker + 2 mediums + lows) ---
+_CO_PRIOR_R3 = {"id": 20, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+                "body": ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+                         "- **#1** [blocker] — NOT FIXED — still open\n"
+                         "- **#2** [medium] — FIXED — closed last round\n\n"
+                         "Reviewed at: " + _CO_HEAD + "\n")}
+_CO_DEV_R3 = dict(_CO_DEV, id=21)
+
+
+def test_conversation_only_round3_never_builds_origin_resolver_and_pins_open_blocker(tmp_path, monkeypatch):
+    # THE local-dogfood blocker: a round-3+ prior went through the origin resolver,
+    # whose origin..head window contains every fix since round 1 → file_touched=True
+    # → a verifier FIXED on a still-OPEN carried blocker was honored with zero new
+    # code. Conversation-only must use pure number-identity: resolver never built,
+    # open blocker's FIXED pinned back, PR stays gated.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [blocker] — FIXED — dev says it's handled\n"
+            "- **#2** [medium] — FIXED — unchanged\n\nReviewed at: " + _CO_HEAD + "\n")
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR_R3, _CO_DEV_R3],
+                               head=_CO_HEAD, verifier_body=body)
+    assert out["conversation_only"] is True
+    assert calls.get("origin_resolver_built", 0) == 0
+    assert "- **#1** [blocker] — NOT FIXED" in out["body"] and out["verdict"] == "REQUEST_CHANGES"
+    # …while the finding the prior round ALREADY closed is not re-poisoned:
+    assert "- **#2** [medium] — FIXED" in out["body"]
+
+
+def test_conversation_only_hallucinated_new_blocker_is_stripped(tmp_path, monkeypatch):
+    # Medium #2: a new `**1.` blocker gates via count_blockers with no ledger at
+    # all. With no code change there is nothing new to find → the section is
+    # removed deterministically before extraction AND before the raw-body gate.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [blocker] — DISPUTED — middleware guards this path\n\n"
+            "### New Findings (introduced since last review)\n\n#### Blockers\n\n"
+            "**1. Invented from the discussion thread**\n\n"
+            "[`f.py#L9`](https://github.com/o/r/blob/aaaaaaaaaaaa/f.py#L9) — made up\n\n"
+            "### Strengths\n\n- fine\n\nReviewed at: " + _CO_HEAD + "\n")
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD,
+                               verifier_body=body)
+    assert "Invented from the discussion thread" not in out["body"]
+    assert "### Strengths" in out["body"] and "— DISPUTED" in out["body"]
+    assert out["verdict"] == "APPROVE"
+    # and the prompt no longer invites it:
+    assert "#### Blockers" not in calls["verifier_task"].split("New Findings")[-1][:200]
+    assert "NOT AVAILABLE this round" in calls["verifier_task"]
+
+
+def test_conversation_only_skips_when_prior_has_no_findings(tmp_path, monkeypatch):
+    # Medium #3: a clean prior gives the ledger nothing to hold → a "take another
+    # look" comment could flip an approved PR on a hallucination. Nothing to
+    # re-adjudicate → skip.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    clean_prior = {"id": 30, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+                   "body": "## Code Review\n\nNo blockers.\n\n### Strengths\n\n- ok\n\nReviewed at: " + _CO_HEAD + "\n"}
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[clean_prior, dict(_CO_DEV, id=31)],
+                               head=_CO_HEAD)
+    assert out["reason"] == "already reviewed at head"
+    assert "verifier_task" not in calls
+
+
+def test_conversation_only_triggers_on_inline_review_comment(tmp_path, monkeypatch):
+    # Low #9: an inline reply on the flagged line is the natural dispute gesture.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    inline = [{"id": 900, "created_at": "2026-09-01T11:30:00Z", "user": {"login": "alice", "type": "User"},
+               "body": "This is guarded two lines up.", "path": "f.py", "line": 2}]
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR], head=_CO_HEAD, inline=inline)
+    assert out.get("conversation_only") is True and "verifier_task" in calls
+
+
+def test_developer_activity_after_filters_surfaces():
+    prior = {"id": 10, "created_at": "2026-09-01T10:00:00Z"}
+    rv = [{"submitted_at": "2026-09-01T10:30:00Z", "user": {"login": "bob"}, "body": "looks wrong", "state": "COMMENTED"},
+          {"submitted_at": "2026-09-01T10:31:00Z", "user": {"login": "bob"}, "body": "", "state": "COMMENTED"},   # umbrella
+          {"submitted_at": "2026-09-01T10:32:00Z", "user": {"login": "bob"}, "body": "draft", "state": "PENDING"},
+          {"submitted_at": "2026-09-01T09:00:00Z", "user": {"login": "bob"}, "body": "before", "state": "COMMENTED"}]
+    inl = [{"created_at": "2026-09-01T10:40:00Z", "user": {"login": "dependabot[bot]", "type": "Bot"}, "body": "bump"},
+           {"created_at": "2026-09-01T10:41:00Z", "user": {"login": "carol"}, "body": "inline dispute"}]
+    got = review.developer_activity_after([], rv, inl, prior, {"air-bot"})
+    assert [g["body"] for g in got] == ["looks wrong", "inline dispute"]

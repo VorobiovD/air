@@ -1298,6 +1298,43 @@ def developer_comments_after(comments: list[dict], after_comment_id: int,
     return out
 
 
+def developer_activity_after(ic: list[dict], rv: list[dict], inl: list[dict], prior: dict,
+                             bot_logins) -> list[dict]:
+    """Every HUMAN contribution since the prior air review, across the three
+    conversation surfaces — the conversation-only re-review trigger. Issue
+    comments come from `developer_comments_after` (id-cursor, exact). PR reviews
+    and inline review comments live in different id spaces, so they are selected
+    by timestamp (`submitted_at` / `created_at` > the prior review's `created_at`,
+    ISO-8601 Zulu ⇒ lexical order is chronological) under the same human-only
+    filter. An inline reply on the flagged line is the most natural way a
+    developer disputes a finding — ignoring it while honoring an issue comment
+    would make the trigger feel random. Umbrella reviews with no body and
+    PENDING reviews are skipped (nothing was said)."""
+    out = list(developer_comments_after(ic, (prior or {}).get("id") or 0, bot_logins))
+    since = (prior or {}).get("created_at") or ""
+    if not since:
+        return out
+    bots = {b.lower() for b in (bot_logins or set()) if b}
+    prefixes = pr_conversation.BOT_REVIEW_PREFIXES + pr_conversation.BOT_NONREVIEW_PREFIXES
+    for kind, entries in (("review", rv or []), ("inline", inl or [])):
+        for e in entries:
+            e = e or {}
+            ts = e.get("submitted_at") or e.get("created_at") or ""
+            if not ts or ts <= since:
+                continue
+            user = e.get("user") or {}
+            login = (user.get("login") or "").strip()
+            body = (e.get("body") or "").strip()
+            if (not login or login.lower() in bots or login.lower().endswith("[bot]")
+                    or (user.get("type") or "").lower() == "bot" or not body
+                    or body.startswith(prefixes)):
+                continue
+            if kind == "review" and (e.get("state") or "") == "PENDING":
+                continue
+            out.append(e)
+    return out
+
+
 def format_developer_responses(comments: list[dict]) -> str:
     """Render PR comments as untrusted <developer-comment> blocks."""
     if not comments:
@@ -2277,11 +2314,13 @@ async def run_review(args):
         # messages-api (headless) path, which orchestrates the verifier directly.
         # This managed/MA path routes through the coordinator session and does not
         # run it (v1) — surface the situation so the skip isn't silent.
-        try:
-            n_dev = len(developer_comments_after(all_comments, prior["id"],
-                                                 _air_bot_logins() | {bot_login}))
-        except Exception:
-            n_dev = 0
+        n_dev = 0
+        if os.environ.get("AIR_REREVIEW_ON_COMMENTS", "1").strip().lower() not in ("0", "false", "no"):
+            try:
+                n_dev = len(developer_comments_after(all_comments, prior["id"],
+                                                     _air_bot_logins() | {bot_login}))
+            except Exception:
+                n_dev = 0
         if n_dev:
             print(f"  [re-review] {n_dev} developer comment(s) since that review — a "
                   f"conversation-only re-review runs in messages-api mode only "

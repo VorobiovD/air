@@ -398,7 +398,7 @@ def conversation_only_directive(prior_sha: str, n_comments: int) -> str:
 
 def build_verifier_task(
     mode: str, repo: str, head_sha: str, prior_sha: str | None, prior_body: str,
-    ledger=None,
+    ledger=None, conversation_only: bool = False,
 ) -> str:
     """Build the verifier_task template — coordinator forwards this verbatim
     to the verifier sub-agent in TURN 2, after appending all 4 specialist
@@ -479,6 +479,46 @@ def build_verifier_task(
             rr_banner = ""
             rr_layout = ""
 
+        # Conversation-only pass (no code changed since the prior review): the
+        # status menu must not offer FIXED as a fresh outcome and the template
+        # must not carry a New-Findings skeleton — a self-contradictory task
+        # ("don't emit new findings" above a `#### Blockers` scaffold with a
+        # worked FIXED example) is exactly what invites the verifier to fill it.
+        # The deterministic backstops (ledger pin, strip_new_findings) still
+        # stand behind this; trimming the prompt removes the invitation.
+        if conversation_only:
+            fixed_bullets = (
+                "- FIXED / PARTIALLY FIXED — NOT AVAILABLE this round: no code has changed "
+                "since the prior review, so nothing was fixed. A finding the prior round "
+                "already recorded as FIXED stays FIXED; an open finding stays at its prior "
+                "status unless the developer's response earns one of the exits below."
+            )
+            new_findings_block = (
+                "### New Findings (introduced since last review)\n\n"
+                "(None — no code changed since the prior review. Do NOT add findings here; "
+                "any that appear are removed before posting.)"
+            )
+        else:
+            fixed_bullets = (
+                "- FIXED — the finding is addressed in the current source (read it and judge). The\n"
+                "  fix may be a cross-region edit elsewhere in the SAME file, OR a cross-FILE edit\n"
+                "  in a DIFFERENT file the finding references (e.g. the finding flags a symptom at a\n"
+                "  read site but the fix is the wiring in another file) — don't require the flagged\n"
+                "  line, or even the flagged file, in the inter-diff; judge by reading the current\n"
+                "  source. (A FIXED is not credible only when NONE of the files the finding is about\n"
+                "  changed at all.)\n"
+                "- PARTIALLY FIXED — code changed but doesn't fully address."
+            )
+            new_findings_block = (
+                "### New Findings (introduced since last review)\n\n"
+                "#### Blockers\n\n"
+                "**1. <description>**\n\n"
+                f"[`<file>#L<line>`](https://github.com/{repo}/blob/{head_sha}/<file>#L<line>) — <explanation>\n\n"
+                "#### Medium / Low / Nits\n\n"
+                "...same structure as new-finding sections, numbered sequentially across the\n"
+                "new-findings block (prior findings keep their #N from the last review)."
+            )
+
         verifier_task = f"""You have raw findings from the specialist reviewers
 (embedded in your task message, or read from /workspace/findings/ plus the labeled
 inline blocks in workspace-handoff mode).
@@ -486,14 +526,7 @@ They were run in RE-REVIEW MODE — each result contains both (a) a classificati
 each prior finding and (b) any NEW findings in the inter-diff.
 
 For each prior finding, choose ONE status:
-- FIXED — the finding is addressed in the current source (read it and judge). The
-  fix may be a cross-region edit elsewhere in the SAME file, OR a cross-FILE edit
-  in a DIFFERENT file the finding references (e.g. the finding flags a symptom at a
-  read site but the fix is the wiring in another file) — don't require the flagged
-  line, or even the flagged file, in the inter-diff; judge by reading the current
-  source. (A FIXED is not credible only when NONE of the files the finding is about
-  changed at all.)
-- PARTIALLY FIXED — code changed but doesn't fully address.
+{fixed_bullets}
 - NOT FIXED — the finding's file is untouched, or its code is present unchanged; finding still applies.
 {deferred_bullet}
 - DISPUTED — author pushed back with rationale you accept.
@@ -544,18 +577,7 @@ Examples:
 - **#5** [low] — DEFERRED — Pagination tracked as PRM-3686.
 - **#7** [medium] — PARTIALLY FIXED — Banner added; server-side search deferred.
 
-### New Findings (introduced since last review)
-
-#### Blockers
-
-**1. <description>**
-
-[`<file>#L<line>`](https://github.com/{repo}/blob/{head_sha}/<file>#L<line>) — <explanation>
-
-#### Medium / Low / Nits
-
-...same structure as new-finding sections, numbered sequentially across the
-new-findings block (prior findings keep their #N from the last review).
+{new_findings_block}
 
 ---
 

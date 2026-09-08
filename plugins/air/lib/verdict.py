@@ -1671,6 +1671,38 @@ def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int) 
     return "\n".join(lines[:end + 1] + block + lines[end + 1:])
 
 
+_NEW_FINDINGS_SECTION_RE = re.compile(
+    r"^###\s+(?:New Findings\b|Blockers\b|Medium\b|Low\b|Nits\b)", re.MULTILINE)
+_ANY_H3_OR_RULE_RE = re.compile(r"^(?:###\s|---\s*$|Reviewed at:)", re.MULTILINE)
+
+
+def strip_new_findings(body: str) -> tuple:
+    """Deterministically remove every NEW-finding section from a re-review body,
+    returning `(body, n_removed)`. Used by the conversation-only re-review, where
+    no code changed since the prior review: there is nothing new to find, so any
+    `### New Findings …` / fresh-format `### Blockers|Medium|Low|Nits` section the
+    verifier emits is a hallucination over a discussion thread — and a new
+    `**N.` blocker entry gates via `count_blockers` with NO ledger involvement, so
+    "don't emit new findings" must be enforced by code, not by the prompt.
+    Cuts from each such `###` header up to (not including) the next `###` header,
+    a `---` rule, or the `Reviewed at:` footer; `### Previous Findings Status`,
+    `### Strengths`, `### Pre-existing …` and the footer are untouched, so the
+    frozen status-line contract and the anti-decoy SHA footer survive intact."""
+    if not body:
+        return body, 0
+    out, pos, removed = [], 0, 0
+    for m in _NEW_FINDINGS_SECTION_RE.finditer(body):
+        if m.start() < pos:
+            continue
+        nxt = _ANY_H3_OR_RULE_RE.search(body, m.end())
+        end = nxt.start() if nxt else len(body)
+        out.append(body[pos:m.start()])
+        pos = end
+        removed += 1
+    out.append(body[pos:])
+    return "".join(out), removed
+
+
 def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
     """The hard guard. Given the emitted re-review body + the ledger:
     pin each prior finding's severity to max(prior, emitted) unless its code
@@ -1756,6 +1788,20 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
         cross_region_fix = ((entry.change == UNCHANGED and entry.file_touched)
                             or temporal_fix)
         if (status == "FIXED" and entry.change != CHANGED and not cross_region_fix
+                and entry.prior_status == "FIXED"
+                and _SEVERITY_RANK.get(new_sev, 3) >= 2):
+            # Re-asserting a closure the PRIOR round already honored is not a new
+            # fix claim, so it needs no new evidence: the gate already passed this
+            # finding as FIXED last round, and keeping it FIXED cannot un-gate
+            # anything that was gated. Without this, a round-3+ number-identity
+            # ledger (no origin window — e.g. a conversation-only pass, or an
+            # unresolvable origin) re-poisoned every already-fixed finding back to
+            # NOT FIXED on nothing but the absence of THIS round's inter-diff
+            # evidence (the lifemd #17537 shape). A finding that was fixed and then
+            # REVERTED shows up as a code change → CHANGED/touched → the verifier's
+            # fresh read governs, same as today.
+            log.append(f"[pin] #{num} FIXED re-asserted (prior round already FIXED; no new claim)")
+        elif (status == "FIXED" and entry.change != CHANGED and not cross_region_fix
                 and _SEVERITY_RANK.get(new_sev, 3) >= 2):
             new_status = "NOT FIXED"
             # Annotate the rewrite so the label doesn't silently contradict the
