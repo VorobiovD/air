@@ -90,6 +90,7 @@ from github_client import (  # noqa: E402,F401 — split modules; re-exported fo
     fetch_pr_changed_files,
     fetch_compare_status,
     fetch_blob_sha,
+    AIR_VERDICT_SENTINEL,
     fetch_related_prs,
     count_diff_changed_lines,
     DIFF_TRUNCATION_MARKER,
@@ -1282,20 +1283,33 @@ def developer_comments_after(comments: list[dict], after_comment_id: int,
     review/non-review prefixes regardless of author (a human quoting one whole
     is vanishingly rare; an air post under an unlisted rotated account is not).
     Chronological order is inherited from filter_comments_after."""
+    return [c for c in filter_comments_after(comments, after_comment_id)
+            if _is_human_dev_entry(c, bot_logins)]
+
+
+def _is_human_dev_entry(entry: dict, bot_logins) -> bool:
+    """The ONE human-only filter both trigger helpers share (it had already drifted
+    once when duplicated): a real, non-empty contribution by a human — not an air
+    login, not a GitHub Bot-typed or `[bot]`-suffixed account, not a body carrying
+    air's review/diagnostic prefixes, and not an air VERDICT review (reason text
+    ending in the verdict sentinel — those match no prefix, so under an unlisted
+    rotated account they would otherwise count as human activity)."""
+    entry = entry or {}
+    user = entry.get("user") or {}
+    login = (user.get("login") or "").strip()
+    body = (entry.get("body") or "").strip()
     bots = {b.lower() for b in (bot_logins or set()) if b}
-    prefixes = pr_conversation.BOT_REVIEW_PREFIXES + pr_conversation.BOT_NONREVIEW_PREFIXES
-    out = []
-    for c in filter_comments_after(comments, after_comment_id):
-        user = (c or {}).get("user") or {}
-        login = (user.get("login") or "").strip()
-        if not login or login.lower() in bots or login.lower().endswith("[bot]"):
-            continue
-        if (user.get("type") or "").lower() == "bot":
-            continue
-        if ((c or {}).get("body") or "").startswith(prefixes):
-            continue
-        out.append(c)
-    return out
+    if not login or not body:
+        return False
+    if login.lower() in bots or login.lower().endswith("[bot]"):
+        return False
+    if (user.get("type") or "").lower() == "bot":
+        return False
+    if body.startswith(pr_conversation.BOT_REVIEW_PREFIXES + pr_conversation.BOT_NONREVIEW_PREFIXES):
+        return False
+    if body.endswith(AIR_VERDICT_SENTINEL):
+        return False
+    return True
 
 
 def developer_activity_after(ic: list[dict], rv: list[dict], inl: list[dict], prior: dict,
@@ -1314,24 +1328,16 @@ def developer_activity_after(ic: list[dict], rv: list[dict], inl: list[dict], pr
     since = (prior or {}).get("created_at") or ""
     if not since:
         return out
-    bots = {b.lower() for b in (bot_logins or set()) if b}
-    prefixes = pr_conversation.BOT_REVIEW_PREFIXES + pr_conversation.BOT_NONREVIEW_PREFIXES
     for kind, entries in (("review", rv or []), ("inline", inl or [])):
         for e in entries:
             e = e or {}
             ts = e.get("submitted_at") or e.get("created_at") or ""
             if not ts or ts <= since:
                 continue
-            user = e.get("user") or {}
-            login = (user.get("login") or "").strip()
-            body = (e.get("body") or "").strip()
-            if (not login or login.lower() in bots or login.lower().endswith("[bot]")
-                    or (user.get("type") or "").lower() == "bot" or not body
-                    or body.startswith(prefixes)):
-                continue
             if kind == "review" and (e.get("state") or "") == "PENDING":
                 continue
-            out.append(e)
+            if _is_human_dev_entry(e, bot_logins):
+                out.append(e)
     return out
 
 

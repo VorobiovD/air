@@ -385,10 +385,15 @@ def conversation_only_directive(prior_sha: str, n_comments: int) -> str:
         f"- Do NOT emit any new finding. There is no new code to find anything in.\n"
         f"- Do NOT mark any prior finding FIXED — nothing changed, so nothing was fixed. "
         f"(A FIXED here is rewritten to NOT FIXED deterministically.)\n"
-        f"- A prior finding MAY move to DISPUTED, FALSE POSITIVE, or PRE-EXISTING when the "
-        f"developer's explanation holds up against the source (an existing compensating "
-        f"control, a misread, code that predates this PR), or to DEFERRED when a non-"
-        f"blocker is explicitly punted with a ticket reference. Cite the evidence.\n"
+        f"- A NON-blocker prior finding MAY move to DISPUTED when the developer's explanation "
+        f"holds up against the source — an existing compensating control, a misread, code "
+        f"that predates this PR (use the DISPUTED token for all of these; it is the only "
+        f"parseable exit for 'not a defect to fix'), or to DEFERRED when it is explicitly "
+        f"punted with a ticket reference. Cite the evidence.\n"
+        f"- A BLOCKER cannot be cleared by discussion alone: keep its prior status and put "
+        f"your assessment of the developer's argument in the rationale. (A blocker status "
+        f"change here is reverted deterministically — clearing a blocker needs a code change "
+        f"reviewed by the full pipeline, or a maintainer-forced full re-review.)\n"
         f"- A prior finding the developer did not address, or whose explanation does not "
         f"hold, stays at its prior status with a one-line reason.\n"
         f"Keep the full re-review format (status block, banner, footer) so the outcome is "
@@ -487,6 +492,14 @@ def build_verifier_task(
         # The deterministic backstops (ledger pin, strip_new_findings) still
         # stand behind this; trimming the prompt removes the invitation.
         if conversation_only:
+            rr_banner = rr_banner.replace("<K> new", "0 new")
+            framing = ("They were run in CONVERSATION-ONLY RE-REVIEW MODE — no code changed since the "
+                       "prior review and no specialist pass ran; the developer replied to the prior "
+                       "findings and re-requested a look.")
+            examples = ("Examples:\n"
+                        "- **#2** [medium] — DISPUTED — auth middleware at L40 already guards this path.\n"
+                        "- **#3** [low] — DEFERRED — Pagination tracked as PRM-3686.\n"
+                        "- **#1** [blocker] — NOT FIXED — developer's argument noted; a blocker needs a code change.")
             fixed_bullets = (
                 "- FIXED / PARTIALLY FIXED — NOT AVAILABLE this round: no code has changed "
                 "since the prior review, so nothing was fixed. A finding the prior round "
@@ -499,6 +512,12 @@ def build_verifier_task(
                 "any that appear are removed before posting.)"
             )
         else:
+            framing = ("They were run in RE-REVIEW MODE — each result contains both (a) a classification of\n"
+                       "each prior finding and (b) any NEW findings in the inter-diff.")
+            examples = ("Examples:\n"
+                        "- **#1** [blocker] — FIXED — `narrow_env` dict at L236-242 now omits secrets.\n"
+                        "- **#5** [low] — DEFERRED — Pagination tracked as PRM-3686.\n"
+                        "- **#7** [medium] — PARTIALLY FIXED — Banner added; server-side search deferred.")
             fixed_bullets = (
                 "- FIXED — the finding is addressed in the current source (read it and judge). The\n"
                 "  fix may be a cross-region edit elsewhere in the SAME file, OR a cross-FILE edit\n"
@@ -522,8 +541,7 @@ def build_verifier_task(
         verifier_task = f"""You have raw findings from the specialist reviewers
 (embedded in your task message, or read from /workspace/findings/ plus the labeled
 inline blocks in workspace-handoff mode).
-They were run in RE-REVIEW MODE — each result contains both (a) a classification of
-each prior finding and (b) any NEW findings in the inter-diff.
+{framing}
 
 For each prior finding, choose ONE status:
 {fixed_bullets}
@@ -572,10 +590,7 @@ NOT FIXED or PARTIALLY FIXED appear in the body as recommendations but
 do not block merge — the developer can fix later or punt with a follow-
 up ticket.
 
-Examples:
-- **#1** [blocker] — FIXED — `narrow_env` dict at L236-242 now omits secrets.
-- **#5** [low] — DEFERRED — Pagination tracked as PRM-3686.
-- **#7** [medium] — PARTIALLY FIXED — Banner added; server-side search deferred.
+{examples}
 
 {new_findings_block}
 

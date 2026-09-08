@@ -69,7 +69,32 @@ from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
     _CONFLICT_GATE_REASON,
 )
-from verdict import extract_prior_statuses, extract_fresh_findings, strip_new_findings  # noqa: E402  (conversation-only re-review guards)
+from verdict import extract_prior_statuses, extract_fresh_findings, strip_new_findings, hold_blockers_to_prior  # noqa: E402  (conversation-only re-review guards)
+from github_client import AIR_VERDICT_SENTINEL  # noqa: E402  (prior-verdict fail-close detection)
+
+
+def _prior_verdict_process_fail_closed(rv, prior_body: str, head_sha: str, bot_logins) -> bool:
+    """True when air's standing verdict at this head is CHANGES_REQUESTED but the
+    prior review body carries NO gating content — i.e. the gate fail-closed on a
+    PROCESS reason (truncated diff, a blocker-class lens that didn't complete,
+    conflict markers, a decoy body). Those gates are inert on a conversation-only
+    pass (no diff, no lenses), so its clean body would APPROVE and un-gate a PR
+    that no code change has touched. A conversation cannot clear a process
+    fail-close; only a re-run or a code change can — so the pass must not run.
+    Content-gated priors return False: the ledger handles those."""
+    if should_request_changes(prior_body or "", floor_exposures=True)[0]:
+        return False
+    bots = {b.lower() for b in (bot_logins or set()) if b}
+    for r in rv or []:
+        r = r or {}
+        login = ((r.get("user") or {}).get("login") or "").lower()
+        if login not in bots or (r.get("state") or "") != "CHANGES_REQUESTED":
+            continue
+        if (r.get("commit_id") or "").lower() != (head_sha or "").lower():
+            continue
+        if (r.get("body") or "").rstrip().endswith(AIR_VERDICT_SENTINEL):
+            return True
+    return False
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
 from agent_md import split_frontmatter, resolve_model_alias  # noqa: E402  (single-source frontmatter parser + AIR_MODEL_* override)
 
@@ -591,7 +616,10 @@ async def run_headless_review(args, bot_token: str) -> dict:
     conversation_only = False
     if mode == "re-review" and prior_sha == head_sha:
         trigger_comments = []
-        if env.env_bool("AIR_REREVIEW_ON_COMMENTS", True):
+        # The ledger pin IS this pass's safety construction (no code delta → every
+        # FIXED pinned). With the pin disabled there is nothing deterministic
+        # standing behind a verifier-only body → no pass, plain skip.
+        if env.env_bool("AIR_REREVIEW_ON_COMMENTS", True) and _ledger_pin_enabled():
             try:
                 # All three surfaces — an inline reply on the flagged line is the
                 # most natural dispute gesture and must count like an issue comment.
@@ -609,6 +637,12 @@ async def run_headless_review(args, bot_token: str) -> dict:
             # to CHANGES_REQUESTED on a hallucinated finding. Nothing to do here.
             print(f"  [re-review] {len(trigger_comments)} developer comment(s) since the review "
                   f"at head, but it carries no findings — nothing to re-adjudicate; skipping")
+            trigger_comments = []
+        if trigger_comments and _prior_verdict_process_fail_closed(
+                rv, prior_body_at_head, head_sha, _air_bot_logins() | {bot_login}):
+            print(f"  [re-review] developer comment(s) since the review at head, but the standing "
+                  f"verdict fail-closed on a process reason (truncated diff / lens incomplete / "
+                  f"conflict markers) — a conversation can't clear that; skipping")
             trigger_comments = []
         if trigger_comments:
             conversation_only = True
@@ -726,7 +760,12 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # filter_comments_after would surface the whole current thread as fake
         # "developer responses to the prior review" — a context leak. Emit none.
         try:
-            dev_context = format_developer_responses(filter_comments_after(ic, prior["id"]))
+            # Conversation-only: the triggering set already spans issue comments,
+            # reviews AND inline comments — use it, so an inline-only dispute
+            # reaches the verifier as a <developer-comment> block (the directive
+            # anchors on those), not only via the flat <pr-conversation> thread.
+            dev_context = format_developer_responses(
+                trigger_comments if conversation_only else filter_comments_after(ic, prior["id"]))
         except Exception as e:
             print(f"  [warn] dev-context build failed: {type(e).__name__}: {e}", file=sys.stderr)
 
@@ -815,6 +854,16 @@ async def run_headless_review(args, bot_token: str) -> dict:
                                                 origin_resolver=origin_resolver)
         except Exception as e:
             print(f"  [warn] ledger build failed: {type(e).__name__}: {e} — no severity pin", file=sys.stderr)
+    if conversation_only and not ledger:
+        # No ledger = nothing deterministic behind a verifier-only body (a build
+        # failure, or a prior whose findings didn't parse). Abort BEFORE any model
+        # call rather than post an unpinned re-adjudication. Plain skip semantics.
+        print("  [gate] conversation-only re-review needs the carry-forward ledger and none "
+              "could be built — skipping (already reviewed at head)")
+        if patterns_abs:
+            shutil.rmtree(patterns_abs, ignore_errors=True)
+        return {"ok": True, "verdict": None, "reason": "already reviewed at head",
+                "wall": 0.0, "cost": 0.0}
 
     # Concurrent open PRs touching the same files (#3d) — advisory context, never
     # gates. Best-effort + bounded; off-loop so nothing blocks on the scan.
@@ -1137,6 +1186,12 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # escalation and is unaffected. Empty ledger (fresh/kill-switch) ⇒ no-op.
     if ledger:
         review_body, pin_log = pin_and_resurrect(review_body, ledger)
+        if conversation_only:
+            # Blockers hold their prior status on a discussion-only pass (see
+            # hold_blockers_to_prior) — the un-gate transition stays with the
+            # full pipeline. After the pin, so severity is already restored to max.
+            review_body, hold_log = hold_blockers_to_prior(review_body, prior_body_at_head)
+            pin_log = list(pin_log) + hold_log
         for line in pin_log:
             print(f"  {line}", file=sys.stderr)
 

@@ -2870,3 +2870,44 @@ def test_strip_new_findings_removes_only_new_sections():
     assert strip_new_findings("")[1] == 0
     same, n0 = strip_new_findings("## Code Review (Re-review)\n\n### Previous Findings Status\n\n- **#1** [low] — FIXED — x\n")
     assert n0 == 0 and "FIXED" in same
+
+
+def test_strip_new_findings_catches_bare_h4_blockers():
+    from verdict import strip_new_findings, count_blockers
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n- **#1** [low] — DISPUTED — ok\n\n"
+            "#### Blockers\n\n**1. orphan h4 blocker**\n\nx\n\n### Strengths\n\n- g\n\nReviewed at: " + "a" * 40 + "\n")
+    out, n = strip_new_findings(body)
+    assert n == 1 and "orphan h4" not in out and count_blockers(out) == 0 and "### Strengths" in out
+
+
+def test_off_enum_false_positive_and_pre_existing_normalize_to_disputed():
+    # Verifier vocabulary leaking into the status slot must not read as "dropped"
+    # (which resurrects the finding NOT FIXED beside its own FALSE POSITIVE line).
+    e1 = _ledger_entry(1, "medium", "NOT FIXED"); e2 = _ledger_entry(2, "low", "NOT FIXED")
+    e3 = _ledger_entry(3, "medium", "NOT FIXED")
+    body = _rr_body("- **#1** [medium] — FALSE POSITIVE — guarded upstream",
+                    "- **#2** [low] — PRE-EXISTING — predates this PR",
+                    "- **#3** [medium] — NOT FIXED — still there")
+    out, log = pin_and_resurrect(body, [e1, e2, e3])
+    assert "- **#1** [medium] — DISPUTED" in out and "- **#2** [low] — DISPUTED" in out
+    assert "- **#3** [medium] — NOT FIXED" in out           # two-word canonical untouched
+    assert "re-inserted" not in out
+
+
+def test_hold_blockers_to_prior_only_touches_changed_blockers():
+    from verdict import hold_blockers_to_prior, _BLOCKER_HOLD_MARKER
+    prior = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+             "- **#1** [blocker] — NOT FIXED — a\n- **#2** [blocker] — FIXED — b\n"
+             "- **#3** [medium] — NOT FIXED — c\n\nReviewed at: x\n")
+    body = _rr_body("- **#1** [blocker] — DISPUTED — argued",
+                    "- **#2** [blocker] — FIXED — still fixed",
+                    "- **#3** [medium] — DISPUTED — argued")
+    out, log = hold_blockers_to_prior(body, prior)
+    assert "- **#1** [blocker] — NOT FIXED — argued " + _BLOCKER_HOLD_MARKER in out
+    assert "- **#2** [blocker] — FIXED — still fixed" in out        # unchanged status → untouched
+    assert "- **#3** [medium] — DISPUTED" in out                    # non-blocker → free to move
+    assert len(log) == 1
+    # fresh prior: its blockers have no status yet → NOT FIXED is the floor
+    fresh = ("## Code Review\n\n### Blockers\n\n**1. flaw**\n\n[`f.py#L2`](https://github.com/o/r/blob/aaaaaaaaaaaa/f.py#L2) — x\n\nReviewed at: aaaaaaaaaaaa" + "0" * 28 + "\n")
+    out2, log2 = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — DISPUTED — argued"), fresh)
+    assert "- **#1** [blocker] — NOT FIXED" in out2 and len(log2) == 1

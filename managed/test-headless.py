@@ -1365,6 +1365,12 @@ _CO_BOT = {"id": 12, "created_at": "2026-09-01T11:05:00Z",
            "user": {"login": "notion-workspace[bot]", "type": "Bot"}, "body": "Linked a page."}
 _CO_AIR_NOTE = {"id": 13, "created_at": "2026-09-01T11:06:00Z", "user": {"login": "air-bot"},
                 "body": "## air review — could not complete\n\ntransient error"}
+# A fresh prior whose only finding is a MEDIUM — the non-blocker shape a
+# "please re-check my comment" pass exists to clear (blockers are held).
+_CO_PRIOR_MED = {"id": 10, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+                 "body": ("## Code Review\n\n### Medium — consider fixing\n\n**1. tidy**\n\n"
+                          "[`f.py#L2`](https://github.com/o/r/blob/aaaaaaaaaaaa/f.py#L2) — x\n\n"
+                          "Reviewed at: " + _CO_HEAD + "\n")}
 
 
 def test_at_head_with_dev_comment_runs_conversation_only_rereview(tmp_path, monkeypatch):
@@ -1436,12 +1442,19 @@ def test_conversation_only_pins_fixed_without_code_but_honors_disputed(tmp_path,
     assert out["conversation_only"] is True
     assert "— NOT FIXED" in out["body"] and "[air: pinned NOT FIXED" in out["body"]
     assert out["verdict"] == "REQUEST_CHANGES"
-    disputed_body = fixed_body.replace("— FIXED — dev says it's covered",
-                                       "— DISPUTED — auth middleware at auth.py L40 guards this path")
-    out2, _ = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD,
+    # A NON-blocker's DISPUTED is the evidence-bearing exit the pass exists for → clears.
+    disputed_body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+                     "- **#1** [medium] — DISPUTED — auth middleware at auth.py L40 guards this path\n\n"
+                     "Reviewed at: " + _CO_HEAD + "\n")
+    out2, _ = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR_MED, _CO_DEV], head=_CO_HEAD,
                             verifier_body=disputed_body)
     assert "— DISPUTED" in out2["body"] and "NOT FIXED" not in out2["body"]
     assert out2["verdict"] == "APPROVE"
+    # …while the same DISPUTED on a BLOCKER is held (see hold_blockers_to_prior).
+    blocker_disputed = disputed_body.replace("[medium]", "[blocker]")
+    out3, _ = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD,
+                            verifier_body=blocker_disputed)
+    assert "- **#1** [blocker] — NOT FIXED" in out3["body"] and out3["verdict"] == "REQUEST_CHANGES"
 
 
 def test_conversation_only_skips_learning_tail(tmp_path, monkeypatch):
@@ -1505,12 +1518,12 @@ def test_conversation_only_hallucinated_new_blocker_is_stripped(tmp_path, monkey
     # removed deterministically before extraction AND before the raw-body gate.
     monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
     body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
-            "- **#1** [blocker] — DISPUTED — middleware guards this path\n\n"
+            "- **#1** [medium] — DISPUTED — middleware guards this path\n\n"
             "### New Findings (introduced since last review)\n\n#### Blockers\n\n"
             "**1. Invented from the discussion thread**\n\n"
             "[`f.py#L9`](https://github.com/o/r/blob/aaaaaaaaaaaa/f.py#L9) — made up\n\n"
             "### Strengths\n\n- fine\n\nReviewed at: " + _CO_HEAD + "\n")
-    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD,
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR_MED, _CO_DEV], head=_CO_HEAD,
                                verifier_body=body)
     assert "Invented from the discussion thread" not in out["body"]
     assert "### Strengths" in out["body"] and "— DISPUTED" in out["body"]
@@ -1552,3 +1565,81 @@ def test_developer_activity_after_filters_surfaces():
            {"created_at": "2026-09-01T10:41:00Z", "user": {"login": "carol"}, "body": "inline dispute"}]
     got = review.developer_activity_after([], rv, inl, prior, {"air-bot"})
     assert [g["body"] for g in got] == ["looks wrong", "inline dispute"]
+
+
+# --- conversation-only: dogfood round-2 findings ---
+def test_conversation_only_requires_ledger_pin(tmp_path, monkeypatch):
+    # Blocker 1: with the pin disabled nothing deterministic stands behind a
+    # verifier-only body → the pass must not run (plain at-head skip).
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD,
+                               ledger_pin_env="0")
+    assert out["reason"] == "already reviewed at head" and "verifier_task" not in calls
+
+
+def test_conversation_only_skips_when_ledger_cannot_be_built(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    def _boom(*a, **k):
+        raise RuntimeError("ledger exploded")
+    monkeypatch.setattr(headless, "build_carry_forward_ledger", _boom)
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD)
+    assert out["reason"] == "already reviewed at head" and "verifier_task" not in calls
+
+
+def test_conversation_only_skips_when_prior_verdict_fail_closed_on_process(tmp_path, monkeypatch):
+    # Blocker 2: the standing CHANGES_REQUESTED came from a PROCESS fail-close
+    # (truncated diff / lens incomplete / conflict markers) — the prior body has
+    # findings but none that gate. A conversation pass would post a clean body
+    # and un-gate with zero code change. Must skip.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    from github_client import AIR_VERDICT_SENTINEL
+    medium_prior = {"id": 40, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+                    "body": ("## Code Review\n\n### Medium — consider fixing\n\n**1. tidy**\n\n"
+                             "[`f.py#L2`](https://github.com/o/r/blob/aaaaaaaaaaaa/f.py#L2) — x\n\n"
+                             "Reviewed at: " + _CO_HEAD + "\n")}
+    fail_closed_verdict = [{"user": {"login": "air-bot"}, "state": "CHANGES_REQUESTED",
+                            "commit_id": _CO_HEAD, "submitted_at": "2026-09-01T10:00:05Z",
+                            "body": "diff truncated at 500000 chars — a blocker beyond the cap can't be ruled out\n"
+                                    + AIR_VERDICT_SENTINEL}]
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[medium_prior, dict(_CO_DEV, id=41)],
+                               head=_CO_HEAD, reviews=fail_closed_verdict)
+    assert out["reason"] == "already reviewed at head" and "verifier_task" not in calls
+    # …but a DISMISSED process verdict no longer stands → the pass may run
+    dismissed = [dict(fail_closed_verdict[0], state="DISMISSED")]
+    out2, calls2 = _rereview_run(monkeypatch, tmp_path, comments=[medium_prior, dict(_CO_DEV, id=41)],
+                                 head=_CO_HEAD, reviews=dismissed)
+    assert out2.get("conversation_only") is True
+
+
+def test_conversation_only_blocker_dispute_is_held_but_medium_clears(tmp_path, monkeypatch):
+    # Medium #4: a single verifier over a discussion thread may not clear a
+    # BLOCKER (a complete un-gate); non-blockers are exactly what the pass is for.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    from verdict import _BLOCKER_HOLD_MARKER
+    prior = {"id": 50, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+             "body": ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+                      "- **#1** [blocker] — NOT FIXED — open\n- **#2** [medium] — NOT FIXED — open\n\n"
+                      "Reviewed at: " + _CO_HEAD + "\n")}
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+            "- **#1** [blocker] — DISPUTED — dev says it's guarded\n"
+            "- **#2** [medium] — DISPUTED — dev says it's guarded\n\nReviewed at: " + _CO_HEAD + "\n")
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[prior, dict(_CO_DEV, id=51)], head=_CO_HEAD,
+                           verifier_body=body)
+    assert "- **#1** [blocker] — NOT FIXED" in out["body"] and _BLOCKER_HOLD_MARKER in out["body"]
+    assert "- **#2** [medium] — DISPUTED" in out["body"]
+    assert out["verdict"] == "REQUEST_CHANGES"
+
+
+def test_conversation_only_inline_dispute_reaches_verifier_as_developer_comment(tmp_path, monkeypatch):
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    inline = [{"id": 900, "created_at": "2026-09-01T11:30:00Z", "user": {"login": "alice", "type": "User"},
+               "body": "Guarded two lines up.", "path": "f.py", "line": 2}]
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR], head=_CO_HEAD, inline=inline)
+    assert out.get("conversation_only") is True
+    assert 'author="alice"' in calls["verifier_context"] and "Guarded two lines up." in calls["verifier_context"]
+
+
+def test_developer_comments_after_ignores_air_verdict_reviews():
+    from github_client import AIR_VERDICT_SENTINEL
+    verdict_like = {"id": 12, "user": {"login": "rotated-unlisted"}, "body": "1 blocker(s)\n\n" + AIR_VERDICT_SENTINEL}
+    assert review.developer_comments_after([_CO_PRIOR, verdict_like], 10, {"air-bot"}) == []

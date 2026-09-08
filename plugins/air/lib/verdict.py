@@ -1466,7 +1466,13 @@ _PRIOR_STATUS_LINE_RE = re.compile(
 # words are left alone → they still resurrect (over-gate, fail-safe). The
 # verifier prompt is also tightened to emit enum-only tokens; this is the
 # deterministic backstop for when the model ignores it.
-_STATUS_SYNONYMS = {"ACCEPTED": "DISPUTED", "WONTFIX": "DISPUTED", "RESOLVED": "FIXED"}
+_STATUS_SYNONYMS = {"ACCEPTED": "DISPUTED", "WONTFIX": "DISPUTED", "RESOLVED": "FIXED",
+                    # The verifier's own classification vocabulary leaks into the
+                    # status slot (conversation-only re-reviews made this common):
+                    # off-enum, so the line read as silently dropped and the finding
+                    # was resurrected NOT FIXED beside it — a self-contradicting false
+                    # block. Both mean "not a defect to fix" → the DISPUTED exit.
+                    "FALSE POSITIVE": "DISPUTED", "PRE-EXISTING": "DISPUTED", "PREEXISTING": "DISPUTED"}
 # IGNORECASE: match a `[BLOCKER]`-cased tag too (else the synonym misses and the
 # finding resurrects). `(?P<word>...)(?=\s*(?:[^\w\s]|$))`: rewrite ONLY when the
 # synonym is the COMPLETE leading status token — followed by a DELIMITER (the
@@ -1478,7 +1484,10 @@ _STATUS_SYNONYMS = {"ACCEPTED": "DISPUTED", "WONTFIX": "DISPUTED", "RESOLVED": "
 # re-parses. `num`/`sev` are captured for the severity-aware rule below.
 _SYNONYM_STATUS_RE = re.compile(
     r"(?P<prefix>^-\s+\*\*#(?P<num>\d+)\*\*(?:\s*\[(?P<sev>" + _SEVERITY_ALT + r")\])?\s+—\s+[^\w\n]*)"
-    r"(?P<word>[A-Za-z]+)(?=\s*(?:[^\w\s]|$))",
+    # One optional second word (space- or hyphen-joined) so the two-word synonyms
+    # match; a canonical two-word status (`NOT FIXED`, `PARTIALLY FIXED`) is also
+    # captured whole but isn't in the map, so it is left untouched.
+    r"(?P<word>[A-Za-z]+(?:[ -][A-Za-z]+)?)(?=\s*(?:[^\w\s]|$))",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -1671,8 +1680,11 @@ def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int) 
     return "\n".join(lines[:end + 1] + block + lines[end + 1:])
 
 
+# Matcher is `#{3,4}` so a bare `#### Blockers` with no `### New Findings` parent is
+# still caught (count_blockers accepts both depths); the TERMINATOR stays `###` so a
+# `### New Findings` cut isn't ended early by its own nested `####` sub-header.
 _NEW_FINDINGS_SECTION_RE = re.compile(
-    r"^###\s+(?:New Findings\b|Blockers\b|Medium\b|Low\b|Nits\b)", re.MULTILINE)
+    r"^#{3,4}\s+(?:New Findings\b|Blockers\b|Medium\b|Low\b|Nits\b)", re.MULTILINE)
 _ANY_H3_OR_RULE_RE = re.compile(r"^(?:###\s|---\s*$|Reviewed at:)", re.MULTILINE)
 
 
@@ -1701,6 +1713,47 @@ def strip_new_findings(body: str) -> tuple:
         removed += 1
     out.append(body[pos:])
     return "".join(out), removed
+
+
+_BLOCKER_HOLD_MARKER = (
+    "[air: a blocker cannot be cleared by discussion alone — it keeps its prior "
+    "status until a code change is reviewed, or a maintainer forces a full re-review.]"
+)
+_CLEARING_STATUSES = frozenset({"DISPUTED", "DEFERRED", "FIXED", "PARTIALLY FIXED"})
+
+
+def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
+    """Conversation-only re-review guard: a BLOCKER may not change status on the
+    strength of a discussion thread. The pass runs the verifier alone, over no
+    code delta — the least evidence and the least judgment redundancy of any
+    round — while a blocker's DISPUTED is a complete un-gate; the normal path
+    earns that transition with four specialists AND a code change behind it.
+    So every `- **#N** [blocker] — <status>` line whose status differs from the
+    prior round's is rewritten back to the prior status (NOT FIXED for a fresh
+    prior, whose findings have no status yet) with an explanatory marker. Non-
+    blocker findings are untouched — mediums/lows/nits are exactly what a
+    "please re-check my comment" pass exists to clear. Returns `(body, log)`.
+    Runs AFTER pin_and_resurrect (severity is already pinned to max, so a blocker
+    laundered to `[medium]` has already been restored before this looks)."""
+    prior = {num: status for num, _sev, status in extract_prior_statuses(prior_body)}
+    if not prior:
+        prior = {num: "NOT FIXED" for num, _sev, _st in extract_fresh_findings(prior_body)}
+    log = []
+
+    def _hold(m):
+        num = int(m.group(1))
+        sev = (m.group(2) or "blocker").lower()
+        status = re.sub(r"\s+", " ", m.group(3).upper()).strip()
+        if sev != "blocker" or num not in prior:
+            return m.group(0)
+        prior_status = prior[num]
+        if status == prior_status or status not in _CLEARING_STATUSES:
+            return m.group(0)
+        tail = re.sub(r"^\*{0,2}", "", m.group(4)).rstrip()
+        log.append(f"[hold] #{num} blocker {status}->{prior_status} (conversation-only: no code change)")
+        return f"- **#{num}** [blocker] — {prior_status}{tail} {_BLOCKER_HOLD_MARKER}"
+
+    return _PRIOR_STATUS_LINE_RE.sub(_hold, body), log
 
 
 def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
@@ -1797,9 +1850,11 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
             # ledger (no origin window — e.g. a conversation-only pass, or an
             # unresolvable origin) re-poisoned every already-fixed finding back to
             # NOT FIXED on nothing but the absence of THIS round's inter-diff
-            # evidence (the lifemd #17537 shape). A finding that was fixed and then
-            # REVERTED shows up as a code change → CHANGED/touched → the verifier's
-            # fresh read governs, same as today.
+            # evidence (the lifemd #17537 shape). A fix that was later REVERTED is
+            # the verifier's to catch from its read of current source (it should
+            # not re-emit FIXED); on this number-identity path `change` is
+            # INDETERMINATE by construction, so the pin cannot tell a revert from
+            # nothing — the same trust as today for any INDETERMINATE re-assertion.
             log.append(f"[pin] #{num} FIXED re-asserted (prior round already FIXED; no new claim)")
         elif (status == "FIXED" and entry.change != CHANGED and not cross_region_fix
                 and _SEVERITY_RANK.get(new_sev, 3) >= 2):
