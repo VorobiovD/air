@@ -375,7 +375,7 @@ def conversation_only_directive(prior_sha: str, n_comments: int, new_in_prior: d
     POSITIVE / PRE-EXISTING / DEFERRED-with-ticket — each grounded in the
     developer's stated evidence AND your own read of the current source."""
     return (
-        f"\nCONVERSATION-ONLY RE-REVIEW — READ FIRST:\n\n"
+        f"\nCONVERSATION-ONLY RE-REVIEW — THESE RULES OVERRIDE THE TEMPLATE ABOVE:\n\n"
         f"No code has changed since the prior review at {prior_sha[:8]} (the inter-diff "
         f"is empty), and no specialist pass ran this round. The developer added "
         f"{n_comments} comment(s) after that review and re-requested a look. Your ONLY "

@@ -69,7 +69,7 @@ from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
     _CONFLICT_GATE_REASON,
 )
-from verdict import extract_prior_statuses, extract_fresh_findings, strip_new_findings, hold_blockers_to_prior, _reconcile_banner_with_ledger, _prior_new_findings  # noqa: E402  (conversation-only re-review guards)
+from verdict import extract_prior_statuses, strip_new_findings, hold_blockers_to_prior, _reconcile_banner_with_ledger, _prior_new_findings  # noqa: E402  (conversation-only re-review guards)
 from github_client import AIR_VERDICT_SENTINEL  # noqa: E402  (prior-verdict fail-close detection)
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
 
@@ -108,7 +108,9 @@ def _prior_verdict_process_fail_closed(rv, prior_body: str, head_sha: str, bot_l
             mine.append(r)
     if not mine:
         return False
-    mine.sort(key=lambda r: r.get("submitted_at") or "")
+    # A review with no timestamp sorts LAST (unknown ⇒ treat as the latest): if it is
+    # a CHANGES_REQUESTED that reads as standing → skip, the conservative direction.
+    mine.sort(key=lambda r: r.get("submitted_at") or "9999")
     return (mine[-1].get("state") or "") == "CHANGES_REQUESTED"
 from agent_md import split_frontmatter, resolve_model_alias  # noqa: E402  (single-source frontmatter parser + AIR_MODEL_* override)
 
@@ -646,8 +648,12 @@ async def run_headless_review(args, bot_token: str) -> dict:
                 print(f"  [warn] developer-comment trigger check failed: "
                       f"{type(e).__name__}: {e} — treating as none", file=sys.stderr)
         prior_body_at_head = (prior or {}).get("body", "")
+        # `_prior_new_findings` reads `#{3,4}` headers, so a round-2 prior whose
+        # round-1 was clean (no status block, findings only under `### New
+        # Findings` → `#### <sev>`) counts as carrying findings — the same
+        # H4-aware view the hold reconciles against (cloud dogfood medium).
         if trigger_comments and not (extract_prior_statuses(prior_body_at_head)
-                                     or extract_fresh_findings(prior_body_at_head)):
+                                     or _prior_new_findings(prior_body_at_head)):
             # A prior with NO findings gives the pass nothing to re-adjudicate — and
             # nothing for the ledger to hold, so a verifier body would be trusted
             # verbatim: a "please take another look" comment could flip a clean PR
@@ -856,6 +862,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # + finding-resurrection deterministic — the gate can only get stricter, never
     # un-gate. An empty ledger (fresh / kill-switch / all findings moved) is a no-op.
     ledger = []
+    ledger_built = False   # distinguishes "built (possibly empty)" from "build failed"
     if mode == "re-review" and _ledger_pin_enabled():
         try:
             # #198 origin-anchor: round-3+ carried findings test their first-raise
@@ -876,12 +883,16 @@ async def run_headless_review(args, bot_token: str) -> dict:
             ledger = build_carry_forward_ledger(prior.get("body", ""), diff, prior_sha,
                                                 sibling=(promote_sibling_pr is not None),
                                                 origin_resolver=origin_resolver)
+            ledger_built = True
         except Exception as e:
             print(f"  [warn] ledger build failed: {type(e).__name__}: {e} — no severity pin", file=sys.stderr)
-    if conversation_only and not ledger:
-        # No ledger = nothing deterministic behind a verifier-only body (a build
-        # failure, or a prior whose findings didn't parse). Abort BEFORE any model
-        # call rather than post an unpinned re-adjudication. Plain skip semantics.
+    if conversation_only and not ledger_built:
+        # No ledger = nothing deterministic behind a verifier-only body (the build
+        # failed). Abort BEFORE any model call rather than post an unpinned
+        # re-adjudication. Plain skip semantics. An EMPTY ledger is fine: a prior
+        # with no status block (round-1 clean, round-2 raised new findings) has
+        # nothing for the ledger, and `hold_blockers_to_prior` reconciles those
+        # new-in-prior findings from the prior body itself.
         print("  [gate] conversation-only re-review needs the carry-forward ledger and none "
               "could be built — skipping (already reviewed at head)")
         if patterns_abs:
@@ -1209,16 +1220,20 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # the gate can only get STRICTER, never un-gate. It rewrites only the EXTRACTED
     # body; the raw-body anti-decoy gate below (rc_raw) stays a one-directional
     # escalation and is unaffected. Empty ledger (fresh/kill-switch) ⇒ no-op.
+    pin_log = []
     if ledger:
         review_body, pin_log = pin_and_resurrect(review_body, ledger)
-        if conversation_only:
-            # Blockers hold their prior status on a discussion-only pass (see
-            # hold_blockers_to_prior) — the un-gate transition stays with the
-            # full pipeline. After the pin, so severity is already restored to max.
-            review_body, hold_log = hold_blockers_to_prior(review_body, prior_body_at_head)
-            pin_log = list(pin_log) + hold_log
-            # The banner's counts were written before the hold, same as before the pin.
-            review_body = _reconcile_banner_with_ledger(review_body, len(hold_log), 0)
+    if conversation_only:
+        # Blockers hold their prior status on a discussion-only pass (see
+        # hold_blockers_to_prior) — the un-gate transition stays with the full
+        # pipeline. After the pin, so severity is already restored to max. NOT
+        # gated on the ledger: a prior with no status block (round-1 clean,
+        # round-2 raised new findings) has an EMPTY ledger, and the hold is the
+        # only guard that sees those new-in-prior findings.
+        review_body, hold_log = hold_blockers_to_prior(review_body, prior_body_at_head)
+        pin_log = list(pin_log) + hold_log
+        # The banner's counts were written before the hold, same as before the pin.
+        review_body = _reconcile_banner_with_ledger(review_body, len(hold_log), 0)
         for line in pin_log:
             print(f"  {line}", file=sys.stderr)
 

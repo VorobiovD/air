@@ -1343,6 +1343,9 @@ def developer_activity_after(ic: list[dict], rv: list[dict], inl: list[dict], pr
                 continue
             if _is_human_dev_entry(e, bot_logins):
                 out.append(e)
+    # Merge the three surfaces chronologically so the caller's tail-cap keeps the
+    # NEWEST entries rather than whichever surface was appended last.
+    out.sort(key=lambda e: e.get("submitted_at") or e.get("created_at") or "")
     return out
 
 

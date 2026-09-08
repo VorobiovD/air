@@ -2970,3 +2970,10 @@ def test_hold_resurrects_omitted_open_prior_findings_only():
     out, log = hold_blockers_to_prior(_rr_body("- **#1** [medium] — NOT FIXED — a"), prior)
     assert "- **#4** [medium] — NOT FIXED — [air: re-inserted" in out and "[sec:idor]" in out
     assert "**#2**" not in out and "**#3**" not in out                          # closed last round → not resurrected
+
+
+def test_prior_new_findings_resets_severity_on_every_header():
+    from verdict import _prior_new_findings
+    body = ("## Code Review\n\n### Blockers\n\n**1. real**\n\nx\n\n### Pre-existing Issues\n\n**2. old thing**\n\ny\n\n"
+            "### Strengths\n\n**3. nice**\n\nReviewed at: z\n")
+    assert _prior_new_findings(body) == {1: "blocker"}

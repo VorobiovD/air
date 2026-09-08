@@ -1808,3 +1808,35 @@ def test_conversation_only_skips_when_reviews_fetch_fails(tmp_path, monkeypatch)
     out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD,
                                reviews_exc=RuntimeError("reviews 502"))
     assert out["reason"] == "already reviewed at head" and "verifier_task" not in calls
+
+
+_CO_PRIOR_NEW_ONLY = {"id": 120, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+                      "body": ("## Code Review (Re-review)\n\nRound 1 was clean; this round found one.\n\n"
+                               "### New Findings (introduced since last review)\n\n#### Blockers\n\n"
+                               "**1. raw PHI logged**\n\n"
+                               "[`g.py#L4`](https://github.com/o/r/blob/aaaaaaaaaaaa/g.py#L4) — bad [sec:pii-exposure]\n\n"
+                               "Reviewed at: " + _CO_HEAD + "\n")}
+
+
+def test_conversation_only_runs_on_new_findings_only_prior(tmp_path, monkeypatch):
+    # Cloud dogfood medium: a round-2 prior with NO status block (round-1 clean)
+    # but a `### New Findings → #### Blockers` block IS a prior with findings —
+    # the pass must run (guard 4), an EMPTY ledger must not abort it (guard 5),
+    # and the hold must still pin the new-in-prior blocker.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR_NEW_ONLY, dict(_CO_DEV, id=121)],
+                               head=_CO_HEAD, verifier_body=_co_rr("- **#1** [medium] — DISPUTED — dev explained"))
+    assert out.get("conversation_only") is True and "verifier_task" in calls
+    assert "- **#1** [blocker] — NOT FIXED" in out["body"] and "[sec:pii-exposure]" in out["body"]
+    assert out["verdict"] == "REQUEST_CHANGES"
+
+
+def test_developer_activity_after_merges_surfaces_chronologically():
+    from review import developer_activity_after
+    prior = {"id": 1, "created_at": "2026-09-01T10:00:00Z"}
+    ic = [{"id": 5, "created_at": "2026-09-01T12:00:00Z", "user": {"login": "dev"}, "body": "newest issue comment",
+           "author_association": "MEMBER"}]
+    rv = [{"id": 6, "submitted_at": "2026-09-01T11:00:00Z", "state": "COMMENTED", "user": {"login": "dev"},
+           "body": "older review", "author_association": "MEMBER"}]
+    out = developer_activity_after(ic, rv, [], prior, {"air-bot"})
+    assert [e["body"] for e in out] == ["older review", "newest issue comment"]

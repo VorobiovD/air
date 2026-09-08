@@ -1765,8 +1765,9 @@ def _prior_new_findings(body: str) -> dict:
         for hpos, hsev in headers:
             if hpos >= fm.start():
                 break
-            if hsev is not None:
-                sev = hsev
+            sev = hsev   # reset on EVERY header (parity with extract_fresh_findings):
+                         # an entry under `### Pre-existing Issues`/`### Strengths`
+                         # must not inherit the last severity section's rank
         if sev is not None:
             out.setdefault(int(fm.group(1)), sev)
     return out
