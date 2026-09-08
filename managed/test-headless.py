@@ -1840,3 +1840,24 @@ def test_developer_activity_after_merges_surfaces_chronologically():
            "body": "older review", "author_association": "MEMBER"}]
     out = developer_activity_after(ic, rv, [], prior, {"air-bot"})
     assert [e["body"] for e in out] == ["older review", "newest issue comment"]
+
+
+def test_conversation_only_skips_when_standing_verdict_has_no_commit_id_or_time(tmp_path, monkeypatch):
+    # A CHANGES_REQUESTED air review with no commit_id and no submitted_at can't be
+    # placed — it is treated as STANDING (sorts last, admitted regardless of head),
+    # so a prior with no gating content reads as a process fail-close → skip.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    reviews = [{"id": 1, "state": "APPROVED", "commit_id": _CO_HEAD, "submitted_at": "2026-09-01T10:05:00Z",
+                "user": {"login": "air-bot"}, "body": "ok <!-- air-review-verdict -->"},
+               {"id": 2, "state": "CHANGES_REQUESTED", "user": {"login": "air-bot"},
+                "body": "diff truncated <!-- air-review-verdict -->"}]
+    # a prior that gates by CONTENT (open blocker) → the process guard is not consulted (pass runs)
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR, _CO_DEV], head=_CO_HEAD, reviews=reviews,
+                               verifier_body=_co_rr("- **#1** [blocker] — NOT FIXED — still"))
+    assert "verifier_task" in calls
+    # a prior with a NON-gating medium + that unplaceable CHANGES_REQUESTED → process fail-close → skip
+    out2, calls2 = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR_MED, _CO_DEV], head=_CO_HEAD, reviews=reviews)
+    assert out2["reason"] == "already reviewed at head" and "verifier_task" not in calls2
+    # a prior with NO gating content + that unplaceable CHANGES_REQUESTED → fail-closed skip
+    from headless import _prior_verdict_process_fail_closed
+    assert _prior_verdict_process_fail_closed(reviews, "## Code Review\n\nclean\n\nReviewed at: x", _CO_HEAD, {"air-bot"}) is True

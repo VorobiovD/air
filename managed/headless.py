@@ -69,7 +69,7 @@ from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
     _CONFLICT_GATE_REASON,
 )
-from verdict import extract_prior_statuses, strip_new_findings, hold_blockers_to_prior, _reconcile_banner_with_ledger, _prior_new_findings  # noqa: E402  (conversation-only re-review guards)
+from verdict import extract_prior_statuses, strip_new_findings, hold_blockers_to_prior, _prior_new_findings  # noqa: E402  (conversation-only re-review guards)
 from github_client import AIR_VERDICT_SENTINEL  # noqa: E402  (prior-verdict fail-close detection)
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
 
@@ -88,7 +88,9 @@ def _prior_verdict_process_fail_closed(rv, prior_body: str, head_sha: str, bot_l
     OR-contract as `_is_air_verdict`, so a pre-sentinel legacy verdict or an
     unlisted rotated account both count). "Standing" = the LATEST non-dismissed
     air review at this head — a later APPROVE/COMMENT supersedes an earlier
-    CHANGES_REQUESTED, so ordering matters."""
+    CHANGES_REQUESTED, so ordering matters. A review with NO `commit_id` is
+    admitted regardless of head, and one with no `submitted_at` sorts as the
+    latest: an unplaceable air verdict is treated as standing (conservative)."""
     if should_request_changes(prior_body or "", floor_exposures=True)[0]:
         return False
     bots = {b.lower() for b in (bot_logins or set()) if b}
@@ -1230,12 +1232,11 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # gated on the ledger: a prior with no status block (round-1 clean,
         # round-2 raised new findings) has an EMPTY ledger, and the hold is the
         # only guard that sees those new-in-prior findings.
+        # (The hold reconciles the banner note itself, like the pin does.)
         review_body, hold_log = hold_blockers_to_prior(review_body, prior_body_at_head)
         pin_log = list(pin_log) + hold_log
-        # The banner's counts were written before the hold, same as before the pin.
-        review_body = _reconcile_banner_with_ledger(review_body, len(hold_log), 0)
-        for line in pin_log:
-            print(f"  {line}", file=sys.stderr)
+    for line in pin_log:   # the [pin]/[ledger]/[hold] stderr trail — every re-review
+        print(f"  {line}", file=sys.stderr)
 
     rc, reason = should_request_changes(review_body, floor_exposures=floor)
     # Deterministic conflict-marker gate (parity with managed/CLI): CLAUDE.md mandates

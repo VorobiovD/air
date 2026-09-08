@@ -2947,7 +2947,7 @@ def test_hold_covers_new_in_prior_and_sec_floored():
     assert "- **#2** [medium] — FIXED — still done" in out                              # re-asserted closure untouched
     assert "- **#3** [blocker] — NOT FIXED" in out                                       # new-in-prior blocker held
     assert "- **#4** [low] — NOT FIXED" in out and _NO_CODE_FIXED_MARKER in out          # FIXED without code held
-    assert len([l for l in log if "->" in l]) == 3   # three status rewrites (plus the [sec:] carry line)
+    assert len([l for l in log if " status " in l]) == 3   # three status rewrites (plus the [sec:] carry line)
 
 
 def test_hold_collision_honors_recorded_status_unless_new_is_blocker():
@@ -2960,6 +2960,7 @@ def test_hold_collision_honors_recorded_status_unless_new_is_blocker():
     prior_blk = prior_low.replace("#### Low\n\n**1. tidy**", "#### Blockers\n\n**1. new blocker")
     out2, log2 = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — FIXED — still done"), prior_blk)
     assert "- **#1** [blocker] — NOT FIXED" in out2 and _COLLISION_HOLD_MARKER in out2
+    assert any("#1 status FIXED->NOT FIXED" in l for l in log2) and not any("severity" in l for l in log2)
 
 
 def test_hold_resurrects_omitted_open_prior_findings_only():
@@ -2977,3 +2978,48 @@ def test_prior_new_findings_resets_severity_on_every_header():
     body = ("## Code Review\n\n### Blockers\n\n**1. real**\n\nx\n\n### Pre-existing Issues\n\n**2. old thing**\n\ny\n\n"
             "### Strengths\n\n**3. nice**\n\nReviewed at: z\n")
     assert _prior_new_findings(body) == {1: "blocker"}
+
+
+def test_hold_never_places_sec_tag_on_a_closed_line():
+    # Cloud dogfood medium (round 5): the floor is not status-aware, so carrying
+    # the prior's tag onto an honest FIXED/DISPUTED restatement would re-gate a
+    # resolved exposure on every pass. Closed lines stay byte-identical.
+    from verdict import hold_blockers_to_prior, count_category_floored
+    prior = _rr_body("- **#1** [medium] — FIXED — scrubbed [sec:pii-exposure]",
+                     "- **#2** [medium] — DISPUTED — by design [sec:idor]",
+                     "- **#3** [medium] — NOT FIXED — open [sec:idor]")
+    body = _rr_body("- **#1** [medium] — FIXED — scrubbed", "- **#2** [medium] — DISPUTED — by design",
+                    "- **#3** [medium] — NOT FIXED — open")
+    out, log = hold_blockers_to_prior(body, prior)
+    assert "- **#1** [medium] — FIXED — scrubbed\n" in out and "- **#2** [medium] — DISPUTED — by design\n" in out
+    assert "- **#3** [medium] — NOT FIXED — open [sec:idor]" in out
+    assert count_category_floored(out)[0] == 1 and len(log) == 1
+
+
+def test_hold_partially_fixed_to_fixed_needs_code():
+    from verdict import hold_blockers_to_prior, _NO_CODE_FIXED_MARKER
+    prior = _rr_body("- **#1** [medium] — PARTIALLY FIXED — half", "- **#2** [medium] — FIXED — done")
+    out, _ = hold_blockers_to_prior(_rr_body("- **#1** [medium] — FIXED — dev says rest is fine",
+                                             "- **#2** [medium] — PARTIALLY FIXED — actually one case left"), prior)
+    assert "- **#1** [medium] — PARTIALLY FIXED" in out and _NO_CODE_FIXED_MARKER in out
+    assert "- **#2** [medium] — PARTIALLY FIXED — actually one case left" in out   # stricter direction passes
+
+
+def test_prior_record_duplicate_lines_keep_the_more_gating_status():
+    from verdict import _prior_record, hold_blockers_to_prior
+    prior = _rr_body("- **#1** [medium] — NOT FIXED — a", "- **#1** [blocker] — DISPUTED — later dup")
+    assert _prior_record(prior)[1]["status"] == "NOT FIXED" and _prior_record(prior)[1]["sev"] == "blocker"
+    out, _ = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — DISPUTED — cleared"), prior)
+    assert "- **#1** [blocker] — NOT FIXED" in out
+
+
+def test_hold_reconciles_banner_before_splice_when_status_block_missing():
+    # The verifier dropped the whole status block: the hold must create it AND the
+    # banner note must still land (reconcile-before-splice, as the pin does).
+    from verdict import hold_blockers_to_prior, _PIN_BANNER_NOTE_MARK
+    prior = _rr_body("- **#1** [medium] — NOT FIXED — open")
+    body = ("## Code Review (Re-review)\n\n> [!NOTE]\n> **No blockers.** all clear\n\nNothing to report.\n\n"
+            "Reviewed at: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
+    out, log = hold_blockers_to_prior(body, prior)
+    assert "- **#1** [medium] — NOT FIXED — [air: re-inserted" in out and _PIN_BANNER_NOTE_MARK in out
+    assert any("resurrected" in l for l in log)

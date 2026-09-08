@@ -1749,6 +1749,16 @@ _CLOSED_STATUSES = frozenset({"FIXED", "DISPUTED"})   # same non-resurrection se
 _ANY_SECTION_HEADER_RE = re.compile(r"^#{3,4}\s+(.+?)\s*$", re.MULTILINE)
 
 
+def _blocker_sec_token(text: str):
+    """The first blocker-class `[sec:<token>]` token in `text` (lowercased), or None.
+    THE single predicate for "does this line/entry carry a floor tag" — used by
+    `_sec_flagged_nums` and the hold so the two can't drift."""
+    for t in _SEC_TAG_RE.findall(text or ""):
+        if t.lower() in _BLOCKER_CATEGORIES:
+            return t.lower()
+    return None
+
+
 def _prior_new_findings(body: str) -> dict:
     """`{num: severity}` for the findings a RE-REVIEW body raised as NEW that
     round (`**N.` entries under `### New Findings` → `#### <severity>`), plus a
@@ -1782,15 +1792,8 @@ def _sec_flagged_nums(body: str) -> dict:
     nums: dict = {}
     if not body:
         return nums
-
-    def _blocker_tok(text):
-        for t in _SEC_TAG_RE.findall(text):
-            if t.lower() in _BLOCKER_CATEGORIES:
-                return t.lower()
-        return None
-
     for m in _PRIOR_STATUS_LINE_RE.finditer(body):
-        tok = _blocker_tok(m.group(0))
+        tok = _blocker_sec_token(m.group(0))
         if tok:
             nums.setdefault(int(m.group(1)), tok)
     entries = list(_FRESH_FINDING_RE.finditer(body))
@@ -1798,10 +1801,17 @@ def _sec_flagged_nums(body: str) -> dict:
         nxt = entries[i + 1].start() if i + 1 < len(entries) else len(body)
         hdr = _ANY_SECTION_HEADER_RE.search(body, fm.end())
         stop = min(nxt, hdr.start()) if hdr else nxt
-        tok = _blocker_tok(body[fm.start():stop])
+        tok = _blocker_sec_token(body[fm.start():stop])
         if tok:
             nums.setdefault(int(fm.group(1)), tok)
     return nums
+
+
+# Most-gating first. Used to resolve a prior body carrying the SAME `#N` twice with
+# different statuses: the gate counts every occurrence, so the record must keep the
+# one that gated (last-wins would let `NOT FIXED` + a later `DISPUTED` clear).
+_STATUS_GATING_RANK = {"NOT FIXED": 0, "PARTIALLY FIXED": 1, "DEFERRED": 2, "DISPUTED": 3, "FIXED": 4}
+_OPEN_STATUSES = frozenset({"NOT FIXED", "PARTIALLY FIXED", "DEFERRED"})
 
 
 def _prior_record(prior_body: str) -> dict:
@@ -1812,11 +1822,18 @@ def _prior_record(prior_body: str) -> dict:
     collision; it is resolved by honoring the recorded status (mirroring the
     pin's re-assertion rule) UNLESS the colliding new finding is blocker-class,
     where the ambiguity is held NOT FIXED — the false-block direction, chosen
-    only for the highest-stakes case and explained on the line."""
+    only for the highest-stakes case and explained on the line. A duplicated
+    status line keeps the more-gating status and the higher severity."""
     rec: dict = {}
     sec = _sec_flagged_nums(prior_body)
     for num, sev, status in extract_prior_statuses(prior_body):
-        rec[num] = {"sev": sev, "status": status, "sec": sec.get(num), "collision": False}
+        r = rec.get(num)
+        if r is None:
+            rec[num] = {"sev": sev, "status": status, "sec": sec.get(num), "collision": False}
+        else:
+            r["sev"] = _max_severity(r["sev"], sev)
+            if _STATUS_GATING_RANK.get(status, 0) < _STATUS_GATING_RANK.get(r["status"], 0):
+                r["status"] = status
     for num, sev in _prior_new_findings(prior_body).items():
         new_is_blocker = sev == "blocker" or num in sec
         if num in rec:
@@ -1841,30 +1858,41 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
       re-emitted as `[low]` cannot dodge blocker-class (the pin only covers ledger
       entries);
     - the prior's blocker-class **`[sec:]` tag is carried** onto the line whenever
-      the emitted line lacks one — on EVERY path, including an honest same-status
-      restatement — because the category floor gates only on tags in the body
-      under gate, and a restated `[medium] — NOT FIXED` without its tag would
-      silently stop gating;
-    - **no code ⇒ nothing FIXED**: FIXED/PARTIALLY FIXED where the prior did not
-      already record that status → prior status;
-    - **blocker-class may not change status** on a discussion thread (the pass has
-      the least evidence and least judgment redundancy of any round, and a
-      blocker's DISPUTED is a complete un-gate) → prior status; a number
-      collision with a new blocker → NOT FIXED with its own marker;
-    - a prior finding **omitted** from the emitted block (not closed last round)
-      is **resurrected** at its prior severity/status/tag — the same policy the
-      pin applies to ledger entries, extended to the findings the ledger lacks.
+      the emitted line lacks one AND the line's final status is OPEN — on every
+      open path, including an honest same-status restatement — because the
+      category floor gates only on tags in the body under gate, and a restated
+      `[medium] — NOT FIXED` without its tag would silently stop gating. A CLOSED
+      line (FIXED/DISPUTED) never gets the tag: the floor is not status-aware, so
+      a tag on a closed line would re-gate a resolved exposure forever (the
+      verifier is told not to tag resolved issues; honor that);
+    - **no code ⇒ nothing FIXED**: FIXED where the prior did not record FIXED, or
+      PARTIALLY FIXED where the prior recorded neither → prior status (a prior
+      FIXED honestly restated as PARTIALLY FIXED is the stricter direction and
+      passes);
+    - **blocker-class may not move to a clearing status** on a discussion thread
+      (the pass has the least evidence and least judgment redundancy of any
+      round, and a blocker's DISPUTED is a complete un-gate) → prior status; the
+      stricter direction (DISPUTED → NOT FIXED) is allowed; a number collision
+      with a new blocker → NOT FIXED with its own marker;
+    - a prior finding **omitted** from the emitted block and not closed last
+      round is **resurrected NOT FIXED** at its prior severity/tag — the pin's
+      exact policy (same status, same closed set), extended to the findings the
+      ledger lacks.
 
     Non-blocker findings may still clear via DISPUTED / DEFERRED — exactly what a
-    "please re-check my comment" pass exists for. Returns `(body, log)`."""
+    "please re-check my comment" pass exists for. The banner note is reconciled
+    here (status rewrites + resurrections, BEFORE the status-block splice — the
+    same ordering pin_and_resurrect uses, since a freshly created section would
+    otherwise sit ahead of the banner and hide it from the locator). Returns
+    `(body, log)`; log lines are `[hold] #N status …`, `… severity …`, `… tag …`,
+    `… resurrected …`."""
     rec = _prior_record(prior_body)
     seen: set = set()
     log: list = []
-
-    def _has_blocker_tag(text):
-        return any(t.lower() in _BLOCKER_CATEGORIES for t in _SEC_TAG_RE.findall(text))
+    n_status = 0
 
     def _hold(m):
+        nonlocal n_status
         num = int(m.group(1))
         r = rec.get(num)
         if r is None:
@@ -1872,24 +1900,28 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
         seen.add(num)
         emitted_sev = (m.group(2) or "blocker").lower()
         status = re.sub(r"\s+", " ", m.group(3).upper()).strip()
-        tail = re.sub(r"^\*{0,2}", "", m.group(4)).rstrip()
+        orig_tail = re.sub(r"^\*{0,2}", "", m.group(4)).rstrip()
+        tail = orig_tail
         new_sev = _max_severity(r["sev"], emitted_sev)
-        if r["sec"] and not _has_blocker_tag(m.group(0)):
-            tail = f"{tail} [sec:{r['sec']}]"
-            log.append(f"[hold] #{num} carried [sec:{r['sec']}] forward (floor gates on this body only)")
-        blocker_class = new_sev == "blocker" or bool(r["sec"]) or _has_blocker_tag(m.group(0))
+        line_has_tag = _blocker_sec_token(m.group(0)) is not None
+        blocker_class = new_sev == "blocker" or bool(r["sec"]) or line_has_tag
         new_status, marker = status, ""
         if r["collision"] and status != "NOT FIXED":
             new_status, marker = "NOT FIXED", _COLLISION_HOLD_MARKER
-        elif status in _FIX_STATUSES and r["status"] not in _FIX_STATUSES:
+        elif (status == "FIXED" and r["status"] != "FIXED") or \
+                (status == "PARTIALLY FIXED" and r["status"] not in _FIX_STATUSES):
             new_status, marker = r["status"], _NO_CODE_FIXED_MARKER
         elif blocker_class and status != r["status"] and status in _CLEARING_STATUSES:
             new_status, marker = r["status"], _BLOCKER_HOLD_MARKER
+        if r["sec"] and not line_has_tag and new_status in _OPEN_STATUSES:
+            tail = f"{tail} [sec:{r['sec']}]"
+            log.append(f"[hold] #{num} tag [sec:{r['sec']}] carried forward (floor gates on this body only)")
         if new_status != status:
-            log.append(f"[hold] #{num} {status}->{new_status} (conversation-only: no code change)")
+            n_status += 1
+            log.append(f"[hold] #{num} status {status}->{new_status} (conversation-only: no code change)")
         if new_sev != emitted_sev:
             log.append(f"[hold] #{num} severity {emitted_sev}->{new_sev} (pinned to prior)")
-        if new_status == status and new_sev == emitted_sev and tail == re.sub(r"^\*{0,2}", "", m.group(4)).rstrip():
+        if new_status == status and new_sev == emitted_sev and tail == orig_tail:
             return m.group(0)
         return f"- **#{num}** [{new_sev}] — {new_status}{tail}{(' ' + marker) if marker else ''}"
 
@@ -1900,9 +1932,10 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
             continue
         tag = f" [sec:{r['sec']}]" if r["sec"] else ""
         resurrected.append(
-            f"- **#{num}** [{r['sev']}] — {r['status']} — "
+            f"- **#{num}** [{r['sev']}] — NOT FIXED — "
             f"[air: re-inserted — prior finding absent from this re-review; pinned from prior round]{tag}")
-        log.append(f"[hold] #{num} resurrected [{r['sev']}] {r['status']} (absent from the emitted block)")
+        log.append(f"[hold] #{num} resurrected [{r['sev']}] NOT FIXED (absent from the emitted block)")
+    body = _reconcile_banner_with_ledger(body, n_status, len(resurrected))
     return _ensure_rereview_shape(body, log, resurrected), log
 
 
@@ -2047,7 +2080,7 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
     # closed, not resurrected).
     resurrected = []
     for e in ledger:
-        if e.num in seen or e.prior_status in ("FIXED", "DISPUTED"):
+        if e.num in seen or e.prior_status in _CLOSED_STATUSES:
             continue
         resurrected.append(
             f"- **#{e.num}** [{e.prior_severity}] — NOT FIXED — "

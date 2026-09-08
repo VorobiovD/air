@@ -396,14 +396,14 @@ def conversation_only_directive(prior_sha: str, n_comments: int, new_in_prior: d
         f"reviewed by the full pipeline, or a maintainer-forced full re-review.)\n"
         f"- A prior finding the developer did not address, or whose explanation does not "
         f"hold, stays at its prior status with a one-line reason.\n"
-        f"Keep the full re-review format (status block, banner, footer) so the outcome is "
-        f"machine-parseable.\n"
         + (
-            "- The prior review ALSO raised these as NEW findings (see its New Findings "
-            "section) — they are prior findings too; include a status line for EACH: "
-            + ", ".join(f"#{n} [{sev}]" for n, sev in sorted(new_in_prior.items())) + ".\n"
+            "- These findings were raised by the prior review as numbered findings (not "
+            "in a status block) — they are prior findings too; include a status line for "
+            "EACH: " + ", ".join(f"#{n} [{sev}]" for n, sev in sorted(new_in_prior.items())) + ".\n"
             if new_in_prior else ""
         )
+        + f"Keep the full re-review format (status block, banner, footer) so the outcome is "
+        f"machine-parseable.\n"
     )
 
 
