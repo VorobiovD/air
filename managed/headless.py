@@ -69,7 +69,7 @@ from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
     _CONFLICT_GATE_REASON,
 )
-from verdict import extract_prior_statuses, strip_new_findings, hold_blockers_to_prior, _prior_new_findings  # noqa: E402  (conversation-only re-review guards)
+from verdict import extract_prior_statuses, strip_new_findings, hold_blockers_to_prior, prior_new_findings  # noqa: E402  (conversation-only re-review guards)
 from github_client import AIR_VERDICT_SENTINEL  # noqa: E402  (prior-verdict fail-close detection)
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
 
@@ -650,12 +650,12 @@ async def run_headless_review(args, bot_token: str) -> dict:
                 print(f"  [warn] developer-comment trigger check failed: "
                       f"{type(e).__name__}: {e} — treating as none", file=sys.stderr)
         prior_body_at_head = (prior or {}).get("body", "")
-        # `_prior_new_findings` reads `#{3,4}` headers, so a round-2 prior whose
+        # `prior_new_findings` reads `#{3,4}` headers, so a round-2 prior whose
         # round-1 was clean (no status block, findings only under `### New
         # Findings` → `#### <sev>`) counts as carrying findings — the same
         # H4-aware view the hold reconciles against (cloud dogfood medium).
         if trigger_comments and not (extract_prior_statuses(prior_body_at_head)
-                                     or _prior_new_findings(prior_body_at_head)):
+                                     or prior_new_findings(prior_body_at_head)):
             # A prior with NO findings gives the pass nothing to re-adjudicate — and
             # nothing for the ledger to hold, so a verifier body would be trusted
             # verbatim: a "please take another look" comment could flip a clean PR
@@ -1103,7 +1103,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
                 "===== No specialist findings this round =====\n"
                 "(conversation-only re-review — no code changed; see the task directive)"]
             verifier_task = verifier_task + conversation_only_directive(
-                prior_sha, len(trigger_comments), _prior_new_findings(prior_body_at_head))
+                prior_sha, len(trigger_comments), prior_new_findings(prior_body_at_head))
         verifier_input = (
             "Specialist findings to verify (verify each against source per your system prompt; "
             "drop FALSE POSITIVE / below-threshold; emit [sec:<token>] tags on confirmed exposures). "

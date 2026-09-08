@@ -1637,7 +1637,7 @@ def _locate_banner_block(body: str):
 
 
 
-def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int) -> str:
+def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int, source: str = "pin") -> str:
     """State in the banner that the summary's counts predate the pin.
 
     The verifier writes its banner prose ("4 prior blockers/mediums resolved · …")
@@ -1656,7 +1656,12 @@ def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int) 
     GATE-SAFE: blockquote lines only, inserted inside the banner — no
     `### Blockers` heading, no `**N.` entry, no `- **#N**` status line, no
     `[sec:]` tag. Every parser is line-anchored over those, so the body gates
-    byte-identically. Idempotent; no-op when the pin changed nothing.
+    byte-identically. Idempotent PER SOURCE and additive ACROSS sources: the pin
+    (`source="pin"`) and the conversation-only hold (`source="hold"`) each
+    reconcile the same body in one pass; the marker line carries per-source counts
+    (`<!-- air-pin-reconcile-counts pin=4/1 hold=2/0 -->`), so a repeat call from
+    one source replaces its own counts while a second source folds its counts in
+    instead of being dropped by a presence-only check. No-op when nothing changed.
     """
     if not (rewrites or resurrections):
         return body
@@ -1664,8 +1669,21 @@ def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int) 
     if located is None:
         return body                      # legacy/flat body: per-line markers stand alone
     lines, start, end, _ = located
-    if any(_PIN_BANNER_NOTE_MARK in ln for ln in lines[start:end + 1]):
-        return body
+    counts: dict = {}
+    mi = next((i for i in range(start, end + 1) if _PIN_BANNER_NOTE_MARK in lines[i]), None)
+    if mi is not None:
+        found = re.findall(r"(\w+)=(\d+)/(\d+)", lines[mi])
+        if not found:
+            return body                  # a pre-counts note (legacy body): leave it alone
+        counts = {k: (int(x), int(y)) for k, x, y in found}
+        cut_from = mi - 1                # the note line
+        if cut_from - 1 >= start and lines[cut_from - 1].strip() == ">":
+            cut_from -= 1                # its leading blank quote line
+        lines = lines[:cut_from] + lines[mi + 1:]
+        end = cut_from - 1
+    counts[source] = (rewrites, resurrections)
+    rewrites = sum(v[0] for v in counts.values())
+    resurrections = sum(v[1] for v in counts.values())
     def _n(count, noun):
         return f"{count} {noun}{'' if count == 1 else 's'}"
     parts = []
@@ -1677,7 +1695,8 @@ def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int) 
             f"{' and '.join(parts)}. Any fixed/resolved counts above predate that "
             f"check and may overstate what cleared — the per-finding statuses "
             f"below are authoritative.")
-    block = ["> ", f"> {note}", f"> {_PIN_BANNER_NOTE_MARK}"]
+    tally = " ".join(f"{k}={v[0]}/{v[1]}" for k, v in sorted(counts.items()))
+    block = ["> ", f"> {note}", f"> {_PIN_BANNER_NOTE_MARK} <!-- air-pin-reconcile-counts {tally} -->"]
     return "\n".join(lines[:end + 1] + block + lines[end + 1:])
 
 
@@ -1781,6 +1800,9 @@ def _prior_new_findings(body: str) -> dict:
         if sev is not None:
             out.setdefault(int(fm.group(1)), sev)
     return out
+
+
+prior_new_findings = _prior_new_findings   # public name for headless (the underscore form stays for in-module use)
 
 
 def _sec_flagged_nums(body: str) -> dict:
@@ -1916,6 +1938,13 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
         if r["sec"] and not line_has_tag and new_status in _OPEN_STATUSES:
             tail = f"{tail} [sec:{r['sec']}]"
             log.append(f"[hold] #{num} tag [sec:{r['sec']}] carried forward (floor gates on this body only)")
+        elif line_has_tag and new_status in _CLOSED_STATUSES:
+            # The verifier echoed the prior's tag onto its own FIXED/DISPUTED line
+            # (the prior body it reads carries it). The floor is not status-aware,
+            # so the tag would re-gate a resolved exposure — strip it by construction
+            # rather than rely on the "do not tag resolved issues" instruction.
+            tail = re.sub(r"\s*\[sec:[a-z0-9-]+\]", "", tail, flags=re.IGNORECASE).rstrip()
+            log.append(f"[hold] #{num} tag stripped from a closed line (floor is not status-aware)")
         if new_status != status:
             n_status += 1
             log.append(f"[hold] #{num} status {status}->{new_status} (conversation-only: no code change)")
@@ -1935,7 +1964,7 @@ def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
             f"- **#{num}** [{r['sev']}] — NOT FIXED — "
             f"[air: re-inserted — prior finding absent from this re-review; pinned from prior round]{tag}")
         log.append(f"[hold] #{num} resurrected [{r['sev']}] NOT FIXED (absent from the emitted block)")
-    body = _reconcile_banner_with_ledger(body, n_status, len(resurrected))
+    body = _reconcile_banner_with_ledger(body, n_status, len(resurrected), source="hold")
     return _ensure_rereview_shape(body, log, resurrected), log
 
 

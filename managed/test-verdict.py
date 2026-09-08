@@ -3023,3 +3023,30 @@ def test_hold_reconciles_banner_before_splice_when_status_block_missing():
     out, log = hold_blockers_to_prior(body, prior)
     assert "- **#1** [medium] — NOT FIXED — [air: re-inserted" in out and _PIN_BANNER_NOTE_MARK in out
     assert any("resurrected" in l for l in log)
+
+
+def test_reconcile_banner_is_additive_across_pin_and_hold_and_idempotent_per_source():
+    # Cloud dogfood low (round 6): the pin and the hold each reconcile the same
+    # body; the second SOURCE must fold its counts in, a repeat of the same source
+    # must replace its own (idempotent), and the marker constant stays present.
+    from verdict import _reconcile_banner_with_ledger, _PIN_BANNER_NOTE_MARK
+    body = ("## Code Review (Re-review)\n\n> [!CAUTION]\n> **Changes requested.** 2 fixed\n\n"
+            "### Previous Findings Status\n\n- **#1** [medium] — NOT FIXED — a\n\nReviewed at: x\n")
+    once = _reconcile_banner_with_ledger(body, 1, 0)
+    both = _reconcile_banner_with_ledger(once, 2, 1, source="hold")
+    assert both.count("Carry-forward check ran") == 1 and _PIN_BANNER_NOTE_MARK in both
+    assert "3 carried findings re-pinned **NOT FIXED** and 1 silently-dropped finding re-inserted" in both
+    assert "hold=2/1 pin=1/0" in both
+    assert _reconcile_banner_with_ledger(both, 2, 1, source="hold") == both      # per-source idempotent
+    assert _reconcile_banner_with_ledger(both, 0, 0) == both                     # nothing-changed no-op
+
+
+def test_hold_strips_echoed_sec_tag_from_a_closed_line():
+    from verdict import hold_blockers_to_prior, count_category_floored
+    prior = _rr_body("- **#1** [medium] — FIXED — scrubbed [sec:pii-exposure]",
+                     "- **#2** [medium] — NOT FIXED — open [sec:idor]")
+    out, log = hold_blockers_to_prior(_rr_body("- **#1** [medium] — FIXED — scrubbed [sec:pii-exposure]",
+                                               "- **#2** [medium] — DISPUTED — dev explained [sec:idor]"), prior)
+    assert "- **#1** [medium] — FIXED — scrubbed\n" in out                       # echoed tag on a closed line stripped
+    assert "- **#2** [medium] — NOT FIXED — dev explained [sec:idor]" in out      # blocker-class held, tag kept
+    assert count_category_floored(out)[0] == 1 and any("stripped" in l for l in log)
