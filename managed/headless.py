@@ -1248,6 +1248,12 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # (The hold reconciles the banner note itself, like the pin does.)
         review_body, hold_log = hold_blockers_to_prior(review_body, prior_body_at_head)
         pin_log = list(pin_log) + hold_log
+        # The raw-body anti-decoy gate (rc_raw, below) re-parses review_body_raw.
+        # The hold has two DE-escalating moves — the closed-line tag strip and the
+        # not-a-prior-finding line drop — and both must reach the raw body too, or
+        # rc_raw re-gates exactly what the hold just corrected (and posts a false
+        # "injected decoy" reason). Same precedent as strip_new_findings above.
+        review_body_raw, _ = hold_blockers_to_prior(review_body_raw, prior_body_at_head)
     for line in pin_log:   # the [pin]/[ledger]/[hold] stderr trail — every re-review
         print(f"  {line}", file=sys.stderr)
 

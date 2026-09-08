@@ -367,13 +367,15 @@ def conversation_only_directive(prior_sha: str, n_comments: int, new_in_prior: d
     the PRIOR findings against what the developer said, verified against source.
 
     The status vocabulary is deliberately narrowed: without a code change a
-    finding cannot become FIXED (the deterministic ledger pins any such claim
-    back to NOT FIXED anyway), and NO new findings may be raised (nothing new
-    exists to find, and inventing findings from a discussion thread is the
-    hallucination shape the specialist+verifier split exists to prevent). The
-    legitimate movements are the evidence-bearing exits — DISPUTED / FALSE
-    POSITIVE / PRE-EXISTING / DEFERRED-with-ticket — each grounded in the
-    developer's stated evidence AND your own read of the current source."""
+    finding cannot become FIXED (the deterministic hold pins a FIXED the prior
+    did not already record back to the prior status anyway), and NO new findings
+    may be raised (nothing new exists to find, and inventing findings from a
+    discussion thread is the hallucination shape the specialist+verifier split
+    exists to prevent). The legitimate movements are the evidence-bearing exits
+    on the frozen enum — DISPUTED (covering false-positive / pre-existing /
+    accepted-by-design) or DEFERRED-with-ticket — each grounded in the
+    developer's stated evidence AND your own read of the current source; a
+    blocker may only hold or get stricter."""
     return (
         f"\nCONVERSATION-ONLY RE-REVIEW — THESE RULES OVERRIDE THE TEMPLATE ABOVE:\n\n"
         f"No code has changed since the prior review at {prior_sha[:8]} (the inter-diff "

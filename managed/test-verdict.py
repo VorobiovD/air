@@ -1,3 +1,4 @@
+import re
 #!/usr/bin/env python3
 """Direct unit tests for the verdict-gating decision tree (managed/verdict.py).
 
@@ -2947,7 +2948,7 @@ def test_hold_covers_new_in_prior_and_sec_floored():
     assert "- **#2** [medium] — FIXED — still done" in out                              # re-asserted closure untouched
     assert "- **#3** [blocker] — NOT FIXED" in out                                       # new-in-prior blocker held
     assert "- **#4** [low] — NOT FIXED" in out and _NO_CODE_FIXED_MARKER in out          # FIXED without code held
-    assert len([l for l in log if " status " in l]) == 3   # three status rewrites (plus the [sec:] carry line)
+    assert len([l for l in log if re.search(r"#\d+ status ", l)]) == 3   # three status rewrites (plus the [sec:] carry line)
 
 
 def test_hold_collision_honors_recorded_status_unless_new_is_blocker():
@@ -3035,7 +3036,7 @@ def test_reconcile_banner_is_additive_across_pin_and_hold_and_idempotent_per_sou
     once = _reconcile_banner_with_ledger(body, 1, 0)
     both = _reconcile_banner_with_ledger(once, 2, 1, source="hold")
     assert both.count("Carry-forward check ran") == 1 and _PIN_BANNER_NOTE_MARK in both
-    assert "3 carried findings re-pinned **NOT FIXED** and 1 silently-dropped finding re-inserted" in both
+    assert "3 carried findings re-pinned to the prior status and 1 silently-dropped finding re-inserted" in both
     assert "hold=2/1 pin=1/0" in both
     assert _reconcile_banner_with_ledger(both, 2, 1, source="hold") == both      # per-source idempotent
     assert _reconcile_banner_with_ledger(both, 0, 0) == both                     # nothing-changed no-op
@@ -3059,6 +3060,10 @@ def test_status_sets_are_derived_from_one_ranking():
     assert _OPEN_STATUSES | _CLOSED_STATUSES == vocab and not (_OPEN_STATUSES & _CLOSED_STATUSES)
     assert _CLEARING_STATUSES == vocab - {"NOT FIXED"} and _FIX_STATUSES < vocab
     assert set(_GATING_STATUSES) <= _OPEN_STATUSES          # what the gate counts is open by definition
+    # THE property the direction clamp relies on: every gating status ranks strictly
+    # below every non-gating one (swap DEFERRED/PARTIALLY FIXED and this fails).
+    assert max(_STATUS_GATING_RANK[g] for g in _GATING_STATUSES) < \
+        min(_STATUS_GATING_RANK[x] for x in vocab - set(_GATING_STATUSES))
 
 
 def test_hold_direction_clamp_keeps_a_reopened_blocker_open():
@@ -3075,7 +3080,7 @@ def test_hold_direction_clamp_keeps_a_reopened_blocker_open():
     assert "- **#2** [medium] — PARTIALLY FIXED — dev admits it [sec:pii-exposure]" in out
     assert "- **#3** [blocker] — NOT FIXED — dev retracted the dispute" in out
     assert _NO_CODE_FIXED_MARKER not in out and _BLOCKER_HOLD_MARKER not in out
-    assert count_category_floored(out)[0] == 1 and not any(" status " in l for l in log)
+    assert count_category_floored(out)[0] == 1 and not any(re.search(r"#\d+ status ", l) for l in log)
 
 
 def test_hold_normalizes_synonyms_without_a_ledger():
@@ -3088,3 +3093,43 @@ def test_hold_normalizes_synonyms_without_a_ledger():
                                                "- **#2** [low] — PRE-EXISTING — was there before"), prior)
     assert out.count("**#1**") == 1 and out.count("**#2**") == 1                  # one line each, no twin
     assert "- **#1** [blocker] — NOT FIXED" in out and "- **#2** [low] — DISPUTED" in out
+
+
+def test_hold_drops_status_lines_for_numbers_the_prior_never_raised():
+    # Cloud dogfood round-7 medium: a hallucinated `#99 — PRE-EXISTING` with no
+    # severity tag normalized to NOT FIXED and gated as a default-blocker.
+    from verdict import hold_blockers_to_prior, should_request_changes
+    prior = _rr_body("- **#1** [medium] — NOT FIXED — open")
+    out, log = hold_blockers_to_prior(_rr_body("- **#1** [medium] — NOT FIXED — still open",
+                                               "- **#99** — PRE-EXISTING — never a finding"), prior)
+    assert "**#99**" not in out and any("#99 dropped" in l for l in log)
+    assert should_request_changes(out)[0] is False
+
+
+def test_hold_marks_and_counts_an_accept_word_escalation():
+    # Local round-7 low: the synonym escalation (accept-word on a blocker → NOT
+    # FIXED) reversed the verifier's verdict silently; it is now marked + counted.
+    from verdict import hold_blockers_to_prior, _BLOCKER_HOLD_MARKER
+    prior = ("## Code Review (Re-review)\n\n> [!NOTE]\n> **x**\n\n### New Findings (introduced since last review)\n\n"
+             "#### Blockers\n\n**1. new blocker**\n\nx\n\nReviewed at: z\n")
+    body = ("## Code Review (Re-review)\n\n> [!NOTE]\n> **No blockers.**\n\n### Previous Findings Status\n\n"
+            "- **#1** [blocker] — FALSE POSITIVE — dev explained\n\nReviewed at: z\n")
+    out, log = hold_blockers_to_prior(body, prior)
+    line = [l for l in out.split("\n") if l.startswith("- **#1**")][0]
+    assert line.startswith("- **#1** [blocker] — NOT FIXED — dev explained") and _BLOCKER_HOLD_MARKER in line
+    assert "1 carried finding re-pinned to the prior status" in out and any("[hold] #1 normalized" in l for l in log)
+
+
+def test_pin_then_hold_both_reach_the_banner_when_status_block_missing():
+    # Local round-7 low: the pin's created status section landed BEFORE the banner,
+    # so the hold's note was dropped by the locator. It now lands after the banner.
+    from verdict import pin_and_resurrect, hold_blockers_to_prior, build_carry_forward_ledger
+    prior = _rr_body("- **#1** [medium] — NOT FIXED — a")
+    ledger = build_carry_forward_ledger(prior, "", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    body = ("## Code Review (Re-review)\n\n> [!NOTE]\n> **No blockers.** all clear\n\nNothing to report.\n\n"
+            "Reviewed at: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
+    pinned, _ = pin_and_resurrect(body, ledger)
+    assert pinned.index("> [!NOTE]") < pinned.index("### Previous Findings Status")
+    prior2 = prior.replace("Reviewed at", "### New Findings (introduced since last review)\n\n#### Medium\n\n**2. new**\n\nx\n\nReviewed at")
+    held, log = hold_blockers_to_prior(pinned, prior2)
+    assert "hold=0/1 pin=0/1" in held and held.count("Carry-forward check ran") == 1   # sorted tally

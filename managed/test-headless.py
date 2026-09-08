@@ -1892,3 +1892,22 @@ def test_conversation_only_pin_and_hold_both_reported_in_one_banner(tmp_path, mo
     assert "- **#1** [medium] — NOT FIXED" in out["body"] and "- **#2** [blocker] — NOT FIXED" in out["body"]
     assert out["body"].count("Carry-forward check ran") == 1
     assert "pin=1/0" in out["body"] and "hold=1/0" in out["body"]
+
+
+_CO_PRIOR_CLOSED_TAG = {"id": 130, "created_at": "2026-09-01T10:00:00Z", "user": {"login": "air-bot"},
+                        "body": ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+                                 "- **#1** [medium] — FIXED — scrubbed [sec:pii-exposure]\n"
+                                 "- **#2** [low] — NOT FIXED — tidy\n\nReviewed at: " + _CO_HEAD + "\n")}
+
+
+def test_conversation_only_echoed_tag_on_closed_line_does_not_gate_end_to_end(tmp_path, monkeypatch):
+    # Local round-7 medium: the strip reached only the extracted body while the raw
+    # anti-decoy gate re-floored the echoed tag → CHANGES_REQUESTED with a false
+    # "injected decoy" reason. Both gate inputs now see the hold.
+    monkeypatch.delenv("AIR_REREVIEW_ON_COMMENTS", raising=False)
+    out, _ = _rereview_run(monkeypatch, tmp_path, comments=[_CO_PRIOR_CLOSED_TAG, dict(_CO_DEV, id=131)],
+                           head=_CO_HEAD, verifier_body=_co_rr("- **#1** [medium] — FIXED — scrubbed [sec:pii-exposure]",
+                                                               "- **#2** [low] — DISPUTED — dev explained",
+                                                               "- **#99** — PRE-EXISTING — never a finding"))
+    assert out["verdict"] == "APPROVE" and "decoy" not in (out.get("reason") or "")
+    assert "[sec:pii-exposure]" not in out["body"] and "**#99**" not in out["body"]
