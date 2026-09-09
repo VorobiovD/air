@@ -870,8 +870,20 @@ def _extract_review_body(raw_text: str, head_sha: str,
 # are duplicated here with this note rather than imported. A test pins the
 # stub shape; if the markers change in github_client, update these too.
 _DIFF_TRUNCATION_MARKER = "[air: diff truncated"
+# Both hygiene stub classes: the generated/vendored body stub and the
+# deleted-file body stub. A stubbed segment's real lines are hidden, so
+# `finding_changed` returns INDETERMINATE for it (pin-preserving) rather than
+# reading the absent hunks as "unchanged".
+# Prefix match on purpose: each alternative stops at its distinguishing phrase,
+# so the marker's trailing detail (counts, the `git show` hint) can change
+# without touching this. Locked to the real producer output by
+# test_diff_markers_match_github_client_producers.
 _DIFF_STUB_RE = re.compile(
-    r"^\[air: .* changed lines omitted \(generated/vendored\)\]", re.MULTILINE
+    r"^\[air: .* (?:"
+    r"changed lines omitted \(generated/vendored\)"      # generated/vendored body
+    r"|lines removed \(file deleted; body omitted"         # deleted-file body
+    r")",
+    re.MULTILINE,
 )
 
 CHANGED, UNCHANGED, INDETERMINATE = "CHANGED", "UNCHANGED", "INDETERMINATE"

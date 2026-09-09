@@ -597,6 +597,21 @@ jobs:
           # POSITIVE / PRE-EXISTING / DEFERRED can move). Set a caller repo/org
           # VARIABLE AIR_REREVIEW_ON_COMMENTS=0 to restore the plain at-head skip.
           AIR_REREVIEW_ON_COMMENTS: ${{ vars.AIR_REREVIEW_ON_COMMENTS }}
+          # Diff byte cap. A diff over the cap gets its tail omitted, which
+          # fail-closes the gate ("a blocker beyond the cap can't be ruled out")
+          # — correct, but until now the cap was NOT forwarded, so the remedy the
+          # review printed on the PR was impossible for the author or a maintainer
+          # to carry out without editing this file (lifemd #17748). Forwarded as a
+          # repo/org VARIABLE now. AIR_DIFF_MAX_BYTES moves BOTH halves (the
+          # headless char cap defaults to it); AIR_HEADLESS_DIFF_CAP overrides just
+          # the headless half. Raising it costs tokens on big PRs — prefer letting
+          # the deleted-file body stub reclaim the budget first (default ON).
+          AIR_DIFF_MAX_BYTES: ${{ vars.AIR_DIFF_MAX_BYTES }}
+          AIR_HEADLESS_DIFF_CAP: ${{ vars.AIR_HEADLESS_DIFF_CAP }}
+          # Deleted-file body stubbing (over-budget diffs only). Default ON; set a
+          # caller repo/org VARIABLE AIR_DELETION_STUB=0 to restore the old
+          # behavior where a deletion-heavy cleanup PR cap-omits its added code.
+          AIR_DELETION_STUB: ${{ vars.AIR_DELETION_STUB }}
           # Fresh-gate exposure floor. Default ON (review.py treats unset/empty
           # as enabled); set a caller repo/org VARIABLE AIR_CATEGORY_FLOOR=0 in
           # Settings → Variables to disable the deterministic "active exposure =

@@ -1923,3 +1923,68 @@ def test_conversation_only_raw_only_rewrites_are_logged(tmp_path, monkeypatch, c
     assert out["verdict"] == "APPROVE" and "decoy" not in (out.get("reason") or "")
     err = capsys.readouterr().err
     assert "[hold][raw] 1 rewrite(s) on the raw body only" in err and "#77" in err
+
+
+def test_headless_diff_cap_defaults_to_the_hygiene_cap():
+    """ONE knob must move both halves: `_diff_is_truncated` is `marker OR len >
+    cap`, and hygiene writes that marker at ITS cap, so two independent defaults
+    meant raising either one alone left the gate failing closed (lifemd #17748)."""
+    import importlib, os
+    import diff_hygiene
+    prev = os.environ.get("AIR_DIFF_MAX_BYTES")
+    os.environ["AIR_DIFF_MAX_BYTES"] = "900000"
+    os.environ.pop("AIR_HEADLESS_DIFF_CAP", None)
+    try:
+        importlib.reload(diff_hygiene)
+        h = importlib.reload(headless)
+        assert diff_hygiene.DIFF_MAX_BYTES == 900_000 and h._DIFF_CAP == 900_000
+    finally:
+        if prev is None:
+            os.environ.pop("AIR_DIFF_MAX_BYTES", None)
+        else:
+            os.environ["AIR_DIFF_MAX_BYTES"] = prev
+        importlib.reload(diff_hygiene)
+        importlib.reload(headless)
+
+
+def test_diff_cap_knobs_are_forwarded_to_the_job():
+    """The caps never reached the job, so the remedy air printed on the PR was
+    impossible to carry out without editing the reusable workflow (lifemd #17748).
+    Which variable gets NAMED is covered by the runtime test below."""
+    wf = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(headless.__file__))),
+                           ".github", "workflows", "managed-review.yml")).read()
+    for var in ("AIR_DIFF_MAX_BYTES", "AIR_HEADLESS_DIFF_CAP", "AIR_DELETION_STUB"):
+        assert f"{var}: ${{{{ vars.{var} }}}}" in wf, f"{var} is not forwarded to the job"
+
+
+def test_truncation_arm_distinguishes_hygiene_from_the_headless_cap():
+    marker = "[air: diff truncated at 500000 bytes — 2 file(s) omitted]\n"
+    assert headless._truncation_arm(marker) == headless.MARKER_ARM
+    assert headless._truncation_arm("x" * (headless._DIFF_CAP + 10)) == headless.LENGTH_ARM
+    assert headless._truncation_arm("diff --git a/x b/x\n+ok\n") == ""
+
+
+def test_truncation_remedy_names_the_cap_for_the_arm_that_fired(monkeypatch):
+    """#8: keyed on the arm that fired, not on which variable is set. Hygiene
+    writes the MARKER arm upstream and reads only AIR_DIFF_MAX_BYTES, so naming
+    the headless override there is the impossible-remedy trap this closes."""
+    monkeypatch.setenv("AIR_HEADLESS_DIFF_CAP", "900000")
+    assert headless._truncation_remedy(headless.MARKER_ARM) == "AIR_DIFF_MAX_BYTES"
+    assert headless._truncation_remedy(headless.LENGTH_ARM) == "AIR_HEADLESS_DIFF_CAP"
+    monkeypatch.setenv("AIR_HEADLESS_DIFF_CAP", "900k")                   # malformed
+    assert headless._truncation_remedy(headless.LENGTH_ARM) == "AIR_DIFF_MAX_BYTES"
+    monkeypatch.delenv("AIR_HEADLESS_DIFF_CAP", raising=False)
+    assert headless._truncation_remedy(headless.LENGTH_ARM) == "AIR_DIFF_MAX_BYTES"
+
+
+def test_the_v1_guards_own_marker_cannot_hijack_the_remedy(monkeypatch):
+    """#11: the LENGTH arm rewrites `diff` with `[air: diff truncated … v1 guard]`,
+    whose prefix is byte-identical to hygiene's marker. Re-deriving the arm from
+    the mutated diff answered AIR_DIFF_MAX_BYTES for a truncation the headless
+    override caused — the override's own documented use (a cap set LOWER)."""
+    monkeypatch.setenv("AIR_HEADLESS_DIFF_CAP", "900000")
+    original = "x" * (headless._DIFF_CAP + 10)
+    arm = headless._truncation_arm(original)             # captured before the rewrite
+    mutated = original[:headless._DIFF_CAP] + f"\n[air: diff truncated at {headless._DIFF_CAP} chars — v1 guard]\n"
+    assert headless._truncation_arm(mutated) == headless.MARKER_ARM        # the collision…
+    assert headless._truncation_remedy(arm) == "AIR_HEADLESS_DIFF_CAP"     # …does not reach the remedy
