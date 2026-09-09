@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 # This dir hosts the sibling shared modules. When this file is loaded by
@@ -1466,7 +1467,14 @@ _PRIOR_STATUS_LINE_RE = re.compile(
 # words are left alone → they still resurrect (over-gate, fail-safe). The
 # verifier prompt is also tightened to emit enum-only tokens; this is the
 # deterministic backstop for when the model ignores it.
-_STATUS_SYNONYMS = {"ACCEPTED": "DISPUTED", "WONTFIX": "DISPUTED", "RESOLVED": "FIXED"}
+_STATUS_SYNONYMS = {"ACCEPTED": "DISPUTED", "WONTFIX": "DISPUTED", "RESOLVED": "FIXED",
+                    # The verifier's own classification vocabulary leaks into the
+                    # status slot (conversation-only re-reviews made this common):
+                    # off-enum, so the line read as silently dropped and the finding
+                    # was resurrected NOT FIXED beside it — a self-contradicting false
+                    # block. Both mean "not a defect to fix" → the DISPUTED exit.
+                    "FALSE POSITIVE": "DISPUTED", "FALSE-POSITIVE": "DISPUTED",
+                    "PRE-EXISTING": "DISPUTED", "PREEXISTING": "DISPUTED"}
 # IGNORECASE: match a `[BLOCKER]`-cased tag too (else the synonym misses and the
 # finding resurrects). `(?P<word>...)(?=\s*(?:[^\w\s]|$))`: rewrite ONLY when the
 # synonym is the COMPLETE leading status token — followed by a DELIMITER (the
@@ -1478,12 +1486,15 @@ _STATUS_SYNONYMS = {"ACCEPTED": "DISPUTED", "WONTFIX": "DISPUTED", "RESOLVED": "
 # re-parses. `num`/`sev` are captured for the severity-aware rule below.
 _SYNONYM_STATUS_RE = re.compile(
     r"(?P<prefix>^-\s+\*\*#(?P<num>\d+)\*\*(?:\s*\[(?P<sev>" + _SEVERITY_ALT + r")\])?\s+—\s+[^\w\n]*)"
-    r"(?P<word>[A-Za-z]+)(?=\s*(?:[^\w\s]|$))",
+    # One optional second word (space- or hyphen-joined) so the two-word synonyms
+    # match; a canonical two-word status (`NOT FIXED`, `PARTIALLY FIXED`) is also
+    # captured whole but isn't in the map, so it is left untouched.
+    r"(?P<word>[A-Za-z]+(?:[ -][A-Za-z]+)?)(?=\s*(?:[^\w\s]|$))",
     re.MULTILINE | re.IGNORECASE,
 )
 
 
-def _canonicalize_status_synonyms(review_body: str, by_num: dict) -> tuple:
+def _canonicalize_status_synonyms(review_body: str, by_num: dict, tag: str = "pin", escalated_out: set | None = None) -> tuple:
     """Rewrite a known off-enum status synonym on a `### Previous Findings
     Status` line to its canonical token before the frozen regexes parse it.
     Returns (body, log_lines). Only a synonym that is the COMPLETE leading
@@ -1518,7 +1529,9 @@ def _canonicalize_status_synonyms(review_body: str, by_num: dict) -> tuple:
             prior_sev = entry.prior_severity if entry else (emitted_sev or "blocker")
             if _max_severity(prior_sev, emitted_sev or prior_sev) == "blocker":
                 canon = "NOT FIXED"  # accept-by-design must not auto-clear a blocker
-        log.append(f"[pin] normalized status synonym {m.group('word')!r} -> {canon}")
+                if escalated_out is not None:
+                    escalated_out.add(int(m.group("num")))
+        log.append(f"[{tag}] #{m.group('num')} normalized status synonym {m.group('word')!r} -> {canon}")
         return m.group("prefix") + canon
 
     return _SYNONYM_STATUS_RE.sub(_repl, review_body), log
@@ -1554,6 +1567,14 @@ def _ensure_rereview_shape(body: str, log: list, resurrected: list) -> str:
         return body[:at].rstrip("\n") + "\n" + block + "\n\n" + body[at:]
     hdr = _REREVIEW_HEADER_RE.search(body)
     log.append("[ledger] created Previous Findings Status section for resurrected findings")
+    located = _locate_banner_block(body)
+    if located is not None:
+        # AFTER the verdict banner, never between the header and the banner: a
+        # `- **#N**` line ahead of the banner makes `_locate_banner_block` return
+        # None for every later consumer (the hold's note, normalize_verdict_banner,
+        # append_gate_note) — their notes would be silently dropped.
+        lines, _start, end, _m = located
+        return "\n".join(lines[:end + 1] + ["", "### Previous Findings Status", "", block] + lines[end + 1:])
     if hdr:
         nl = body.find("\n", hdr.end())
         nl = len(body) if nl == -1 else nl + 1
@@ -1592,6 +1613,7 @@ _PIN_REWRITE_MARKER_REBASE = (
 
 
 _PIN_BANNER_NOTE_MARK = "<!-- air-pin-reconcile -->"
+_PIN_COUNTS_MARK = "air-pin-reconcile-counts"   # per-source tally comment (emit + parse share this literal)
 
 
 def _locate_banner_block(body: str):
@@ -1627,7 +1649,7 @@ def _locate_banner_block(body: str):
 
 
 
-def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int) -> str:
+def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int, source: str = "pin") -> str:
     """State in the banner that the summary's counts predate the pin.
 
     The verifier writes its banner prose ("4 prior blockers/mediums resolved · …")
@@ -1646,7 +1668,12 @@ def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int) 
     GATE-SAFE: blockquote lines only, inserted inside the banner — no
     `### Blockers` heading, no `**N.` entry, no `- **#N**` status line, no
     `[sec:]` tag. Every parser is line-anchored over those, so the body gates
-    byte-identically. Idempotent; no-op when the pin changed nothing.
+    byte-identically. Idempotent PER SOURCE and additive ACROSS sources: the pin
+    (`source="pin"`) and the conversation-only hold (`source="hold"`) each
+    reconcile the same body in one pass; the marker line carries per-source counts
+    (`<!-- air-pin-reconcile-counts pin=4/1 hold=2/0 -->`), so a repeat call from
+    one source replaces its own counts while a second source folds its counts in
+    instead of being dropped by a presence-only check. No-op when nothing changed.
     """
     if not (rewrites or resurrections):
         return body
@@ -1654,21 +1681,361 @@ def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int) 
     if located is None:
         return body                      # legacy/flat body: per-line markers stand alone
     lines, start, end, _ = located
-    if any(_PIN_BANNER_NOTE_MARK in ln for ln in lines[start:end + 1]):
-        return body
+    counts: dict = {}
+    mi = next((i for i in range(start, end + 1) if _PIN_BANNER_NOTE_MARK in lines[i]), None)
+    if mi is not None:
+        # `[A-Za-z_]+` (not `\w+`) so a digit run can't be split between one unit's
+        # `\d+` and the next unit's key — with `\w+` the group was ambiguous and a
+        # line missing its `-->` backtracked exponentially (dogfood: ReDoS on the
+        # pin path of every re-review).
+        cm = re.search(r"<!-- " + _PIN_COUNTS_MARK + r" ((?:[A-Za-z_]+=\d+/\d+ ?)+)-->", lines[mi])
+        found = re.findall(r"\b([A-Za-z_]+)=(\d+)/(\d+)\b", cm.group(1)) if cm else []
+        if not found:
+            return body                  # a pre-counts note (legacy body): leave it alone
+        counts = {k: (int(x), int(y)) for k, x, y in found}
+        cut_from = mi - 1                # the note line
+        if cut_from - 1 >= start and lines[cut_from - 1].strip() == ">":
+            cut_from -= 1                # its leading blank quote line
+        cut_from = max(cut_from, start + 1)   # never cut the alert line itself
+        lines = lines[:cut_from] + lines[mi + 1:]
+        end = cut_from - 1
+    counts[source] = (rewrites, resurrections)
+    rewrites = sum(v[0] for v in counts.values())
+    resurrections = sum(v[1] for v in counts.values())
     def _n(count, noun):
         return f"{count} {noun}{'' if count == 1 else 's'}"
     parts = []
     if rewrites:
-        parts.append(f"{_n(rewrites, 'carried finding')} re-pinned **NOT FIXED**")
+        parts.append(f"{_n(rewrites, 'carried finding')} re-pinned to the prior status")
     if resurrections:
         parts.append(f"{_n(resurrections, 'silently-dropped finding')} re-inserted")
     note = (f"**Carry-forward check ran after this summary was written:** "
             f"{' and '.join(parts)}. Any fixed/resolved counts above predate that "
             f"check and may overstate what cleared — the per-finding statuses "
             f"below are authoritative.")
-    block = ["> ", f"> {note}", f"> {_PIN_BANNER_NOTE_MARK}"]
+    tally = " ".join(f"{k}={v[0]}/{v[1]}" for k, v in sorted(counts.items()))
+    block = ["> ", f"> {note}", f"> {_PIN_BANNER_NOTE_MARK} <!-- {_PIN_COUNTS_MARK} {tally} -->"]
     return "\n".join(lines[:end + 1] + block + lines[end + 1:])
+
+
+# Matcher is `#{3,4}` so a bare `#### Blockers` with no `### New Findings` parent is
+# still caught (count_blockers accepts both depths); the TERMINATOR stays `###` so a
+# `### New Findings` cut isn't ended early by its own nested `####` sub-header.
+_NEW_FINDINGS_SECTION_RE = re.compile(
+    r"^#{3,4}\s+(?:New Findings\b|Blockers\b|Medium\b|Low\b|Nits\b)", re.MULTILINE)
+_ANY_H3_OR_RULE_RE = re.compile(r"^(?:###\s|---\s*$|Reviewed at:)", re.MULTILINE)
+
+
+def strip_new_findings(body: str) -> tuple:
+    """Deterministically remove every NEW-finding section from a re-review body,
+    returning `(body, n_removed)`. Used by the conversation-only re-review, where
+    no code changed since the prior review: there is nothing new to find, so any
+    `### New Findings …` / fresh-format `### Blockers|Medium|Low|Nits` section the
+    verifier emits is a hallucination over a discussion thread — and a new
+    `**N.` blocker entry gates via `count_blockers` with NO ledger involvement, so
+    "don't emit new findings" must be enforced by code, not by the prompt.
+    Cuts from each such `###` header up to (not including) the next `###` header,
+    a `---` rule, or the `Reviewed at:` footer; `### Previous Findings Status`,
+    `### Strengths`, `### Pre-existing …` and the footer are untouched, so the
+    frozen status-line contract and the anti-decoy SHA footer survive intact."""
+    if not body:
+        return body, 0
+    out, pos, removed = [], 0, 0
+    for m in _NEW_FINDINGS_SECTION_RE.finditer(body):
+        if m.start() < pos:
+            continue
+        cut_start = m.start()
+        # v2 folds non-blocker sections in <details><summary>…</summary>; a header
+        # sitting inside one must take its wrapper along, or the orphaned opener
+        # folds the rest of the comment.
+        pre = body[pos:cut_start]
+        wrap = re.search(r"(?:<details>\s*(?:<summary>.*?</summary>\s*)?)\Z", pre, re.DOTALL)
+        if wrap:
+            cut_start = pos + wrap.start()
+        nxt = _ANY_H3_OR_RULE_RE.search(body, m.end())
+        end = nxt.start() if nxt else len(body)
+        closer = re.match(r"\s*</details>\s*", body[end:])
+        if wrap and closer:
+            end += closer.end()
+        out.append(body[pos:cut_start])
+        pos = end
+        removed += 1
+    out.append(body[pos:])
+    return "".join(out), removed
+
+
+_BLOCKER_HOLD_MARKER = (
+    "[air: a blocker cannot be cleared by discussion alone — it keeps its prior "
+    "status until a code change is reviewed, or a maintainer forces a full re-review.]"
+)
+_NO_CODE_FIXED_MARKER = (
+    "[air: pinned to the prior status — no code changed since the prior review, "
+    "so nothing was fixed.]"
+)
+_COLLISION_HOLD_MARKER = (
+    "[air: this finding number was both carried and newly raised as a blocker in the "
+    "prior review, so the two cannot be told apart — held NOT FIXED until a code change "
+    "is reviewed, or a maintainer forces a full re-review.]"
+)
+# THE status vocabulary, ordered most-gating first. `_CLEARING_STATUSES` and
+# `_OPEN_STATUSES` are derived from it; `_FIX_STATUSES`/`_CLOSED_STATUSES` name
+# hand-picked subsets. The property the direction clamp relies on — every gating
+# status ranks strictly below every non-gating one — is locked by test.
+_STATUS_GATING_RANK = {"NOT FIXED": 0, "PARTIALLY FIXED": 1, "DEFERRED": 2, "DISPUTED": 3, "FIXED": 4}
+_DROPPED_LINE = "\x00air-dropped-line\x00"   # placeholder a dropped status line becomes before cleanup
+_CLEARING_STATUSES = frozenset(set(_STATUS_GATING_RANK) - {"NOT FIXED"})   # anything but the fully-open status
+_FIX_STATUSES = frozenset({"FIXED", "PARTIALLY FIXED"})                       # claims that need code
+_CLOSED_STATUSES = frozenset({"FIXED", "DISPUTED"})                           # never resurrected (pin + hold)
+_OPEN_STATUSES = frozenset(set(_STATUS_GATING_RANK) - _CLOSED_STATUSES)      # the partition's other half
+# `#{3,4}` so the `#### Blockers` sub-headers of a re-review body's
+# `### New Findings` block are seen (extract_fresh_findings deliberately reads
+# only `###` — it is documented as fresh-body-only).
+_ANY_SECTION_HEADER_RE = re.compile(r"^#{3,4}\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _blocker_sec_token(text: str):
+    """The first blocker-class `[sec:<token>]` token in `text` (lowercased), or None.
+    THE single predicate for "does this line/entry carry a floor tag" — used by
+    `_sec_flagged_nums` and the hold so the two can't drift."""
+    for t in _SEC_TAG_RE.findall(text or ""):
+        if t.lower() in _BLOCKER_CATEGORIES:
+            return t.lower()
+    return None
+
+
+def _prior_new_findings(body: str) -> dict:
+    """`{num: severity}` for the findings a RE-REVIEW body raised as NEW that
+    round (`**N.` entries under `### New Findings` → `#### <severity>`), plus a
+    fresh body's plain sections. These are in neither the body's status block nor
+    the next round's ledger triples, so a conversation-only pass would otherwise
+    see them as unconstrained — a new-in-prior blocker could be DISPUTED away,
+    downgraded, or simply omitted, all with zero code change."""
+    if not body:
+        return {}
+    headers = [(m.start(), _section_severity(m.group(1))) for m in _ANY_SECTION_HEADER_RE.finditer(body)]
+    out = {}
+    for fm in _FRESH_FINDING_RE.finditer(body):
+        sev = None
+        for hpos, hsev in headers:
+            if hpos >= fm.start():
+                break
+            sev = hsev   # reset on EVERY header (parity with extract_fresh_findings):
+                         # an entry under `### Pre-existing Issues`/`### Strengths`
+                         # must not inherit the last severity section's rank
+        if sev is not None:
+            out.setdefault(int(fm.group(1)), sev)
+    return out
+
+
+prior_new_findings = _prior_new_findings   # public name for headless (the underscore form stays for in-module use)
+
+
+def _sec_flagged_nums(body: str) -> dict:
+    """`{num: token}` for findings in `body` carrying a blocker-class `[sec:<token>]`
+    tag — on a `- **#N**` status line or anywhere in a `**N.` entry's block (up to
+    the next entry/header). The category floor makes such a finding a BLOCKER for
+    the gate regardless of its `[medium]` label; the hold must see it the same way,
+    and must carry the tag forward because the floor scans only the body under gate."""
+    nums: dict = {}
+    if not body:
+        return nums
+    for m in _PRIOR_STATUS_LINE_RE.finditer(body):
+        tok = _blocker_sec_token(m.group(0))
+        if tok:
+            nums.setdefault(int(m.group(1)), tok)
+    entries = list(_FRESH_FINDING_RE.finditer(body))
+    for i, fm in enumerate(entries):
+        nxt = entries[i + 1].start() if i + 1 < len(entries) else len(body)
+        hdr = _ANY_SECTION_HEADER_RE.search(body, fm.end())
+        stop = min(nxt, hdr.start()) if hdr else nxt
+        tok = _blocker_sec_token(body[fm.start():stop])
+        if tok:
+            nums.setdefault(int(fm.group(1)), tok)
+    return nums
+
+
+def _prior_record(prior_body: str) -> dict:
+    """The prior round's COMPLETE record of its findings: `{num: {"sev", "status",
+    "sec", "collision"}}` — the status block (carried findings) UNIONED with the
+    findings that round raised as NEW (status NOT FIXED — they were open when
+    raised). A number present in BOTH is the documented per-round renumbering
+    collision; it is resolved by honoring the recorded status (mirroring the
+    pin's re-assertion rule) UNLESS the colliding new finding is blocker-class,
+    where the ambiguity is held NOT FIXED — the false-block direction, chosen
+    only for the highest-stakes case and explained on the line. A duplicated
+    status line keeps the more-gating status and the higher severity."""
+    rec: dict = {}
+    sec = _sec_flagged_nums(prior_body)
+    for num, sev, status in extract_prior_statuses(prior_body):
+        r = rec.get(num)
+        if r is None:
+            rec[num] = {"sev": sev, "status": status, "sec": sec.get(num), "collision": False}
+        else:
+            r["sev"] = _max_severity(r["sev"], sev)
+            if _STATUS_GATING_RANK.get(status, 0) < _STATUS_GATING_RANK.get(r["status"], 0):
+                r["status"] = status
+    for num, sev in _prior_new_findings(prior_body).items():
+        new_is_blocker = sev == "blocker" or num in sec
+        if num in rec:
+            r = rec[num]
+            r["sev"] = _max_severity(r["sev"], sev)
+            if new_is_blocker:
+                r["status"], r["collision"] = "NOT FIXED", True
+            r["sec"] = r["sec"] or sec.get(num)
+        else:
+            rec[num] = {"sev": sev, "status": "NOT FIXED", "sec": sec.get(num), "collision": False}
+    return rec
+
+
+def hold_blockers_to_prior(body: str, prior_body: str) -> tuple:
+    """Conversation-only re-review guard, run AFTER pin_and_resurrect: reconcile
+    the emitted status block against the PRIOR round's complete record
+    (`_prior_record` — carried statuses ∪ the findings it raised as new, which the
+    ledger never sees). No code changed, so the result can never be weaker than
+    the verdict already standing. Per prior finding:
+
+    - **severity** is pinned to max(prior, emitted) — a new-in-prior blocker
+      re-emitted as `[low]` cannot dodge blocker-class (the pin only covers ledger
+      entries);
+    - the prior's blocker-class **`[sec:]` tag is carried** onto the line whenever
+      the emitted line lacks one AND the line's final status is OPEN — on every
+      open path, including an honest same-status restatement — because the
+      category floor gates only on tags in the body under gate, and a restated
+      `[medium] — NOT FIXED` without its tag would silently stop gating. A CLOSED
+      line (FIXED/DISPUTED) never gets the tag: the floor is not status-aware, so
+      a tag on a closed line would re-gate a resolved exposure forever (the
+      verifier is told not to tag resolved issues; honor that);
+    - **no code ⇒ nothing FIXED**: FIXED where the prior did not record FIXED, or
+      PARTIALLY FIXED where the prior recorded neither → prior status, unless
+      that prior status is LESS gating than what was emitted (the clamp below:
+      a prior FIXED/DISPUTED/DEFERRED honestly restated PARTIALLY FIXED stays);
+    - **blocker-class may not move to a clearing status** on a discussion thread
+      (the pass has the least evidence and least judgment redundancy of any
+      round, and a blocker's DISPUTED is a complete un-gate) → prior status; the
+      stricter direction is always allowed (a direction clamp guarantees no
+      STATUS branch ever makes a line less gating than emitted — the one
+      deliberate weakening is the closed-line tag strip below); a number
+      collision with a new blocker → NOT FIXED with its own marker;
+    - a prior finding **omitted** from the emitted block and not closed last
+      round is **resurrected NOT FIXED** at its prior severity/tag — the pin's
+      exact policy (same status, same closed set), extended to the findings the
+      ledger lacks.
+
+    A status line for a number the prior never raised is DROPPED from the status
+    block (a hallucinated `#99 — PRE-EXISTING` with no severity tag would
+    otherwise normalize to a gating blocker) and BLOCKQUOTED elsewhere in the
+    body (a quotation stays readable but leaves the line-anchored gate counters,
+    which are unscoped); if the section can't be located, everything drops. Non-blocker findings may still clear via DISPUTED / DEFERRED
+    — exactly what a "please re-check my comment" pass exists for. The banner
+    note is reconciled
+    here (status rewrites + resurrections, BEFORE the status-block splice — the
+    same ordering pin_and_resurrect uses, since a freshly created section would
+    otherwise sit ahead of the banner and hide it from the locator). Returns
+    `(body, log)`; log lines are `[hold] #N status …`, `… severity …`, `… tag …`,
+    `… resurrected …`."""
+    rec = _prior_record(prior_body)
+    seen: set = set()
+    # Off-enum synonyms (FALSE POSITIVE / PRE-EXISTING / …) are normalized by the
+    # pin — but the pin is a no-op on an EMPTY ledger (a New-Findings-only prior),
+    # and an un-normalized line doesn't match the frozen regex, so the finding
+    # would be resurrected NOT FIXED *beside* the verifier's own line. Normalize
+    # here too (idempotent; the prior's recorded severity governs the blocker rule).
+    # An accept-word on a blocker-class finding is escalated to NOT FIXED by the
+    # canonicalizer; that reverses the verifier's stated verdict, so it is counted
+    # as a hold rewrite and marked on the line like any other blocker hold.
+    escalated: set = set()
+    body, log = _canonicalize_status_synonyms(
+        body, {num: SimpleNamespace(prior_severity=r["sev"]) for num, r in rec.items()},
+        tag="hold", escalated_out=escalated)
+    n_status = 0
+    # The drop (below) is scoped to the status SECTION: a `- **#N**` line quoted in
+    # finding prose / <details> elsewhere in the body must survive untouched.
+    _sec = _PRIOR_STATUS_SECTION_RE.search(body)
+    sec_span = (_sec.end(), _section_end(body, _sec.end())) if _sec else (-1, -1)
+
+    def _hold(m):
+        nonlocal n_status
+        num = int(m.group(1))
+        r = rec.get(num)
+        if r is None:
+            # Not a prior finding. Nothing changed, so a status line for a number
+            # the prior round never raised is a hallucination — and one with no
+            # severity tag defaults to a gating blocker downstream. Conversation-
+            # only may not introduce a finding by ANY route. Inside the status
+            # section (or when the section can't be located — fail-safe) the line is
+            # DROPPED. Outside it the only legitimate reason for such a line is a
+            # quotation, so it is turned into one: a `> ` prefix keeps the prose
+            # intact while taking the line off the line-anchored gate counters,
+            # which scan the whole body (extracted AND raw).
+            if sec_span[0] >= 0 and not (sec_span[0] <= m.start() < sec_span[1]):
+                # …and without any `[sec:]` tag: the category floor scans the whole
+                # body with no line anchor, so a quoted tag would still gate.
+                quoted = re.sub(r"\s*\[sec:[a-z0-9-]+\]", "", m.group(0), flags=re.IGNORECASE).rstrip()
+                log.append(f"[hold] #{num} blockquoted outside the status block — not a prior finding"
+                           + (" (tag removed)" if quoted != m.group(0).rstrip() else ""))
+                return "> " + quoted
+            log.append(f"[hold] #{num} dropped — not a prior finding (no new findings without code)")
+            return _DROPPED_LINE
+        seen.add(num)
+        emitted_sev = (m.group(2) or "blocker").lower()
+        status = re.sub(r"\s+", " ", m.group(3).upper()).strip()
+        orig_tail = re.sub(r"^\*{0,2}", "", m.group(4)).rstrip()
+        tail = orig_tail
+        new_sev = _max_severity(r["sev"], emitted_sev)
+        line_has_tag = _blocker_sec_token(m.group(0)) is not None
+        blocker_class = new_sev == "blocker" or bool(r["sec"]) or line_has_tag
+        new_status, marker = status, ""
+        if r["collision"] and status != "NOT FIXED":
+            new_status, marker = "NOT FIXED", _COLLISION_HOLD_MARKER
+        elif (status == "FIXED" and r["status"] != "FIXED") or \
+                (status == "PARTIALLY FIXED" and r["status"] not in _FIX_STATUSES):
+            new_status, marker = r["status"], _NO_CODE_FIXED_MARKER
+        elif blocker_class and status != r["status"] and status in _CLEARING_STATUSES:
+            new_status, marker = r["status"], _BLOCKER_HOLD_MARKER
+        if not marker and num in escalated and new_status == "NOT FIXED":
+            marker = _BLOCKER_HOLD_MARKER
+            escalated.discard(num)     # mark + count once per finding
+            n_status += 1
+            log.append(f"[hold] #{num} status (accept-word on a blocker-class finding)->NOT FIXED (conversation-only)")
+        if _STATUS_GATING_RANK[new_status] > _STATUS_GATING_RANK[status]:
+            # DIRECTION CLAMP: no branch may make a line LESS gating than the verifier
+            # emitted. A prior FIXED/DISPUTED blocker re-opened as PARTIALLY FIXED must
+            # stay re-opened — reverting it to the prior's clearing status (and, with
+            # it, dropping the floor tag below) would make the result weaker than what
+            # the verifier just asserted (local dogfood round-6 blocker).
+            new_status, marker = status, ""
+        if r["sec"] and not line_has_tag and new_status in _OPEN_STATUSES:
+            tail = f"{tail} [sec:{r['sec']}]"
+            log.append(f"[hold] #{num} tag [sec:{r['sec']}] carried forward (floor gates on this body only)")
+        elif line_has_tag and new_status in _CLOSED_STATUSES:
+            # The verifier echoed the prior's tag onto its own FIXED/DISPUTED line
+            # (the prior body it reads carries it). The floor is not status-aware,
+            # so the tag would re-gate a resolved exposure — strip it by construction
+            # rather than rely on the "do not tag resolved issues" instruction.
+            tail = re.sub(r"\s*\[sec:[a-z0-9-]+\]", "", tail, flags=re.IGNORECASE).rstrip()
+            log.append(f"[hold] #{num} tag stripped from a closed line (floor is not status-aware)")
+        if new_status != status:
+            n_status += 1
+            log.append(f"[hold] #{num} status {status}->{new_status} (conversation-only: no code change)")
+        if new_sev != emitted_sev:
+            log.append(f"[hold] #{num} severity {emitted_sev}->{new_sev} (pinned to prior)")
+        if new_status == status and new_sev == emitted_sev and tail == orig_tail and not marker:
+            return m.group(0)
+        return f"- **#{num}** [{new_sev}] — {new_status}{tail}{(' ' + marker) if marker else ''}"
+
+    body = _PRIOR_STATUS_LINE_RE.sub(_hold, body)
+    body = re.sub(re.escape(_DROPPED_LINE) + r"\n?", "", body)   # take the dropped line's newline with it
+    resurrected = []
+    for num, r in sorted(rec.items()):
+        if num in seen or r["status"] in _CLOSED_STATUSES:
+            continue
+        tag = f" [sec:{r['sec']}]" if r["sec"] else ""
+        resurrected.append(
+            f"- **#{num}** [{r['sev']}] — NOT FIXED — "
+            f"[air: re-inserted — prior finding absent from this re-review; pinned from prior round]{tag}")
+        log.append(f"[hold] #{num} resurrected [{r['sev']}] NOT FIXED (absent from the emitted block)")
+    body = _reconcile_banner_with_ledger(body, n_status, len(resurrected), source="hold")
+    return _ensure_rereview_shape(body, log, resurrected), log
 
 
 def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
@@ -1756,6 +2123,22 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
         cross_region_fix = ((entry.change == UNCHANGED and entry.file_touched)
                             or temporal_fix)
         if (status == "FIXED" and entry.change != CHANGED and not cross_region_fix
+                and entry.prior_status == "FIXED"
+                and _SEVERITY_RANK.get(new_sev, 3) >= 2):
+            # Re-asserting a closure the PRIOR round already honored is not a new
+            # fix claim, so it needs no new evidence: the gate already passed this
+            # finding as FIXED last round, and keeping it FIXED cannot un-gate
+            # anything that was gated. Without this, a round-3+ number-identity
+            # ledger (no origin window — e.g. a conversation-only pass, or an
+            # unresolvable origin) re-poisoned every already-fixed finding back to
+            # NOT FIXED on nothing but the absence of THIS round's inter-diff
+            # evidence (the lifemd #17537 shape). A fix that was later REVERTED is
+            # the verifier's to catch from its read of current source (it should
+            # not re-emit FIXED); on this number-identity path `change` is
+            # INDETERMINATE by construction, so the pin cannot tell a revert from
+            # nothing — the same trust as today for any INDETERMINATE re-assertion.
+            log.append(f"[pin] #{num} FIXED re-asserted (prior round already FIXED; no new claim)")
+        elif (status == "FIXED" and entry.change != CHANGED and not cross_region_fix
                 and _SEVERITY_RANK.get(new_sev, 3) >= 2):
             new_status = "NOT FIXED"
             # Annotate the rewrite so the label doesn't silently contradict the
@@ -1796,7 +2179,7 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
     # closed, not resurrected).
     resurrected = []
     for e in ledger:
-        if e.num in seen or e.prior_status in ("FIXED", "DISPUTED"):
+        if e.num in seen or e.prior_status in _CLOSED_STATUSES:
             continue
         resurrected.append(
             f"- **#{e.num}** [{e.prior_severity}] — NOT FIXED — "

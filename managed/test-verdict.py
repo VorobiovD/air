@@ -14,6 +14,7 @@ the deterministic conflict-marker gate).
 
 Pure functions, no network. Run: python -m pytest managed/test-verdict.py
 """
+import re
 import sys
 from pathlib import Path
 
@@ -1597,7 +1598,6 @@ def test_cli_two_call_flow_matches_one_call_decide():
 # was spuriously RESURRECTED as a phantom NOT FIXED — gating a PR whose blocker
 # the verifier had marked FIXED/ACCEPTED. These lock in the parse fix.
 # ---------------------------------------------------------------------------
-import re  # noqa: E402
 from verdict import _PRIOR_STATUS_LINE_RE, _canonicalize_status_synonyms  # noqa: E402
 
 
@@ -2835,3 +2835,335 @@ def test_file_origin_resolver_temporal_kill_switch(tmp_path, monkeypatch):
     monkeypatch.setenv("AIR_TEMPORAL_ANCHOR", "0")
     assert make_file_origin_resolver([(r1, r1_sha)], str(diffs),
                                      temporal_dir=str(tdir))(1) is None
+
+
+# --- prior-FIXED re-assertion (conversation-only follow-up) + strip_new_findings ---
+
+def test_pin_keeps_fixed_when_prior_round_already_fixed_it():
+    # Re-asserting a closure the prior round honored is not a new fix claim: no
+    # inter-diff evidence needed. Without this, every round-3+ number-identity
+    # ledger re-poisoned already-fixed findings back to NOT FIXED.
+    already = _ledger_entry(1, "blocker", "FIXED")               # INDETERMINATE, untouched
+    still_open = _ledger_entry(2, "blocker", "NOT FIXED")
+    body = _rr_body("- **#1** [blocker] — FIXED — unchanged since last round",
+                    "- **#2** [blocker] — FIXED — claims fixed with no evidence")
+    out, log = pin_and_resurrect(body, [already, still_open])
+    assert "- **#1** [blocker] — FIXED" in out
+    assert "- **#2** [blocker] — NOT FIXED" in out
+    assert any("re-asserted" in l for l in log) and any("#2 FIXED->NOT FIXED" in l for l in log)
+
+
+def test_strip_new_findings_removes_only_new_sections():
+    from verdict import strip_new_findings
+    body = ("## Code Review (Re-review)\n\n> [!NOTE]\n> banner\n\n"
+            "### Previous Findings Status\n\n- **#1** [blocker] — DISPUTED — ok\n\n"
+            "### New Findings (introduced since last review)\n\n#### Blockers\n\n**1. invented**\n\nx\n\n"
+            "### Medium — consider fixing\n\n**2. also invented**\n\n"
+            "### Strengths\n\n- good\n\n### Pre-existing Issues\n\n- old\n\n"
+            "Reviewed at: " + "a" * 40 + "\n")
+    out, n = strip_new_findings(body)
+    assert n == 2
+    assert "invented" not in out
+    assert "### Previous Findings Status" in out and "— DISPUTED" in out
+    assert "### Strengths" in out and "### Pre-existing Issues" in out
+    assert out.rstrip().endswith("Reviewed at: " + "a" * 40)
+    assert strip_new_findings("")[1] == 0
+    same, n0 = strip_new_findings("## Code Review (Re-review)\n\n### Previous Findings Status\n\n- **#1** [low] — FIXED — x\n")
+    assert n0 == 0 and "FIXED" in same
+
+
+def test_strip_new_findings_catches_bare_h4_blockers():
+    from verdict import strip_new_findings, count_blockers
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n- **#1** [low] — DISPUTED — ok\n\n"
+            "#### Blockers\n\n**1. orphan h4 blocker**\n\nx\n\n### Strengths\n\n- g\n\nReviewed at: " + "a" * 40 + "\n")
+    out, n = strip_new_findings(body)
+    assert n == 1 and "orphan h4" not in out and count_blockers(out) == 0 and "### Strengths" in out
+
+
+def test_off_enum_false_positive_and_pre_existing_normalize_to_disputed():
+    # Verifier vocabulary leaking into the status slot must not read as "dropped"
+    # (which resurrects the finding NOT FIXED beside its own FALSE POSITIVE line).
+    e1 = _ledger_entry(1, "medium", "NOT FIXED"); e2 = _ledger_entry(2, "low", "NOT FIXED")
+    e3 = _ledger_entry(3, "medium", "NOT FIXED")
+    body = _rr_body("- **#1** [medium] — FALSE POSITIVE — guarded upstream",
+                    "- **#2** [low] — PRE-EXISTING — predates this PR",
+                    "- **#3** [medium] — NOT FIXED — still there")
+    out, log = pin_and_resurrect(body, [e1, e2, e3])
+    assert "- **#1** [medium] — DISPUTED" in out and "- **#2** [low] — DISPUTED" in out
+    assert "- **#3** [medium] — NOT FIXED" in out           # two-word canonical untouched
+    assert "re-inserted" not in out
+
+
+def test_hold_blockers_to_prior_only_touches_changed_blockers():
+    from verdict import hold_blockers_to_prior, _BLOCKER_HOLD_MARKER
+    prior = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+             "- **#1** [blocker] — NOT FIXED — a\n- **#2** [blocker] — FIXED — b\n"
+             "- **#3** [medium] — NOT FIXED — c\n\nReviewed at: x\n")
+    body = _rr_body("- **#1** [blocker] — DISPUTED — argued",
+                    "- **#2** [blocker] — FIXED — still fixed",
+                    "- **#3** [medium] — DISPUTED — argued")
+    out, log = hold_blockers_to_prior(body, prior)
+    assert "- **#1** [blocker] — NOT FIXED — argued " + _BLOCKER_HOLD_MARKER in out
+    assert "- **#2** [blocker] — FIXED — still fixed" in out        # unchanged status → untouched
+    assert "- **#3** [medium] — DISPUTED" in out                    # non-blocker → free to move
+    assert len(log) == 1
+    # fresh prior: its blockers have no status yet → NOT FIXED is the floor
+    fresh = ("## Code Review\n\n### Blockers\n\n**1. flaw**\n\n[`f.py#L2`](https://github.com/o/r/blob/aaaaaaaaaaaa/f.py#L2) — x\n\nReviewed at: aaaaaaaaaaaa" + "0" * 28 + "\n")
+    out2, log2 = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — DISPUTED — argued"), fresh)
+    assert "- **#1** [blocker] — NOT FIXED" in out2 and len(log2) == 1
+
+
+def test_strip_new_findings_takes_details_wrapper_along():
+    from verdict import strip_new_findings
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n- **#1** [low] — DISPUTED — ok\n\n"
+            "<details>\n<summary>Medium (1)</summary>\n\n### Medium — consider fixing\n\n**1. invented**\n\nx\n\n</details>\n\n"
+            "### Strengths\n\n- g\n\nReviewed at: " + "a" * 40 + "\n")
+    out, n = strip_new_findings(body)
+    assert n == 1 and "invented" not in out
+    assert out.count("<details>") == out.count("</details>") == 0
+    assert "### Strengths" in out
+
+
+def test_false_positive_hyphenated_synonym():
+    e = _ledger_entry(1, "medium", "NOT FIXED")
+    out, _ = pin_and_resurrect(_rr_body("- **#1** [medium] — FALSE-POSITIVE — guarded"), [e])
+    assert "- **#1** [medium] — DISPUTED" in out and "re-inserted" not in out
+
+
+def test_hold_covers_new_in_prior_and_sec_floored():
+    from verdict import hold_blockers_to_prior, _BLOCKER_HOLD_MARKER, _NO_CODE_FIXED_MARKER
+    prior = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+             "- **#1** [medium] — NOT FIXED — logs leak ids [sec:pii-exposure]\n"
+             "- **#2** [medium] — FIXED — done earlier\n\n"
+             "### New Findings (introduced since last review)\n\n#### Blockers\n\n**3. new blocker**\n\nx\n\n"
+             "#### Low\n\n**4. new low**\n\ny\n\nReviewed at: x\n")
+    body = _rr_body("- **#1** [medium] — DISPUTED — internal only",
+                    "- **#2** [medium] — FIXED — still done",
+                    "- **#3** [blocker] — DISPUTED — argued",
+                    "- **#4** [low] — FIXED — dev says done")
+    out, log = hold_blockers_to_prior(body, prior)
+    assert "- **#1** [medium] — NOT FIXED" in out and _BLOCKER_HOLD_MARKER in out     # sec-floored held
+    assert "[sec:pii-exposure]" in out.split("- **#1**")[1].split("\n")[0]       # tag carried → floor gates
+    assert "- **#2** [medium] — FIXED — still done" in out                              # re-asserted closure untouched
+    assert "- **#3** [blocker] — NOT FIXED" in out                                       # new-in-prior blocker held
+    assert "- **#4** [low] — NOT FIXED" in out and _NO_CODE_FIXED_MARKER in out          # FIXED without code held
+    assert len([l for l in log if re.search(r"#\d+ status ", l)]) == 3   # three status rewrites (plus the [sec:] carry line)
+
+
+def test_hold_collision_honors_recorded_status_unless_new_is_blocker():
+    # Round-4 medium 3: carried #1 FIXED + new `**1.` (renumbering collision).
+    from verdict import hold_blockers_to_prior, _COLLISION_HOLD_MARKER
+    prior_low = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n- **#1** [blocker] — FIXED — done\n\n"
+                 "### New Findings (introduced since last review)\n\n#### Low\n\n**1. tidy**\n\nx\n\nReviewed at: y\n")
+    out, log = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — FIXED — still done"), prior_low)
+    assert "- **#1** [blocker] — FIXED — still done" in out and not log       # recorded FIXED honored
+    prior_blk = prior_low.replace("#### Low\n\n**1. tidy**", "#### Blockers\n\n**1. new blocker")
+    out2, log2 = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — FIXED — still done"), prior_blk)
+    assert "- **#1** [blocker] — NOT FIXED" in out2 and _COLLISION_HOLD_MARKER in out2
+    assert any("#1 status FIXED->NOT FIXED" in l for l in log2) and not any("severity" in l for l in log2)
+
+
+def test_hold_resurrects_omitted_open_prior_findings_only():
+    from verdict import hold_blockers_to_prior
+    prior = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n"
+             "- **#1** [medium] — NOT FIXED — a\n- **#2** [low] — DISPUTED — closed\n- **#3** [blocker] — FIXED — closed\n\n"
+             "### New Findings (introduced since last review)\n\n#### Medium\n\n**4. new medium [sec:idor]**\n\nx\n\nReviewed at: y\n")
+    out, log = hold_blockers_to_prior(_rr_body("- **#1** [medium] — NOT FIXED — a"), prior)
+    assert "- **#4** [medium] — NOT FIXED — [air: re-inserted" in out and "[sec:idor]" in out
+    assert "**#2**" not in out and "**#3**" not in out                          # closed last round → not resurrected
+
+
+def test_prior_new_findings_resets_severity_on_every_header():
+    from verdict import _prior_new_findings
+    body = ("## Code Review\n\n### Blockers\n\n**1. real**\n\nx\n\n### Pre-existing Issues\n\n**2. old thing**\n\ny\n\n"
+            "### Strengths\n\n**3. nice**\n\nReviewed at: z\n")
+    assert _prior_new_findings(body) == {1: "blocker"}
+
+
+def test_hold_never_places_sec_tag_on_a_closed_line():
+    # Cloud dogfood medium (round 5): the floor is not status-aware, so carrying
+    # the prior's tag onto an honest FIXED/DISPUTED restatement would re-gate a
+    # resolved exposure on every pass. Closed lines stay byte-identical.
+    from verdict import hold_blockers_to_prior, count_category_floored
+    prior = _rr_body("- **#1** [medium] — FIXED — scrubbed [sec:pii-exposure]",
+                     "- **#2** [medium] — DISPUTED — by design [sec:idor]",
+                     "- **#3** [medium] — NOT FIXED — open [sec:idor]")
+    body = _rr_body("- **#1** [medium] — FIXED — scrubbed", "- **#2** [medium] — DISPUTED — by design",
+                    "- **#3** [medium] — NOT FIXED — open")
+    out, log = hold_blockers_to_prior(body, prior)
+    assert "- **#1** [medium] — FIXED — scrubbed\n" in out and "- **#2** [medium] — DISPUTED — by design\n" in out
+    assert "- **#3** [medium] — NOT FIXED — open [sec:idor]" in out
+    assert count_category_floored(out)[0] == 1 and len(log) == 1
+
+
+def test_hold_partially_fixed_to_fixed_needs_code():
+    from verdict import hold_blockers_to_prior, _NO_CODE_FIXED_MARKER
+    prior = _rr_body("- **#1** [medium] — PARTIALLY FIXED — half", "- **#2** [medium] — FIXED — done")
+    out, _ = hold_blockers_to_prior(_rr_body("- **#1** [medium] — FIXED — dev says rest is fine",
+                                             "- **#2** [medium] — PARTIALLY FIXED — actually one case left"), prior)
+    assert "- **#1** [medium] — PARTIALLY FIXED" in out and _NO_CODE_FIXED_MARKER in out
+    assert "- **#2** [medium] — PARTIALLY FIXED — actually one case left" in out   # stricter direction passes
+
+
+def test_prior_record_duplicate_lines_keep_the_more_gating_status():
+    from verdict import _prior_record, hold_blockers_to_prior
+    prior = _rr_body("- **#1** [medium] — NOT FIXED — a", "- **#1** [blocker] — DISPUTED — later dup")
+    assert _prior_record(prior)[1]["status"] == "NOT FIXED" and _prior_record(prior)[1]["sev"] == "blocker"
+    out, _ = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — DISPUTED — cleared"), prior)
+    assert "- **#1** [blocker] — NOT FIXED" in out
+
+
+def test_hold_reconciles_banner_before_splice_when_status_block_missing():
+    # The verifier dropped the whole status block: the hold must create it AND the
+    # banner note must still land (reconcile-before-splice, as the pin does).
+    from verdict import hold_blockers_to_prior, _PIN_BANNER_NOTE_MARK
+    prior = _rr_body("- **#1** [medium] — NOT FIXED — open")
+    body = ("## Code Review (Re-review)\n\n> [!NOTE]\n> **No blockers.** all clear\n\nNothing to report.\n\n"
+            "Reviewed at: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
+    out, log = hold_blockers_to_prior(body, prior)
+    assert "- **#1** [medium] — NOT FIXED — [air: re-inserted" in out and _PIN_BANNER_NOTE_MARK in out
+    assert any("resurrected" in l for l in log)
+
+
+def test_reconcile_banner_is_additive_across_pin_and_hold_and_idempotent_per_source():
+    # Cloud dogfood low (round 6): the pin and the hold each reconcile the same
+    # body; the second SOURCE must fold its counts in, a repeat of the same source
+    # must replace its own (idempotent), and the marker constant stays present.
+    from verdict import _reconcile_banner_with_ledger, _PIN_BANNER_NOTE_MARK
+    body = ("## Code Review (Re-review)\n\n> [!CAUTION]\n> **Changes requested.** 2 fixed\n\n"
+            "### Previous Findings Status\n\n- **#1** [medium] — NOT FIXED — a\n\nReviewed at: x\n")
+    once = _reconcile_banner_with_ledger(body, 1, 0)
+    both = _reconcile_banner_with_ledger(once, 2, 1, source="hold")
+    assert both.count("Carry-forward check ran") == 1 and _PIN_BANNER_NOTE_MARK in both
+    assert "3 carried findings re-pinned to the prior status and 1 silently-dropped finding re-inserted" in both
+    assert "hold=2/1 pin=1/0" in both
+    assert _reconcile_banner_with_ledger(both, 2, 1, source="hold") == both      # per-source idempotent
+    assert _reconcile_banner_with_ledger(both, 0, 0) == both                     # nothing-changed no-op
+
+
+def test_hold_strips_echoed_sec_tag_from_a_closed_line():
+    from verdict import hold_blockers_to_prior, count_category_floored
+    prior = _rr_body("- **#1** [medium] — FIXED — scrubbed [sec:pii-exposure]",
+                     "- **#2** [medium] — NOT FIXED — open [sec:idor]")
+    out, log = hold_blockers_to_prior(_rr_body("- **#1** [medium] — FIXED — scrubbed [sec:pii-exposure]",
+                                               "- **#2** [medium] — DISPUTED — dev explained [sec:idor]"), prior)
+    assert "- **#1** [medium] — FIXED — scrubbed\n" in out                       # echoed tag on a closed line stripped
+    assert "- **#2** [medium] — NOT FIXED — dev explained [sec:idor]" in out      # blocker-class held, tag kept
+    assert count_category_floored(out)[0] == 1 and any("stripped" in l for l in log)
+
+
+def test_status_sets_are_derived_from_one_ranking():
+    from verdict import (_STATUS_GATING_RANK, _CLEARING_STATUSES, _FIX_STATUSES, _CLOSED_STATUSES,
+                         _OPEN_STATUSES, _GATING_STATUSES)
+    vocab = set(_STATUS_GATING_RANK)
+    assert _OPEN_STATUSES | _CLOSED_STATUSES == vocab and not (_OPEN_STATUSES & _CLOSED_STATUSES)
+    assert _CLEARING_STATUSES == vocab - {"NOT FIXED"} and _FIX_STATUSES < vocab
+    assert set(_GATING_STATUSES) <= _OPEN_STATUSES          # what the gate counts is open by definition
+    # THE property the direction clamp relies on: every gating status ranks strictly
+    # below every non-gating one (swap DEFERRED/PARTIALLY FIXED and this fails).
+    assert max(_STATUS_GATING_RANK[g] for g in _GATING_STATUSES) < \
+        min(_STATUS_GATING_RANK[x] for x in vocab - set(_GATING_STATUSES))
+
+
+def test_hold_direction_clamp_keeps_a_reopened_blocker_open():
+    # Local dogfood round-6 BLOCKER: prior FIXED blocker (tagged) re-opened as
+    # PARTIALLY FIXED was reverted to FIXED and lost its tag → clean APPROVE with
+    # zero code. The stricter direction must always survive, tag carried.
+    from verdict import hold_blockers_to_prior, count_category_floored, _NO_CODE_FIXED_MARKER, _BLOCKER_HOLD_MARKER
+    prior = _rr_body("- **#1** [blocker] — FIXED — done", "- **#2** [medium] — DISPUTED — by design [sec:pii-exposure]",
+                     "- **#3** [blocker] — DISPUTED — by design")
+    out, log = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — PARTIALLY FIXED — dev admits one path still open",
+                                               "- **#2** [medium] — PARTIALLY FIXED — dev admits it",
+                                               "- **#3** [blocker] — NOT FIXED — dev retracted the dispute"), prior)
+    assert "- **#1** [blocker] — PARTIALLY FIXED — dev admits one path still open" in out
+    assert "- **#2** [medium] — PARTIALLY FIXED — dev admits it [sec:pii-exposure]" in out
+    assert "- **#3** [blocker] — NOT FIXED — dev retracted the dispute" in out
+    assert _NO_CODE_FIXED_MARKER not in out and _BLOCKER_HOLD_MARKER not in out
+    assert count_category_floored(out)[0] == 1 and not any(re.search(r"#\d+ status ", l) for l in log)
+
+
+def test_hold_normalizes_synonyms_without_a_ledger():
+    # Local dogfood round-6 medium: the synonym backstop lived only in the pin,
+    # which is a no-op on an empty ledger — the hold must normalize too.
+    from verdict import hold_blockers_to_prior
+    prior = ("## Code Review (Re-review)\n\n### New Findings (introduced since last review)\n\n#### Blockers\n\n"
+             "**1. new blocker**\n\nx\n\n#### Low\n\n**2. tidy**\n\ny\n\nReviewed at: z\n")
+    out, log = hold_blockers_to_prior(_rr_body("- **#1** [blocker] — FALSE POSITIVE — dev explained",
+                                               "- **#2** [low] — PRE-EXISTING — was there before"), prior)
+    assert out.count("**#1**") == 1 and out.count("**#2**") == 1                  # one line each, no twin
+    assert "- **#1** [blocker] — NOT FIXED" in out and "- **#2** [low] — DISPUTED" in out
+
+
+def test_hold_drops_status_lines_for_numbers_the_prior_never_raised():
+    # Cloud dogfood round-7 medium: a hallucinated `#99 — PRE-EXISTING` with no
+    # severity tag normalized to NOT FIXED and gated as a default-blocker.
+    from verdict import hold_blockers_to_prior, should_request_changes
+    prior = _rr_body("- **#1** [medium] — NOT FIXED — open")
+    out, log = hold_blockers_to_prior(_rr_body("- **#1** [medium] — NOT FIXED — still open",
+                                               "- **#99** — PRE-EXISTING — never a finding"), prior)
+    assert "**#99**" not in out and any("#99 dropped" in l for l in log)
+    assert "\n\n\n" not in out                       # the dropped line took its newline with it
+    assert should_request_changes(out)[0] is False
+
+
+def test_hold_marks_and_counts_an_accept_word_escalation():
+    # Local round-7 low: the synonym escalation (accept-word on a blocker → NOT
+    # FIXED) reversed the verifier's verdict silently; it is now marked + counted.
+    from verdict import hold_blockers_to_prior, _BLOCKER_HOLD_MARKER
+    prior = ("## Code Review (Re-review)\n\n> [!NOTE]\n> **x**\n\n### New Findings (introduced since last review)\n\n"
+             "#### Blockers\n\n**1. new blocker**\n\nx\n\nReviewed at: z\n")
+    body = ("## Code Review (Re-review)\n\n> [!NOTE]\n> **No blockers.**\n\n### Previous Findings Status\n\n"
+            "- **#1** [blocker] — FALSE POSITIVE — dev explained\n\nReviewed at: z\n")
+    out, log = hold_blockers_to_prior(body, prior)
+    line = [l for l in out.split("\n") if l.startswith("- **#1**")][0]
+    assert line.startswith("- **#1** [blocker] — NOT FIXED — dev explained") and _BLOCKER_HOLD_MARKER in line
+    assert "1 carried finding re-pinned to the prior status" in out and any("[hold] #1 normalized" in l for l in log)
+
+
+def test_pin_then_hold_both_reach_the_banner_when_status_block_missing():
+    # Local round-7 low: the pin's created status section landed BEFORE the banner,
+    # so the hold's note was dropped by the locator. It now lands after the banner.
+    from verdict import pin_and_resurrect, hold_blockers_to_prior, build_carry_forward_ledger
+    prior = _rr_body("- **#1** [medium] — NOT FIXED — a")
+    ledger = build_carry_forward_ledger(prior, "", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    body = ("## Code Review (Re-review)\n\n> [!NOTE]\n> **No blockers.** all clear\n\nNothing to report.\n\n"
+            "Reviewed at: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
+    pinned, _ = pin_and_resurrect(body, ledger)
+    assert pinned.index("> [!NOTE]") < pinned.index("### Previous Findings Status")
+    prior2 = prior.replace("Reviewed at", "### New Findings (introduced since last review)\n\n#### Medium\n\n**2. new**\n\nx\n\nReviewed at")
+    held, log = hold_blockers_to_prior(pinned, prior2)
+    assert "hold=0/1 pin=0/1" in held and held.count("Carry-forward check ran") == 1   # sorted tally
+
+
+def test_hold_drop_is_scoped_to_the_status_section():
+    # Local round-8 low: a `- **#N**` line QUOTED in prose for an out-of-record
+    # number must not vanish from the posted comment — only the status block is
+    # subject to the drop.
+    from verdict import hold_blockers_to_prior
+    prior = _rr_body("- **#1** [medium] — NOT FIXED — open")
+    body = ("## Code Review (Re-review)\n\n### Previous Findings Status\n\n- **#1** [medium] — NOT FIXED — open\n"
+            "- **#7** — PRE-EXISTING — hallucinated\n\n### Notes\n\nThe prior said:\n\n"
+            "- **#9** [blocker] — NOT FIXED — quoted from an older review\n\nReviewed at: x\n")
+    out, log = hold_blockers_to_prior(body, prior)
+    assert "**#7**" not in out and "> - **#9** [blocker] — NOT FIXED — quoted" in out   # kept, as a quotation
+    from verdict import should_request_changes, count_category_floored
+    assert should_request_changes(out)[0] is False              # …and off the (unscoped) gate counters
+    tagged = body.replace("quoted from an older review", "quoted from an older review [sec:pii-exposure]")
+    out_t, _ = hold_blockers_to_prior(tagged, prior)
+    assert "[sec:" not in out_t and count_category_floored(out_t)[0] == 0   # the floor is body-wide too
+    assert should_request_changes(out_t, floor_exposures=True)[0] is False
+    # Section header drifted → can't scope → fail-safe: drop everywhere.
+    drifted = body.replace("### Previous Findings Status", "### Previous Findings Status (round 2)")
+    out2, _ = hold_blockers_to_prior(drifted, prior)
+    assert "**#7**" not in out2 and "**#9**" not in out2
+
+
+def test_hold_output_status_numbers_are_all_prior_findings():
+    # Parity invariant behind the drop: every number the gate counters see in the
+    # status block after the hold is a number the prior record contains.
+    from verdict import hold_blockers_to_prior, _prior_record, extract_prior_statuses
+    prior = _rr_body("- **#1** [medium] — NOT FIXED — a", "- **#2** [blocker] — FIXED — b")
+    body = _rr_body("- **#1** [medium] — DISPUTED — dev", "- **#2** [blocker] — FIXED — b",
+                    "- **#3** [blocker] — NOT FIXED — invented", "- **#42** — ACCEPTED — invented too")
+    out, _ = hold_blockers_to_prior(body, prior)
+    assert {n for n, _, _ in extract_prior_statuses(out)} == set(_prior_record(prior))

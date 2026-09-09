@@ -90,6 +90,7 @@ from github_client import (  # noqa: E402,F401 — split modules; re-exported fo
     fetch_pr_changed_files,
     fetch_compare_status,
     fetch_blob_sha,
+    AIR_VERDICT_SENTINEL,
     fetch_related_prs,
     count_diff_changed_lines,
     DIFF_TRUNCATION_MARKER,
@@ -1267,6 +1268,87 @@ def filter_comments_after(
     return matches
 
 
+def developer_comments_after(comments: list[dict], after_comment_id: int,
+                             bot_logins) -> list[dict]:
+    """The HUMAN developer comments posted after `after_comment_id` — the
+    trigger set for a conversation-only re-review (a re-request at an already-
+    reviewed head with new discussion, but no new code). `filter_comments_after`
+    returns EVERY later comment, which is right for context but wrong as a
+    trigger: air's own follow-ups (a `## air review — could not complete` note,
+    a CLI verdict), third-party bots (Notion/Dependabot/CI linkers) and any
+    `[bot]` account would otherwise re-fire a paid pass — and air's own next
+    post would re-trigger itself. So drop: any login in `bot_logins` (the
+    AIR_PAT_MAP/AIR_BOT_LOGINS allowlist ∪ the current token), any GitHub Bot-
+    typed user or `[bot]`-suffixed login, and any body carrying air's own
+    review/non-review prefixes regardless of author (a human quoting one whole
+    is vanishingly rare; an air post under an unlisted rotated account is not).
+    Chronological order is inherited from filter_comments_after."""
+    return [c for c in filter_comments_after(comments, after_comment_id)
+            if _is_human_dev_entry(c, bot_logins)]
+
+
+def _is_human_dev_entry(entry: dict, bot_logins) -> bool:
+    """The ONE human-only filter both trigger helpers share (it had already drifted
+    once when duplicated): a real, non-empty contribution by a human — not an air
+    login, not a GitHub Bot-typed or `[bot]`-suffixed account, not a body carrying
+    air's review/diagnostic prefixes, and not an air VERDICT review (reason text
+    ending in the verdict sentinel — those match no prefix, so under an unlisted
+    rotated account they would otherwise count as human activity)."""
+    entry = entry or {}
+    user = entry.get("user") or {}
+    login = (user.get("login") or "").strip()
+    body = (entry.get("body") or "").strip()
+    bots = {b.lower() for b in (bot_logins or set()) if b}
+    if not login or not body:
+        return False
+    if login.lower() in bots or login.lower().endswith("[bot]"):
+        return False
+    if (user.get("type") or "").lower() == "bot":
+        return False
+    if body.startswith(pr_conversation.BOT_REVIEW_PREFIXES + pr_conversation.BOT_NONREVIEW_PREFIXES):
+        return False
+    if body.endswith(AIR_VERDICT_SENTINEL):
+        return False
+    # A drive-by account with no relationship to the repo is not "the developer
+    # responding": its text still reaches the agents as untrusted conversation
+    # context, but it must not TRIGGER a paid pass or be framed as authoritative.
+    if (entry.get("author_association") or "").upper() in ("NONE", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR"):
+        return False
+    return True
+
+
+def developer_activity_after(ic: list[dict], rv: list[dict], inl: list[dict], prior: dict,
+                             bot_logins) -> list[dict]:
+    """Every HUMAN contribution since the prior air review, across the three
+    conversation surfaces — the conversation-only re-review trigger. Issue
+    comments come from `developer_comments_after` (id-cursor, exact). PR reviews
+    and inline review comments live in different id spaces, so they are selected
+    by timestamp (`submitted_at` / `created_at` > the prior review's `created_at`,
+    ISO-8601 Zulu ⇒ lexical order is chronological) under the same human-only
+    filter. An inline reply on the flagged line is the most natural way a
+    developer disputes a finding — ignoring it while honoring an issue comment
+    would make the trigger feel random. Umbrella reviews with no body and
+    PENDING reviews are skipped (nothing was said)."""
+    out = list(developer_comments_after(ic, (prior or {}).get("id") or 0, bot_logins))
+    since = (prior or {}).get("created_at") or ""
+    if not since:
+        return out
+    for kind, entries in (("review", rv or []), ("inline", inl or [])):
+        for e in entries:
+            e = e or {}
+            ts = e.get("submitted_at") or e.get("created_at") or ""
+            if not ts or ts <= since:
+                continue
+            if kind == "review" and (e.get("state") or "") == "PENDING":
+                continue
+            if _is_human_dev_entry(e, bot_logins):
+                out.append(e)
+    # Merge the three surfaces chronologically so the caller's tail-cap keeps the
+    # NEWEST entries rather than whichever surface was appended last.
+    out.sort(key=lambda e: e.get("submitted_at") or e.get("created_at") or "")
+    return out
+
+
 def format_developer_responses(comments: list[dict]) -> str:
     """Render PR comments as untrusted <developer-comment> blocks."""
     if not comments:
@@ -1275,7 +1357,15 @@ def format_developer_responses(comments: list[dict]) -> str:
     for c in comments:
         author = html.escape(c.get("user", {}).get("login", "?"))
         body = html.escape((c.get("body") or "")[:4000])
-        blocks.append(f'<developer-comment author="{author}">\n{body}\n</developer-comment>')
+        attrs = f'author="{author}"'
+        role = (c.get("author_association") or "").strip()
+        if role:
+            attrs += f' role="{html.escape(role.lower())}"'
+        path = (c.get("path") or "").strip()            # inline review comments
+        if path:
+            line = c.get("line") or c.get("original_line") or ""
+            attrs += f' path="{html.escape(f"{path}:{line}" if line else path)}"'
+        blocks.append(f'<developer-comment {attrs}>\n{body}\n</developer-comment>')
     return "\n\n".join(blocks)
 
 
@@ -2241,6 +2331,23 @@ async def run_review(args):
             f"Already reviewed at {prior_sha[:8]}. No changes since; skipping. "
             f"Pass --fresh to force a full review."
         )
+        # The conversation-only re-review (re-request at head after new developer
+        # discussion → verifier-only re-adjudication) is implemented on the
+        # messages-api (headless) path, which orchestrates the verifier directly.
+        # This managed/MA path routes through the coordinator session and does not
+        # run it (v1) — surface the situation so the skip isn't silent.
+        n_dev = 0
+        if env.env_bool("AIR_REREVIEW_ON_COMMENTS", True):
+            try:
+                n_dev = len(developer_comments_after(all_comments, prior["id"],
+                                                     _air_bot_logins() | {bot_login}))
+            except Exception as e:
+                print(f"  [warn] developer-comment check failed: {type(e).__name__}: {e}",
+                      file=sys.stderr)
+        if n_dev:
+            print(f"  [re-review] {n_dev} developer comment(s) since that review — a "
+                  f"conversation-only re-review runs in messages-api mode only "
+                  f"(AIR_REVIEW_MODE); this managed path skips.", file=sys.stderr)
         # A kill between the comment POST and the verdict POST used to lose
         # the verdict for this SHA permanently — this gate refused to look
         # again. The posted comment is deterministic state: recompute the
