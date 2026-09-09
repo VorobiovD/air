@@ -334,20 +334,39 @@ def _int_env(name: str, default: int) -> int:
     return env.env_int(name, default)
 
 
-def _truncation_remedy(diff: str) -> str:
-    """The variable a reader must actually raise to clear THIS truncation.
+MARKER_ARM, LENGTH_ARM = "marker", "length"
 
-    Keyed on which arm of `_diff_is_truncated` fired, not on which variable
-    happens to be set — naming the wrong one is the same "impossible remedy"
-    class this whole change set out to close. The MARKER arm is written upstream
-    by the fetcher's `apply_diff_hygiene`, which only ever reads
-    `AIR_DIFF_MAX_BYTES`; `AIR_HEADLESS_DIFF_CAP` cannot clear it. The LENGTH arm
-    is the headless char cap, so an explicit override owns it — but only a
-    WELL-FORMED override, since `env.env_int` warns and falls back to
-    `DIFF_MAX_BYTES` on a malformed value, and naming a variable whose value was
-    ignored is the same trap again."""
+
+def _truncation_arm(diff: str) -> str:
+    """Which arm of the truncation test fires: `MARKER_ARM`, `LENGTH_ARM`, or ""
+    (not truncated). The single computation behind both `_diff_is_truncated` and
+    the remedy — see `_truncation_remedy` for why the arm cannot be re-derived
+    later."""
     from review import _diff_is_truncated as _marker_truncated  # lazy: module-top cycle
     if _marker_truncated(diff):
+        return MARKER_ARM
+    return LENGTH_ARM if len(diff) > _DIFF_CAP else ""
+
+
+def _truncation_remedy(arm: str) -> str:
+    """The variable a reader must actually raise to clear THIS truncation.
+
+    Takes the ARM AS A VALUE, captured where the test ran — it must NOT re-derive
+    it from `diff`, because the length arm then REWRITES `diff` with its own
+    `[air: diff truncated at N chars — v1 guard]` line, whose prefix is
+    byte-identical to hygiene's `DIFF_TRUNCATION_MARKER`. Re-deriving read that
+    self-inserted line as hygiene's marker and answered `AIR_DIFF_MAX_BYTES` for
+    a truncation the headless override caused — the same "impossible remedy" this
+    change set out to close, in the override's own documented use case (a cap set
+    deliberately LOWER than the fetcher's).
+
+    The MARKER arm is written upstream by the fetcher's `apply_diff_hygiene`,
+    which only ever reads `AIR_DIFF_MAX_BYTES`; `AIR_HEADLESS_DIFF_CAP` cannot
+    clear it. The LENGTH arm is the headless char cap, so an explicit override
+    owns it — but only a WELL-FORMED one, since `env.env_int` warns and falls
+    back on a malformed value, and naming a variable whose value was ignored is
+    the same trap again."""
+    if arm != LENGTH_ARM:
         return "AIR_DIFF_MAX_BYTES"                     # hygiene's cap, upstream
     override = os.environ.get("AIR_HEADLESS_DIFF_CAP", "").strip()
     if override:
@@ -378,8 +397,7 @@ def _diff_is_truncated(diff: str) -> bool:
     lines always start with +/-/space, so PR content can't forge a line
     beginning with the marker). The char-cap stays as a secondary for the rare
     case of a headless cap set SMALLER than the fetcher's byte cap."""
-    from review import _diff_is_truncated as _marker_truncated  # lazy: avoid the module-top cycle
-    return _marker_truncated(diff) or (len(diff) > _DIFF_CAP)
+    return bool(_truncation_arm(diff))
 
 
 _REVIEW_HEADER_LINE_RE = re.compile(r"(?m)^## Code Review")
@@ -822,7 +840,10 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # and a huge PR truncated to fewer `diff --git` markers would undercount files.
     n_files = diff.count("\ndiff --git ") + (1 if diff.startswith("diff --git ") else 0)
     raw_diff_bytes = len(diff.encode("utf-8", "replace"))
-    diff_truncated = _diff_is_truncated(diff)
+    # Captured HERE, before the length guard below rewrites `diff` with a marker
+    # whose prefix is indistinguishable from hygiene's (new finding #11).
+    truncation_arm = _truncation_arm(diff)
+    diff_truncated = bool(truncation_arm)
     if len(diff) > _DIFF_CAP:
         # Secondary guard: a diff still over the char cap (rare — the fetcher's
         # byte-cap is the same size) is re-truncated with a visible marker.
@@ -1328,7 +1349,7 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # it on — both caps are forwarded as caller repo/org variables, so no workflow
     # edit is needed. A remedy the reader cannot carry out is worse than none.
     if not rc and diff_truncated:
-        _knob = _truncation_remedy(diff)
+        _knob = _truncation_remedy(truncation_arm)
         rc, reason = True, (f"diff truncated at {_DIFF_CAP} chars — a blocker beyond the cap "
                             f"can't be ruled out; raise the repo/org variable {_knob}"
                             + (" (it moves both the hygiene and headless caps)"

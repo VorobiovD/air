@@ -1957,17 +1957,34 @@ def test_diff_cap_knobs_are_forwarded_to_the_job():
         assert f"{var}: ${{{{ vars.{var} }}}}" in wf, f"{var} is not forwarded to the job"
 
 
-def test_truncation_remedy_names_the_cap_for_the_arm_that_fired(monkeypatch):
-    """#8: keyed on which arm of _diff_is_truncated fired, not on which variable
-    is set. The MARKER arm is written upstream by hygiene, which only reads
-    AIR_DIFF_MAX_BYTES — naming the headless override there is the same
-    impossible-remedy trap this change set out to close."""
+def test_truncation_arm_distinguishes_hygiene_from_the_headless_cap():
     marker = "[air: diff truncated at 500000 bytes — 2 file(s) omitted]\n"
-    plain = "diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n"
+    assert headless._truncation_arm(marker) == headless.MARKER_ARM
+    assert headless._truncation_arm("x" * (headless._DIFF_CAP + 10)) == headless.LENGTH_ARM
+    assert headless._truncation_arm("diff --git a/x b/x\n+ok\n") == ""
+
+
+def test_truncation_remedy_names_the_cap_for_the_arm_that_fired(monkeypatch):
+    """#8: keyed on the arm that fired, not on which variable is set. Hygiene
+    writes the MARKER arm upstream and reads only AIR_DIFF_MAX_BYTES, so naming
+    the headless override there is the impossible-remedy trap this closes."""
     monkeypatch.setenv("AIR_HEADLESS_DIFF_CAP", "900000")
-    assert headless._truncation_remedy(marker) == "AIR_DIFF_MAX_BYTES"   # hygiene owns it
-    assert headless._truncation_remedy(plain) == "AIR_HEADLESS_DIFF_CAP"  # length arm
+    assert headless._truncation_remedy(headless.MARKER_ARM) == "AIR_DIFF_MAX_BYTES"
+    assert headless._truncation_remedy(headless.LENGTH_ARM) == "AIR_HEADLESS_DIFF_CAP"
     monkeypatch.setenv("AIR_HEADLESS_DIFF_CAP", "900k")                   # malformed
-    assert headless._truncation_remedy(plain) == "AIR_DIFF_MAX_BYTES"     # value was ignored
+    assert headless._truncation_remedy(headless.LENGTH_ARM) == "AIR_DIFF_MAX_BYTES"
     monkeypatch.delenv("AIR_HEADLESS_DIFF_CAP", raising=False)
-    assert headless._truncation_remedy(plain) == "AIR_DIFF_MAX_BYTES"     # default follows it
+    assert headless._truncation_remedy(headless.LENGTH_ARM) == "AIR_DIFF_MAX_BYTES"
+
+
+def test_the_v1_guards_own_marker_cannot_hijack_the_remedy(monkeypatch):
+    """#11: the LENGTH arm rewrites `diff` with `[air: diff truncated … v1 guard]`,
+    whose prefix is byte-identical to hygiene's marker. Re-deriving the arm from
+    the mutated diff answered AIR_DIFF_MAX_BYTES for a truncation the headless
+    override caused — the override's own documented use (a cap set LOWER)."""
+    monkeypatch.setenv("AIR_HEADLESS_DIFF_CAP", "900000")
+    original = "x" * (headless._DIFF_CAP + 10)
+    arm = headless._truncation_arm(original)             # captured before the rewrite
+    mutated = original[:headless._DIFF_CAP] + f"\n[air: diff truncated at {headless._DIFF_CAP} chars — v1 guard]\n"
+    assert headless._truncation_arm(mutated) == headless.MARKER_ARM        # the collision…
+    assert headless._truncation_remedy(arm) == "AIR_HEADLESS_DIFF_CAP"     # …does not reach the remedy
