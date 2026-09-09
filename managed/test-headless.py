@@ -1923,3 +1923,41 @@ def test_conversation_only_raw_only_rewrites_are_logged(tmp_path, monkeypatch, c
     assert out["verdict"] == "APPROVE" and "decoy" not in (out.get("reason") or "")
     err = capsys.readouterr().err
     assert "[hold][raw] 1 rewrite(s) on the raw body only" in err and "#77" in err
+
+
+def test_headless_diff_cap_defaults_to_the_hygiene_cap():
+    """ONE knob must move both halves: `_diff_is_truncated` is `marker OR len >
+    cap`, and hygiene writes that marker at ITS cap, so two independent defaults
+    meant raising either one alone left the gate failing closed (lifemd #17748)."""
+    import importlib, os
+    import diff_hygiene
+    prev = os.environ.get("AIR_DIFF_MAX_BYTES")
+    os.environ["AIR_DIFF_MAX_BYTES"] = "900000"
+    os.environ.pop("AIR_HEADLESS_DIFF_CAP", None)
+    try:
+        importlib.reload(diff_hygiene)
+        h = importlib.reload(headless)
+        assert diff_hygiene.DIFF_MAX_BYTES == 900_000 and h._DIFF_CAP == 900_000
+    finally:
+        if prev is None:
+            os.environ.pop("AIR_DIFF_MAX_BYTES", None)
+        else:
+            os.environ["AIR_DIFF_MAX_BYTES"] = prev
+        importlib.reload(diff_hygiene)
+        importlib.reload(headless)
+
+
+def test_truncation_reason_names_a_variable_the_reader_can_actually_set():
+    """The old reason told the author to raise AIR_HEADLESS_DIFF_CAP — which was
+    not forwarded by managed-review.yml AND could not clear the marker arm on its
+    own. A remedy the reader cannot carry out is worse than none."""
+    import re as _re
+    src = open(os.path.join(os.path.dirname(os.path.abspath(headless.__file__)),
+                            "headless.py")).read()
+    m = _re.search(r'"diff truncated at \{_DIFF_CAP\} bytes[^"]*"\s*\n?\s*"([^"]*)"', src)
+    assert m, "the truncation reason string moved — keep it actionable"
+    assert "AIR_DIFF_MAX_BYTES" in m.group(1)
+    wf = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(headless.__file__))),
+                           ".github", "workflows", "managed-review.yml")).read()
+    for var in ("AIR_DIFF_MAX_BYTES", "AIR_HEADLESS_DIFF_CAP", "AIR_DELETION_STUB"):
+        assert f"{var}: ${{{{ vars.{var} }}}}" in wf, f"{var} is not forwarded to the job"

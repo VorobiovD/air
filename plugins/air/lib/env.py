@@ -111,7 +111,7 @@ def env_bool(name: str, default: bool) -> bool:
 # dynamic prefix — surfacing a mistyped knob name that would otherwise no-op.
 KNOWN_AIR_VARS = frozenset({
     # --- tuning knobs (int/float) ---
-    "AIR_DIFF_MAX_BYTES", "AIR_HEADLESS_DIFF_CAP", "AIR_HEADLESS_MAX_TURNS",
+    "AIR_DIFF_MAX_BYTES", "AIR_DELETION_STUB", "AIR_HEADLESS_DIFF_CAP", "AIR_HEADLESS_MAX_TURNS",
     "AIR_HEADLESS_TTL_FILES", "AIR_HEADLESS_TTL_BYTES",
     "AIR_STREAM_RETRY_ATTEMPTS", "AIR_STREAM_RETRY_BACKOFF",
     "AIR_LEARN_TIMEOUT_S", "AIR_LEARN_PARALLELISM", "AIR_LEARN_MAX_TOKENS",

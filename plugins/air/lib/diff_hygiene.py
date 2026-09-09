@@ -3,8 +3,10 @@
 
 One implementation, every path (the verdict.py / agent_md.py / meta.py anti-drift
 pattern). Stubs minified bundles, sourcemaps, snapshots, dist/vendor/node_modules
-segments, and lockfiles whose same-dir manifest also changed; then enforces a
-byte cap with explicit in-diff markers (nothing dropped silently). Agents never
+segments, and lockfiles whose same-dir manifest also changed; then, ONLY when the
+result is still over budget, stubs the bodies of fully-DELETED files (largest
+first, stopping the moment it fits); then enforces a byte cap with explicit
+in-diff markers (nothing dropped silently). Agents never
 see the stubbed bodies — it's PURE cost (and a load-bearing parity guarantee for
 the re-review ledger, whose UNCHANGED determination must see the same diff shape
 on the CLI and managed).
@@ -30,6 +32,32 @@ DIFF_MAX_BYTES = env.env_int("AIR_DIFF_MAX_BYTES", 500_000, minimum=0)
 # LINE-START anchored at the consumer — diff body lines always start with
 # `+`/`-`/space, so PR content cannot forge a line beginning with this.
 DIFF_TRUNCATION_MARKER = "[air: diff truncated"
+# Deleted-file body stub. DELIBERATELY NOT the truncation marker: a segment that
+# only REMOVES a file introduces no new code, so no newly-introduced blocker can
+# hide in the bytes we drop — the path is named, the removed-line count is given,
+# and the body stays retrievable (`git show <base-sha>:<path>`; the sandbox's
+# fixed-verb git dispatcher allows `show`). A cap OMISSION is the opposite: it
+# drops added/modified code unreviewed, which is what the fail-closed gate exists
+# for. Keeping the two markers distinct is what lets a deletion-heavy cleanup PR
+# get a real verdict while a genuinely over-cap PR still fails closed.
+DELETION_STUB_MARKER_SUFFIX = "(file deleted; body omitted to fit the size cap"
+_DELETED_FILE_RE = re.compile(r"^deleted file mode ", re.MULTILINE)
+
+
+def _deletion_stub_enabled() -> bool:
+    """Kill switch `AIR_DELETION_STUB` ∈ 0/false/no → pre-feature behavior
+    (deletion-heavy PRs fall straight through to the cap omission)."""
+    return env.env_bool("AIR_DELETION_STUB", True)
+
+
+def _is_pure_deletion(segment: str) -> bool:
+    """True for a segment that removes a file outright.
+
+    `deleted file mode` is emitted by git for a whole-file removal only — a
+    modification that happens to delete many lines never carries it, so a
+    file whose remaining content still needs review is never stubbed here.
+    """
+    return bool(_DELETED_FILE_RE.search(segment))
 
 # Lockfile → the manifest whose same-directory change justifies stubbing.
 _LOCKFILE_MANIFESTS = {
@@ -167,6 +195,57 @@ def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
     result = "".join(kept)
     if len(result.encode("utf-8", errors="replace")) <= budget:
         return result
+
+    # LADDER STEP (over budget only — a diff that fits is byte-identical to
+    # pre-feature, so the fleet and the prompt cache are untouched): stub the
+    # BODIES of fully-deleted files before dropping any segment whole.
+    #
+    # Why this class: a retirement/cleanup PR carries each removed file's entire
+    # former content as `-` lines, which is the least review-dense material in any
+    # diff — judging a deletion is "does anything still reference this?", a
+    # repo-wide grep, not a read of the removed body. Meanwhile the added and
+    # modified code (where new risk actually enters) was being cap-omitted to make
+    # room for it, and the resulting truncation marker fail-closed the gate. The
+    # live case: lifemd #17748, 54% of 545KB in 14 deleted files, gated with no
+    # blockers found.
+    #
+    # LARGEST-FIRST, STOP AS SOON AS IT FITS — a PR 5% over budget loses its one
+    # biggest deleted body, not every deletion in the diff (minimum damage, the
+    # wiki_cap trim-ladder idiom).
+    if _deletion_stub_enabled():
+        order = sorted(
+            (i for i, seg in enumerate(kept) if _is_pure_deletion(seg)),
+            key=lambda i: len(kept[i].encode("utf-8", errors="replace")),
+            reverse=True,
+        )
+        total = len(result.encode("utf-8", errors="replace"))
+        for i in order:
+            if total <= budget:
+                break
+            seg, path = kept[i], kept_paths[i]
+            n = count_diff_changed_lines(seg)
+            # Keep the git headers (mode/index/rename lines) so path parsing, the
+            # rename map, and the ledger's `present`/`stubbed` sets all still see
+            # this file exactly as they would any other stubbed segment.
+            head = [ln for ln in seg.splitlines()
+                    if ln.startswith(("diff --git ", "deleted file mode ", "index ",
+                                      "similarity index ", "rename "))]
+            stub = ("\n".join(head) + "\n"
+                    f"[air: {path}: {n} lines removed "
+                    f"{DELETION_STUB_MARKER_SUFFIX} — `git show <base-sha>:{path}` "
+                    f"to read it)]\n")
+            before = len(seg.encode("utf-8", errors="replace"))
+            after = len(stub.encode("utf-8", errors="replace"))
+            if after >= before:
+                continue                        # nothing to reclaim on a tiny deletion
+            kept[i] = stub
+            total -= before - after
+            print(f"  diff hygiene: stubbed deleted-file body {path} ({n} lines removed)")
+        result = "".join(kept)
+        if len(result.encode("utf-8", errors="replace")) <= budget:
+            print("  diff hygiene: deleted-file stubbing brought the diff under the "
+                  f"{budget}-byte cap — no segment omitted, gate not failed closed")
+            return result
 
     def _marker(show_paths: list, n_omitted: int) -> str:
         # Paths are tail-truncated to 60 chars so 5 of them can't blow the

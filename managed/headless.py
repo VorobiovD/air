@@ -69,6 +69,7 @@ from verdict import (  # noqa: E402 (managed shim → plugins/air/lib/verdict.py
     find_prior_review, extract_reviewed_at_sha, build_carry_forward_ledger, pin_and_resurrect,
     _CONFLICT_GATE_REASON,
 )
+from diff_hygiene import DIFF_MAX_BYTES  # noqa: E402  (THE hygiene byte cap — the headless char cap defaults to it)
 from verdict import extract_prior_statuses, strip_new_findings, hold_blockers_to_prior, prior_new_findings  # noqa: E402  (conversation-only re-review guards)
 from github_client import AIR_VERDICT_SENTINEL  # noqa: E402  (prior-verdict fail-close detection)
 from setup import MODEL_ALIASES  # noqa: E402  (single source — don't duplicate the alias map)
@@ -152,7 +153,13 @@ _BLOCKER_LENS_MAX_TOKENS = env.env_int("AIR_BLOCKER_LENS_MAX_TOKENS", 32_000, mi
 # gating verdict stays standing.
 _VERIFIER_MAX_TOKENS = env.env_int("AIR_VERIFIER_MAX_TOKENS", 64_000, minimum=1)
 
-_DIFF_CAP = env.env_int("AIR_HEADLESS_DIFF_CAP", 500_000, minimum=0)  # chars — managed parity
+# DEFAULTS TO the hygiene cap, so ONE variable (`AIR_DIFF_MAX_BYTES`) moves both
+# halves. It has to: `_diff_is_truncated` is `marker present OR len > _DIFF_CAP`,
+# and hygiene inserts that marker at its OWN cap — so raising only one of the two
+# leaves the other arm firing and the gate still fails closed. lifemd #17748 hit
+# exactly that, and the reason string told the author to raise the half that
+# cannot help. `AIR_HEADLESS_DIFF_CAP` remains an explicit per-repo override.
+_DIFF_CAP = env.env_int("AIR_HEADLESS_DIFF_CAP", DIFF_MAX_BYTES, minimum=0)  # chars — managed parity
                              # (= managed's AIR_DIFF_MAX_BYTES). The diff is already
                              # apply_diff_hygiene'd (generated/vendored stubbed) before this
                              # cap, so this only bounds real-code diffs. The old 120K "v1
@@ -1294,8 +1301,13 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # lens, so a clean verdict can't be trusted. The reviewer raises AIR_HEADLESS_DIFF_CAP
     # (or splits the PR) to get a real verdict.
     if not rc and diff_truncated:
-        rc, reason = True, (f"diff truncated at {_DIFF_CAP} chars — a blocker beyond the cap "
-                            "can't be ruled out; raise AIR_HEADLESS_DIFF_CAP or split the PR")
+        # Name the variable that actually governs BOTH halves (see _DIFF_CAP above)
+        # and the level to set it on — a remedy the reader cannot carry out is worse
+        # than none. `AIR_DIFF_MAX_BYTES` is forwarded by managed-review.yml, so a
+        # repo/org variable is enough; no workflow edit.
+        rc, reason = True, (f"diff truncated at {_DIFF_CAP} bytes — a blocker beyond the cap "
+                            "can't be ruled out; raise the repo/org variable AIR_DIFF_MAX_BYTES "
+                            "(it moves both the hygiene and headless caps) or split the PR")
         print(f"  [gate] {reason} — failing closed", file=sys.stderr)
     verdict = resolve_verdict_event(rc)  # REQUEST_CHANGES | APPROVE | COMMENT (AIR_NO_APPROVE)
     # Banner ↔ gate consistency (parity with review.py): rewrite ONLY the v2 verdict

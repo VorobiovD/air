@@ -3167,3 +3167,16 @@ def test_hold_output_status_numbers_are_all_prior_findings():
                     "- **#3** [blocker] — NOT FIXED — invented", "- **#42** — ACCEPTED — invented too")
     out, _ = hold_blockers_to_prior(body, prior)
     assert {n for n, _, _ in extract_prior_statuses(out)} == set(_prior_record(prior))
+
+
+def test_deletion_stub_reads_as_stubbed_in_the_ledger_index():
+    """A deleted-file body stub hides its real lines, so the index must treat it
+    like the generated/vendored stub — INDETERMINATE (pin-preserving), never
+    "unchanged" (which would hand it the cross-region trust class)."""
+    from verdict import parse_changed_lines, finding_changed, INDETERMINATE
+    diff = ("diff --git a/old/legacy.js b/old/legacy.js\ndeleted file mode 100644\nindex abc..000\n"
+            "[air: old/legacy.js: 900 lines removed (file deleted; body omitted to fit the size "
+            "cap — `git show <base-sha>:old/legacy.js` to read it)]\n")
+    idx = parse_changed_lines(diff)
+    assert "old/legacy.js" in idx.stubbed and idx.truncated is False
+    assert finding_changed(("old/legacy.js", 10, 12), idx) == INDETERMINATE

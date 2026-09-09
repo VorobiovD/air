@@ -103,3 +103,84 @@ def test_main_rewrites_file_in_place(tmp_path):
 
 def test_main_missing_file_returns_1(tmp_path):
     assert dh._main(["--diff-file", str(tmp_path / "nope.diff")]) == 1  # read-error guard
+
+
+# --- deleted-file body stub (lifemd #17748: a deletion-heavy cleanup PR blew the
+# cap on removed bodies, cap-omitted its ADDED code, and fail-closed the gate) ---
+
+def _seg_deleted(path, lines):
+    body = "".join(f"-line {i}\n" for i in range(lines))
+    return (f"diff --git a/{path} b/{path}\ndeleted file mode 100644\nindex abc..000\n"
+            f"--- a/{path}\n+++ /dev/null\n@@ -1,{lines} +0,0 @@\n{body}")
+
+
+def _seg_modified(path, lines):
+    body = "".join(f"+added {i}\n" for i in range(lines))
+    return (f"diff --git a/{path} b/{path}\nindex abc..def 100644\n"
+            f"--- a/{path}\n+++ b/{path}\n@@ -1,0 +1,{lines} @@\n{body}")
+
+
+def test_deletion_stub_is_inert_when_the_diff_fits():
+    """Under budget ⇒ byte-identical to pre-feature. The fleet and the prompt
+    cache must not move for the PRs that were always fine."""
+    from diff_hygiene import apply_diff_hygiene
+    d = _seg_deleted("old/legacy.js", 200) + _seg_modified("src/new.ts", 5)
+    assert apply_diff_hygiene(d, max_bytes=1_000_000) == d
+
+
+def test_deletion_stub_reclaims_budget_instead_of_omitting_added_code():
+    from diff_hygiene import apply_diff_hygiene, DIFF_TRUNCATION_MARKER
+    d = _seg_deleted("old/legacy.test.js", 4000) + _seg_modified("src/new.ts", 20)
+    out = apply_diff_hygiene(d, max_bytes=5_000)
+    assert "4000 lines removed (file deleted" in out          # deleted body stubbed…
+    assert "git show <base-sha>:old/legacy.test.js" in out    # …and still retrievable
+    assert "+added 19" in out                                 # the ADDED code survived
+    assert DIFF_TRUNCATION_MARKER not in out                  # so the gate does NOT fail closed
+    assert len(out.encode()) <= 5_000
+
+
+def test_deletion_stub_keeps_the_git_headers_so_path_and_ledger_parsing_hold():
+    from diff_hygiene import apply_diff_hygiene, _segment_path
+    out = apply_diff_hygiene(_seg_deleted("a/b/gone.py", 4000) + _seg_modified("s.ts", 2),
+                             max_bytes=3_000)
+    seg = [s for s in out.split("diff --git ") if s.startswith("a/a/b/gone.py")][0]
+    assert "deleted file mode 100644" in seg and "index abc..000" in seg
+    assert _segment_path("diff --git " + seg) == "a/b/gone.py"
+
+
+def test_deletion_stub_is_largest_first_and_stops_when_it_fits():
+    """A diff barely over budget loses its ONE biggest deleted body, not every
+    deletion in the PR (minimum damage — the trim-ladder idiom)."""
+    from diff_hygiene import apply_diff_hygiene
+    d = _seg_deleted("big.js", 3000) + _seg_deleted("small.js", 40) + _seg_modified("s.ts", 2)
+    out = apply_diff_hygiene(d, max_bytes=4_000)
+    assert "3000 lines removed" in out            # the big one was stubbed
+    assert "40 lines removed" not in out          # the small one was left intact
+    assert "-line 39" in out
+
+
+def test_a_modification_that_deletes_many_lines_is_never_stubbed():
+    """Only a whole-file removal (`deleted file mode`) qualifies — a file whose
+    remaining content still needs review keeps its body."""
+    from diff_hygiene import apply_diff_hygiene, DIFF_TRUNCATION_MARKER
+    heavy = (f"diff --git a/src/app.ts b/src/app.ts\nindex abc..def 100644\n"
+             f"--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3000 +1,1 @@\n"
+             + "".join(f"-gone {i}\n" for i in range(3000)) + "+kept\n")
+    out = apply_diff_hygiene(heavy, max_bytes=4_000)
+    assert "lines removed (file deleted" not in out
+    assert DIFF_TRUNCATION_MARKER in out          # falls through to the honest fail-close
+
+
+def test_still_fails_closed_when_stubbing_deletions_is_not_enough():
+    from diff_hygiene import apply_diff_hygiene, DIFF_TRUNCATION_MARKER
+    out = apply_diff_hygiene(_seg_deleted("gone.js", 500) + _seg_modified("huge.ts", 5000),
+                             max_bytes=4_000)
+    assert DIFF_TRUNCATION_MARKER in out          # real over-cap code ⇒ gate still fails closed
+
+
+def test_deletion_stub_kill_switch(monkeypatch):
+    from diff_hygiene import apply_diff_hygiene, DIFF_TRUNCATION_MARKER
+    monkeypatch.setenv("AIR_DELETION_STUB", "0")
+    out = apply_diff_hygiene(_seg_deleted("gone.js", 4000) + _seg_modified("s.ts", 2),
+                             max_bytes=3_000)
+    assert "lines removed (file deleted" not in out and DIFF_TRUNCATION_MARKER in out
