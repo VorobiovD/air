@@ -1305,9 +1305,13 @@ async def run_headless_review(args, bot_token: str) -> dict:
         # and the level to set it on — a remedy the reader cannot carry out is worse
         # than none. `AIR_DIFF_MAX_BYTES` is forwarded by managed-review.yml, so a
         # repo/org variable is enough; no workflow edit.
-        rc, reason = True, (f"diff truncated at {_DIFF_CAP} bytes — a blocker beyond the cap "
-                            "can't be ruled out; raise the repo/org variable AIR_DIFF_MAX_BYTES "
-                            "(it moves both the hygiene and headless caps) or split the PR")
+        _knob = ("AIR_HEADLESS_DIFF_CAP" if os.environ.get("AIR_HEADLESS_DIFF_CAP", "").strip()
+                 else "AIR_DIFF_MAX_BYTES")
+        rc, reason = True, (f"diff truncated at {_DIFF_CAP} chars — a blocker beyond the cap "
+                            f"can't be ruled out; raise the repo/org variable {_knob}"
+                            + ("" if _knob == "AIR_HEADLESS_DIFF_CAP" else
+                               " (it moves both the hygiene and headless caps)")
+                            + " or split the PR")
         print(f"  [gate] {reason} — failing closed", file=sys.stderr)
     verdict = resolve_verdict_event(rc)  # REQUEST_CHANGES | APPROVE | COMMENT (AIR_NO_APPROVE)
     # Banner ↔ gate consistency (parity with review.py): rewrite ONLY the v2 verdict

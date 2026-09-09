@@ -184,3 +184,31 @@ def test_deletion_stub_kill_switch(monkeypatch):
     out = apply_diff_hygiene(_seg_deleted("gone.js", 4000) + _seg_modified("s.ts", 2),
                              max_bytes=3_000)
     assert "lines removed (file deleted" not in out and DIFF_TRUNCATION_MARKER in out
+
+
+def test_adversarially_named_file_cannot_forge_the_truncation_marker():
+    """Git allows a file named `diff truncated.trap`. Interpolated raw, its stub
+    line's first bytes collide with DIFF_TRUNCATION_MARKER — the one marker every
+    consumer treats as unforgeable. Both stub sites must neutralize it."""
+    from diff_hygiene import apply_diff_hygiene, DIFF_TRUNCATION_MARKER
+    trap = "diff truncated.trap"
+    out = apply_diff_hygiene(_seg_deleted(trap, 4000) + _seg_modified("s.ts", 2),
+                             max_bytes=3_000)
+    assert "lines removed (file deleted" in out              # it WAS stubbed…
+    assert not any(ln.startswith(DIFF_TRUNCATION_MARKER) for ln in out.splitlines())
+    assert f"'{trap}'" in out                                # …quoted, so readable and honest
+    # same hole in the pre-existing generated/vendored stub: `.min.js` classifies
+    # as generated, so a crafted name forges the same prefix there too
+    gen = (f"diff --git a/{trap}.min.js b/{trap}.min.js\nindex a..b 100644\n"
+           f"--- a/{trap}.min.js\n+++ b/{trap}.min.js\n@@ -1 +1 @@\n-a\n+b\n")
+    out2 = apply_diff_hygiene(gen, max_bytes=1_000_000)
+    assert "changed lines omitted (generated/vendored)" in out2
+    assert not any(ln.startswith(DIFF_TRUNCATION_MARKER) for ln in out2.splitlines())
+
+
+def test_marker_path_strips_bracket_and_backtick_injection():
+    """A path containing `]` or a backtick would end the marker or its `git show`
+    hint early, letting crafted content sit outside the marker."""
+    from diff_hygiene import _safe_marker_path
+    assert _safe_marker_path("a]b`c.js") == "a_b_c.js"
+    assert _safe_marker_path("ok/path.js") == "ok/path.js"      # untouched otherwise

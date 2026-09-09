@@ -1532,6 +1532,19 @@ def test_diff_markers_match_github_client_producers():
            "@@ -1 +1 @@\n-a\n+b\n")
     stubbed = gc.apply_diff_hygiene(raw)
     assert v._DIFF_STUB_RE.search(stubbed), f"stub regex no longer matches producer: {stubbed!r}"
+    # Same pin for the DELETION stub: drive the real producer over budget so the
+    # marker text comes from diff_hygiene, never re-encoded here. A wording tweak
+    # to DELETION_STUB_MARKER_SUFFIX must fail HERE, not silently make the ledger
+    # read a stubbed deletion as "unchanged" instead of INDETERMINATE.
+    deleted = ("diff --git a/old/legacy.js b/old/legacy.js\ndeleted file mode 100644\n"
+               "index abc..000\n--- a/old/legacy.js\n+++ /dev/null\n@@ -1,400 +0,0 @@\n"
+               + "".join(f"-line {i}\n" for i in range(400)))
+    stub2 = gc.apply_diff_hygiene(deleted, max_bytes=1_200)
+    assert "lines removed (file deleted" in stub2, f"producer changed: {stub2!r}"
+    assert v._DIFF_STUB_RE.search(stub2), f"deletion-stub regex missed producer output: {stub2!r}"
+    idx = v.parse_changed_lines(stub2)
+    assert "old/legacy.js" in idx.stubbed and idx.truncated is False
+    assert v.finding_changed(("old/legacy.js", 10, 12), idx) == v.INDETERMINATE
 
 
 def test_malformed_prior_body_parse_robustness():
@@ -3168,15 +3181,3 @@ def test_hold_output_status_numbers_are_all_prior_findings():
     out, _ = hold_blockers_to_prior(body, prior)
     assert {n for n, _, _ in extract_prior_statuses(out)} == set(_prior_record(prior))
 
-
-def test_deletion_stub_reads_as_stubbed_in_the_ledger_index():
-    """A deleted-file body stub hides its real lines, so the index must treat it
-    like the generated/vendored stub — INDETERMINATE (pin-preserving), never
-    "unchanged" (which would hand it the cross-region trust class)."""
-    from verdict import parse_changed_lines, finding_changed, INDETERMINATE
-    diff = ("diff --git a/old/legacy.js b/old/legacy.js\ndeleted file mode 100644\nindex abc..000\n"
-            "[air: old/legacy.js: 900 lines removed (file deleted; body omitted to fit the size "
-            "cap — `git show <base-sha>:old/legacy.js` to read it)]\n")
-    idx = parse_changed_lines(diff)
-    assert "old/legacy.js" in idx.stubbed and idx.truncated is False
-    assert finding_changed(("old/legacy.js", 10, 12), idx) == INDETERMINATE

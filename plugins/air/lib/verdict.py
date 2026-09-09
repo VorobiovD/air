@@ -874,9 +874,15 @@ _DIFF_TRUNCATION_MARKER = "[air: diff truncated"
 # deleted-file body stub. A stubbed segment's real lines are hidden, so
 # `finding_changed` returns INDETERMINATE for it (pin-preserving) rather than
 # reading the absent hunks as "unchanged".
+# Prefix match on purpose: each alternative stops at its distinguishing phrase,
+# so the marker's trailing detail (counts, the `git show` hint) can change
+# without touching this. Locked to the real producer output by
+# test_diff_markers_match_github_client_producers.
 _DIFF_STUB_RE = re.compile(
-    r"^\[air: .* (?:changed lines omitted \(generated/vendored\)"
-    r"|lines removed \(file deleted; body omitted to fit the size cap)",
+    r"^\[air: .* (?:"
+    r"changed lines omitted \(generated/vendored\)"      # generated/vendored body
+    r"|lines removed \(file deleted; body omitted"         # deleted-file body
+    r")",
     re.MULTILINE,
 )
 

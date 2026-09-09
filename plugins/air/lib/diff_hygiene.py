@@ -42,6 +42,31 @@ DIFF_TRUNCATION_MARKER = "[air: diff truncated"
 # get a real verdict while a genuinely over-cap PR still fails closed.
 DELETION_STUB_MARKER_SUFFIX = "(file deleted; body omitted to fit the size cap"
 _DELETED_FILE_RE = re.compile(r"^deleted file mode ", re.MULTILINE)
+# Chars that would terminate an `[air: …]` marker or its `git show` hint early.
+_MARKER_UNSAFE_RE = re.compile(r"[\[\]`\r\n]")
+
+
+def _safe_marker_path(path: str) -> str:
+    """A path rendered safe to interpolate into an `[air: …]` control marker.
+
+    Git allows nearly any byte in a filename, so a PR author can add or delete
+    a file named `diff truncated.trap` and make a stub line's first bytes
+    collide with DIFF_TRUNCATION_MARKER — the ONE marker every consumer treats
+    as unforgeable ("diff body lines always start with `+`/`-`/space, so PR
+    content cannot forge a line beginning with this"). The collision only ever
+    fails CLOSED (a diff that fits read as truncated), so it is not an exploit,
+    but it breaks the invariant the fail-close rests on, so the path is
+    neutralized here rather than trusted. A colliding path is single-quoted,
+    which moves a quote into the byte right after `[air: ` and keeps the path
+    readable and shell-correct in the `git show` hint. Brackets, backticks and
+    CR/LF are replaced outright — they end the marker or the hint early.
+
+    Applied at BOTH stub sites: the deletion stub (new) and the
+    generated/vendored stub (pre-existing — a crafted `diff truncated.min.js`
+    classifies as generated and forges the same prefix)."""
+    safe = _MARKER_UNSAFE_RE.sub("_", path or "")
+    prefix = DIFF_TRUNCATION_MARKER[len("[air: "):]        # "diff truncated"
+    return f"'{safe}'" if safe[:len(prefix)].lower() == prefix.lower() else safe
 
 
 def _deletion_stub_enabled() -> bool:
@@ -187,7 +212,7 @@ def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
         n = count_diff_changed_lines(seg)
         header = seg.splitlines()[0]
         kept.append(
-            f"{header}\n[air: {path}: {n} changed lines omitted "
+            f"{header}\n[air: {_safe_marker_path(path)}: {n} changed lines omitted "
             f"(generated/vendored)]\n"
         )
         kept_paths.append(path)
@@ -230,9 +255,10 @@ def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
             head = [ln for ln in seg.splitlines()
                     if ln.startswith(("diff --git ", "deleted file mode ", "index ",
                                       "similarity index ", "rename "))]
+            shown = _safe_marker_path(path)
             stub = ("\n".join(head) + "\n"
-                    f"[air: {path}: {n} lines removed "
-                    f"{DELETION_STUB_MARKER_SUFFIX} — `git show <base-sha>:{path}` "
+                    f"[air: {shown}: {n} lines removed "
+                    f"{DELETION_STUB_MARKER_SUFFIX} — `git show <base-sha>:{shown}` "
                     f"to read it)]\n")
             before = len(seg.encode("utf-8", errors="replace"))
             after = len(stub.encode("utf-8", errors="replace"))

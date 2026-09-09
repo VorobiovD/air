@@ -1952,11 +1952,16 @@ def test_truncation_reason_names_a_variable_the_reader_can_actually_set():
     not forwarded by managed-review.yml AND could not clear the marker arm on its
     own. A remedy the reader cannot carry out is worse than none."""
     import re as _re
-    src = open(os.path.join(os.path.dirname(os.path.abspath(headless.__file__)),
-                            "headless.py")).read()
-    m = _re.search(r'"diff truncated at \{_DIFF_CAP\} bytes[^"]*"\s*\n?\s*"([^"]*)"', src)
-    assert m, "the truncation reason string moved — keep it actionable"
-    assert "AIR_DIFF_MAX_BYTES" in m.group(1)
+    root = os.path.dirname(os.path.abspath(headless.__file__))
+    src = open(os.path.join(root, "headless.py")).read()
+    # The reason-building block, located by its own leading phrase rather than by
+    # an exact quote layout (this assertion should survive a reword, and fail only
+    # if the remedy stops naming a variable the reader can set).
+    i = src.index("a blocker beyond the cap")     # unique to the GATE reason
+    block = src[i - 500:i + 700]
+    assert "chars" in block, "state the unit the cap is compared in (len() is chars)"
+    assert "AIR_DIFF_MAX_BYTES" in block, "the remedy must name the forwarded variable"
+    assert "AIR_HEADLESS_DIFF_CAP" in block, "…and defer to an explicit headless override"
     wf = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(headless.__file__))),
                            ".github", "workflows", "managed-review.yml")).read()
     for var in ("AIR_DIFF_MAX_BYTES", "AIR_HEADLESS_DIFF_CAP", "AIR_DELETION_STUB"):
