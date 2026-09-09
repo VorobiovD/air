@@ -206,9 +206,26 @@ def test_adversarially_named_file_cannot_forge_the_truncation_marker():
     assert not any(ln.startswith(DIFF_TRUNCATION_MARKER) for ln in out2.splitlines())
 
 
-def test_marker_path_strips_bracket_and_backtick_injection():
-    """A path containing `]` or a backtick would end the marker or its `git show`
-    hint early, letting crafted content sit outside the marker."""
-    from diff_hygiene import _safe_marker_path
-    assert _safe_marker_path("a]b`c.js") == "a_b_c.js"
-    assert _safe_marker_path("ok/path.js") == "ok/path.js"      # untouched otherwise
+def test_an_ordinary_bracketed_path_is_not_mangled_and_stays_retrievable():
+    """`app/[id]/page.tsx` is a plain Next.js dynamic route, not an attack. The
+    label must keep it verbatim and the `git show` hint must name a path that
+    actually exists — sanitizing either was the module breaking its own
+    retrievability guarantee on a realistic filename."""
+    from diff_hygiene import apply_diff_hygiene
+    p = "app/[id]/page.tsx"
+    out = apply_diff_hygiene(_seg_deleted(p, 4000) + _seg_modified("s.ts", 2), max_bytes=3_000)
+    assert f"[air: {p}: 4000 lines removed" in out
+    assert f"git show <base-sha>:'app/[id]/page.tsx'" in out    # shell-quoted, path intact
+    assert "_id_" not in out
+
+
+def test_marker_hint_is_shell_quoted_including_an_embedded_single_quote():
+    """A hand-rolled `'{path}'` wrap broke out on a path containing a quote. The
+    hint is advisory text a human pastes into a real shell, so it uses shlex."""
+    from diff_hygiene import _marker_hint_path, _marker_label
+    nasty = "diff truncated' ; rm -rf ~ ; echo '.js"
+    q = _marker_hint_path(nasty)
+    import shlex
+    assert shlex.split(f"git show base:{q}") == ["git", "show", f"base:{nasty}"]
+    assert _marker_label("ok/path.js") == "ok/path.js"          # untouched otherwise
+    assert "\n" not in _marker_label("a\nb.js")                 # newline can forge a line start

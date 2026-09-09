@@ -1947,22 +1947,27 @@ def test_headless_diff_cap_defaults_to_the_hygiene_cap():
         importlib.reload(headless)
 
 
-def test_truncation_reason_names_a_variable_the_reader_can_actually_set():
-    """The old reason told the author to raise AIR_HEADLESS_DIFF_CAP — which was
-    not forwarded by managed-review.yml AND could not clear the marker arm on its
-    own. A remedy the reader cannot carry out is worse than none."""
-    import re as _re
-    root = os.path.dirname(os.path.abspath(headless.__file__))
-    src = open(os.path.join(root, "headless.py")).read()
-    # The reason-building block, located by its own leading phrase rather than by
-    # an exact quote layout (this assertion should survive a reword, and fail only
-    # if the remedy stops naming a variable the reader can set).
-    i = src.index("a blocker beyond the cap")     # unique to the GATE reason
-    block = src[i - 500:i + 700]
-    assert "chars" in block, "state the unit the cap is compared in (len() is chars)"
-    assert "AIR_DIFF_MAX_BYTES" in block, "the remedy must name the forwarded variable"
-    assert "AIR_HEADLESS_DIFF_CAP" in block, "…and defer to an explicit headless override"
+def test_diff_cap_knobs_are_forwarded_to_the_job():
+    """The caps never reached the job, so the remedy air printed on the PR was
+    impossible to carry out without editing the reusable workflow (lifemd #17748).
+    Which variable gets NAMED is covered by the runtime test below."""
     wf = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(headless.__file__))),
                            ".github", "workflows", "managed-review.yml")).read()
     for var in ("AIR_DIFF_MAX_BYTES", "AIR_HEADLESS_DIFF_CAP", "AIR_DELETION_STUB"):
         assert f"{var}: ${{{{ vars.{var} }}}}" in wf, f"{var} is not forwarded to the job"
+
+
+def test_truncation_remedy_names_the_cap_for_the_arm_that_fired(monkeypatch):
+    """#8: keyed on which arm of _diff_is_truncated fired, not on which variable
+    is set. The MARKER arm is written upstream by hygiene, which only reads
+    AIR_DIFF_MAX_BYTES — naming the headless override there is the same
+    impossible-remedy trap this change set out to close."""
+    marker = "[air: diff truncated at 500000 bytes — 2 file(s) omitted]\n"
+    plain = "diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n"
+    monkeypatch.setenv("AIR_HEADLESS_DIFF_CAP", "900000")
+    assert headless._truncation_remedy(marker) == "AIR_DIFF_MAX_BYTES"   # hygiene owns it
+    assert headless._truncation_remedy(plain) == "AIR_HEADLESS_DIFF_CAP"  # length arm
+    monkeypatch.setenv("AIR_HEADLESS_DIFF_CAP", "900k")                   # malformed
+    assert headless._truncation_remedy(plain) == "AIR_DIFF_MAX_BYTES"     # value was ignored
+    monkeypatch.delenv("AIR_HEADLESS_DIFF_CAP", raising=False)
+    assert headless._truncation_remedy(plain) == "AIR_DIFF_MAX_BYTES"     # default follows it

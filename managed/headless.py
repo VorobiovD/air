@@ -334,6 +334,31 @@ def _int_env(name: str, default: int) -> int:
     return env.env_int(name, default)
 
 
+def _truncation_remedy(diff: str) -> str:
+    """The variable a reader must actually raise to clear THIS truncation.
+
+    Keyed on which arm of `_diff_is_truncated` fired, not on which variable
+    happens to be set — naming the wrong one is the same "impossible remedy"
+    class this whole change set out to close. The MARKER arm is written upstream
+    by the fetcher's `apply_diff_hygiene`, which only ever reads
+    `AIR_DIFF_MAX_BYTES`; `AIR_HEADLESS_DIFF_CAP` cannot clear it. The LENGTH arm
+    is the headless char cap, so an explicit override owns it — but only a
+    WELL-FORMED override, since `env.env_int` warns and falls back to
+    `DIFF_MAX_BYTES` on a malformed value, and naming a variable whose value was
+    ignored is the same trap again."""
+    from review import _diff_is_truncated as _marker_truncated  # lazy: module-top cycle
+    if _marker_truncated(diff):
+        return "AIR_DIFF_MAX_BYTES"                     # hygiene's cap, upstream
+    override = os.environ.get("AIR_HEADLESS_DIFF_CAP", "").strip()
+    if override:
+        try:
+            int(override)          # env_int's own parse rule; a sentinel-default probe
+        except ValueError:         # can't be used here (its `minimum` clamps the default)
+            return "AIR_DIFF_MAX_BYTES"     # malformed ⇒ env_int ignored it ⇒ don't name it
+        return "AIR_HEADLESS_DIFF_CAP"      # explicit, well-formed override owns this arm
+    return "AIR_DIFF_MAX_BYTES"
+
+
 def _diff_is_truncated(diff: str) -> bool:
     """True if the diff was cut short and a blocker could live in the omitted
     tail — the signal that drives the fail-closed gate.
@@ -1297,20 +1322,17 @@ async def run_headless_review(args, bot_token: str) -> dict:
     if not rc and missing_blocker_lens:
         rc, reason = True, f"blocker-class lens did not complete: {', '.join(missing_blocker_lens)}"
         print(f"  [gate] {reason} — failing closed", file=sys.stderr)
-    # Fail closed on a truncated diff: a blocker living past the cap is invisible to every
-    # lens, so a clean verdict can't be trusted. The reviewer raises AIR_HEADLESS_DIFF_CAP
-    # (or splits the PR) to get a real verdict.
+    # Fail closed on a truncated diff: a blocker living past the cap is invisible to
+    # every lens, so a clean verdict can't be trusted. The remedy names the cap that
+    # actually governs the arm that fired (`_truncation_remedy`) and the level to set
+    # it on — both caps are forwarded as caller repo/org variables, so no workflow
+    # edit is needed. A remedy the reader cannot carry out is worse than none.
     if not rc and diff_truncated:
-        # Name the variable that actually governs BOTH halves (see _DIFF_CAP above)
-        # and the level to set it on — a remedy the reader cannot carry out is worse
-        # than none. `AIR_DIFF_MAX_BYTES` is forwarded by managed-review.yml, so a
-        # repo/org variable is enough; no workflow edit.
-        _knob = ("AIR_HEADLESS_DIFF_CAP" if os.environ.get("AIR_HEADLESS_DIFF_CAP", "").strip()
-                 else "AIR_DIFF_MAX_BYTES")
+        _knob = _truncation_remedy(diff)
         rc, reason = True, (f"diff truncated at {_DIFF_CAP} chars — a blocker beyond the cap "
                             f"can't be ruled out; raise the repo/org variable {_knob}"
-                            + ("" if _knob == "AIR_HEADLESS_DIFF_CAP" else
-                               " (it moves both the hygiene and headless caps)")
+                            + (" (it moves both the hygiene and headless caps)"
+                               if _knob == "AIR_DIFF_MAX_BYTES" else "")
                             + " or split the PR")
         print(f"  [gate] {reason} — failing closed", file=sys.stderr)
     verdict = resolve_verdict_event(rc)  # REQUEST_CHANGES | APPROVE | COMMENT (AIR_NO_APPROVE)

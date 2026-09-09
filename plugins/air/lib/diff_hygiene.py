@@ -17,10 +17,11 @@ Consumers:
 - CLI: `/air:review` pipes its diff files through `python3 lib/diff_hygiene.py
   --diff-file <path>` (the analogue of the managed in-fetcher hygiene).
 
-stdlib-only (re, os, sys).
+stdlib-only (re, os, shlex, sys).
 """
 import os
 import re
+import shlex
 import sys
 
 import env  # tolerant env parsing (sibling in plugins/air/lib; on sys.path as a script or via the managed _LIB insert)
@@ -42,31 +43,51 @@ DIFF_TRUNCATION_MARKER = "[air: diff truncated"
 # get a real verdict while a genuinely over-cap PR still fails closed.
 DELETION_STUB_MARKER_SUFFIX = "(file deleted; body omitted to fit the size cap"
 _DELETED_FILE_RE = re.compile(r"^deleted file mode ", re.MULTILINE)
-# Chars that would terminate an `[air: …]` marker or its `git show` hint early.
-_MARKER_UNSAFE_RE = re.compile(r"[\[\]`\r\n]")
+# A literal CR/LF in a path would split a marker across lines — and a line-start
+# forgery is exactly what the truncation detector must be immune to.
+_MARKER_NEWLINE_RE = re.compile(r"[\r\n]")
 
 
-def _safe_marker_path(path: str) -> str:
-    """A path rendered safe to interpolate into an `[air: …]` control marker.
+def _marker_label(path: str) -> str:
+    """The path as DISPLAYED inside an `[air: …]` marker.
 
-    Git allows nearly any byte in a filename, so a PR author can add or delete
-    a file named `diff truncated.trap` and make a stub line's first bytes
-    collide with DIFF_TRUNCATION_MARKER — the ONE marker every consumer treats
-    as unforgeable ("diff body lines always start with `+`/`-`/space, so PR
-    content cannot forge a line beginning with this"). The collision only ever
-    fails CLOSED (a diff that fits read as truncated), so it is not an exploit,
-    but it breaks the invariant the fail-close rests on, so the path is
-    neutralized here rather than trusted. A colliding path is single-quoted,
-    which moves a quote into the byte right after `[air: ` and keeps the path
-    readable and shell-correct in the `git show` hint. Brackets, backticks and
-    CR/LF are replaced outright — they end the marker or the hint early.
+    Git allows nearly any byte in a filename, so a PR author can add or delete a
+    file named `diff truncated.trap` and make a stub line's first bytes collide
+    with DIFF_TRUNCATION_MARKER — the ONE marker every consumer treats as
+    unforgeable ("diff body lines always start with `+`/`-`/space, so PR content
+    cannot forge a line beginning with this"). The collision only ever fails
+    CLOSED (a diff that fits read as truncated), so it is not an exploit, but it
+    breaks the invariant the fail-close rests on. A colliding path is therefore
+    single-quoted, which puts a quote in the byte right after `[air: `.
 
-    Applied at BOTH stub sites: the deletion stub (new) and the
-    generated/vendored stub (pre-existing — a crafted `diff truncated.min.js`
-    classifies as generated and forges the same prefix)."""
-    safe = _MARKER_UNSAFE_RE.sub("_", path or "")
+    NOTHING ELSE is rewritten. An earlier cut also replaced `[`/`]`/backticks and
+    mangled ordinary paths — `app/[id]/page.tsx`, a plain Next.js dynamic route,
+    displayed as `app/_id_/page.tsx` — for no gain: every consumer of this marker
+    is a line-start prefix match or a `.*`-spanning search, so a bracket inside
+    the label breaks no parser. Only a newline does, and that is neutralized.
+
+    Applied at BOTH stub sites: the deletion stub and the generated/vendored stub
+    (a crafted `diff truncated.min.js` classifies as generated and forges the
+    same prefix there)."""
+    safe = _MARKER_NEWLINE_RE.sub("_", path or "")
     prefix = DIFF_TRUNCATION_MARKER[len("[air: "):]        # "diff truncated"
     return f"'{safe}'" if safe[:len(prefix)].lower() == prefix.lower() else safe
+
+
+def _marker_hint_path(path: str) -> str:
+    """The path for the copy-pasteable `git show <base-sha>:<path>` hint — the
+    REAL path, shell-quoted, never the display label.
+
+    Reusing the label here broke the module's own retrievability guarantee: a
+    sanitized label points at a file that does not exist. `shlex.quote` is the
+    right tool and handles what a hand-rolled wrap could not — spaces, brackets,
+    backticks, and an embedded single quote (a file named
+    `diff truncated' ; rm -rf ~ ; echo '.js` closed the old hand-written quote
+    early). The hint is advisory text for a human to paste into a real shell —
+    the sandbox's own dispatcher shlex-splits into a verb-allowlisted `git` argv,
+    so it was never an automated sink — but a hint that mangles or misquotes the
+    path is worse than no hint."""
+    return shlex.quote(path or "")
 
 
 def _deletion_stub_enabled() -> bool:
@@ -212,7 +233,7 @@ def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
         n = count_diff_changed_lines(seg)
         header = seg.splitlines()[0]
         kept.append(
-            f"{header}\n[air: {_safe_marker_path(path)}: {n} changed lines omitted "
+            f"{header}\n[air: {_marker_label(path)}: {n} changed lines omitted "
             f"(generated/vendored)]\n"
         )
         kept_paths.append(path)
@@ -255,11 +276,10 @@ def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
             head = [ln for ln in seg.splitlines()
                     if ln.startswith(("diff --git ", "deleted file mode ", "index ",
                                       "similarity index ", "rename "))]
-            shown = _safe_marker_path(path)
             stub = ("\n".join(head) + "\n"
-                    f"[air: {shown}: {n} lines removed "
-                    f"{DELETION_STUB_MARKER_SUFFIX} — `git show <base-sha>:{shown}` "
-                    f"to read it)]\n")
+                    f"[air: {_marker_label(path)}: {n} lines removed "
+                    f"{DELETION_STUB_MARKER_SUFFIX} — "
+                    f"`git show <base-sha>:{_marker_hint_path(path)}` to read it)]\n")
             before = len(seg.encode("utf-8", errors="replace"))
             after = len(stub.encode("utf-8", errors="replace"))
             if after >= before:

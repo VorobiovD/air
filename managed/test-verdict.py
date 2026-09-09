@@ -3180,4 +3180,3 @@ def test_hold_output_status_numbers_are_all_prior_findings():
                     "- **#3** [blocker] — NOT FIXED — invented", "- **#42** — ACCEPTED — invented too")
     out, _ = hold_blockers_to_prior(body, prior)
     assert {n for n, _, _ in extract_prior_statuses(out)} == set(_prior_record(prior))
-
