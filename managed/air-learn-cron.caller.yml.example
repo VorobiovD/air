@@ -53,6 +53,7 @@ jobs:
     # managed/README.md → "Pinning air"). The workflow checks out air's code at that
     # same commit, so a push to the public air repo can't change the code your
     # secrets flow into until you merge the bump. `@main` also works and floats.
+    #   uses: VorobiovD/air/.github/workflows/air-learn-cron.yml@<full-40-char-sha> # vX.Y.Z
     uses: VorobiovD/air/.github/workflows/air-learn-cron.yml@main
     with:
       repo: ${{ github.repository }}

@@ -346,13 +346,19 @@ Runs full mode through `air-coordinator-ma`, a coordinator on the GA `multiagent
 `air-ui-copy-reviewer` dispatches whenever a PR's diff touches a **web** surface (`.tsx/.jsx/.vue/.svelte/.html`, i18n catalogs, user-facing docs) — automatically, no config. For **CLI/TUI products** whose user-facing copy lives in non-markup files (e.g. repo-C's Python patient/agent message modules), add a `## User-Facing Copy Paths` section to the repo's **PROJECT-PROFILE.md** listing glob patterns, one per `- ` line:
 
 ```markdown
+## User-Facing Copy Paths
+- agent-core/agents/*.py
+- `**/messages/*.py`
+```
+
+The dispatch gate reads those globs from the store (`read_memory`) **only when the web check misses**, so web PRs and repos without the section pay nothing extra. Keep the globs **narrow** — they should match only the copy modules, so routine backend PRs still skip the reviewer ($0). `fnmatch` semantics (`*` is greedy across `/`, so `agent-core/agents/*.py` matches any depth). **Store-backed repos only** (legacy-wiki repos fall back to the web-only gate). The reviewer reviews **static** user-visible strings (display text, prompts, canned/template messages) — not runtime-generated agent output.
 
 ## Pinning air (recommended for org repos)
 
 `@main` floats: every merge to air's `main` reaches your repo on its next run. To control when air changes, pin the `uses:` line to a **full commit SHA** and let Dependabot propose bumps:
 
 ```yaml
-    uses: VorobiovD/air/.github/workflows/managed-review.yml@<full-40-char-sha> # v1.52.0
+    uses: VorobiovD/air/.github/workflows/managed-review.yml@<full-40-char-sha> # vX.Y.Z
 ```
 
 ```yaml
@@ -370,13 +376,6 @@ updates:
 Pin to a full SHA, not a tag: tags can be moved. Pass secrets explicitly, never `secrets: inherit` — inside one organization, `inherit` hands the called workflow every repo and org secret.
 
 **Trade-off:** with pins, an air fix reaches a repo only when that repo's Dependabot PR is merged. Someone has to own merging those bumps.
-
-## User-Facing Copy Paths
-- agent-core/agents/*.py
-- `**/messages/*.py`
-```
-
-The dispatch gate reads those globs from the store (`read_memory`) **only when the web check misses**, so web PRs and repos without the section pay nothing extra. Keep the globs **narrow** — they should match only the copy modules, so routine backend PRs still skip the reviewer ($0). `fnmatch` semantics (`*` is greedy across `/`, so `agent-core/agents/*.py` matches any depth). **Store-backed repos only** (legacy-wiki repos fall back to the web-only gate). The reviewer reviews **static** user-visible strings (display text, prompts, canned/template messages) — not runtime-generated agent output.
 
 ## How it works
 

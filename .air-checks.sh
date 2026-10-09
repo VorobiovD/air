@@ -299,10 +299,10 @@ for WF in .github/workflows/managed-review.yml .github/workflows/air-learn-cron.
     || fail "Check L-a: $WF no longer resolves the air code ref from job.workflow_sha — a pinned caller would run main's code"
   grep -qF 'ref: ${{ steps.air_code.outputs.ref }}' "$WF" \
     || fail "Check L-b: $WF's air checkout is not wired to the resolved ref (steps.air_code.outputs.ref)"
-  if awk '/^      air_ref:/{f=1} f&&/default:/{print; exit}' "$WF" | grep -qE "default: *'main'"; then
+  if awk '/^      air_ref:/{f=1} f&&/default:/{print; exit}' "$WF" | grep -qE "default: *[\"']main[\"']"; then
     fail "Check L-c: $WF defaults air_ref to 'main' — that overrides job.workflow_sha and un-pins every caller"
   fi
-  if grep -qE "ref: *\\\$\{\{ *inputs\.air_ref *\|\| *'main'" "$WF"; then
+  if grep -qE "ref: *\\\$\{\{ *inputs\.air_ref *\|\| *[\"']main[\"']" "$WF"; then
     fail "Check L-d: $WF checks out air at inputs.air_ref || 'main' — use the resolved workflow commit"
   fi
 done
