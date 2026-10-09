@@ -1,0 +1,15 @@
+# TEMPORARY — proves job.workflow_sha pins the air code. Removed before merge.
+name: tmp pin test
+on:
+  push:
+    branches: [fix/pin-air-code-to-workflow-commit]
+permissions:
+  contents: read
+jobs:
+  learn:
+    uses: VorobiovD/air/.github/workflows/air-learn-cron.yml@0848809e0e9be739c46c276d6066529cc2089048
+    with:
+      repo: VorobiovD/air
+      mode: list
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
