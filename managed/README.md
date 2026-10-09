@@ -346,6 +346,31 @@ Runs full mode through `air-coordinator-ma`, a coordinator on the GA `multiagent
 `air-ui-copy-reviewer` dispatches whenever a PR's diff touches a **web** surface (`.tsx/.jsx/.vue/.svelte/.html`, i18n catalogs, user-facing docs) — automatically, no config. For **CLI/TUI products** whose user-facing copy lives in non-markup files (e.g. repo-C's Python patient/agent message modules), add a `## User-Facing Copy Paths` section to the repo's **PROJECT-PROFILE.md** listing glob patterns, one per `- ` line:
 
 ```markdown
+
+## Pinning air (recommended for org repos)
+
+`@main` floats: every merge to air's `main` reaches your repo on its next run. To control when air changes, pin the `uses:` line to a **full commit SHA** and let Dependabot propose bumps:
+
+```yaml
+    uses: VorobiovD/air/.github/workflows/managed-review.yml@<full-40-char-sha> # v1.52.0
+```
+
+```yaml
+# .github/dependabot.yml
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+```
+
+**The pin freezes the code, not just the YAML.** Both reusable workflows (`managed-review.yml`, `air-learn-cron.yml`) check out air's Python at `job.workflow_sha`, the commit the workflow file was loaded from. A caller pinned to a SHA runs exactly that commit's engine; a caller on `@main` runs main as before. (Up to v1.51.0 the code checkout defaulted to `main`, so a SHA pin froze only the YAML — pin to a version that includes this change or later.) `air_ref` stays as an explicit override for running a different ref than the one in `uses:`.
+
+Pin to a full SHA, not a tag: tags can be moved. Pass secrets explicitly, never `secrets: inherit` — inside one organization, `inherit` hands the called workflow every repo and org secret.
+
+**Trade-off:** with pins, an air fix reaches a repo only when that repo's Dependabot PR is merged. Someone has to own merging those bumps.
+
 ## User-Facing Copy Paths
 - agent-core/agents/*.py
 - `**/messages/*.py`

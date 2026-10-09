@@ -1,8 +1,10 @@
 # Post-merge smoke runbook
 
-Every merge to `main` deploys fleet-wide immediately (callers pin
-`managed-review.yml@main`, no `agent_versions`). There is no staging tier, so
-this runbook is the deploy verification. Run it after any merge touching
+Every merge to `main` deploys immediately to every caller still on
+`managed-review.yml@main` (no `agent_versions`). Callers pinned to a full SHA
+pick it up only when their Dependabot bump merges — re-run this smoke against
+one of them after the bump. There is no staging tier, so this runbook is the
+deploy verification. Run it after any merge touching
 `managed/`, `plugins/air/lib/`, or the workflows; skip for docs-only merges.
 Total cost: **$0 for steps 1–3**; step 4 is one review (~$1–3).
 
