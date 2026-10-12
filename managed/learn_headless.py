@@ -593,7 +593,7 @@ def seed_missing_author_files(repo, store_id, *, token, complete=None, log=print
     but learn only ever curated files that ALREADY existed (`targets` comes from
     `list_memories`). So NOTHING anywhere created the first file: the only
     creator was the one-shot `migrate_wiki_to_store.py`. Consequences measured
-    2026-08-04: a store bootstrapped empty stayed empty forever (lifemd, telco),
+    2026-08-04: a store bootstrapped empty stayed empty forever (two production repos),
     and even on a populated store a NEW author was never added (repo-C's
     `asim-ayana`). Author-pattern learning only ever worked for authors the
     original wiki migration happened to include.
