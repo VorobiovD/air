@@ -237,9 +237,11 @@ def check(text: str, name: str = "<workflow>") -> list:
         f = _fields(block)
         # A skipped or allowed-to-fail resolver leaves the ref empty, and an empty
         # cross-repo checkout floats on air's default branch — the bug this guards.
-        for key in ("if", "continue-on-error"):
-            if key in f:
-                errors.append(f"{name}: the resolver step must always run — remove its `{key}:`")
+        if "if" in f:
+            errors.append(f"{name}: the resolver step must always run — remove its `if:`")
+        if "continue-on-error" in f and f["continue-on-error"].lower() != "false":
+            errors.append(f"{name}: the resolver step must not be allowed to fail — "
+                          f"remove `continue-on-error: {f['continue-on-error']}`")
         env = _child_map(block, "env")
         for key, want in EXPECTED_ENV.items():
             if env.get(key) != want:

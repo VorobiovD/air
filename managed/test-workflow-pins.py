@@ -1,6 +1,8 @@
-"""Check L: a caller's SHA pin must pin air's code. Each mutation below is one of
-the four regressions an audit slipped past the original string-grep version of
-Check L; every one must now fail, and the real workflows must pass."""
+"""Check L: a caller's SHA pin must pin air's code. Each mutation below is a
+regression that slipped past an earlier version of the guard: four from the first
+audit (string grep, comments included) and three from the second (first-match key
+lookup, a skippable resolver, multi-line output). Every one must now fail, and
+the real workflows must pass."""
 import os
 import re
 import sys
@@ -154,3 +156,12 @@ def test_output_parser_matches_runner_rules():
     assert cwp._parse_outputs("ref<<X\nline1\nline2\nX\n") == {"ref": "line1\nline2"}
     assert cwp._parse_outputs("ref=a<<b\n") == {"ref": "a<<b"}        # `=` first → plain value
     assert cwp._parse_outputs("ref<<X\nunterminated\n") is None
+
+
+def test_continue_on_error_false_is_allowed_but_true_is_not():
+    for wf in WORKFLOWS:
+        text = _read(wf)
+        ok = text.replace("        id: air_code\n", "        id: air_code\n        continue-on-error: false\n", 1)
+        assert ok != text and cwp.check(ok, wf) == [], (wf, cwp.check(ok, wf))
+        bad = text.replace("        id: air_code\n", "        id: air_code\n        continue-on-error: true\n", 1)
+        assert any("not be allowed to fail" in e for e in cwp.check(bad, wf)), wf
