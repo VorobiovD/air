@@ -354,7 +354,7 @@ def make_origin_resolver(comments, bot_login, head_sha, repo, token, base_sha=No
     TEMPORAL ANCHOR (#294 successor): a REJECTED origin (compare status diverged/
     behind — the branch was rebased/force-pushed, so NO prior SHA is an ancestor of
     head) no longer collapses straight to v1 number-identity (which pinned a
-    genuinely-fixed finding NOT FIXED forever — lifemd #17537). It falls back to
+    genuinely-fixed finding NOT FIXED forever — repo-F #17537). It falls back to
     AUTHOR-DATE evidence: the PR's own rebase-proof base...head diff, narrowed to
     files edited by commits AUTHORED AFTER that origin review posted
     (_files_authored_after — author dates survive the rebase that destroys SHA

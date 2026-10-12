@@ -1166,7 +1166,7 @@ def temporal_anchor_enabled() -> bool:
     them all), fall back to AUTHOR-DATE evidence — "was this finding's file edited
     by a commit authored AFTER the review that raised it?" — instead of collapsing
     to v1 number-identity, which pins a genuinely-fixed finding NOT FIXED forever
-    (repo-C #17065, lifemd #16973/#17395/#17537). Author dates survive the rebase
+    (repo-C #17065, repo-F #16973/#17395/#17537). Author dates survive the rebase
     that destroys SHA ancestry, and the review's created_at is a server-side lower
     bound, so the "edited after the finding was raised" property — whose loss killed
     the rejected base..head approach on #294 — is preserved. Author dates are
@@ -1585,7 +1585,7 @@ def _ensure_rereview_shape(body: str, log: list, resurrected: list) -> str:
 # Appended to a status line when the pin rewrites a verifier FIXED→NOT FIXED, so
 # the label is self-explaining rather than contradicting its own "fixed" rationale
 # (the repo-A #1422 report). Inert to the gate — the STATUS token is parsed, the
-# tail is free prose. The dispute exit leads and is imperative: lifemd #17537
+# tail is free prose. The dispute exit leads and is imperative: repo-F #17537
 # showed the old passive phrasing ("or via a DISPUTED reply") never got a dev to
 # the right exit — three manual review-dismissals over two days instead.
 _PIN_REWRITE_MARKER = (
@@ -1654,7 +1654,7 @@ def _reconcile_banner_with_ledger(body: str, rewrites: int, resurrections: int, 
 
     The verifier writes its banner prose ("4 prior blockers/mediums resolved · …")
     BEFORE the pin runs, so a pin that rewrites `FIXED` -> `NOT FIXED` leaves the
-    comment contradicting itself: lifemd #16973 shipped "4 prior blockers/mediums
+    comment contradicting itself: repo-F #16973 shipped "4 prior blockers/mediums
     resolved" directly above four `NOT FIXED` lines, each carrying the pin marker.
     A reader can't tell which half to believe, and the prose is the wrong half.
 
@@ -2132,7 +2132,7 @@ def pin_and_resurrect(review_body: str, ledger: list) -> tuple:
             # ledger (no origin window — e.g. a conversation-only pass, or an
             # unresolvable origin) re-poisoned every already-fixed finding back to
             # NOT FIXED on nothing but the absence of THIS round's inter-diff
-            # evidence (the lifemd #17537 shape). A fix that was later REVERTED is
+            # evidence (the repo-F #17537 shape). A fix that was later REVERTED is
             # the verifier's to catch from its read of current source (it should
             # not re-emit FIXED); on this number-identity path `change` is
             # INDETERMINATE by construction, so the pin cannot tell a revert from

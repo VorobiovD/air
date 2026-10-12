@@ -340,7 +340,7 @@ jobs:
               # 3-of-7 fleet callers that don't pass it, EVERY named-reviewer run
               # warned "has no PAT — reviewing under the shared bot" while
               # demonstrably reviewing under that reviewer's own PAT. That false
-              # line is not harmless: it sent a live qai-be 403 diagnosis at
+              # line is not harmless: it sent a live repo-A 403 diagnosis at
               # AIR_BOT_TOKEN (never even consulted — <STEM>_PAT short-circuits
               # the `||`) instead of the reviewer PAT that was actually failing.
               #

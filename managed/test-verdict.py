@@ -2273,7 +2273,7 @@ def test_gate_note_not_suppressed_by_a_quoted_marker_in_the_body():
     assert "If no new review appears" in out
 
 
-# ---- the "No blockers" + CHANGES_REQUESTED self-contradiction (lifemd #17344) --
+# ---- the "No blockers" + CHANGES_REQUESTED self-contradiction (repo-F #17344) --
 # A `[sec:]`-tagged exposure the model rated MEDIUM is floored to a blocker by
 # count_category_floored, so the gate fires while the model's own lead — written
 # before the floor is applied in Python — still says "No blockers." Live on a real
@@ -2529,7 +2529,7 @@ def test_every_find_prior_review_call_site_passes_the_allowlist():
 
 
 # --- banner vs ledger: the pin runs AFTER the summary is written --------------
-# lifemd #16973 shipped "4 prior blockers/mediums resolved" directly above four
+# repo-F #16973 shipped "4 prior blockers/mediums resolved" directly above four
 # NOT FIXED lines, each carrying the pin marker — the verifier wrote the banner
 # before the pin rewrote those statuses. normalize_verdict_banner can't catch it:
 # the lead already says "Changes requested", so it correctly leaves it alone.
@@ -2698,7 +2698,7 @@ def _temporal_entry(num, sev, status, *, file_touched):
 
 
 def test_temporal_fix_on_post_review_edit_is_trusted():
-    # The lifemd #17537 shape: blocker genuinely fixed, branch then rebased ~15x.
+    # The repo-F #17537 shape: blocker genuinely fixed, branch then rebased ~15x.
     # Verifier reads current source and emits FIXED; temporal evidence shows the
     # finding's file was edited by a commit authored after the review → trusted,
     # APPROVE — where v1 number-identity pinned NOT FIXED forever.
@@ -2714,7 +2714,7 @@ def test_temporal_without_post_review_edit_still_pins_with_rebase_marker():
     # Temporal window ran but NO commit authored after the review touches the
     # finding's file → conservative rewrite stands, and the marker is the
     # rebase-flavored one so the dev learns WHY verification is limited and how
-    # to clear it (the DISPUTED exit that lifemd #17537's dev never found).
+    # to clear it (the DISPUTED exit that repo-F #17537's dev never found).
     from verdict import _PIN_REWRITE_MARKER_REBASE
     e = _temporal_entry(1, "blocker", "NOT FIXED", file_touched=False)
     body = _rr_body("- **#1** [blocker] — FIXED — claims fixed")

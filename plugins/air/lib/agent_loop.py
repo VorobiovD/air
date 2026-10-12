@@ -201,7 +201,7 @@ def _is_retryable_turn_error(e) -> bool:
     # **status_code=200** — not `OverloadedError`/529. The code test above then
     # says "not retryable", the turn re-raises with no retry and no log, and a
     # blocker lens dies → fail-closed CHANGES_REQUESTED with no finding behind it
-    # (lifemd #17405: `air-code-reviewer failed: APIStatusError … overloaded_error`
+    # (repo-F #17405: `air-code-reviewer failed: APIStatusError … overloaded_error`
     # with zero retry lines). So fall back to the error BODY's own type, which is
     # populated on exactly this path. Re-issuing stays safe for the same reason as
     # the transport-drop case: a mid-stream failure means no final message was

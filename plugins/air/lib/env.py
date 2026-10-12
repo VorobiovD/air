@@ -143,7 +143,7 @@ KNOWN_AIR_VARS = frozenset({
 # Families whose exact key varies at runtime: AIR_CTX_0000.. (sandbox context
 # blocks), AIR_WIKI_CAP_<FILE> (per-file bloat-cap overrides), and
 # AIR_NEW_API_KEY_<REPO> (an operator's per-repo key handles in their local
-# shell — e.g. _AIRELAY, _LIFEMD — not air knobs; warning on them every local
+# shell — e.g. _TEAMA, _TEAMB — not air knobs; warning on them every local
 # run trains people to ignore [env] warnings, defeating the report).
 _KNOWN_PREFIXES = ("AIR_CTX_", "AIR_WIKI_CAP_", "AIR_NEW_API_KEY_")
 

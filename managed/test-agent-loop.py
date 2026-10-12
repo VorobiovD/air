@@ -401,7 +401,7 @@ def test_truncated_turn_with_tool_uses_fails_closed(monkeypatch):
 # When the stream opens 200 OK and the server THEN sends an `error` event, the SDK
 # builds the exception with `response=<the 200 stream response>`; _make_status_error
 # dispatches on status_code, 200 matches no subclass, so an overloaded_error arrives
-# as a BASE APIStatusError carrying status_code=200. lifemd #17405: air-code-reviewer
+# as a BASE APIStatusError carrying status_code=200. repo-F #17405: air-code-reviewer
 # died on exactly this with ZERO retry lines, fail-closing the gate with no finding.
 
 def _mid_stream_error(etype="overloaded_error"):

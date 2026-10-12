@@ -1167,7 +1167,7 @@ def _ta_resolver(monkeypatch, *, git_log=_TA_GIT_LOG, base_sha=_TA_BASE,
 
 
 def test_temporal_fallback_unpoisons_rebased_branch(monkeypatch):
-    # The lifemd #17537 shape: origin diverged (rebase), but svc.py was edited by
+    # The repo-F #17537 shape: origin diverged (rebase), but svc.py was edited by
     # a commit authored after the origin review → temporal 5-tuple; ledger keeps
     # file_touched without line evidence; pin honors the verifier's FIXED.
     resolver = _ta_resolver(monkeypatch)
@@ -1309,7 +1309,7 @@ def test_temporal_blob_api_error_not_credited(monkeypatch):
 def test_temporal_path_absent_at_origin_is_credited(monkeypatch):
     # The finding's file doesn't exist at the origin tree (fetch_blob_sha → "" on
     # 404): a rename/move landed after the review — its content at this path IS a
-    # post-review change (the lifemd #17537 package-move shape). Credited.
+    # post-review change (the repo-F #17537 package-move shape). Credited.
     resolver = _ta_resolver(monkeypatch, origin_blob="")
     res = resolver(1)
     assert res and res[3] == {"svc.py"}
@@ -1378,7 +1378,7 @@ _CO_PRIOR_MED = {"id": 10, "created_at": "2026-09-01T10:00:00Z", "user": {"login
 
 
 def test_at_head_with_dev_comment_runs_conversation_only_rereview(tmp_path, monkeypatch):
-    # The Nathan case: reviewed at head, dev adds context, re-requests. Before: the
+    # The motivating case: reviewed at head, dev adds context, re-requests. Before: the
     # at-head skip ($0, silent). Now: a verifier-only re-adjudication — no diff
     # fetch, no specialists, no codex; the verifier sees the directive AND the
     # developer's comment, and the <diff> block says explicitly that nothing changed.

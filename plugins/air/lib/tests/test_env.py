@@ -154,14 +154,14 @@ def test_env_int_warning_clips_long_value(monkeypatch, capsys):
 
 
 def test_report_env_ignores_per_repo_key_handles(monkeypatch):
-    # Operator shells carry per-repo key handles (AIR_NEW_API_KEY_AIRELAY,
-    # _LIFEMD, …) — an AIR_-prefixed family that isn't an air knob. Warning on
+    # Operator shells carry per-repo key handles (AIR_NEW_API_KEY_TEAMA,
+    # _TEAMB, …) — an AIR_-prefixed family that isn't an air knob. Warning on
     # them every local run trains people to ignore [env] warnings.
     import os
     for k in [k for k in os.environ if k.startswith("AIR_")]:
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("AIR_NEW_API_KEY_AIRELAY", "x")
-    monkeypatch.setenv("AIR_NEW_API_KEY_LIFEMD", "x")
+    monkeypatch.setenv("AIR_NEW_API_KEY_TEAMA", "x")
+    monkeypatch.setenv("AIR_NEW_API_KEY_TEAMB", "x")
     monkeypatch.setenv("AIR_NEW_API_KEYX", "x")   # NOT the family (no underscore) → still flagged
     logged = []
     unknown = env.report_env(log=logged.append)
