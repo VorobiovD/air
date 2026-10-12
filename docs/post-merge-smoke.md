@@ -90,7 +90,8 @@ Two deeper regression checks when a change touches gating or review behavior:
 |---|---|
 | Behavior behind a kill switch | set the caller/org variable (`AIR_LEDGER_PIN=0`, `AIR_CATEGORY_FLOOR=0`, `AIR_REVIEW_FORMAT=legacy`, `AIR_WIKI_CAP=0`, `AIR_RELATED_PRS=0`, `AIR_POST_VERIFIER_BODY=0`, `AIR_HEADLESS_PATTERNS=0`, …) — instant, no deploy |
 | Mode/architecture | `gh variable delete AIR_REVIEW_MODE --repo <caller>` (falls back to `full`) |
-| Anything else | `git revert` the merge commit on main — the next fleet run picks it up |
+| Anything else, callers on `@main` | `git revert` the merge commit on main — their next run picks it up |
+| Anything else, callers pinned to a SHA | a revert on main does NOT reach them: they keep running their pinned commit. Either move the caller's pin back (revert its Dependabot bump), or cut a corrective release and merge the bumps it triggers |
 
 A billing/API failure leaves CI green by design on some paths — check the PR
 comment/verdict, not just the workflow badge.

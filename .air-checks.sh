@@ -290,22 +290,20 @@ fi
 
 # Check L: a caller's SHA pin must freeze air's CODE, not just the YAML. Both
 # reusable workflows check out air at the commit the workflow file was loaded
-# from (job.workflow_sha), with air_ref as an EMPTY-default override. The old
-# default was `main`, which made every SHA pin cosmetic: the YAML froze while
-# the Python floated — exactly what an org security review asks pins to stop.
-for WF in .github/workflows/managed-review.yml .github/workflows/air-learn-cron.yml; do
-  [ -f "$WF" ] || continue
-  grep -qF 'job.workflow_sha' "$WF" \
-    || fail "Check L-a: $WF no longer resolves the air code ref from job.workflow_sha — a pinned caller would run main's code"
-  grep -qF 'ref: ${{ steps.air_code.outputs.ref }}' "$WF" \
-    || fail "Check L-b: $WF's air checkout is not wired to the resolved ref (steps.air_code.outputs.ref)"
-  if awk '/^      air_ref:/{f=1} f&&/default:/{print; exit}' "$WF" | grep -qE "default: *[\"']main[\"']"; then
-    fail "Check L-c: $WF defaults air_ref to 'main' — that overrides job.workflow_sha and un-pins every caller"
+# from (job.workflow_sha), with air_ref as an EMPTY-default override and an
+# explicit `main` only when neither exists (GHES). The first version of this
+# check grepped for strings anywhere in the file, comments included, and an
+# audit defeated it four ways; it is now a STRUCTURAL check (comments stripped,
+# the resolver step located and EXECUTED, the air checkout's ref compared
+# exactly) in managed/check_workflow_pins.py, with each bypass locked as a test
+# in managed/test-workflow-pins.py.
+if [ -f managed/check_workflow_pins.py ]; then
+  if ! out=$(python3 managed/check_workflow_pins.py .github/workflows/managed-review.yml .github/workflows/air-learn-cron.yml 2>&1); then
+    while IFS= read -r line; do fail "Check L: $line"; done <<< "$out"
   fi
-  if grep -qE "ref: *\\\$\{\{ *inputs\.air_ref *\|\| *[\"']main[\"']" "$WF"; then
-    fail "Check L-d: $WF checks out air at inputs.air_ref || 'main' — use the resolved workflow commit"
-  fi
-done
+else
+  fail "Check L: managed/check_workflow_pins.py is missing — the pinned-code guard is gone"
+fi
 
 if [ "$status" -eq 0 ]; then
   printf 'air drift-check: all checks passed.\n'

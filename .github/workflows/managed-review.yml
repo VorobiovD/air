@@ -460,8 +460,10 @@ jobs:
       # caller pinned to a SHA runs that SHA's engine; `@main` runs main exactly
       # as before. Previously this defaulted to `main` (actions/checkout's
       # default branch for a foreign repo), which made every SHA pin cosmetic:
-      # the YAML was frozen, the Python floated. An empty job.workflow_sha (an
-      # older runner / GHES) degrades to the default branch — today's behavior.
+      # the YAML was frozen, the Python floated. An empty job.workflow_sha (GHES,
+      # where the property doesn't exist) falls back to an EXPLICIT `main` — the
+      # exact old default (relying on checkout's implicit default would not be:
+      # it differs for a same-repo call).
       - name: Resolve the air code ref
         id: air_code
         env:
@@ -469,11 +471,11 @@ jobs:
           WF_SHA: ${{ job.workflow_sha }}
           WF_REF: ${{ job.workflow_ref }}
         run: |
-          ref="${OVERRIDE:-$WF_SHA}"
+          ref="${OVERRIDE:-${WF_SHA:-main}}"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
-          echo "air code: ${ref:-<default branch>}  (workflow: ${WF_REF:-?} @ ${WF_SHA:-?}; air_ref override: ${OVERRIDE:-none})"
+          echo "air code: ${ref}  (workflow: ${WF_REF:-?} @ ${WF_SHA:-?}; air_ref override: ${OVERRIDE:-none})"
           if [ -z "$OVERRIDE" ] && [ -z "$WF_SHA" ]; then
-            echo "::warning::job.workflow_sha is empty — checking out air's default branch, so a SHA pin on this workflow will not freeze the code."
+            echo "::warning::job.workflow_sha is empty (e.g. GitHub Enterprise Server) — checking out air at main, so a SHA pin on this workflow will not freeze the code."
           fi
       - name: Checkout air repo (for setup.py + agent prompts)
         uses: actions/checkout@v4
