@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.51.1](https://github.com/VorobiovD/air/compare/v1.51.0...v1.51.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* **workflows:** run the air code from the commit the caller pinned ([#310](https://github.com/VorobiovD/air/issues/310)) ([d2403fb](https://github.com/VorobiovD/air/commit/d2403fbd2076dd0386eb3379a688d44c9461ab04))
+
 ## [1.51.0](https://github.com/VorobiovD/air/compare/v1.50.0...v1.51.0) (2026-09-09)
 
 
