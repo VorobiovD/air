@@ -84,3 +84,14 @@ def test_cli_exit_codes(tmp_path):
     bad = tmp_path / "bad.yml"
     bad.write_text(_read(good).replace("WF_SHA: ${{ job.workflow_sha }}", "WF_SHA: x"))
     assert cwp.main(["x", str(bad)]) == 1
+
+
+def test_resolver_that_overwrites_its_ref_later_fails():
+    """$GITHUB_OUTPUT is last-write-wins: a correct ref followed by `ref=main`
+    runs main, so the checker must read the final value."""
+    for wf in WORKFLOWS:
+        text = _read(wf)
+        bad = text.replace('echo "ref=$ref" >> "$GITHUB_OUTPUT"',
+                           'echo "ref=$ref" >> "$GITHUB_OUTPUT"\n          echo "ref=main" >> "$GITHUB_OUTPUT"')
+        assert bad != text
+        assert any("resolver produced 'main'" in e for e in cwp.check(bad, wf)), wf

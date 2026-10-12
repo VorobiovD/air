@@ -144,9 +144,11 @@ def _resolve(body: str, override: str, wf_sha: str):
         r = subprocess.run(["bash", "-c", body], env=env, capture_output=True, text=True, timeout=20)
         if r.returncode != 0:
             return None
-        for line in open(out).read().splitlines():
-            if line.startswith("ref="):
-                return line[len("ref="):]
+        # GitHub reads $GITHUB_OUTPUT top to bottom and the LAST assignment of a
+        # name wins, so a script that writes the right ref and then overwrites it
+        # must be judged by the final value, not the first.
+        refs = [ln[len("ref="):] for ln in open(out).read().splitlines() if ln.startswith("ref=")]
+        return refs[-1] if refs else None
     return None
 
 
