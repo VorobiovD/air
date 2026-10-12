@@ -48,9 +48,12 @@ concurrency:
 
 jobs:
   learn:
-    # For stricter supply-chain isolation, pin @main to an immutable air commit
-    # SHA — a push to the public air repo then can't silently change the code
-    # your secrets flow into (bump deliberately). @main is the low-friction default.
+    # Recommended: pin to a FULL air commit SHA with the version as a comment, and
+    # let Dependabot's `github-actions` ecosystem bump it on each air release (see
+    # managed/README.md → "Pinning air"). The workflow checks out air's code at that
+    # same commit, so a push to the public air repo can't change the code your
+    # secrets flow into until you merge the bump. `@main` also works and floats.
+    #   uses: VorobiovD/air/.github/workflows/air-learn-cron.yml@<full-40-char-sha> # vX.Y.Z
     uses: VorobiovD/air/.github/workflows/air-learn-cron.yml@main
     with:
       repo: ${{ github.repository }}

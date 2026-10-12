@@ -33,10 +33,10 @@ on:
         type: string
         default: 'list'
       air_ref:
-        description: 'air repo ref for the code checkout (default main; override only when benchmarking a branch).'
+        description: 'Optional override for the air code checkout. Empty (default) = the commit this workflow was loaded from, so a pinned `uses:` SHA pins the code too.'
         required: false
         type: string
-        default: 'main'
+        default: ''
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -61,11 +61,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      # Always run THIS (air) repo's code, regardless of which repo called us.
+      # Always run THIS (air) repo's code, regardless of which repo called us — and
+      # from the SAME commit this workflow file was loaded from (job.workflow_sha),
+      # so a caller pinned to a SHA runs that SHA's code, not whatever is on main.
+      # See managed-review.yml for the full rationale. Empty SHA (GHES) → explicit main.
+      - name: Resolve the air code ref
+        id: air_code
+        env:
+          OVERRIDE: ${{ inputs.air_ref }}
+          WF_SHA: ${{ job.workflow_sha }}
+          WF_REF: ${{ job.workflow_ref }}
+        run: |
+          ref="${OVERRIDE:-${WF_SHA:-main}}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "air code: ${ref}  (workflow: ${WF_REF:-?} @ ${WF_SHA:-?}; air_ref override: ${OVERRIDE:-none})"
+          if [ -z "$OVERRIDE" ] && [ -z "$WF_SHA" ]; then
+            echo "::warning::job.workflow_sha is empty (e.g. GitHub Enterprise Server) — checking out air at main, so a SHA pin on this workflow will not freeze the code."
+          fi
       - uses: actions/checkout@v4
         with:
           repository: VorobiovD/air
-          ref: ${{ inputs.air_ref || 'main' }}
+          ref: ${{ steps.air_code.outputs.ref }}
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'

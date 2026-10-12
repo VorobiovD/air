@@ -29,7 +29,12 @@
 #           default: 'false'
 #   jobs:
 #     review:
-#       uses: VorobiovD/air/.github/workflows/managed-review.yml@main
+#       # Pin to a FULL commit SHA (with the version as a comment) so Dependabot's
+#       # `github-actions` ecosystem can bump it on each air release. The code this
+#       # workflow runs is checked out at the SAME commit (job.workflow_sha), so the
+#       # pin freezes the engine, not just this file. `@main` still works and
+#       # floats on every merge.
+#       uses: VorobiovD/air/.github/workflows/managed-review.yml@<full-sha> # vX.Y.Z
 #       with:
 #         pr_number: ${{ inputs.pr_number }}
 #         closed: ${{ inputs.closed }}
@@ -52,11 +57,12 @@
 # to enable. Without it, the review runs with 4 Claude specialists +
 # verifier only (behavior unchanged from v1.8.0).
 #
-# Cross-repo benchmarking: when pinning the `uses:` line at a non-main
-# air branch (e.g. `@feat/...`), pass `air_ref` with the same value so
-# setup.py reads agent frontmatter from the same branch the reusable
-# workflow loaded from — otherwise setup.py reads main's frontmatter
-# and reverts any feature-branch model-tier changes mid-run.
+# Which air code runs: the air checkout below defaults to job.workflow_sha,
+# the commit this workflow file was loaded from. So the caller's `uses:` ref
+# decides the code too — a SHA pin freezes the engine, a branch ref runs that
+# branch, `@main` runs main. (Before this, the checkout defaulted to `main`,
+# so a pinned `uses:` line froze only this YAML while the Python floated.)
+# `air_ref` remains an explicit override for benchmarking a different ref.
 
 name: air managed review
 
@@ -110,19 +116,17 @@ on:
         default: ''
       air_ref:
         description: |
-          air repo ref for the setup.py + agent prompts checkout. Defaults
-          to `main` for production. Override only when benchmarking a
-          feature branch — setup.py reads agent frontmatter and syncs to
-          Anthropic, so `air_ref` MUST point at the same air branch the
-          caller's `uses:` line pins. Otherwise setup.py reads main's
-          frontmatter and silently reverts any model-tier changes that
-          exist only on the feature branch (repo-A benchmark surfaced
-          this when `uses: ...managed-review.yml@feat/...` ran setup.py
-          against main's frontmatter and resynced specialists from the
-          test tier back to production tier).
+          Optional override for the air code checkout. Empty (default) =
+          the commit this workflow file was loaded from (job.workflow_sha),
+          so the caller's `uses:` ref — a pinned SHA, a branch, or `main`
+          — decides which engine runs, and the YAML and the Python can
+          never disagree. Set it only to run a DIFFERENT ref than the one
+          in `uses:` (rare benchmarking). This also retires the old
+          foot-gun where `uses: ...@feat/...` ran setup.py against main's
+          frontmatter and resynced specialists back to production tier.
         required: false
         type: string
-        default: 'main'
+        default: ''
       cooldown_minutes:
         description: |
           Minimum minutes between reviews of the same PR on push
@@ -450,23 +454,35 @@ jobs:
         # use `-r managed/requirements.txt` — keep these bounds in sync with it.
         run: pip install 'anthropic>=0.116.0,<0.117.0' 'requests>=2.28.0,<3.0.0'
 
-      # `actions/checkout@v4` defaults to the default branch when
-      # `repository:` is set to a different repo than the caller's. For
-      # cross-repo benchmarking (e.g., repo-A → air@feature-branch) the
-      # caller must pass `air_ref` as an input so setup.py reads agent
-      # frontmatter from the SAME air ref that the reusable workflow
-      # was loaded from — otherwise setup.py syncs main's frontmatter
-      # to the live agents and silently reverts any feature-branch
-      # model-tier changes. github.workflow_ref returns the CALLER's
-      # ref inside a reusable workflow (not the reusable's own), so
-      # there's no built-in way to derive this — must be an explicit
-      # input.
+      # Run the air code from the SAME commit this workflow file was loaded from
+      # (job.workflow_sha: "the commit SHA of the workflow file that defines the
+      # current job" — for a reusable workflow, the reusable's own commit). So a
+      # caller pinned to a SHA runs that SHA's engine; `@main` runs main exactly
+      # as before. Previously this defaulted to `main` (actions/checkout's
+      # default branch for a foreign repo), which made every SHA pin cosmetic:
+      # the YAML was frozen, the Python floated. An empty job.workflow_sha (GHES,
+      # where the property doesn't exist) falls back to an EXPLICIT `main` — the
+      # exact old default (relying on checkout's implicit default would not be:
+      # it differs for a same-repo call).
+      - name: Resolve the air code ref
+        id: air_code
+        env:
+          OVERRIDE: ${{ inputs.air_ref }}
+          WF_SHA: ${{ job.workflow_sha }}
+          WF_REF: ${{ job.workflow_ref }}
+        run: |
+          ref="${OVERRIDE:-${WF_SHA:-main}}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "air code: ${ref}  (workflow: ${WF_REF:-?} @ ${WF_SHA:-?}; air_ref override: ${OVERRIDE:-none})"
+          if [ -z "$OVERRIDE" ] && [ -z "$WF_SHA" ]; then
+            echo "::warning::job.workflow_sha is empty (e.g. GitHub Enterprise Server) — checking out air at main, so a SHA pin on this workflow will not freeze the code."
+          fi
       - name: Checkout air repo (for setup.py + agent prompts)
         uses: actions/checkout@v4
         with:
           repository: VorobiovD/air
           path: air
-          ref: ${{ inputs.air_ref }}
+          ref: ${{ steps.air_code.outputs.ref }}
 
       # Always check out the target repo — Codex needs it (when enabled),
       # AND review.py uses it for client-side pre-computation (blame /

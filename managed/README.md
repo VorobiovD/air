@@ -353,6 +353,32 @@ Runs full mode through `air-coordinator-ma`, a coordinator on the GA `multiagent
 
 The dispatch gate reads those globs from the store (`read_memory`) **only when the web check misses**, so web PRs and repos without the section pay nothing extra. Keep the globs **narrow** — they should match only the copy modules, so routine backend PRs still skip the reviewer ($0). `fnmatch` semantics (`*` is greedy across `/`, so `agent-core/agents/*.py` matches any depth). **Store-backed repos only** (legacy-wiki repos fall back to the web-only gate). The reviewer reviews **static** user-visible strings (display text, prompts, canned/template messages) — not runtime-generated agent output.
 
+## Pinning air (recommended for org repos)
+
+`@main` floats: every merge to air's `main` reaches your repo on its next run. To control when air changes, pin the `uses:` line to a **full commit SHA** and let Dependabot propose bumps:
+
+```yaml
+    uses: VorobiovD/air/.github/workflows/managed-review.yml@<full-40-char-sha> # vX.Y.Z
+```
+
+```yaml
+# .github/dependabot.yml
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+```
+
+**The pin freezes the code, not just the YAML.** Both reusable workflows (`managed-review.yml`, `air-learn-cron.yml`) check out air's Python at `job.workflow_sha`, the commit the workflow file was loaded from. A caller pinned to a SHA runs exactly that commit's engine; a caller on `@main` runs main as before. (Up to v1.51.0 the code checkout defaulted to `main`, so a SHA pin froze only the YAML — pin to a version that includes this change or later.) `air_ref` stays as an explicit override for running a different ref than the one in `uses:`.
+
+If `job.workflow_sha` is empty (it doesn't exist on GitHub Enterprise Server), the checkout falls back to an explicit `main`, the old default, and the run logs a warning that the pin is not freezing the code.
+
+Pin to a full SHA, not a tag: tags can be moved. Use the commit of a **release tag** (`git rev-list -n1 vX.Y.Z`): Dependabot tracks releases from the tag that SHA belongs to, and a version comment alone does not establish that link. If the repo already has a `.github/dependabot.yml`, add the `github-actions` entry to it rather than replacing the file. Pass secrets explicitly, never `secrets: inherit` — inside one organization, `inherit` hands the called workflow every repo and org secret.
+
+**Trade-off:** with pins, an air fix reaches a repo only when that repo's Dependabot PR is merged. Someone has to own merging those bumps. Rollback works the same way: reverting air's `main` does not reach a pinned repo; move its pin back, or ship a corrective release and merge the bumps.
+
 ## How it works
 
 **Multi-agent coordinator (v1.9.0+)**: the Python driver does upstream prep (fetch PR data, state gates, build context, optionally run codex), then hands off to a single `air-coordinator` session that dispatches the specialists in parallel + verifier as `callable_agents` sub-agents within one Anthropic session — mirroring the local CLI's architecture. This replaced v1.7's client-side `asyncio.gather` over 5 separate sessions once Anthropic granted research-preview access for `callable_agents` on 2026-04-25.

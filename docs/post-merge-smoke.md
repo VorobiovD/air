@@ -1,8 +1,10 @@
 # Post-merge smoke runbook
 
-Every merge to `main` deploys fleet-wide immediately (callers pin
-`managed-review.yml@main`, no `agent_versions`). There is no staging tier, so
-this runbook is the deploy verification. Run it after any merge touching
+Every merge to `main` deploys immediately to every caller still on
+`managed-review.yml@main` (no `agent_versions`). Callers pinned to a full SHA
+pick it up only when their Dependabot bump merges — re-run this smoke against
+one of them after the bump. There is no staging tier, so this runbook is the
+deploy verification. Run it after any merge touching
 `managed/`, `plugins/air/lib/`, or the workflows; skip for docs-only merges.
 Total cost: **$0 for steps 1–3**; step 4 is one review (~$1–3).
 
@@ -88,7 +90,8 @@ Two deeper regression checks when a change touches gating or review behavior:
 |---|---|
 | Behavior behind a kill switch | set the caller/org variable (`AIR_LEDGER_PIN=0`, `AIR_CATEGORY_FLOOR=0`, `AIR_REVIEW_FORMAT=legacy`, `AIR_WIKI_CAP=0`, `AIR_RELATED_PRS=0`, `AIR_POST_VERIFIER_BODY=0`, `AIR_HEADLESS_PATTERNS=0`, …) — instant, no deploy |
 | Mode/architecture | `gh variable delete AIR_REVIEW_MODE --repo <caller>` (falls back to `full`) |
-| Anything else | `git revert` the merge commit on main — the next fleet run picks it up |
+| Anything else, callers on `@main` | `git revert` the merge commit on main — their next run picks it up |
+| Anything else, callers pinned to a SHA | a revert on main does NOT reach them: they keep running their pinned commit. Either move the caller's pin back (revert its Dependabot bump), or cut a corrective release and merge the bumps it triggers |
 
 A billing/API failure leaves CI green by design on some paths — check the PR
 comment/verdict, not just the workflow badge.
