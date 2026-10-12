@@ -47,7 +47,7 @@ def test_checkout_ref_main_with_expression_left_in_a_comment_fails():
         bad = text.replace("ref: ${{ steps.air_code.outputs.ref }}",
                            "ref: main  # ref: ${{ steps.air_code.outputs.ref }}")
         assert bad != text
-        assert any("checkout must use" in e for e in cwp.check(bad, wf)), wf
+        assert any("with.ref" in e for e in cwp.check(bad, wf)), wf
 
 
 def test_resolver_that_hardcodes_main_fails():
@@ -95,3 +95,62 @@ def test_resolver_that_overwrites_its_ref_later_fails():
                            'echo "ref=$ref" >> "$GITHUB_OUTPUT"\n          echo "ref=main" >> "$GITHUB_OUTPUT"')
         assert bad != text
         assert any("resolver produced 'main'" in e for e in cwp.check(bad, wf)), wf
+
+
+# --- audit round 2: three more bypasses of the structural check ---
+
+def test_decoy_expression_in_env_with_real_with_ref_main_fails():
+    """A first-match key lookup read the decoy `env.ref`; only `with.ref` counts."""
+    for wf in WORKFLOWS:
+        text = _read(wf)
+        bad = text.replace(
+            "          ref: ${{ steps.air_code.outputs.ref }}",
+            "          ref: main",
+        ).replace(
+            "      - uses: actions/checkout@v4\n        with:\n          repository: VorobiovD/air",
+            "      - uses: actions/checkout@v4\n        env:\n          ref: ${{ steps.air_code.outputs.ref }}\n        with:\n          repository: VorobiovD/air",
+        ).replace(
+            "        uses: actions/checkout@v4\n        with:\n          repository: VorobiovD/air",
+            "        uses: actions/checkout@v4\n        env:\n          ref: ${{ steps.air_code.outputs.ref }}\n        with:\n          repository: VorobiovD/air",
+        )
+        assert "env:\n          ref: ${{ steps.air_code.outputs.ref }}" in bad, wf
+        assert any("with.ref" in e for e in cwp.check(bad, wf)), (wf, cwp.check(bad, wf))
+
+
+def test_conditionally_skipped_resolver_fails():
+    """With the normal empty override this resolver is skipped, its output is
+    empty, and the cross-repo checkout floats on air's default branch."""
+    for wf in WORKFLOWS:
+        text = _read(wf)
+        bad = text.replace("        id: air_code\n",
+                           "        id: air_code\n        if: ${{ inputs.air_ref != '' }}\n", 1)
+        assert bad != text
+        assert any("must always run" in e for e in cwp.check(bad, wf)), wf
+
+
+def test_multiline_output_overwrite_fails():
+    """GitHub's `name<<DELIM` format is a write too, and the last write wins."""
+    for wf in WORKFLOWS:
+        text = _read(wf)
+        bad = text.replace(
+            'echo "ref=$ref" >> "$GITHUB_OUTPUT"',
+            'echo "ref=$ref" >> "$GITHUB_OUTPUT"\n          printf \'ref<<EOF\\nmain\\nEOF\\n\' >> "$GITHUB_OUTPUT"')
+        assert bad != text
+        assert any("resolver produced 'main'" in e for e in cwp.check(bad, wf)), (wf, cwp.check(bad, wf))
+
+
+def test_unterminated_multiline_output_fails():
+    """A format the guard can't judge must fail, not pass."""
+    for wf in WORKFLOWS:
+        text = _read(wf)
+        bad = text.replace('echo "ref=$ref" >> "$GITHUB_OUTPUT"',
+                           'echo "ref=$ref" >> "$GITHUB_OUTPUT"\n          echo "ref<<EOF" >> "$GITHUB_OUTPUT"')
+        assert bad != text
+        assert any("resolver produced None" in e for e in cwp.check(bad, wf)), wf
+
+
+def test_output_parser_matches_runner_rules():
+    assert cwp._parse_outputs("ref=a\nref=b\n") == {"ref": "b"}
+    assert cwp._parse_outputs("ref<<X\nline1\nline2\nX\n") == {"ref": "line1\nline2"}
+    assert cwp._parse_outputs("ref=a<<b\n") == {"ref": "a<<b"}        # `=` first → plain value
+    assert cwp._parse_outputs("ref<<X\nunterminated\n") is None

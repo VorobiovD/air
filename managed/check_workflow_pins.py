@@ -57,43 +57,93 @@ def _indent(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
 
-def _steps(lines: list) -> list:
-    """Split comment-stripped lines into step blocks: each starts at a `- `
-    list item and runs until the next line at the same or a lower indent."""
-    out, i = [], 0
-    while i < len(lines):
-        ln = lines[i]
-        m = re.match(r"^(\s*)- \S", ln)
-        if m:
-            ind = len(m.group(1))
-            j = i + 1
-            while j < len(lines):
-                nxt = lines[j]
-                if nxt.strip() and _indent(nxt) <= ind:
-                    break
-                j += 1
-            out.append(lines[i:j])
-            i = j
-        else:
+def _jobs(lines: list) -> list:
+    """[(job_name, [step_block, ...]), ...] in file order. Steps are the items of
+    each job's own `steps:` list only (split at that list's dash indent), so a
+    nested list item can never be mistaken for a step."""
+    out, i, n = [], 0, len(lines)
+    while i < n and not re.match(r"^jobs:\s*$", lines[i]):
+        i += 1
+    i += 1
+    while i < n:
+        m = re.match(r"^(\s+)([A-Za-z0-9_-]+):\s*$", lines[i])
+        if not (m and lines[i].strip()):
             i += 1
+            continue
+        job_ind, job = len(m.group(1)), m.group(2)
+        j = i + 1
+        while j < n and not (lines[j].strip() and _indent(lines[j]) <= job_ind):
+            j += 1
+        body = lines[i + 1:j]
+        steps = []
+        for k, ln in enumerate(body):
+            if re.match(r"^\s*steps:\s*$", ln):
+                items = body[k + 1:]
+                dash = next((_indent(x) for x in items if re.match(r"^\s*- ", x)), None)
+                cur = None
+                for x in items:
+                    if x.strip() and _indent(x) < (dash or 0):
+                        break
+                    if dash is not None and re.match(r"^\s*- ", x) and _indent(x) == dash:
+                        if cur is not None:
+                            steps.append(cur)
+                        cur = [x]
+                    elif cur is not None:
+                        cur.append(x)
+                if cur is not None:
+                    steps.append(cur)
+                break
+        out.append((job, steps))
+        i = j
     return out
 
 
-def _value(block: list, key: str):
-    """Value of `key:` anywhere in a step block (first match), or None."""
+def _fields(block: list) -> dict:
+    """The step's OWN top-level keys → raw value (`''` for a key that opens a
+    nested mapping or block scalar). Keys inside `with:`/`env:` are not here."""
+    dash = _indent(block[0])
+    key_ind = dash + 2
+    out = {}
+    first = re.match(r"^\s*- ([A-Za-z0-9_-]+):\s*(.*)$", block[0])
+    if first:
+        out[first.group(1)] = first.group(2).strip()
+    for ln in block[1:]:
+        if ln.strip() and _indent(ln) == key_ind:
+            m = re.match(r"^\s*([A-Za-z0-9_-]+):\s*(.*)$", ln)
+            if m:
+                out[m.group(1)] = m.group(2).strip()
+    return out
+
+
+def _child_map(block: list, key: str) -> dict:
+    """Direct children of the step's top-level `key:` mapping (e.g. `with`, `env`)."""
+    key_ind = _indent(block[0]) + 2
+    out, inside, child_ind = {}, False, None
     for ln in block:
-        m = re.match(r"^\s*(?:- )?" + re.escape(key) + r":\s*(.*)$", ln)
-        if m:
-            return m.group(1).strip()
-    return None
+        if not inside:
+            if _indent(ln) == key_ind and re.match(r"^\s*" + re.escape(key) + r":\s*$", ln):
+                inside = True
+            continue
+        if ln.strip() and _indent(ln) <= key_ind:
+            break
+        if not ln.strip():
+            continue
+        if child_ind is None:
+            child_ind = _indent(ln)
+        if _indent(ln) == child_ind:
+            m = re.match(r"^\s*([A-Za-z0-9_-]+):\s*(.*)$", ln)
+            if m:
+                out[m.group(1)] = m.group(2).strip()
+    return out
 
 
 def _run_body(block: list):
-    """The dedented body of the step's `run: |` block scalar, or None."""
+    """The dedented body of the step's top-level `run: |` block scalar, or None."""
+    key_ind = _indent(block[0]) + 2
     for k, ln in enumerate(block):
-        m = re.match(r"^(\s*)(?:- )?run:\s*\|\s*$", ln)
-        if m:
-            base = len(m.group(1))
+        m = re.match(r"^(\s*)(- )?run:\s*\|\s*$", ln)
+        if m and (_indent(ln) == key_ind or (k == 0 and m.group(2))):
+            base = _indent(ln) if k else key_ind
             body = [b for b in block[k + 1:] if not b.strip() or _indent(b) > base]
             nonblank = [b for b in body if b.strip()]
             if not nonblank:
@@ -101,21 +151,6 @@ def _run_body(block: list):
             cut = min(_indent(b) for b in nonblank)
             return "\n".join(b[cut:] for b in body) + "\n"
     return None
-
-
-def _env(block: list) -> dict:
-    env, inside, ind = {}, False, 0
-    for ln in block:
-        if re.match(r"^\s*env:\s*$", ln):
-            inside, ind = True, _indent(ln)
-            continue
-        if inside:
-            if ln.strip() and _indent(ln) <= ind:
-                break
-            m = re.match(r"^\s*([A-Z_][A-Z0-9_]*):\s*(.*)$", ln)
-            if m:
-                env[m.group(1)] = m.group(2).strip()
-    return env
 
 
 def _air_ref_default(lines: list):
@@ -134,8 +169,41 @@ def _air_ref_default(lines: list):
     return False, None
 
 
+def _parse_outputs(text: str):
+    """Parse a $GITHUB_OUTPUT file the way the runner does: `name=value` lines and
+    `name<<DELIM` … `DELIM` blocks, in order, last write wins. Returns a dict, or
+    None if the file is malformed (an unterminated block, an unparsable line) —
+    a format the guard cannot judge must fail, not pass."""
+    out, lines, i = {}, text.split("\n"), 0
+    while i < len(lines):
+        ln = lines[i]
+        if ln == "":
+            i += 1
+            continue
+        # The runner's rule: if `=` appears before any `<<`, it's name=value;
+        # otherwise a `<<` makes it a delimited multi-line block.
+        eq_at, hd_at = ln.find("="), ln.find("<<")
+        eq = re.match(r"^([^=]+)=(.*)$", ln) if eq_at >= 0 and (hd_at < 0 or eq_at < hd_at) else None
+        hd = re.match(r"^(.+?)<<(.+)$", ln) if eq is None and hd_at >= 0 else None
+        if hd:
+            name, delim = hd.group(1), hd.group(2)
+            j = i + 1
+            while j < len(lines) and lines[j] != delim:
+                j += 1
+            if j >= len(lines):
+                return None
+            out[name] = "\n".join(lines[i + 1:j])
+            i = j + 1
+        elif eq:
+            out[eq.group(1)] = eq.group(2)
+            i += 1
+        else:
+            return None
+    return out
+
+
 def _resolve(body: str, override: str, wf_sha: str):
-    """Execute the resolver script; return the `ref=` it writes, or None."""
+    """Execute the resolver script; return the effective `ref` output, or None."""
     with tempfile.TemporaryDirectory() as d:
         out = os.path.join(d, "out")
         open(out, "w").close()
@@ -144,18 +212,14 @@ def _resolve(body: str, override: str, wf_sha: str):
         r = subprocess.run(["bash", "-c", body], env=env, capture_output=True, text=True, timeout=20)
         if r.returncode != 0:
             return None
-        # GitHub reads $GITHUB_OUTPUT top to bottom and the LAST assignment of a
-        # name wins, so a script that writes the right ref and then overwrites it
-        # must be judged by the final value, not the first.
-        refs = [ln[len("ref="):] for ln in open(out).read().splitlines() if ln.startswith("ref=")]
-        return refs[-1] if refs else None
-    return None
+        parsed = _parse_outputs(open(out).read())
+        return None if parsed is None else parsed.get("ref")
 
 
 def check(text: str, name: str = "<workflow>") -> list:
     errors = []
     lines = [_strip_comment(ln) for ln in text.splitlines()]
-    steps = _steps(lines)
+    jobs = _jobs(lines)
 
     found, default = _air_ref_default(lines)
     if not found:
@@ -164,12 +228,19 @@ def check(text: str, name: str = "<workflow>") -> list:
         errors.append(f"{name}: `air_ref` must default to an empty string (got {default!r}) — "
                       "a non-empty default overrides job.workflow_sha and un-pins every caller")
 
-    resolvers = [b for b in steps if _value(b, "id") == RESOLVER_ID]
+    resolvers = [(job, idx, b) for job, steps in jobs for idx, b in enumerate(steps)
+                 if _fields(b).get("id") == RESOLVER_ID]
     if len(resolvers) != 1:
         errors.append(f"{name}: expected exactly one step with `id: {RESOLVER_ID}`, found {len(resolvers)}")
     else:
-        block = resolvers[0]
-        env = _env(block)
+        r_job, r_idx, block = resolvers[0]
+        f = _fields(block)
+        # A skipped or allowed-to-fail resolver leaves the ref empty, and an empty
+        # cross-repo checkout floats on air's default branch — the bug this guards.
+        for key in ("if", "continue-on-error"):
+            if key in f:
+                errors.append(f"{name}: the resolver step must always run — remove its `{key}:`")
+        env = _child_map(block, "env")
         for key, want in EXPECTED_ENV.items():
             if env.get(key) != want:
                 errors.append(f"{name}: resolver env {key} must be `{want}` (got {env.get(key)!r})")
@@ -187,15 +258,18 @@ def check(text: str, name: str = "<workflow>") -> list:
                 if got != want:
                     errors.append(f"{name}: resolver produced {got!r} where {label} requires {want!r}")
 
-    air_checkouts = [b for b in steps
-                     if (_value(b, "uses") or "").startswith("actions/checkout@")
-                     and _value(b, "repository") == AIR_REPO]
-    if not air_checkouts:
+    checkouts = [(job, idx, b) for job, steps in jobs for idx, b in enumerate(steps)
+                 if _fields(b).get("uses", "").startswith("actions/checkout@")
+                 and _child_map(b, "with").get("repository") == AIR_REPO]
+    if not checkouts:
         errors.append(f"{name}: no `actions/checkout` step for {AIR_REPO} found")
-    for b in air_checkouts:
-        ref = _value(b, "ref")
+    for job, idx, b in checkouts:
+        ref = _child_map(b, "with").get("ref")
         if ref != RESOLVED_REF:
-            errors.append(f"{name}: the {AIR_REPO} checkout must use `ref: {RESOLVED_REF}` (got {ref!r})")
+            errors.append(f"{name}: the {AIR_REPO} checkout's `with.ref` must be `{RESOLVED_REF}` (got {ref!r})")
+        if len(resolvers) == 1 and (job != resolvers[0][0] or idx < resolvers[0][1]):
+            errors.append(f"{name}: the {AIR_REPO} checkout in job `{job}` must come after the "
+                          f"`{RESOLVER_ID}` resolver in the same job")
     return errors
 
 
