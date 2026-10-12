@@ -156,7 +156,7 @@ _VERIFIER_MAX_TOKENS = env.env_int("AIR_VERIFIER_MAX_TOKENS", 64_000, minimum=1)
 # DEFAULTS TO the hygiene cap, so ONE variable (`AIR_DIFF_MAX_BYTES`) moves both
 # halves. It has to: `_diff_is_truncated` is `marker present OR len > _DIFF_CAP`,
 # and hygiene inserts that marker at its OWN cap — so raising only one of the two
-# leaves the other arm firing and the gate still fails closed. lifemd #17748 hit
+# leaves the other arm firing and the gate still fails closed. a production cleanup PR hit
 # exactly that, and the reason string told the author to raise the half that
 # cannot help. `AIR_HEADLESS_DIFF_CAP` remains an explicit per-repo override.
 _DIFF_CAP = env.env_int("AIR_HEADLESS_DIFF_CAP", DIFF_MAX_BYTES, minimum=0)  # chars — managed parity

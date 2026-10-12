@@ -252,7 +252,7 @@ def apply_diff_hygiene(diff: str, *, max_bytes: int | None = None) -> str:
     # repo-wide grep, not a read of the removed body. Meanwhile the added and
     # modified code (where new risk actually enters) was being cap-omitted to make
     # room for it, and the resulting truncation marker fail-closed the gate. The
-    # live case: lifemd #17748, 54% of 545KB in 14 deleted files, gated with no
+    # live case: a production cleanup PR, 54% of 545KB in 14 deleted files, gated with no
     # blockers found.
     #
     # LARGEST-FIRST, STOP AS SOON AS IT FITS — a PR 5% over budget loses its one

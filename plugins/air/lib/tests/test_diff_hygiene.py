@@ -105,7 +105,7 @@ def test_main_missing_file_returns_1(tmp_path):
     assert dh._main(["--diff-file", str(tmp_path / "nope.diff")]) == 1  # read-error guard
 
 
-# --- deleted-file body stub (lifemd #17748: a deletion-heavy cleanup PR blew the
+# --- deleted-file body stub (a production deletion-heavy cleanup PR blew the
 # cap on removed bodies, cap-omitted its ADDED code, and fail-closed the gate) ---
 
 def _seg_deleted(path, lines):

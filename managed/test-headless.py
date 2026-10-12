@@ -1928,7 +1928,7 @@ def test_conversation_only_raw_only_rewrites_are_logged(tmp_path, monkeypatch, c
 def test_headless_diff_cap_defaults_to_the_hygiene_cap():
     """ONE knob must move both halves: `_diff_is_truncated` is `marker OR len >
     cap`, and hygiene writes that marker at ITS cap, so two independent defaults
-    meant raising either one alone left the gate failing closed (lifemd #17748)."""
+    meant raising either one alone left the gate failing closed (seen on a production cleanup PR)."""
     import importlib, os
     import diff_hygiene
     prev = os.environ.get("AIR_DIFF_MAX_BYTES")
@@ -1949,7 +1949,7 @@ def test_headless_diff_cap_defaults_to_the_hygiene_cap():
 
 def test_diff_cap_knobs_are_forwarded_to_the_job():
     """The caps never reached the job, so the remedy air printed on the PR was
-    impossible to carry out without editing the reusable workflow (lifemd #17748).
+    impossible to carry out without editing the reusable workflow (seen on a production cleanup PR).
     Which variable gets NAMED is covered by the runtime test below."""
     wf = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(headless.__file__))),
                            ".github", "workflows", "managed-review.yml")).read()
