@@ -81,6 +81,17 @@ def main():
         print("Error: AIR_BOT_TOKEN not set.", file=sys.stderr)
         sys.exit(1)
 
+    # Resolve the pattern store BEFORE touching hosted state: a skipped run (store
+    # lookup error) must not create/update the learn agent.
+    import memory_store
+    store_status, store_id = memory_store.lookup_store(args.repo, flow="learn")
+    if store_status == memory_store.STORE_ERROR:
+        # Unknown backend: do NOT fall through to the legacy wiki pipeline for a
+        # repo that may be store-backed.
+        print("  [learn] store lookup failed; skipping learn this run",
+              file=sys.stderr)
+        sys.exit(1)
+
     # Sync learn agent
     print("[1] Syncing learn agent...")
     agent = sync_learn_agent()
@@ -109,8 +120,6 @@ def main():
     # mirror export; the session no longer renders it (REVIEW-HISTORY.md,
     # which isn't in the store, is the one wiki file the session still
     # writes). Non-migrated repos run the legacy wiki-clone pipeline unchanged.
-    import memory_store
-    store_id = memory_store.get_store_id(args.repo, flow="learn")
 
     resources = [{
         "type": "github_repository",

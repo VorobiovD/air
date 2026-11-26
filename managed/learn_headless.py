@@ -607,8 +607,9 @@ def seed_missing_author_files(repo, store_id, *, token, complete=None, log=print
     ourselves; False → we refuse): the seed's write is create-only and then
     protected by the curation fidelity check, so a body spoofed by any user who
     can comment on a merged PR would plant a permanent, later-trusted pattern.
-    Unlike REVIEW-HISTORY — regenerated wholesale each learn, hence self-healing
-    — there is nothing to un-poison it, so this path fails CLOSED.
+    REVIEW-HISTORY follows the same rule (it also feeds a model prompt, and a
+    regeneration re-sends the previous history, so it is not self-healing); this
+    path fails CLOSED.
     """
     complete = complete or _default_complete
     if _SEED_MAX_AUTHORS == 0:
@@ -735,7 +736,7 @@ def seed_missing_author_files(repo, store_id, *, token, complete=None, log=print
 
 def regenerate_review_history(repo, *, token, complete=None, log=print,
                               dry_run=False, current_history=None,
-                              pr_bodies=None, bot_login=None) -> dict:
+                              pr_bodies=None, authenticated=None) -> dict:
     """Regenerate the wiki-only REVIEW-HISTORY.md (KAIROS) from recent PR review
     bodies — one streaming regen call (current history + the new window →
     updated history), a structural guard (the cumulative `## Finding Frequency`
@@ -743,16 +744,32 @@ def regenerate_review_history(repo, *, token, complete=None, log=print,
     failure keeps the current history. Inputs are injectable for offline tests.
     Sequenced BEFORE the store→wiki mirror render (disjoint single-file push
     first, avoiding a non-ff race) — same as managed learn.
+
+    Like the seed step, the input must be unedited review comments posted by
+    air's own accounts: `authenticated` asserts the supplied `pr_bodies` were
+    filtered to air's accounts and to unedited comments (None → we
+    resolve the identity and fetch them ourselves; anything but True with
+    supplied bodies → refuse). An empty identity allowlist or a failed fetch
+    SKIPS the regeneration — it never falls back to unfiltered comments.
     """
     complete = complete or _default_complete
     if pr_bodies is None:
         import github_client
+        allowed = _air_review_identity(token, log=log)
+        if not allowed:
+            log("  [learn] REVIEW-HISTORY: air's review identity is unresolvable "
+                "— SKIPPED (refusing unauthenticated review bodies)")
+            return {"history": "no-bot-identity"}
         try:
             pr_bodies = github_client.fetch_recent_review_bodies(
-                repo, token, bot_login=bot_login)
+                repo, token, bot_logins=allowed)
         except Exception as e:
-            log(f"  [learn] REVIEW-HISTORY: review-body fetch failed: {e}")
+            log(f"  [learn] REVIEW-HISTORY: review-body fetch failed: {e} — SKIPPED")
             return {"history": "fetch-failed"}
+    elif authenticated is not True:
+        log("  [learn] REVIEW-HISTORY: supplied review bodies are not attested "
+            "as air-authored — SKIPPED")
+        return {"history": "unauthenticated-bodies"}
     if not pr_bodies:
         log("  [learn] REVIEW-HISTORY: no prior ## Code Review comments — skip")
         return {"history": "no-bodies"}
@@ -915,7 +932,7 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
     # Both consume the same "recent reviewed PRs" window, and each fetch is
     # 1 + N requests (a PR list plus a comments call per PR), so fetching
     # separately would double the GitHub API cost for identical data. On failure
-    # we pass None through, which leaves each step's own fallback intact.
+    # nothing is refetched: the seed gets [] and REVIEW-HISTORY is skipped.
     history_enabled = env.env_bool("AIR_HEADLESS_HISTORY", True)
     pr_bodies = None
     # Filter to air's OWN accounts whenever the identity resolves: any user who
@@ -926,12 +943,18 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
     if _SEED_MAX_AUTHORS > 0 or history_enabled:
         import github_client
         allowed = _air_review_identity(token, log=log)
-        try:
-            pr_bodies = github_client.fetch_recent_review_bodies(
-                repo, token, bot_logins=allowed)
-            authenticated = bool(allowed)
-        except Exception as e:
-            log(f"  [learn] review-body fetch failed: {type(e).__name__}: {e}")
+        if not allowed:
+            # No identity to filter on: fetch nothing (never unfiltered). Seed and
+            # history each log their own skip below.
+            log("  [learn] air's review identity is unresolvable — not fetching "
+                "review bodies")
+        else:
+            try:
+                pr_bodies = github_client.fetch_recent_review_bodies(
+                    repo, token, bot_logins=allowed)
+                authenticated = True
+            except Exception as e:
+                log(f"  [learn] review-body fetch failed: {type(e).__name__}: {e}")
 
     # --- SEED author files for authors who have none (the bootstrap fix) ---
     # After curation: a freshly seeded file is already in the target shape, so
@@ -943,8 +966,9 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
         seeded = seed_missing_author_files(
             repo, store_id, token=token, complete=complete, log=log,
             dry_run=dry_run,
-            # [] (not None) when the shared fetch failed: None would make the
-            # seed step fetch again, defeating the sharing above.
+            # [] (not None) when the shared fetch failed or was skipped: the seed
+            # then skips too. None would make it fetch again, defeating the
+            # sharing above (and the no-unfiltered-retry rule).
             pr_bodies=pr_bodies if pr_bodies is not None else [],
             authenticated=authenticated,
         ).get("seeded", [])
@@ -957,11 +981,16 @@ def run_headless_learn(repo, *, token=None, store_id=None, complete=None,
     # (disjoint single-file push first, avoiding a non-ff race with the render).
     # Kill switch AIR_HEADLESS_HISTORY=0; independent of the store curation above.
     history = "disabled"
-    if history_enabled:
+    if history_enabled and pr_bodies is None:
+        # The shared air-authored fetch did not happen (identity unresolvable or
+        # the fetch failed). Skip — never retry unfiltered, never refetch.
+        log("  [learn] REVIEW-HISTORY: no authenticated review bodies — SKIPPED")
+        history = "no-authenticated-bodies"
+    elif history_enabled:
         try:
             history = regenerate_review_history(
                 repo, token=token, complete=complete, log=log, dry_run=dry_run,
-                pr_bodies=pr_bodies,   # None → it fetches itself (fetch failed)
+                pr_bodies=pr_bodies, authenticated=authenticated,
             ).get("history")
         except Exception as e:
             log(f"  [learn] REVIEW-HISTORY regen errored: {type(e).__name__}: {e}")

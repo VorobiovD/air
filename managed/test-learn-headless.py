@@ -379,7 +379,7 @@ def test_history_dry_run_carries_current_and_window():
     out = L.regenerate_review_history(
         "o/r", token="t", complete=complete, dry_run=True,
         current_history="# Review History\n## Finding Frequency\n| SQLi | 4x |",
-        pr_bodies=_PR_BODIES)
+        pr_bodies=_PR_BODIES, authenticated=True)
     assert out["history"] == "dry-run"
     assert out["reviews"] == 2
     # the regen call must see BOTH the current history (carry-forward) AND the window
@@ -393,14 +393,14 @@ def test_history_refused_when_finding_frequency_dropped():
         return "# Review History\n## Timeline\n- only timeline, no cumulative table"
     out = L.regenerate_review_history(
         "o/r", token="t", complete=complete, dry_run=True,
-        current_history="x", pr_bodies=_PR_BODIES)
+        current_history="x", pr_bodies=_PR_BODIES, authenticated=True)
     assert out["history"] == "refused"
 
 
 def test_history_no_bodies_skips():
     out = L.regenerate_review_history(
         "o/r", token="t", complete=lambda *a, **k: "x", dry_run=True,
-        current_history="x", pr_bodies=[])
+        current_history="x", pr_bodies=[], authenticated=True)
     assert out["history"] == "no-bodies"
 
 
@@ -409,8 +409,13 @@ def test_history_regen_failure_keeps_current():
         raise RuntimeError("model down")
     out = L.regenerate_review_history(
         "o/r", token="t", complete=boom, dry_run=True,
-        current_history="x", pr_bodies=_PR_BODIES)
+        current_history="x", pr_bodies=_PR_BODIES, authenticated=True)
     assert out["history"] == "regen-failed"
+
+
+# created_at == updated_at: the "never edited" evidence the fetcher requires.
+_UNEDITED = {"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"}
+_EDITED = {"created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z"}
 
 
 def test_fetch_recent_review_bodies_filters_and_anti_spoofs(monkeypatch):
@@ -420,9 +425,9 @@ def test_fetch_recent_review_bodies_filters_and_anti_spoofs(monkeypatch):
 
     def fake_comments(repo, pr, token):
         if pr == 10:
-            return [{"body": "random chatter", "user": {"login": "dev"}},
-                    {"body": "## Code Review\nreal", "user": {"login": "air-machine"}}]
-        return [{"body": "## Code Review\nspoofed", "user": {"login": "attacker"}}]
+            return [{"body": "random chatter", "user": {"login": "dev"}, **_UNEDITED},
+                    {"body": "## Code Review\nreal", "user": {"login": "air-machine"}, **_UNEDITED}]
+        return [{"body": "## Code Review\nspoofed", "user": {"login": "attacker"}, **_UNEDITED}]
     monkeypatch.setattr(gc, "fetch_issue_comments", fake_comments)
     out = gc.fetch_recent_review_bodies("o/r", "t", bot_login="air-machine")
     assert {b["pr"] for b in out} == {10}   # PR 11's review spoofed by non-bot → excluded
@@ -469,10 +474,207 @@ def test_fetch_recent_review_bodies_matches_re_reviews(monkeypatch):
     monkeypatch.setattr(gc, "_github_paginate",
                         lambda url, token, max_pages=None: [{"number": 20, "merged_at": "t"}])
     monkeypatch.setattr(gc, "fetch_issue_comments", lambda repo, pr, token: [
-        {"body": "## Code Review (Re-review)\nround 2 ...", "user": {"login": "air-machine"}}])
-    out = gc.fetch_recent_review_bodies("o/r", "t")  # no bot_login → prefix is the signal
+        {"body": "## Code Review (Re-review)\nround 2 ...", "user": {"login": "air-machine"}, **_UNEDITED}])
+    out = gc.fetch_recent_review_bodies("o/r", "t", bot_logins={"air-machine"})
     assert {b["pr"] for b in out} == {20}
     assert "Re-review" in out[0]["body"]
+
+
+def _bodies_for(monkeypatch, comments):
+    import github_client as gc
+    monkeypatch.setattr(gc, "_github_paginate",
+                        lambda url, token, max_pages=None: [{"number": 30, "merged_at": "t"}])
+    monkeypatch.setattr(gc, "fetch_issue_comments", lambda repo, pr, token: comments)
+    return gc.fetch_recent_review_bodies("o/r", "t", bot_logins={"air-machine"})
+
+
+def test_fetch_recent_review_bodies_unedited_newest_chosen(monkeypatch):
+    out = _bodies_for(monkeypatch, [
+        {"body": "## Code Review\nolder", "user": {"login": "air-machine"}, **_UNEDITED},
+        {"body": "## Code Review\nnewest", "user": {"login": "air-machine"}, **_UNEDITED}])
+    assert [b["body"] for b in out] == ["## Code Review\nnewest"]
+
+
+def test_fetch_recent_review_bodies_edited_newest_falls_back_to_older(monkeypatch, capsys):
+    out = _bodies_for(monkeypatch, [
+        {"body": "## Code Review\nolder-unedited", "user": {"login": "air-machine"}, **_UNEDITED},
+        {"body": "## Code Review\nnewest-edited", "user": {"login": "air-machine"}, **_EDITED}])
+    assert [b["body"] for b in out] == ["## Code Review\nolder-unedited"]
+    assert "skipped 1" in capsys.readouterr().err
+
+
+def test_fetch_recent_review_bodies_only_edited_yields_nothing(monkeypatch):
+    out = _bodies_for(monkeypatch, [
+        {"body": "## Code Review\nedited", "user": {"login": "air-machine"}, **_EDITED}])
+    assert out == []
+
+
+def test_fetch_recent_review_bodies_missing_timestamps_skipped(monkeypatch):
+    out = _bodies_for(monkeypatch, [
+        {"body": "## Code Review\nno-meta", "user": {"login": "air-machine"}},
+        {"body": "## Code Review\nno-updated", "user": {"login": "air-machine"},
+         "created_at": "2026-01-01T00:00:00Z"},
+        {"body": "## Code Review\nno-created", "user": {"login": "air-machine"},
+         "updated_at": "2026-01-01T00:00:00Z"}])
+    assert out == []
+
+
+# --- REVIEW-HISTORY requires an authenticated allowlist (no unfiltered path) --
+
+def test_fetch_recent_review_bodies_empty_allowlist_returns_nothing(monkeypatch):
+    """No identity → nothing, and the network is never touched."""
+    import github_client as gc
+
+    def boom(*a, **k):
+        raise AssertionError("must not fetch without an identity")
+    monkeypatch.setattr(gc, "_github_paginate", boom)
+    monkeypatch.setattr(gc, "fetch_issue_comments", boom)
+    assert gc.fetch_recent_review_bodies("o/r", "t") == []
+    assert gc.fetch_recent_review_bodies("o/r", "t", bot_logins=set(), bot_login=None) == []
+
+
+def test_history_empty_allowlist_makes_no_fetch(monkeypatch):
+    import github_client as gc
+    calls = []
+    monkeypatch.setattr(L, "_air_review_identity", lambda token, log=print: frozenset())
+    monkeypatch.setattr(gc, "fetch_recent_review_bodies",
+                        lambda *a, **k: calls.append((a, k)) or _PR_BODIES)
+    logs = []
+    out = L.regenerate_review_history(
+        "o/r", token="t", complete=lambda *a, **k: "x", dry_run=True,
+        current_history="x", log=logs.append)
+    assert out["history"] == "no-bot-identity"
+    assert calls == []
+    assert any("SKIPPED" in m for m in logs)
+
+
+def test_history_self_fetch_filters_on_identity(monkeypatch):
+    import github_client as gc
+    seen = {}
+    monkeypatch.setattr(L, "_air_review_identity",
+                        lambda token, log=print: frozenset({"air-bot"}))
+
+    def spy(repo, token, limit=30, bot_login=None, bot_logins=None):
+        seen["bot_logins"] = bot_logins
+        return _PR_BODIES
+    monkeypatch.setattr(gc, "fetch_recent_review_bodies", spy)
+    out = L.regenerate_review_history(
+        "o/r", token="t", dry_run=True, current_history="x",
+        complete=lambda *a, **k: "# H\n## Finding Frequency\n| a | 1x |")
+    assert seen["bot_logins"] == frozenset({"air-bot"})
+    assert out["history"] == "dry-run"
+
+
+def test_history_fetch_failure_skips_without_unfiltered_retry(monkeypatch):
+    import github_client as gc
+    calls = []
+    monkeypatch.setattr(L, "_air_review_identity",
+                        lambda token, log=print: frozenset({"air-bot"}))
+
+    def boom(repo, token, limit=30, bot_login=None, bot_logins=None):
+        calls.append(bot_logins)
+        raise RuntimeError("api down")
+    monkeypatch.setattr(gc, "fetch_recent_review_bodies", boom)
+    out = L.regenerate_review_history(
+        "o/r", token="t", complete=lambda *a, **k: "x", dry_run=True,
+        current_history="x", log=lambda *_: None)
+    assert out["history"] == "fetch-failed"
+    assert calls == [frozenset({"air-bot"})]   # one filtered attempt, no refetch
+
+
+def test_history_refuses_unattested_supplied_bodies():
+    out = L.regenerate_review_history(
+        "o/r", token="t", complete=lambda *a, **k: "x", dry_run=True,
+        current_history="x", pr_bodies=_PR_BODIES, log=lambda *_: None)
+    assert out["history"] == "unauthenticated-bodies"
+
+
+def test_run_learn_skips_history_when_shared_fetch_failed(fake, monkeypatch):
+    """The shared fetch failing must leave history SKIPPED — never a refetch
+    through regenerate_review_history's own (previously unfiltered) path."""
+    import github_client as gc
+    store, calls = fake
+    monkeypatch.setattr(L, "_air_review_identity",
+                        lambda token, log=print: frozenset({"air-bot"}))
+    fetches = []
+
+    def boom(repo, token, limit=30, bot_login=None, bot_logins=None):
+        fetches.append(bot_logins)
+        raise RuntimeError("api down")
+    monkeypatch.setattr(gc, "fetch_recent_review_bodies", boom)
+    out = L.run_headless_learn("o/r", token="t", complete=_curate_appending, dry_run=True,
+                               log=lambda *_: None)
+    assert out["history"] == "no-authenticated-bodies"
+    assert len(fetches) == 1
+
+
+def test_run_learn_empty_allowlist_fetches_nothing_and_skips_history(fake, monkeypatch):
+    import github_client as gc
+    store, calls = fake
+    monkeypatch.setattr(L, "_air_review_identity", lambda token, log=print: frozenset())
+    fetches = []
+    monkeypatch.setattr(gc, "fetch_recent_review_bodies",
+                        lambda *a, **k: fetches.append(1) or _PR_BODIES)
+    out = L.run_headless_learn("o/r", token="t", complete=_curate_appending, dry_run=True,
+                               log=lambda *_: None)
+    assert fetches == []
+    assert out["history"] == "no-authenticated-bodies"
+    assert out["seeded"] == []
+
+
+# --- end-to-end: an edited review never reaches a model prompt ---------------
+
+_EDITED_MARKER = "EDITED_TEXT_MARKER"
+
+
+def _mock_github_with_edited_newest(monkeypatch, prs=(10, 11), author="carol"):
+    """Merged PRs whose NEWEST air review is edited and whose older one is not."""
+    import github_client as gc
+    monkeypatch.setattr(L, "_air_review_identity",
+                        lambda token, log=print: frozenset({"air-machine"}))
+    monkeypatch.setattr(
+        gc, "_github_paginate",
+        lambda url, token, max_pages=None: [
+            {"number": n, "merged_at": "t", "user": {"login": author}} for n in prs])
+    monkeypatch.setattr(gc, "fetch_issue_comments", lambda repo, pr, token: [
+        {"body": f"## Code Review\n\n**1. unedited finding on PR {pr}**",
+         "user": {"login": "air-machine"}, **_UNEDITED},
+        {"body": f"## Code Review\n\n**1. {_EDITED_MARKER} on PR {pr}**",
+         "user": {"login": "air-machine"}, **_EDITED}])
+
+
+def test_history_regen_never_prompts_with_edited_review(monkeypatch):
+    _mock_github_with_edited_newest(monkeypatch)
+    prompts = []
+
+    def complete(persona, content, *, label=""):
+        prompts.append(persona + "\n" + content)
+        return "# H\n## Finding Frequency\n| a | 1x |"
+    out = L.regenerate_review_history(
+        "o/r", token="t", complete=complete, dry_run=True,
+        current_history="x", pr_bodies=None, log=lambda *_: None)
+    assert out["history"] == "dry-run"
+    assert prompts, "the regeneration call was never made"
+    assert not any(_EDITED_MARKER in p for p in prompts)
+    assert any("unedited finding on PR 10" in p for p in prompts)
+
+
+def test_seed_never_prompts_with_edited_review(fake, monkeypatch):
+    store, _ = fake
+    _mock_github_with_edited_newest(monkeypatch)
+    prompts = []
+
+    def complete(persona, content, *, label=""):
+        prompts.append(persona + "\n" + content)
+        return _seed_ok(persona, content, label=label)
+    res = L.seed_missing_author_files(
+        "o/r", "store_1", token="t", complete=complete, log=lambda *_: None,
+        pr_bodies=None)
+    assert res["seeded"] == ["/authors/carol.md"]
+    assert prompts, "the seed call was never made"
+    assert not any(_EDITED_MARKER in p for p in prompts)
+    assert any("unedited finding on PR 10" in p for p in prompts)
+    assert _EDITED_MARKER not in store.files["/authors/carol.md"]
 
 
 # --- Phase-2 Batch API ------------------------------------------------------
@@ -891,3 +1093,21 @@ def test_findings_files_keep_the_stricter_byte_floor():
                                 collapsed, lambda *_: None)
     assert status == "refused"
     assert L.MIN_KEEP_FRACTION == 0.5
+
+
+def test_hosted_learn_store_error_skips_before_agent_sync(monkeypatch, capsys):
+    """A failed store lookup exits before any hosted state is created or updated."""
+    import learn as hosted_learn
+    monkeypatch.setenv("AIR_BOT_TOKEN", "t")
+    monkeypatch.setattr(sys, "argv", ["learn.py", "o/r"])
+    monkeypatch.setattr(memory_store, "lookup_store",
+                        lambda repo, flow="review": (memory_store.STORE_ERROR, None))
+
+    def boom(*a, **k):
+        raise AssertionError("hosted state touched on a skipped run")
+    monkeypatch.setattr(hosted_learn, "sync_learn_agent", boom)
+    monkeypatch.setattr(hosted_learn, "find_environment", boom)
+    with pytest.raises(SystemExit) as exc:
+        hosted_learn.main()
+    assert exc.value.code == 1
+    assert "store lookup failed; skipping learn this run" in capsys.readouterr().err
