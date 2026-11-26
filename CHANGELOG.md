@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.51.2](https://github.com/VorobiovD/air/compare/v1.51.1...v1.51.2) (2026-11-26)
+
+
+### Bug Fixes
+
+* **LMD-1396:** harden the headless sandbox's git output guard ([#314](https://github.com/VorobiovD/air/issues/314)) ([2bb2f82](https://github.com/VorobiovD/air/commit/2bb2f826d17f038b5324505fc6a51ea0a99c6f2b))
+* **LMD-1396:** tighten learn inputs and store-lookup handling ([#313](https://github.com/VorobiovD/air/issues/313)) ([8024e4f](https://github.com/VorobiovD/air/commit/8024e4f521af89b9ebbe83c13abbd3ce77af7658))
+
 ## [1.51.1](https://github.com/VorobiovD/air/compare/v1.51.0...v1.51.1) (2026-10-12)
 
 
