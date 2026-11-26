@@ -580,7 +580,7 @@ def fetch_recent_review_bodies(repo: str, token: str, limit: int = 30,
     first and treat an empty result as "skip".
 
     Best-effort: a per-PR fetch error skips that PR (a partial history is fine).
-        GitHub timestamps have one-second resolution, so an edit within the same
+    GitHub timestamps have one-second resolution, so an edit within the same
     second as the post is not detectable; verdict backfill has the same limit.
     """
     allowed = {x for x in (set(bot_logins or ()) | {bot_login}) if x}

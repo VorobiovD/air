@@ -104,7 +104,7 @@ def lookup_store(repo: str, flow: str = "review") -> tuple[str, str | None]:
         sid = find_store(repo)
     except Exception as e:
         print(f"  [warn] pattern-store lookup failed ({type(e).__name__}: {e}) "
-              f"during {flow}", file=__import__("sys").stderr)
+              f"during {flow}", file=sys.stderr)
         return STORE_ERROR, None
     return (STORE_FOUND, sid) if sid else (STORE_ABSENT, None)
 
@@ -117,7 +117,7 @@ def get_store_id(repo: str, flow: str = "review") -> str | None:
         return find_store(repo)
     except Exception as e:
         print(f"  [warn] pattern-store lookup failed ({e}) — "
-              f"{flow} falls back to the wiki", file=__import__("sys").stderr)
+              f"{flow} falls back to the wiki", file=sys.stderr)
         return None
 
 

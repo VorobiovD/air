@@ -3247,7 +3247,7 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
     def _meta(*meta_args: str) -> subprocess.CompletedProcess:
         return _run_meta(meta_script, *meta_args)
 
-    if store_lookup_failed and not store_id:
+    if store_lookup_failed:   # lookup_store never pairs an error with an id
         print("  [learn] store lookup failed; skipping learn this run",
               file=sys.stderr)
         return
