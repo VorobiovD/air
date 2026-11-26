@@ -109,3 +109,43 @@ def test_sdk_signature_conformance():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# --- tri-state store lookup: found / absent / error --------------------------
+
+def _stores(monkeypatch, rows=None, exc=None):
+    def fake_paginate(list_fn, **kw):
+        if exc:
+            raise exc
+        return rows or []
+    monkeypatch.setattr(ms, "client", lambda: types.SimpleNamespace(
+        beta=types.SimpleNamespace(memory_stores=types.SimpleNamespace(list=None))))
+    monkeypatch.setattr(ms, "_paginate", fake_paginate)
+
+
+def test_lookup_store_found(monkeypatch):
+    _stores(monkeypatch, [{"id": "ms_1", "name": ms.store_name("o/r")}])
+    assert ms.lookup_store("o/r") == (ms.STORE_FOUND, "ms_1")
+
+
+def test_lookup_store_absent(monkeypatch):
+    _stores(monkeypatch, [{"id": "ms_9", "name": ms.store_name("o/other")},
+                          {"id": "ms_2", "name": ms.store_name("o/r"),
+                           "archived_at": "2026-01-01"}])
+    assert ms.lookup_store("o/r") == (ms.STORE_ABSENT, None)
+
+
+def test_lookup_store_error_is_distinct_from_absent(monkeypatch, capsys):
+    _stores(monkeypatch, exc=RuntimeError("api down"))
+    assert ms.lookup_store("o/r") == (ms.STORE_ERROR, None)
+    assert "lookup failed" in capsys.readouterr().err
+
+
+def test_get_store_id_contract_unchanged(monkeypatch):
+    """Existing callers keep the None-for-both contract."""
+    _stores(monkeypatch, exc=RuntimeError("api down"))
+    assert ms.get_store_id("o/r") is None
+    _stores(monkeypatch, [])
+    assert ms.get_store_id("o/r") is None
+    _stores(monkeypatch, [{"id": "ms_1", "name": ms.store_name("o/r")}])
+    assert ms.get_store_id("o/r") == "ms_1"

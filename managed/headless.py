@@ -578,15 +578,18 @@ async def run_headless_review(args, bot_token: str) -> dict:
     # mode's stated win is wall-time). store_id is threaded into stage_patterns + the
     # learning tail; empty/None ⇒ legacy-wiki backend (air's case).
     sid_res, bl_res, ic_res, rv_res, inl_res = await asyncio.gather(
-        asyncio.to_thread(memory_store.get_store_id, args.repo, "review"),
+        asyncio.to_thread(memory_store.lookup_store, args.repo, "review"),
         asyncio.to_thread(fetch_bot_login, bot_token),
         asyncio.to_thread(fetch_issue_comments, args.repo, args.pr_number, bot_token),
         asyncio.to_thread(fetch_pr_reviews, args.repo, args.pr_number, bot_token),
         asyncio.to_thread(fetch_pr_review_comments, args.repo, args.pr_number, bot_token),
         return_exceptions=True)
-    store_id = None if isinstance(sid_res, BaseException) else sid_res
+    # lookup_store is tri-state; an exception OR an "error" status both mean the
+    # backend is UNKNOWN (not "legacy wiki"), so the learn tail is skipped below.
+    store_lookup_failed = isinstance(sid_res, BaseException) or sid_res[0] == memory_store.STORE_ERROR
+    store_id = None if isinstance(sid_res, BaseException) else sid_res[1]
     if isinstance(sid_res, BaseException):
-        print(f"  [warn] store lookup failed: {sid_res!r} — wiki backend", file=sys.stderr)
+        print(f"  [warn] store lookup failed: {sid_res!r}", file=sys.stderr)
     bot_login = None if isinstance(bl_res, BaseException) else bl_res
     if isinstance(bl_res, BaseException):
         print(f"  [warn] bot-login fetch failed: {bl_res!r}", file=sys.stderr)
@@ -1371,7 +1374,8 @@ async def run_headless_review(args, bot_token: str) -> dict:
     try:
         # headless IS the messages-api arch — route a store-backed learn to learn_headless.
         _update_learn_counter(args.repo, args.pr_number, bot_token, store_id=store_id,
-                              review_arch="messages-api")
+                              review_arch="messages-api",
+                              store_lookup_failed=store_lookup_failed)
     except Exception as e:
         print(f"  [warn] learn-counter update failed: {type(e).__name__}: {e}", file=sys.stderr)
 

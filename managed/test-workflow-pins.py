@@ -165,3 +165,47 @@ def test_continue_on_error_false_is_allowed_but_true_is_not():
         assert ok != text and cwp.check(ok, wf) == [], (wf, cwp.check(ok, wf))
         bad = text.replace("        id: air_code\n", "        id: air_code\n        continue-on-error: true\n", 1)
         assert any("not be allowed to fail" in e for e in cwp.check(bad, wf)), wf
+
+
+# --- learn switches are forwarded from caller variables ----------------------
+
+LEARN_SWITCHES = ("AIR_HEADLESS_HISTORY", "AIR_LEARN_SEED_MAX_AUTHORS", "AIR_WIKI_CAP")
+
+
+def _step_containing(text, needle):
+    """The text of the workflow step (from its `- name:` line to the next one)
+    that holds `needle` as an uncommented line."""
+    steps = re.split(r"(?m)^      - (?=name:|uses:)", text)
+    for step in steps:
+        if any(ln.strip().startswith(needle) for ln in step.splitlines()):
+            return step
+    return ""
+
+
+def test_learn_switches_forwarded_in_both_workflows():
+    """Setting one of these caller variables is a silent no-op unless the same
+    step's env forwards it (`${{ vars.NAME }}` resolves to the caller's
+    variable). Forwarded next to AIR_LEARN_REVIEWS_THRESHOLD, the learn knob that
+    already travels the same way."""
+    for wf in WORKFLOWS:
+        step = _step_containing(_read(wf), "AIR_LEARN_REVIEWS_THRESHOLD:")
+        assert step, wf
+        lines = [ln.strip() for ln in step.splitlines() if not ln.strip().startswith("#")]
+        for name in LEARN_SWITCHES:
+            assert "%s: ${{ vars.%s }}" % (name, name) in lines, (wf, name)
+
+
+def test_commented_out_switch_is_not_counted_as_forwarded():
+    for wf in WORKFLOWS:
+        text = _read(wf)
+        bad = text.replace("          AIR_WIKI_CAP: ${{ vars.AIR_WIKI_CAP }}",
+                           "          # AIR_WIKI_CAP: ${{ vars.AIR_WIKI_CAP }}")
+        assert bad != text
+        step = _step_containing(bad, "AIR_LEARN_REVIEWS_THRESHOLD:")
+        lines = [ln.strip() for ln in step.splitlines() if not ln.strip().startswith("#")]
+        assert "AIR_WIKI_CAP: ${{ vars.AIR_WIKI_CAP }}" not in lines, wf
+
+
+def test_workflows_with_learn_switches_still_pass_pin_check():
+    for wf in WORKFLOWS:
+        assert cwp.check(_read(wf), wf) == [], wf

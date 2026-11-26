@@ -563,18 +563,32 @@ def fetch_recent_review_bodies(repo: str, token: str, limit: int = 30,
     CURRENT token's login alone would drop legitimately-air reviews posted under
     a previously-active account (`bot_logins` mirrors `review._air_bot_logins()`).
 
-    When the allowed set is EMPTY the filter is off and any `## Code Review`
-    comment counts — preserved because REVIEW-HISTORY has always behaved that
-    way and is wholesale-regenerated (self-healing) each learn. A consumer whose
-    write is NOT self-healing must refuse to run on unauthenticated bodies
-    rather than rely on this: `learn_headless.seed_missing_author_files` skips
-    entirely without a resolved identity, because its author-file write is
-    create-only and then protected by the curation fidelity check, so a poisoned
-    entry would be sticky.
+    A comment must also show no edit (`updated_at == created_at` — the same
+    evidence as verdict backfill, but stricter: a comment missing either timestamp
+    is skipped): a collaborator with write access can edit any
+    PR comment, and the author check alone would accept the edited text on the
+    strength of the original poster. An edited comment, or one missing either
+    timestamp (unverifiable), is skipped; selection then falls back to the newest
+    ELIGIBLE (unedited, allowed-author) review for that PR. Residual limit: an
+    allowed account that also posts manual reviews is still trusted; stronger
+    provenance would need a recorded comment id/digest or a dedicated publisher.
+
+    When the allowed set is EMPTY there is no identity to filter on, so nothing
+    is returned: review bodies feed model prompts (history regeneration, author
+    seeding), and an unauthenticated `## Code Review` comment from any PR
+    participant must never become that input. Callers resolve the allowlist
+    first and treat an empty result as "skip".
 
     Best-effort: a per-PR fetch error skips that PR (a partial history is fine).
+    GitHub timestamps have one-second resolution, so an edit within the same
+    second as the post is not detectable; verdict backfill has the same limit.
     """
     allowed = {x for x in (set(bot_logins or ()) | {bot_login}) if x}
+    if not allowed:
+        print("  [warn] fetch_recent_review_bodies: no air identity supplied — "
+              "returning nothing (refusing unauthenticated review bodies)",
+              file=sys.stderr)
+        return []
     try:
         prs = _github_paginate(
             f"https://api.github.com/repos/{repo}/pulls"
@@ -583,6 +597,7 @@ def fetch_recent_review_bodies(repo: str, token: str, limit: int = 30,
     except PartialPageError:
         return []
     out: list[dict] = []
+    skipped_unverified = 0
     for pr in prs:
         if len(out) >= limit:
             break
@@ -605,15 +620,23 @@ def fetch_recent_review_bodies(repo: str, token: str, limit: int = 30,
             # miss "## Code Review (Re-review)" and undercount the history.
             if not body.startswith(BOT_REVIEW_PREFIXES):
                 continue
-            if allowed and (c.get("user") or {}).get("login") not in allowed:
+            if (c.get("user") or {}).get("login") not in allowed:
                 continue
-            review = c  # comments are oldest-first; keep walking → ends on newest
+            created, updated = c.get("created_at"), c.get("updated_at")
+            if not created or not updated or created != updated:
+                skipped_unverified += 1   # edited, or no metadata to prove otherwise
+                continue
+            review = c  # comments are oldest-first; keep walking → ends on newest eligible
         if review:
             # `author` is the PR's own author (NOT the review's) — the key
             # `learn_headless.seed_missing_author_files` groups by to bootstrap
             # per-author pattern files. Additive: existing readers use pr/body.
             out.append({"pr": num, "body": review["body"],
                         "author": (pr.get("user") or {}).get("login") or ""})
+    if skipped_unverified:
+        print(f"  [info] fetch_recent_review_bodies: skipped {skipped_unverified} "
+              "review comment(s) that were edited or had unverifiable timestamps",
+              file=sys.stderr)
     return out
 
 

@@ -86,14 +86,38 @@ def find_store(repo: str) -> str | None:
     return None
 
 
+STORE_FOUND = "found"
+STORE_ABSENT = "absent"
+STORE_ERROR = "error"
+
+
+def lookup_store(repo: str, flow: str = "review") -> tuple[str, str | None]:
+    """Tri-state store lookup: ``("found", id)`` / ``("absent", None)`` /
+    ``("error", None)``.
+
+    ``get_store_id`` collapses "no store exists" and "the lookup failed" into the
+    same ``None``. That is fine for a read that merely falls back to the wiki,
+    but a caller that decides WHICH learn backend runs must tell them apart: a
+    transient lookup error on a store-backed repo is not evidence of a legacy
+    wiki repo."""
+    try:
+        sid = find_store(repo)
+    except Exception as e:
+        print(f"  [warn] pattern-store lookup failed ({type(e).__name__}: {e}) "
+              f"during {flow}", file=sys.stderr)
+        return STORE_ERROR, None
+    return (STORE_FOUND, sid) if sid else (STORE_ABSENT, None)
+
+
 def get_store_id(repo: str, flow: str = "review") -> str | None:
     """find_store with the standard graceful fallback — shared by
-    review.py and learn.py so the warn message can't drift."""
+    review.py and learn.py so the warn message can't drift. Callers that must
+    distinguish "absent" from "error" use ``lookup_store``."""
     try:
         return find_store(repo)
     except Exception as e:
         print(f"  [warn] pattern-store lookup failed ({e}) — "
-              f"{flow} falls back to the wiki", file=__import__("sys").stderr)
+              f"{flow} falls back to the wiki", file=sys.stderr)
         return None
 
 

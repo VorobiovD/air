@@ -221,7 +221,7 @@ def test_run_headless_review_dry_run_orchestration(tmp_path, monkeypatch):
     monkeypatch.setattr(headless, "fetch_pr_review_comments", lambda *a, **k: [])
     # Hermetic: no store (wiki backend, mode stays full — empty issue comments mean
     # no prior detected anyway), stage degrades pattern-blind, precomp empties.
-    monkeypatch.setattr(headless.memory_store, "get_store_id", lambda *a, **k: None)
+    monkeypatch.setattr(headless.memory_store, "lookup_store", lambda *a, **k: ("absent", None))
     monkeypatch.setattr(headless, "stage_patterns", lambda *a, **k: (None, None, "mock"))
     # headless does `from review import compute_*` lazily, which reads the review
     # module's attrs at call time — so patch the review module itself.
@@ -267,7 +267,8 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
                   head="a" * 40, fresh=False, ledger=None, pin=None,
                   ledger_pin_env=None, ledger_calls=None, full_diff=None, codex=None,
                   no_codex=False, promote_env=None, promote_fp=None, verifier_body=None,
-                  dry_run=True, reviews=None, inline=None, reviews_exc=None):
+                  dry_run=True, reviews=None, inline=None, reviews_exc=None,
+                  store_lookup=("absent", None)):
     """Drive run_headless_review (dry-run) for re-review-path tests. Returns
     (result, calls) where calls counts which diff fetcher fired. inter_diff is the
     fetch_inter_diff RETURN (str / "" / None); inter_exc, if set, makes it RAISE.
@@ -303,7 +304,7 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
     # Lazily imported inside run_headless_review (`from review import …`), so the
     # attribute to patch lives on `review`, not `headless`.
     monkeypatch.setattr(review, "make_origin_resolver", _origin_spy)
-    monkeypatch.setattr(headless.memory_store, "get_store_id", lambda *a, **k: None)
+    monkeypatch.setattr(headless.memory_store, "lookup_store", lambda *a, **k: store_lookup)
     monkeypatch.setattr(headless, "stage_patterns", lambda *a, **k: (None, None, "mock"))
     monkeypatch.setattr(review, "compute_file_statuses", lambda *a, **k: ("", []))
     for fn in ("compute_blame_summaries", "compute_churn_data", "compute_diff_check_warnings"):
@@ -377,6 +378,7 @@ def _rereview_run(monkeypatch, tmp_path, *, comments, inter_diff=None, inter_exc
         monkeypatch.setattr(headless, "_submit_verdict_guarded", lambda *a, **k: None)
         def _learn_spy(*a, **k):
             calls["learn_counter"] = calls.get("learn_counter", 0) + 1
+            calls["learn_kwargs"] = k
         monkeypatch.setattr(review, "_update_learn_counter", _learn_spy)
     args = types.SimpleNamespace(repo="o/r", pr_number=7, dry_run=dry_run, closed=False, fresh=fresh,
                                  no_codex=no_codex)
@@ -1923,3 +1925,15 @@ def test_conversation_only_raw_only_rewrites_are_logged(tmp_path, monkeypatch, c
     assert out["verdict"] == "APPROVE" and "decoy" not in (out.get("reason") or "")
     err = capsys.readouterr().err
     assert "[hold][raw] 1 rewrite(s) on the raw body only" in err and "#77" in err
+
+
+def test_headless_learn_tail_flags_store_lookup_error(tmp_path, monkeypatch):
+    """A store lookup ERROR is forwarded to the learn counter (which then skips
+    learn) — distinct from ABSENT, which keeps the legacy wiki behaviour."""
+    out, calls = _rereview_run(monkeypatch, tmp_path, comments=[], dry_run=False,
+                               store_lookup=("error", None))
+    assert out["ok"] and calls["learn_counter"] == 1
+    assert calls["learn_kwargs"]["store_lookup_failed"] is True
+    assert calls["learn_kwargs"]["store_id"] is None
+    out2, calls2 = _rereview_run(monkeypatch, tmp_path, comments=[], dry_run=False)
+    assert calls2["learn_kwargs"]["store_lookup_failed"] is False
