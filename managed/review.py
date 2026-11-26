@@ -2594,7 +2594,9 @@ async def run_review(args):
     # for repo-declared copy paths. Off-loop via to_thread: this is a
     # paginated network call inside the codex overlap window, and the loop
     # must stay free to drain the codex pipes.
-    store_id = await asyncio.to_thread(memory_store.get_store_id, args.repo, flow="review")
+    store_status, store_id = await asyncio.to_thread(
+        memory_store.lookup_store, args.repo, "review")
+    store_lookup_failed = store_status == memory_store.STORE_ERROR
     if store_id:
         print(f"  pattern store: {store_id} (wiki mount skipped)")
 
@@ -3170,7 +3172,8 @@ async def run_review(args):
                 print(f"  [warn] mirror render failed: {e}", file=sys.stderr)
         try:
             _update_learn_counter(args.repo, args.pr_number, bot_token,
-                                  store_id=store_id, review_arch=review_arch)
+                                  store_id=store_id, review_arch=review_arch,
+                                  store_lookup_failed=store_lookup_failed)
         except Exception as e:
             print(f"  [warn] counter update failed: {e}", file=sys.stderr)
     else:
@@ -3213,8 +3216,15 @@ def _maybe_render_mirror(repo: str, store_id: str, bot_token: str) -> None:
 
 def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
                           store_id: str | None = None,
-                          review_arch: str = "full") -> None:
+                          review_arch: str = "full",
+                          store_lookup_failed: bool = False) -> None:
     """Bump the shared counter, trigger learn subprocess on threshold.
+
+    `store_lookup_failed`: the pattern-store lookup ERRORED (as opposed to
+    finding no store). Whether the repo is store- or wiki-backed is then
+    unknown, so skip the counter and learn this run rather than guess the wiki
+    path — that would bypass `AIR_LEARN_CRON_LIVE` and launch the hosted learn
+    session for a repo that may be store-backed.
 
     Store-backed repos mutate `/meta/air-meta.json` in the memory store
     (sha256-preconditioned — no clone, no push, no rebase-retry). Legacy
@@ -3236,6 +3246,11 @@ def _update_learn_counter(repo: str, pr_number: int, bot_token: str,
 
     def _meta(*meta_args: str) -> subprocess.CompletedProcess:
         return _run_meta(meta_script, *meta_args)
+
+    if store_lookup_failed:   # lookup_store never pairs an error with an id
+        print("  [learn] store lookup failed; skipping learn this run",
+              file=sys.stderr)
+        return
 
     cron_sole = _cron_sole_learn()
 

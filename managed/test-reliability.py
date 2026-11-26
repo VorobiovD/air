@@ -591,6 +591,43 @@ def test_cron_sole_ignored_on_wiki_backed_repo(monkeypatch):
     assert ran == [1]               # inline learn still ran (cron can't service wiki)
 
 
+def test_learn_counter_skips_everything_on_store_lookup_error(monkeypatch, capsys):
+    """A failed store lookup means the backend is UNKNOWN: no wiki clone, no
+    counter write, no learn (hosted or headless) — one log line, then return."""
+    monkeypatch.delenv("AIR_LEARN_CRON_LIVE", raising=False)
+    meta_calls, ran = [], []
+    monkeypatch.setattr(review, "_run_meta",
+                        lambda script, *a: (meta_calls.append(a[0])
+                                            or types.SimpleNamespace(returncode=1, stderr="")))
+    monkeypatch.setattr(review, "_run_learn_sync", lambda *a, **k: ran.append(1))
+    boom = types.SimpleNamespace(
+        clone_wiki=lambda *a, **k: (_ for _ in ()).throw(AssertionError("wiki path taken")),
+        configure_identity=lambda *a, **k: None, commit_meta=lambda *a, **k: None)
+    monkeypatch.setitem(sys.modules, "wiki_git", boom)
+    for arch in ("full", "messages-api"):
+        review._update_learn_counter("o/r", 7, "tok", store_id=None, review_arch=arch,
+                                     store_lookup_failed=True)
+    assert meta_calls == [] and ran == []
+    assert capsys.readouterr().err.count("store lookup failed; skipping learn this run") == 2
+
+
+def test_learn_counter_absent_store_keeps_wiki_behaviour(monkeypatch):
+    """store_lookup_failed defaults False: ABSENT is the legacy wiki path."""
+    fake_wiki_git = types.SimpleNamespace(
+        clone_wiki=lambda url, d: (Path(d).mkdir(parents=True, exist_ok=True) or True),
+        configure_identity=lambda *a, **k: None,
+        commit_meta=lambda *a, **k: None,
+    )
+    monkeypatch.setitem(sys.modules, "wiki_git", fake_wiki_git)
+    meta_calls, ran = [], []
+    monkeypatch.setattr(review, "_run_meta",
+                        lambda script, *a: (meta_calls.append(a[0])
+                                            or types.SimpleNamespace(returncode=1, stderr="")))
+    monkeypatch.setattr(review, "_run_learn_sync", lambda *a, **k: ran.append(1))
+    review._update_learn_counter("o/r", 7, "tok", store_id=None, review_arch="full")
+    assert meta_calls == ["claim"] and ran == [1]
+
+
 def test_backfill_noop_on_closed_pr_or_own_pr_or_dry_run(monkeypatch):
     submitted = []
     monkeypatch.setattr(review, "fetch_pr_reviews", lambda *a, **k: [])

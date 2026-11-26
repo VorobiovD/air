@@ -96,6 +96,14 @@ jobs:
           # out-of-band can afford a tighter count; MUST match the value on the
           # review caller, or the two paths disagree on when a repo is due.
           AIR_LEARN_REVIEWS_THRESHOLD: ${{ vars.AIR_LEARN_REVIEWS_THRESHOLD }}
+          # Learn switches, forwarded so a caller repo/org variable actually takes
+          # effect (set but not forwarded = silent no-op). Unset → the code default.
+          # AIR_HEADLESS_HISTORY: REVIEW-HISTORY regeneration (default on, `0` off).
+          # AIR_LEARN_SEED_MAX_AUTHORS: author-file seeding cap (default 8, `0` off).
+          # AIR_WIKI_CAP: deterministic wiki size cap (default on, `0` off).
+          AIR_HEADLESS_HISTORY: ${{ vars.AIR_HEADLESS_HISTORY }}
+          AIR_LEARN_SEED_MAX_AUTHORS: ${{ vars.AIR_LEARN_SEED_MAX_AUTHORS }}
+          AIR_WIKI_CAP: ${{ vars.AIR_WIKI_CAP }}
           # Reviewer-login → PAT-stem map (keys only). Author-file SEEDING runs in
           # learn, so the cron needs the same allowlist as the review caller: with
           # it empty, seeding accepts review bodies only from the currently-active
